@@ -316,55 +316,51 @@ pub(crate) async fn dispatch_swarm(
     let parent_session_id = team.session_id.clone();
     let parent_run_id = run_id.to_owned();
     let working_directory = std::path::PathBuf::from(session.working_dir);
-    let dispatch = state
-        .coordinator
-        .swarm_service()
-        .dispatch(
-            &swarm_id,
-            &team.session_id,
-            requests.clone(),
-            move |request, cancel| {
-                let executor = executor.clone();
-                let task_service = task_service.clone();
-                let parent_session_id = parent_session_id.clone();
-                let parent_run_id = parent_run_id.clone();
-                let working_directory = working_directory.clone();
-                async move {
-                    task_service
-                        .mark_external_task_running(&request.agent_id, &parent_session_id)
-                        .await?;
-                    let child_request = AgentRequest::new(
-                        request.agent_id.clone(),
-                        request.prompt.clone(),
-                        request.agent_type,
-                        request.model,
-                        IsolationMode::None,
-                        true,
-                    );
-                    let context = ChildExecutionContext {
-                        parent_session_id: parent_session_id.clone(),
-                        parent_run_id,
-                        working_directory,
-                        tool_use_id: format!("swarm-{}", request.agent_id),
-                        allowed_tools: None,
-                    };
-                    let result = executor
-                        .execute_sync_with_cancel(&child_request, &context, cancel)
-                        .await;
-                    let outcome = match result.status {
-                        AgentStatus::Completed | AgentStatus::MaxTurns => {
-                            Ok(result.result.unwrap_or_default())
-                        }
-                        _ => Err(result.result.unwrap_or_else(|| "Worker failed".to_owned())),
-                    };
-                    task_service
-                        .finish_external_task(&request.agent_id, &parent_session_id, &outcome)
-                        .await?;
-                    outcome
-                }
-            },
-        )
-        .await;
+    let dispatch = state.coordinator.swarm_service().dispatch(
+        &swarm_id,
+        &team.session_id,
+        requests.clone(),
+        move |request, cancel| {
+            let executor = executor.clone();
+            let task_service = task_service.clone();
+            let parent_session_id = parent_session_id.clone();
+            let parent_run_id = parent_run_id.clone();
+            let working_directory = working_directory.clone();
+            async move {
+                task_service
+                    .mark_external_task_running(&request.agent_id, &parent_session_id)
+                    .await?;
+                let child_request = AgentRequest::new(
+                    request.agent_id.clone(),
+                    request.prompt.clone(),
+                    request.agent_type,
+                    request.model,
+                    IsolationMode::None,
+                    true,
+                );
+                let context = ChildExecutionContext {
+                    parent_session_id: parent_session_id.clone(),
+                    parent_run_id,
+                    working_directory,
+                    tool_use_id: format!("swarm-{}", request.agent_id),
+                    allowed_tools: None,
+                };
+                let result = executor
+                    .execute_sync_with_cancel(&child_request, &context, cancel)
+                    .await;
+                let outcome = match result.status {
+                    AgentStatus::Completed | AgentStatus::MaxTurns => {
+                        Ok(result.result.unwrap_or_default())
+                    }
+                    _ => Err(result.result.unwrap_or_else(|| "Worker failed".to_owned())),
+                };
+                task_service
+                    .finish_external_task(&request.agent_id, &parent_session_id, &outcome)
+                    .await?;
+                outcome
+            }
+        },
+    );
     if let Err(error) = dispatch {
         state.coordinator.finish_dispatch(&swarm_id, false);
         state.coordinator.fail_workflow(&swarm_id, &error);

@@ -15,10 +15,10 @@ permissions:
 jobs:
   contracts:
     name: Contracts
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
       - name: REST / WebSocket / Tool / SQLite contracts
@@ -26,9 +26,9 @@ jobs:
 
   rust:
     name: Rust
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -46,13 +46,13 @@ jobs:
 
   frontend:
     name: Frontend
-    runs-on: macos-14
+    runs-on: macos-15
     defaults:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: '22'
           cache: npm
@@ -66,13 +66,13 @@ jobs:
 
   python:
     name: Python 3.11
-    runs-on: macos-14
+    runs-on: macos-15
     defaults:
       run:
         working-directory: python-service
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
           cache: pip
@@ -88,11 +88,20 @@ jobs:
 
   supply-chain:
     name: Supply chain
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
-      - uses: EmbarkStudios/cargo-deny-action@v2
-      - uses: gitleaks/gitleaks-action@v2
+      - name: Verify Apple Silicon runner
+        run: test "$(uname -m)" = arm64
+      - name: Install cargo-deny 0.20.2
+        uses: taiki-e/install-action@6c6fd71fe4fb72c3697d269963d0e15df8adedad # v2.85.10
+        with:
+          tool: cargo-deny@0.20.2
+          checksum: true
+          fallback: none
+      - name: Rust dependency policy
+        run: cargo deny check
+      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3

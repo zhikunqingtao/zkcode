@@ -1,4 +1,4 @@
-# cargo-deny 配置：CI 由 EmbarkStudios/cargo-deny-action 消费。
+# cargo-deny 配置：CI 固定安装 0.20.2 并原生执行 `cargo deny check`。
 # S3 骨架阶段 workspace 依赖图为空，各检查自首个真实依赖引入起生效。
 
 [graph]

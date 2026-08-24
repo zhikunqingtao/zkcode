@@ -584,8 +584,8 @@ impl SwarmService {
     ///
     /// # Errors
     /// Returns an error for a missing/shutting-down Swarm, duplicate workers, or an active dispatch.
-    #[allow(clippy::too_many_lines, clippy::unused_async)]
-    pub async fn dispatch<F, Fut>(
+    #[allow(clippy::too_many_lines)]
+    pub fn dispatch<F, Fut>(
         &self,
         swarm_id: &str,
         session_id: &str,
@@ -945,7 +945,6 @@ mod tests {
             .dispatch("swarm-1", "sess-1", tasks, |req, _cancel| async move {
                 Ok(format!("done: {}", req.prompt))
             })
-            .await
             .expect("dispatch");
         let results = swarm.collect_results("swarm-1").await;
         assert_eq!(results.results.len(), 2);
@@ -969,7 +968,6 @@ mod tests {
             .dispatch("swarm-2", "sess-2", tasks, |_req, _cancel| async {
                 Err("boom".to_owned())
             })
-            .await
             .expect("dispatch");
         let results = swarm.collect_results("swarm-2").await;
         assert_eq!(results.failure_count, 1);
@@ -1026,7 +1024,6 @@ mod tests {
                     }
                 },
             )
-            .await
             .expect("dispatch");
         assert!(swarm.cancel_worker("swarm-directed", "worker-a"));
         assert!(!swarm.cancel_worker("swarm-directed", "missing"));
@@ -1065,7 +1062,6 @@ mod tests {
                     Err("cancelled".to_owned())
                 },
             )
-            .await
             .expect("dispatch");
         assert!(swarm.force_stop_swarm("swarm-stop").await);
         assert!(!swarm.accepts_dispatch("swarm-stop"));
@@ -1080,7 +1076,6 @@ mod tests {
                     vec![task()],
                     |_request, _cancel| async { Ok("unexpected".to_owned()) }
                 )
-                .await
                 .is_err()
         );
     }
