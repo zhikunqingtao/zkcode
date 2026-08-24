@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "frozenDefaultCount": 33,
+  "frozenDefaultSchemaSha256": "36cb708a3e9b113886acffd7799cfd7d7cb1da23e65045b415e4e608f9ff934c",
+  "frozenDefault": [
+    "AskUserQuestion", "Bash", "Config", "CtxInspect", "Edit", "EnterPlanMode",
+    "ExitPlanMode", "GitDiff", "GitLog", "GitStatus", "Glob", "Grep", "ListDir",
+    "ListMcpResources", "Memory", "Monitor", "NotebookEdit", "REPL", "Read",
+    "ReadMcpResource", "Skill", "Sleep", "Snip",
+    "SyntheticOutput", "TerminalCapture", "TodoWrite", "ToolSearch",
+    "VerifyJourney", "VerifyPlanExecution", "Visualization", "WebFetch", "WebSearch", "Write"
+  ],
+  "featureGates": {
+    "ZK_AGENT_ENABLED": ["Agent", "TaskCreate", "TaskGet", "TaskList", "TaskStop", "TaskUpdate"],
+    "ZK_AGENT_WRITE_ENABLED": ["child:Write", "child:Edit", "child:Bash"],
+    "ZK_WORKTREE_ENABLED": ["Worktree"],
+    "ZK_SWARM_ENABLED": ["Swarm REST and dispatch"]
+  },
+  "planned": []
+}

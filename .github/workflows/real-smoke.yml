@@ -1,0 +1,29 @@
+name: Real short smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: Moonshot model alias
+        required: true
+        default: kimi-k3
+
+permissions:
+  contents: read
+
+jobs:
+  kimi:
+    name: Bounded Kimi connectivity
+    runs-on: macos-14
+    timeout-minutes: 8
+    environment: real-model-smoke
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Real provider stream
+        env:
+          LLM_PROVIDER_MOONSHOT_API_KEY: ${{ secrets.MOONSHOT_API_KEY }}
+          ZK_REAL_MOONSHOT_MODEL: ${{ inputs.model }}
+        run: >-
+          cargo test -p zk-llm --test real_connectivity
+          moonshot_kimi_live -- --ignored --exact --nocapture

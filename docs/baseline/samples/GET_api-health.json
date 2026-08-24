@@ -1,0 +1,27 @@
+{
+  "_meta": {
+    "endpoint": "/api/health",
+    "method": "GET",
+    "status_code": 200,
+    "content_type": "application/json",
+    "sampled_at": "2026-08-15T19:05+08:00"
+  },
+  "response": {
+    "status": "UP",
+    "service": "ai-code-assistant-backend",
+    "version": "1.0.0",
+    "uptime": 114,
+    "java": "21.0.10",
+    "subsystems": {
+      "database": {
+        "status": "UP",
+        "message": "SQLite embedded database available"
+      },
+      "jvm": {
+        "status": "UP",
+        "message": "Heap: 121MB/4096MB"
+      }
+    },
+    "timestamp": "2026-08-15T11:07:20.441629Z"
+  }
+}

@@ -1,0 +1,54 @@
+[package]
+name = "zk-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# 依赖方向（Batch 4A）：zk-mcp 位于 zk-tools 之上、zk-server 之下。
+# - zk-tools：`Tool` trait 是 `McpToolAdapter` 必须实现的目标契约（Batch 4B
+#   由 zk-server 把适配器注入既有 ToolRegistry）；
+# - zk-core：`.zk/` 配置目录名的单一事实源（USER / LOCAL 两级 mcp.json 路径），
+#   禁止自行 `join(".zk")`。
+# 本 crate 不依赖 zk-llm / zk-engine / zk-db / zk-protocol / zk-server。
+zk-core = { version = "0.1.0", path = "../zk-core" }
+zk-tools = { version = "0.1.0", path = "../zk-tools" }
+# JSON-RPC 2.0 报文建模（Request / Response / Notification）与工具入参透传。
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+# 传输层运行时：子进程（STDIO）/ 定时（健康检查、退避重连）/ 锁 / oneshot。
+tokio = { workspace = true }
+# CancellationToken 替代 Java 侧 `ScheduledFuture.cancel`（重连编排与流终止）。
+tokio-util = { workspace = true }
+# 对象安全 trait 的 `BoxFuture`（与 zk-tools `Tool` / zk-llm `ChatProvider` 同形）
+# + SSE 字节流消费（`StreamExt::next`）。
+futures = { workspace = true }
+# SSE / Streamable HTTP 两种传输的 HTTP 客户端（stream 特性 = bytes_stream）。
+reqwest = { workspace = true }
+# MCP WS / WS_IDE 客户端传输；native-tls 与 workspace 的 reqwest TLS 栈一致，
+# 同时覆盖 ws:// 与 wss://，不在日志中暴露握手 headers。
+tokio-tungstenite = { workspace = true, features = ["native-tls"] }
+tracing = { workspace = true }
+# progressToken = UUIDv4（对照旧 `McpToolAdapter` 的 `UUID.randomUUID()`）。
+uuid = { workspace = true }
+# 重连退避的 ±25% 抖动随机源（对照旧 `Math.random()`）。已在 Cargo.lock 中
+# （uuid v4 的传递依赖），不新增供应链面。
+getrandom = { workspace = true }
+sha2 = { workspace = true }
+# STDIO 传输关闭序列的进程组信号（killpg SIGTERM→5s→SIGKILL），与
+# zk-tools/src/process.rs 同一范式——workspace `unsafe_code = "forbid"`，
+# 故不用 libc 裸调用。
+nix = { workspace = true }
+
+[dev-dependencies]
+# SSE / Streamable HTTP 传输的集成测试用裸 `TcpListener` 手写最小 HTTP 响应，
+# 无需引入 axum；`test-util` 提供虚拟时钟（`start_paused`）。
+tokio = { workspace = true, features = ["test-util"] }

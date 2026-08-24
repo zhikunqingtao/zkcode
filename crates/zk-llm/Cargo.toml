@@ -1,0 +1,27 @@
+[package]
+name = "zk-llm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# 领域契约：Usage（zk-protocol 冻结契约的四字段 camelCase 用量）。
+zk-protocol = { version = "0.1.0", path = "../zk-protocol" }
+# 序列化与错误建模：走 workspace 池。
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+# S6 引入（按需增补原则）：
+futures = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+bytes = { workspace = true }

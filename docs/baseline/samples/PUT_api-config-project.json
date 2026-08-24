@@ -1,0 +1,19 @@
+{
+  "_meta": {
+    "endpoint": "/api/config/project",
+    "method": "PUT",
+    "status_code": 200,
+    "content_type": "application/json",
+    "sampled_at": "2026-08-15T19:05+08:00",
+    "note": "idempotent write-back of current lastCost value"
+  },
+  "response": {
+    "success": true,
+    "config": {
+      "lastCost": 0.0,
+      "projectAlwaysAllowRules": [],
+      "projectMcpServers": {},
+      "customSettings": {}
+    }
+  }
+}

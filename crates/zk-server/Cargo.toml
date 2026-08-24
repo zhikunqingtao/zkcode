@@ -1,0 +1,96 @@
+[package]
+name = "zk-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# 依赖方向：zk-protocol / zk-db → zk-server（组装根）。Usage 复用 zk-protocol
+# 冻结契约（camelCase 四字段）；会话/消息持久化走 zk-db Repository。
+# #65：路径/目录迁移基座（workspace 最底层，只出不入）——`main` 启动期调
+# `zk_core::migrate::run_if_needed`，暂存区默认根经 `zk_core::paths` 解析。
+zk-core = { version = "0.1.0", path = "../zk-core" }
+zk-protocol = { version = "0.1.0", path = "../zk-protocol" }
+zk-db = { version = "0.1.0", path = "../zk-db" }
+# S9 引入：对话引擎装配（EngineHook 桥 + MessageSink 适配）与 provider
+# 构造（OpenAiCompatProvider + ApiKey 脱敏配置承载）。
+zk-engine = { version = "0.1.0", path = "../zk-engine" }
+zk-llm = { version = "0.1.0", path = "../zk-llm" }
+# 2.2 引入：工具注册表组合根装配；2.3 起注册基础工具族 9 件并实现
+# SnapshotSink（写前快照 → zk-db file_snapshots）。
+zk-tools = { version = "0.1.0", path = "../zk-tools" }
+# 2.5 引入：授权管线（风险分级 / 授权匹配 / 8 层路径安全 / grant 仓储 / 交互契约）。
+# 依赖方向铁律：zk-authz → (zk-protocol, zk-db)，故组装根单向依赖它。
+zk-authz = { version = "0.1.0", path = "../zk-authz" }
+# Batch 4B 引入：MCP 客户端引擎（协议 / 四传输 / 连接 / 管理器 / 能力注册表 /
+# 工具适配器）。依赖倒置：zk-mcp 不反向依赖本 crate，宿主能力（ApprovalPort /
+# McpToolSink / McpHealthObserver / ProgressTracker）由组装根在 src/mcp/ 实现。
+zk-mcp = { version = "0.1.0", path = "../zk-mcp" }
+# 2.5 引入：交互闭环的 CAS 事务与 run 事件必须与授权落库同处一个写事务，
+# 故 zk-server 直接持 rusqlite Connection（zk-db 只提供 writer/reader 池）。
+rusqlite = { workspace = true }
+# HTTP 栈（S7 引入）：axum 0.8 系（路由 / 提取器 / Json），tower 为其服务
+# 组合基座（集成测试 oneshot 亦复用），tower-http 提供 CatchPanic / CORS 中间件。
+axum = { workspace = true }
+# S8 引入：WS 读写流拆分（StreamExt::split / SinkExt::send）。
+futures = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+# metrics facade（§3.2 Micrometer → metrics + exporter 的 facade 半边）：
+# 打点 API 标准化，recorder 由本 crate 轻量自持（见 src/metrics.rs），
+# Phase 2 接正式 exporter 时打点零改动。
+metrics = { workspace = true }
+# 运行时 / 结构化日志（ZK_LOG / RUST_LOG 控制）。
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+# 2.6 引入：Python 侧车 IPC（HTTP over UDS）——hyper http1 客户端 + TokioIo
+# 适配 UnixStream + Full/collect 体处理；bytes 为请求体载体。
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+http-body-util = { workspace = true }
+bytes = { workspace = true }
+reqwest = { workspace = true }
+# 2.6 `WebBrowser` 截图落盘：Python 侧回传 base64 PNG，需解码后原子写文件
+# （旧 `WebBrowserTool` :275 `Base64.getDecoder().decode`）。
+base64 = { workspace = true }
+# 2.6 引入：侧车优雅停止走进程组信号（killpg SIGTERM → 10s 宽限 → SIGKILL）。
+# workspace `unsafe_code = "forbid"`，故不用 libc 裸调用，改 tokio
+# `Command::process_group(0)` + nix `killpg` 的安全封装组合。
+nix = { workspace = true }
+# 2b-2 引入：access token 的 32 字节 CSPRNG 源（旧 `SecureRandom.nextBytes`）。
+getrandom = { workspace = true }
+# Batch 4B 引入：MCP 服务器信任表的配置指纹（旧 `McpApprovalService`
+# `MessageDigest.getInstance("SHA-256")` 对 `type|command|args|url` 摘要）。
+sha2 = { workspace = true }
+# 3B.7 引入：Skill Markdown frontmatter 的简化 YAML 行解析与 `{{arg}}`
+# 模板变量替换（旧 `FrontmatterParser` / `ArgumentSubstitution` 用 java.util.regex）。
+regex = { workspace = true }
+# 序列化 / 错误建模 / request-id 生成。
+serde = { workspace = true }
+# S7b：OpenAPI 文档（path 注解 + ApiDoc 聚合 → GET /api/openapi.json）。
+utoipa = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+# 集成测试 tower::ServiceExt::oneshot 直打 Router（无真实端口）。
+tower = { workspace = true, features = ["util"] }
+# WS 通道集成测试：tokio-tungstenite 客户端打真实 Router（随机端口）。
+tokio-tungstenite = { workspace = true }
+# 2.6 Python 侧车集成测试：以真实 UnixListener 起 axum stub 服务（FastAPI 契约
+# 同形），验证 UDS 传输 / 重试 / 能力缓存 / 降级全链。
+axum = { workspace = true }
+
+[[bin]]
+name = "zk-server"
+path = "src/main.rs"

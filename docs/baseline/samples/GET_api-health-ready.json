@@ -1,0 +1,10 @@
+{
+  "_meta": {
+    "endpoint": "/api/health/ready",
+    "method": "GET",
+    "status_code": 200,
+    "content_type": "text/plain;charset=UTF-8",
+    "sampled_at": "2026-08-15T19:05+08:00"
+  },
+  "response": "READY"
+}

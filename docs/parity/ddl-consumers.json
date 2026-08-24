@@ -1,0 +1,26 @@
+{
+  "version": 2,
+  "databaseCount": 1,
+  "tableCount": 25,
+  "tables": [
+    "sessions", "messages", "config", "project_config", "file_snapshots", "tasks",
+    "project_context", "activities", "anomaly_events", "run_envelopes", "run_event_log",
+    "evidence_bundles", "evidence_items", "regression_scripts", "agent_checkpoints",
+    "artifact_manifests", "artifact_entries", "interaction_requests",
+    "websocket_session_binding", "permission_grants", "run_workbench_bindings",
+    "run_acceptance_criteria", "memories", "projects", "auth_tokens"
+  ],
+  "rule": "A production table must have a repository, a production consumer, and a restart test before its feature is enabled.",
+  "wp11VerifiedConsumers": {
+    "project_context": {
+      "repository": "zk_db::Db::{save_project_context,find_project_context}",
+      "consumer": "zk_engine::Engine dynamic project_context prompt section",
+      "restartTest": "project_context::tests::latest_project_context_survives_reopen_without_git_access"
+    },
+    "anomaly_events": {
+      "repository": "zk_db::Db::{save_anomaly_event,resolve_anomaly_event,find_anomalies_by_swarm,find_unresolved_anomalies}",
+      "consumer": "zk_server Swarm result collector",
+      "restartTest": "anomaly::tests::anomaly_detection_resolution_survives_reopen"
+    }
+  }
+}

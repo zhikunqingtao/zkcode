@@ -1,0 +1,183 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.97"
+authors = ["zkcode contributors"]
+repository = "https://github.com/zhikunqingtao/zkcode"
+homepage = "https://github.com/zhikunqingtao/zkcode"
+
+[workspace.dependencies]
+# 集中版本管理：成员 crate 一律以 `dep.workspace = true` 引用，禁止写死版本。
+# Phase 1 S3 仅声明依赖池；后续步骤按需增补，不提前引入。
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+# S5（zk-db）引入：SQLite 持久层依赖池。
+# 版本裁定（重要）：refinery-core 0.9.2 对 rusqlite 的约束为 >=0.23, <=0.39，
+# 故 rusqlite 锁 0.39（该区间最新），保证 refinery 的 Migrate impl 与本
+# workspace 的 Connection 是同一 rusqlite 版本——若取 0.40 会被解析为两个并存
+# 版本，迁移入口类型不兼容。bundled：内嵌 SQLite 源码编译，消除宿主 libsqlite3
+# 版本差异（RETURNING 等新语法、外键与 WAL 行为一致性）。
+rusqlite = { version = "0.39", features = ["bundled"] }
+# Batch 0 P0-16（ProjectPromptLoader 热重载）引入：SettingsWatcher 的项目提示
+# 内容缓存用 `ArcSwap<String>`——读路径（系统提示动态段消费方）无锁、无写者阻塞，
+# 写仅在 5s 轮询探测到 mtime 变更时触发一次原子换出。纯 Rust、无 C 依赖、无
+# unsafe 暴露面，符合 workspace `unsafe_code = "forbid"`。
+arc-swap = "1"
+refinery = { version = "0.9", features = ["rusqlite-bundled"] }
+# 游标 Base64 编解码（对齐旧系统 java.util.Base64 标准 alphabet + padding）。
+base64 = "0.22"
+# 会话/消息主键 = UUIDv4（对齐旧系统 UUID.randomUUID()）。
+uuid = { version = "1", features = ["v4"] }
+# S6（zk-llm）引入：异步流原语 / OpenAI 兼容 HTTP 客户端 / 取消令牌 / 字节缓冲。
+# TLS 栈取默认 native-tls（macOS SecurityFramework；CI cargo-deny license
+# 面全兼容——rustls 的 ring 为自定义许可证，不在 allow 列表，故不启用）。
+futures = "0.3"
+reqwest = { version = "0.12", features = ["json", "stream"] }
+url = "2"
+# Batch 8B（Hook 系统）引入：`.zk/hooks.toml` 解析。Cargo.lock 已含 toml 1.1.4
+# （作为既有传递依赖），提升为 workspace 直接依赖不扩大供应链面。
+toml = "1"
+tokio-util = "0.7"
+bytes = "1"
+# S7（zk-server）引入：HTTP 栈与可观测 facade。axum 0.8 系（`{id}` 路由语法）；
+# tower 为服务组合基座（集成测试 oneshot 复用 util feature）；tower-http 提供
+# CatchPanic / CORS 中间件；metrics 为打点 facade（recorder 由 zk-server 自持，
+# Phase 2 接正式 exporter 时打点零改动）。
+axum = { version = "0.8", features = ["ws", "multipart"] }
+tower = "0.5"
+# Batch 2b Step 2b-7 追加 `fs` feature：`tower_http::services::ServeDir` 静态资源
+# 服务（旧 Spring Boot 对 `src/main/resources/static/` 的自动映射的等价物——移动端
+# `remote.html` 与 `/assets/`、`/icons/`、`favicon.ico` 经它出站）。tower-http 把
+# ServeDir/ServeFile 归在 `fs` 特性门内（上游无独立 `serve-dir` 特性名）。
+tower-http = { version = "0.6", features = ["catch-panic", "cors", "fs"] }
+metrics = "0.24"
+# S8（zk-server ws 集成测试）引入：tokio 异步 tungstenite WS 客户端
+#（打真实 Router 走随机端口；默认 features 不含 TLS，ws:// 足够）。
+tokio-tungstenite = "0.28"
+# S7b（zk-server）引入：OpenAPI 3.1 文档生成（`#[utoipa::path]` 编译期注解
+# + `ApiDoc` 聚合），GET /api/openapi.json 暴露 Phase 1 全端点契约。
+utoipa = "5"
+# 2.3（zk-tools 基础工具族）引入：
+# - regex：GrepTool 进程内正则搜索（旧实现 shell 出 ripgrep，差异留痕 §4）；
+# - globset：GlobTool 的 glob → matcher 编译（对照旧 FileSystem.getPathMatcher）；
+# - ignore：目录遍历 + .gitignore 尊重（ListDir / Glob / Grep 共用）；
+# - nix：进程组信号（killpg SIGTERM→SIGKILL）的**安全**封装——workspace
+#   `unsafe_code = "forbid"`，故不用 libc::kill / pre_exec 裸调用，改由 tokio
+#   `Command::process_group(0)` + `nix::sys::signal::killpg` 组合实现；
+#   `feature` 特性门内为 `sys::utsname`（uname(2)），zk-engine 的系统提示
+#   环境信息段用其取宿主 sysname/release（旧源读 JVM os.name/os.version）。
+regex = "1"
+globset = "0.4"
+ignore = "0.4"
+#   Batch 2b Step 2b-1 追加 `net`：`nix::ifaddrs::getifaddrs`（getifaddrs(3) 的
+#   **安全**封装）——局域网 IP 探测对照旧 `RemoteAccessSecurityFilter.getLocalIp`
+#   的 `NetworkInterface.getNetworkInterfaces()` 遍历，std 无对应能力，而 nix 已是
+#   本 workspace 既有依赖（不新增供应链面，亦不必引 libc 裸调用）。
+nix = { version = "0.31", features = ["signal", "feature", "net"] }
+# Batch 2b Step 2b-2（Access Token 管理）引入：CSPRNG 字节源。旧
+# `RemoteAccessSecurityFilter` 的 token 为 `new SecureRandom().nextBytes(new
+# byte[32])`；getrandom 直取操作系统熵源（macOS `getentropy` / Linux
+# `getrandom(2)`），与 `SecureRandom` 同语义且无需自持 PRNG 状态。已在
+# Cargo.lock 中（uuid v4 的传递依赖），不新增外部供应链面；无 unsafe 暴露面，
+# 许可证 MIT OR Apache-2.0，在 deny.toml allow 列表内。
+getrandom = "0.3"
+# 2.6（Python 侧车）引入：HTTP over Unix Domain Socket 传输栈。
+# reqwest 0.12 无 UDS 支持（Client 不开放自定义 connector），故直接用 hyper 1
+# 的 http1 客户端握手 + hyper-util 的 TokioIo 适配 tokio::net::UnixStream；
+# http-body-util 提供 Full 请求体与 BodyExt::collect 响应聚合。三者均已在
+# Cargo.lock 中（axum / reqwest 的传递依赖），不新增外部供应链面。
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+# 2.5（zk-authz）引入：SHA-256。授权身份哈希（operationHash / inputHash /
+# workspaceKey / capabilityHash）必须与旧 `MessageDigest.getInstance("SHA-256")`
+# + `HexFormat.of().formatHex` 逐字节一致，故取纯 Rust RustCrypto 实现（无
+# C 依赖、无 unsafe 暴露面，符合 workspace `unsafe_code = "forbid"`）。
+sha2 = "0.10"
+# Batch 0 P0-21（精确 Tokenizer 四级回退）引入：BPE 分词。旧仓库的「精确计数」是
+# Java `TokenizerService` 经 HTTP 调 Python 侧车 `POST /api/tokenizer/count`，侧车内
+# 为 `tiktoken.get_encoding("cl100k_base")`；本实现取同一编码表的纯 Rust 移植
+# （`tiktoken_rs::cl100k_base()`），编码结果与 Python tiktoken 逐 token 一致，且省掉
+# 一次跨进程 RTT 与「侧车不可用」这一整类回退路径（详见 context/token_counter.rs）。
+# 词表内嵌于 crate（无运行时下载、无网络依赖），纯 Rust 无 C 依赖、无 unsafe 暴露面，
+# 符合 workspace `unsafe_code = "forbid"`；许可证 MIT，在 deny.toml allow 列表内。
+tiktoken-rs = "0.6"
+# Batch 0 P0-15（TokenBudgetGuard 图片/Base64 预算守卫）引入：图片解码 + 缩放 +
+# JPEG 重编码。旧实现走 JVM `javax.imageio`（`ImageReader` 只读头部取宽高做像素
+# 闸门、`ImageIO.read` 全解码、`JPEGImageWriteParam` 显式压缩质量）；本实现取
+# `image` crate 的同构三步：`ImageReader::into_dimensions()`（只解析头部，不全解码）
+# → `load_from_memory` → `codecs::jpeg::JpegEncoder::new_with_quality`。
+# features 收紧至旧 ImageIO 覆盖的三种栅格格式 + WebP（五种魔数前缀含 `UklGR`），
+# 关掉 bmp/tiff/exr/hdr/ico/pnm/qoi/tga/dds/ff 以压缩供应链面与编译时间。
+# 许可证 MIT OR Apache-2.0，在 deny.toml allow 列表内；由 zk-engine 的
+# `image-budget` feature 门控（`dep:image`），最小构建不落入依赖图。
+image = { version = "0.25", default-features = false, features = [
+    "jpeg",
+    "png",
+    "gif",
+    "webp",
+] }
+# Batch 2 P0-1（Edit 工具）引入：unified diff 生成。旧 `FileEditTool` 的 `diff`
+# 元数据来自 java-diff-utils `UnifiedDiffUtils.generateUnifiedDiff(filePath,
+# filePath, originalLines, patch, 3)`；本实现取 `similar` 的同构组合
+# `TextDiff::from_slices(..).unified_diff().context_radius(3).header(a, b)`，
+# 同为 Myers 差分 + 标准 unified 格式，不自研差分算法（长期可维护）。
+# 纯 Rust、默认 features 零传递依赖、无 unsafe 暴露面，符合 workspace
+# `unsafe_code = "forbid"`；许可证 Apache-2.0，在 deny.toml allow 列表内。
+similar = { version = "2", default-features = false, features = ["text"] }
+# Batch 6: concurrent hash map (DashMap) for agent/task state
+dashmap = "6"
+# Batch 8D（Monitor 工具）引入：跨平台系统指标采集。旧 `MonitorTool` 读
+# `OperatingSystemMXBean` / `FileStores` / `RuntimeMXBean`，Rust 侧的同构
+# 组合是 `sysinfo`（纯 Rust，无 C 依赖，跨 macOS/Linux/Windows）。仅启
+# `system` + `disk` 两个特性——network / component / user 三族本工具不读，
+# 关掉可缩小采集面与编译期。
+sysinfo = { version = "0.37", default-features = false, features = [
+    "system",
+    "disk",
+] }
+# Batch 8D（Cron 三件）引入：cron 表达式解析与下次触发时刻推算。旧侧用
+# Spring 的 `CronExpression`；本 crate 是 Rust 生态同语义实现。注意方言
+# 差异：`cron` 要求 6/7 字段（首段为秒），旧 UNIX 5 字段输入由
+# `zk_tools::cron::parse_schedule` 前置补 `"0 "` 归一。
+cron = "0.15"
+# `cron` 的时刻类型即 `chrono::DateTime<Utc>`（`Schedule::after` 的入参），
+# 故提升为直接依赖而非经 re-export 借道；同时供 `CronTask` 的
+# `created_at` / `expires_at` 序列化。default-features 关掉 `oldtime` 等
+# 历史包袱，只留 `clock`（取当前时刻）+ `std` + `serde`。
+chrono = { version = "0.4", default-features = false, features = [
+    "clock",
+    "std",
+    "serde",
+] }
+
+[workspace.lints.rust]
+# unsafe 是硬红线：Phase 1 全部 crate 无 unsafe 需求；未来若确需（如 FFI），
+# 必须先在 docs/architecture.md 留痕再定点降级为 allow。
+unsafe_code = "forbid"
+# lint 组必须设低于单条 lint 的优先级（clippy::lint_groups_priority 要求），
+# 否则组隐含级别会与单条设定冲突。
+rust_2018_idioms = { level = "warn", priority = -1 }
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = "deny"
+# pedantic 取舍：取 warn 而非 deny——CI 侧 `clippy -- -D warnings` 已将 warn
+# 统一升级为 error（CI 等效全量 deny，质量门禁不降级），本地迭代保留 warn
+# 以便渐进修复、不阻塞快速编译验证；故无需逐条 deny 常用项（已全量覆盖）。
+pedantic = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

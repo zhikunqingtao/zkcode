@@ -1,0 +1,15 @@
+{
+  "_meta": {
+    "endpoint": "/api/sessions/{id}/resume",
+    "method": "POST",
+    "status_code": 200,
+    "content_type": "application/json",
+    "sampled_at": "2026-08-15T19:05+08:00",
+    "note": "fresh empty session: messages=[] expected"
+  },
+  "response": {
+    "sessionId": "e7ce9134-c467-4424-be96-710a2666ddad",
+    "webSocketUrl": "/ws/session/e7ce9134-c467-4424-be96-710a2666ddad",
+    "messages": []
+  }
+}

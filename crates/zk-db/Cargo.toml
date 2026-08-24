@@ -1,0 +1,40 @@
+[package]
+name = "zk-db"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# 依赖方向：zk-protocol → zk-db →（zk-engine / zk-server）。复用 zk-protocol
+# 的 Usage（camelCase 字段名与旧 Usage.java 线上形状逐字一致）作为会话累计
+# 用量的领域类型；消息内容块因存储形状（snake_case）与 WS 形状（camelCase，
+# 见 zk-protocol model.rs 模块文档）不同而由本 crate 自持（见 src/model.rs）。
+zk-protocol = { version = "0.1.0", path = "../zk-protocol" }
+# SQLite 访问 + 内嵌迁移（版本联动裁定见根 Cargo.toml S5 注释）。
+rusqlite = { workspace = true }
+refinery = { workspace = true }
+# 游标 Base64 与主键 UUID。
+base64 = { workspace = true }
+uuid = { workspace = true }
+# 序列化 / 错误建模 / async 出口（spawn_blocking）/ 无效游标告警日志。
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+# run 事件载荷超限截断时的 payloadSha256（旧 RunControlService.serializeEvent
+# 用 MessageDigest("SHA-256") + HexFormat）。哈希实现内置于本 crate 而非复用
+# zk-authz::hashing：铁律禁止 zk-db → zk-authz 的反向依赖。
+sha2 = { workspace = true }
+
+[dev-dependencies]
+# 集成测试断言游标 Base64 内容与临时目录随机名（rusqlite/tokio 随主依赖可用）。
+base64 = { workspace = true }
+uuid = { workspace = true }

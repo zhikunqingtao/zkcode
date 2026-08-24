@@ -1,0 +1,204 @@
+"""
+zkcode — Python capability service
+FastAPI 应用 + 动态能力域路由注册
+
+v1.15.0: 能力域动态探测 + 按需加载路由
+"""
+
+import asyncio
+import importlib
+import logging
+import os
+import re
+import time
+import uuid
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+
+from capabilities import (
+    discover_capabilities,
+    run_async_smoke_tests,
+    CapabilityDomain,
+    CAPABILITY_REGISTRY,
+)
+
+logger = logging.getLogger(__name__)
+_SAFE_REQUEST_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+
+# 路由模块 → (prefix, tags) 映射
+ROUTER_PREFIX_MAP = {
+    "routers.code_intel": ("/api/code-intel", ["Code Intelligence"]),
+    "routers.file_processing": ("/api/files", ["File Processing"]),
+    "routers.git_enhanced": ("/api/git", ["Git Enhanced"]),
+    "routers.browser": ("/api/browser", ["Browser Automation"]),
+    "routers.code_quality": ("/api/code-quality", ["Code Quality"]),
+    "routers.analysis": ("/api/analysis", ["Analysis"]),
+    "routers.http_api": ("/api/http", ["HTTP API Verification"]),
+}
+
+# 附加路由：依赖同一能力域但独立路由模块（随主路由一起加载）
+BROWSER_EXTRA_ROUTERS = [
+    ("routers.journey", "/api/browser", ["Browser Automation"]),
+]
+
+
+# ───── 生命周期管理 ─────
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """应用生命周期: 启动时探测能力域并注册路由，关闭时清理资源"""
+    logger.info("Python Service 启动中...")
+    capabilities = discover_capabilities()
+
+    # 执行异步冒烟测试（如浏览器可用性检测）— 失败不影响服务启动
+    try:
+        await run_async_smoke_tests()
+    except Exception as e:
+        logger.error(f"冒烟测试执行异常: {e}")
+
+    # 动态注册可用能力域的路由
+    browser_lifecycle = None
+    for domain, info in capabilities.items():
+        if info.is_available and info.router_module in ROUTER_PREFIX_MAP:
+            try:
+                module = importlib.import_module(info.router_module)
+                prefix, tags = ROUTER_PREFIX_MAP[info.router_module]
+                # 浏览器自动化能力域需要启动/关闭 Playwright
+                if info.router_module == "routers.browser" and hasattr(module, "startup_browser"):
+                    try:
+                        await asyncio.wait_for(module.startup_browser(), timeout=10.0)
+                    except Exception as browser_error:
+                        info.is_available = False
+                        info.unavailable_reason = (
+                            f"浏览器服务启动失败: {type(browser_error).__name__}"
+                        )
+                        logger.warning(
+                            "浏览器服务未就绪，跳过路由注册: %s",
+                            type(browser_error).__name__,
+                        )
+                        continue
+                    browser_lifecycle = module
+                app.include_router(module.router, prefix=prefix, tags=tags)
+                logger.info(f"路由已注册: {prefix} [{info.name}]")
+                if browser_lifecycle is module:
+                    # 注册 BROWSER_AUTOMATION 域的附加路由
+                    for extra_mod, extra_prefix, extra_tags in BROWSER_EXTRA_ROUTERS:
+                        try:
+                            extra = importlib.import_module(extra_mod)
+                            app.include_router(extra.router, prefix=extra_prefix, tags=extra_tags)
+                            logger.info(f"附加路由已注册: {extra_prefix} [{extra_mod}]")
+                        except Exception as ex:
+                            logger.error(f"加载附加路由失败 [{extra_mod}]: {ex}")
+            except Exception as e:
+                logger.error(f"加载路由失败 [{info.name}]: {e}")
+
+    yield
+
+    # 关闭浏览器服务
+    if browser_lifecycle and hasattr(browser_lifecycle, "shutdown_browser"):
+        try:
+            await browser_lifecycle.shutdown_browser()
+        except Exception as e:
+            logger.error(f"关闭浏览器服务失败: {e}")
+    logger.info("Python Service 关闭")
+
+
+# 始终加载的路由 (不依赖能力域)
+from routers.token_estimator import router as token_router
+from routers.tokenizer import router as tokenizer_router
+
+app = FastAPI(
+    title="zkcode Python capability service",
+    version="1.15.0",
+    lifespan=lifespan,
+)
+
+
+@app.middleware("http")
+async def request_correlation_middleware(request: Request, call_next):
+    """Correlate Java/Python calls without reading or changing request/response bodies."""
+    incoming = request.headers.get("x-request-id", "")
+    request_id = incoming if _SAFE_REQUEST_ID.fullmatch(incoming) else str(uuid.uuid4())
+    started = time.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception as error:
+        try:
+            logger.warning(
+                "python_request_failed requestId=%s method=%s path=%s durationMs=%d errorType=%s",
+                request_id,
+                request.method,
+                request.url.path,
+                int((time.perf_counter() - started) * 1000),
+                type(error).__name__,
+            )
+        except Exception:
+            pass
+        raise
+
+    try:
+        response.headers["X-Request-Id"] = request_id
+    except Exception:
+        pass
+    try:
+        logger.info(
+            "python_request_completed requestId=%s method=%s path=%s status=%s durationMs=%d",
+            request_id,
+            request.method,
+            request.url.path,
+            response.status_code,
+            int((time.perf_counter() - started) * 1000),
+        )
+    except Exception:
+        pass
+    return response
+
+# 注册始终可用的 Token 估算路由
+app.include_router(token_router, prefix="/api/v1/tokens", tags=["Token Estimation"])
+app.include_router(tokenizer_router, prefix="/api/tokenizer", tags=["Tokenizer"])
+
+# ───── CORS ─────
+allowed_origins = os.getenv("CORS_ORIGINS", "http://127.0.0.1:5273,http://127.0.0.1:8081").split(",")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ───── 核心路由 (始终加载) ─────
+@app.get("/api/health", tags=["Health"])
+async def health():
+    """健康检查端点 — Java 后端启动时轮询此端点"""
+    return {
+        "status": "ok",
+        "service": "zkcode-python",
+        "version": "1.15.0",
+    }
+
+
+@app.get("/api/health/capabilities", tags=["Health"])
+async def get_capabilities():
+    """返回所有能力域的可用状态 — Java 后端据此决定是否调用"""
+    return {
+        domain.name: {
+            "name": info.name,
+            "available": info.is_available,
+            "reason": info.unavailable_reason if not info.is_available else None,
+        }
+        for domain, info in CAPABILITY_REGISTRY.items()
+    }
+
+
+# ───── 启动入口 ─────
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(
+        "main:app",
+        host="127.0.0.1",
+        port=8000,
+        reload=True,
+        log_level="info",
+    )

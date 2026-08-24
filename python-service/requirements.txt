@@ -1,0 +1,3 @@
+# Convenience install entry point. The generated lock file is the single source
+# of pinned dependency versions used by local setup and CI.
+-r requirements.lock

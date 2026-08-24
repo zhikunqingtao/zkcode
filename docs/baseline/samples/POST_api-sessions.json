@@ -1,0 +1,17 @@
+{
+  "_meta": {
+    "endpoint": "/api/sessions",
+    "method": "POST",
+    "status_code": 201,
+    "content_type": "application/json",
+    "sampled_at": "2026-08-15T19:05+08:00",
+    "note": "empty body; NOTE: workingDirectory field is rejected by design (400)"
+  },
+  "response": {
+    "sessionId": "e7ce9134-c467-4424-be96-710a2666ddad",
+    "webSocketUrl": "/ws/session/e7ce9134-c467-4424-be96-710a2666ddad",
+    "model": "qwen3.7-max",
+    "permissionMode": "DEFAULT",
+    "createdAt": "2026-08-15T11:07:20.567053Z"
+  }
+}

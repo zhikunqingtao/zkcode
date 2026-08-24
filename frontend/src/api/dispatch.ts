@@ -1,0 +1,1149 @@
+/**
+ * WebSocket 消息分发器 — 覆盖全部 40 种 Server→Client 消息类型
+ * SPEC: §8.5.3 dispatch 函数
+ *
+ * 按 type 字段分发到对应 Zustand Store，
+ * 跨 Store 消息通过私有 handle* 方法协调。
+ */
+
+import { isPermissionMode } from '@/types';
+import type { Message, MessageCompletePayload, ServerMessage, PermissionRequest, TokenWarningPayload, ToolPermissionDeniedPayload, InteractionUpdatedPayload, InteractionTerminalPayload } from '@/types';
+import type { ActivityData } from '@/types/apos';
+import { useMessageStore } from '@/store/messageStore';
+import { useActivityStore } from '@/store/activityStore';
+import { useSessionStore } from '@/store/sessionStore';
+import { usePermissionStore } from '@/store/permissionStore';
+import { useCostStore } from '@/store/costStore';
+import { useTaskStore } from '@/store/taskStore';
+import { useAppUiStore } from '@/store/appUiStore';
+import { useBridgeStore } from '@/store/bridgeStore';
+import { useNotificationStore } from '@/store/notificationStore';
+import { useInboxStore } from '@/store/inboxStore';
+import { useMcpStore } from '@/store/mcpStore';
+import { useSwarmStore } from '@/store/swarmStore';
+import { usePlanStore, type PlanStep } from '@/store/planStore';
+import { useCoordinatorStore } from '@/store/coordinatorStore';
+import { useInsightStore } from '@/store/insightStore';
+import { useAnomalyStore } from '@/store/anomalyStore';
+import { useJourneyVerifyStore } from '@/store/journeyVerifyStore';
+import { useEvidenceStore } from '@/store/evidenceStore';
+import { useRunStore } from '@/store/runStore';
+import { anomalyEngine } from '@/services/AnomalyDetectionEngine';
+import { mapRunChecksResponseToRiskAssessment } from '@/utils/aposAdapters';
+import { appendStreamDelta } from '@/hooks/useStreamingText';
+import { generateUUID } from '@/utils/uuid';
+
+/** 序列号校验器 — 检测乱序/丢失消息 */
+let lastSeqTs = 0;
+
+interface PendingBind {
+    sessionId: string;
+    bindingEpoch: number;
+    restoreAccepted: boolean;
+    resolve: (restored: boolean) => void;
+    timer: ReturnType<typeof setTimeout>;
+    queued: Array<ServerMessage & { ts?: number }>;
+}
+const pendingBinds = new Map<string, PendingBind>();
+let activeRecoveryId: string | null = null;
+let nextBindingEpoch = 0;
+let boundBindingEpoch = 0;
+let boundBindRequestId: string | null = null;
+
+interface PendingInteractionAck {
+    sessionId: string;
+    deliveryGeneration: number;
+    correlationKey?: string;
+}
+
+/**
+ * 尚未被服务端确认的交互送达 ACK。
+ *
+ * ACK 只表示权限弹窗已经进入前端 Store，不代表用户允许操作。断线时保留最新
+ * deliveryGeneration，待服务端重投或 Session 恢复后再次发送，避免一次 publish
+ * 失败直接把交互变成 UNDELIVERABLE。
+ */
+const pendingInteractionAcks = new Map<string, PendingInteractionAck>();
+
+/** 恢复状态下仍需立即处理的关键消息类型（时间敏感，不可延迟或丢弃） */
+const RECOVERY_BYPASS_TYPES: ReadonlySet<string> = new Set([
+    'session_restored', 'protocol_error',
+    'interaction_created', 'interaction_updated', 'interaction_terminal',
+    'permission_request', 'permission_mode_changed'
+]);
+
+/** 已绑定的会话 ID — 跟踪当前 WS 连接已绑定的 sessionId，避免重复发送 bind-session */
+let boundSessionId: string | null = null;
+
+interface InteractionView {
+    protocolVersion: number;
+    interactionId: string;
+    correlationKey: string;
+    sessionId: string;
+    runId: string;
+    interactionType: 'permission' | 'elicitation' | 'plan_approval';
+    status: string;
+    prompt: Record<string, unknown>;
+    allowedDecisions: string[];
+    scopeOptions: Array<'run' | 'session' | 'workspace'>;
+    response?: unknown;
+    source?: string;
+    childSessionId?: string;
+    actorRunId?: string;
+    actorType?: string;
+    deliveryGeneration: number;
+    decisionDeadlineAt?: string | number;
+    deliveryWindowEndsAt: string | number;
+    version: number;
+    serverNow: number;
+    operationHash?: string;
+    options?: PermissionOption[];
+}
+
+interface PermissionOption {
+    optionId: string;
+    decision: 'allow' | 'deny';
+    scope: 'once' | 'run' | 'session' | 'workspace';
+}
+
+function clientDeadline(deadline: string | number | undefined, serverNow?: number): number | undefined {
+    if (deadline === undefined || deadline === null) return undefined;
+    const parsed = typeof deadline === 'number' ? deadline : Date.parse(deadline);
+    if (!Number.isFinite(parsed)) return undefined;
+    return Date.now() + Math.max(0, parsed - (serverNow ?? Date.now()));
+}
+
+function handleInteractionCreated(interaction: InteractionView): void {
+    const expectedProtocol = interaction.interactionType === 'permission' ? 3 : 2;
+    if (interaction.protocolVersion !== expectedProtocol || interaction.status !== 'pending') {
+        console.warn('[WS] interaction_created dropped:', {
+            interactionId: interaction.interactionId,
+            status: interaction.status,
+            reason: interaction.protocolVersion !== expectedProtocol
+                ? `protocolVersion=${interaction.protocolVersion}, expected=${expectedProtocol}`
+                : 'status is not pending',
+        });
+        return;
+    }
+    const prompt = interaction.prompt ?? {};
+    const deadline = clientDeadline(interaction.decisionDeadlineAt, interaction.serverNow);
+    if (interaction.interactionType === 'permission') {
+        handlePermissionRequest({
+            interactionId: interaction.interactionId,
+            version: interaction.version,
+            deliveryGeneration: interaction.deliveryGeneration,
+            toolUseId: String(prompt.toolUseId ?? interaction.correlationKey),
+            toolName: String(prompt.toolName ?? 'unknown'),
+            input: { command: String(prompt.inputSummary ?? '') },
+            riskLevel: prompt.riskLevel === 'low' || prompt.riskLevel === 'high'
+                ? prompt.riskLevel : 'medium',
+            reason: String(prompt.reason ?? ''),
+            source: interaction.source,
+            childSessionId: interaction.childSessionId,
+            actorRunId: interaction.actorRunId,
+            actorType: interaction.actorType,
+            scopeOptions: interaction.scopeOptions,
+            rememberScopeDescription: typeof prompt.rememberScopeDescription === 'string'
+                ? prompt.rememberScopeDescription : undefined,
+            operationHash: interaction.operationHash,
+            options: interaction.options,
+            decisionDeadlineAt: deadline,
+        }, interaction.sessionId);
+    } else if (interaction.interactionType === 'elicitation') {
+        useAppUiStore.getState().showElicitationDialog({
+            interactionId: interaction.interactionId,
+            version: interaction.version,
+            requestId: interaction.interactionId,
+            question: String(prompt.question ?? ''),
+            options: prompt.options ?? [],
+            decisionDeadlineAt: deadline,
+        });
+        queueInteractionAck(interaction.sessionId, interaction.interactionId,
+            interaction.deliveryGeneration);
+    }
+}
+
+/** 标记会话已绑定 */
+export function markSessionBound(sessionId: string): void {
+    boundSessionId = sessionId;
+    // 切换 Session 后不保留其他 Session 的前端 ACK；再次进入时由服务端 pending
+    // 权威数据重放，避免终态消息未送达时在浏览器进程内长期积累陈旧条目。
+    for (const [interactionId, pending] of pendingInteractionAcks) {
+        if (pending.sessionId !== sessionId) pendingInteractionAcks.delete(interactionId);
+    }
+    // 连接恢复后先尝试补发内存中保留的 ACK；若服务端已生成新代次，随后重放的
+    // interaction_created 会覆盖旧代次并再次发送。
+    void flushPendingInteractionAcks(sessionId);
+}
+
+/** 检查会话是否已绑定 */
+export function isSessionBound(sessionId: string): boolean {
+    return boundSessionId === sessionId;
+}
+
+/** 重置绑定状态 — WS 重连时调用，确保下次发消息时重新发送 bind-session */
+export function resetBoundSession(): void {
+    boundSessionId = null;
+    boundBindingEpoch = 0;
+    boundBindRequestId = null;
+}
+
+function queueInteractionAck(sessionId: string | null, interactionId?: string,
+        deliveryGeneration?: number, correlationKey?: string): void {
+    if (!sessionId || !interactionId || !deliveryGeneration || deliveryGeneration < 1) return;
+    const current = pendingInteractionAcks.get(interactionId);
+    if (current && current.deliveryGeneration > deliveryGeneration) return;
+    pendingInteractionAcks.set(interactionId, { sessionId, deliveryGeneration, correlationKey });
+    void flushPendingInteractionAcks(sessionId);
+}
+
+/** 仅向当前权威绑定的 Session 重发 ACK；发送失败时保留，等待重投/重连恢复。 */
+async function flushPendingInteractionAcks(sessionId: string): Promise<void> {
+    const { sendToServer } = await import('./stompClient');
+    if (boundSessionId !== sessionId || useSessionStore.getState().sessionId !== sessionId) {
+        console.debug('[WS] flushPendingInteractionAcks guarded:', {
+            reason: boundSessionId !== sessionId
+                ? `session not bound (bound=${boundSessionId})`
+                : 'active session mismatch',
+            sessionId,
+            pendingAckCount: pendingInteractionAcks.size,
+        });
+        return;
+    }
+    for (const [interactionId, pending] of pendingInteractionAcks) {
+        if (pending.sessionId !== sessionId) continue;
+        // dynamic import 期间可能收到更新一代的重投，旧代次绝不能覆盖新代次。
+        if (pendingInteractionAcks.get(interactionId) !== pending) continue;
+        sendToServer('/app/interaction-received', {
+            interactionId,
+            deliveryGeneration: pending.deliveryGeneration,
+            ...(pending.correlationKey ? { correlationKey: pending.correlationKey } : {}),
+        });
+    }
+}
+
+/**
+ * 等待 session_restored 事件处理完成。
+ * 用于 bind-session 后确保 session_restored 已处理完毕再添加用户消息，
+ * 避免 clearMessages() 清掉刚添加的用户消息。
+ * @param timeoutMs 最大等待时间，默认 5s（包含 Run event 缺口补齐）
+ * @return true 表示已收到并处理完服务端 session_restored；false 表示绑定未确认
+ */
+export function bindSessionAndWait(
+    sessionId: string,
+    publish: (payload: { sessionId: string; protocolVersion: number; bindRequestId: string; bindingEpoch: number }) => void | boolean,
+    timeoutMs = 5000,
+): Promise<boolean> {
+    if (activeRecoveryId) finishBind(activeRecoveryId, false, false);
+    const bindRequestId = crypto.randomUUID();
+    const bindingEpoch = ++nextBindingEpoch;
+    return new Promise(resolve => {
+        const timer = setTimeout(() => {
+            const pending = pendingBinds.get(bindRequestId);
+            const restored = pending?.restoreAccepted === true;
+            finishBind(bindRequestId, restored, restored);
+        }, timeoutMs);
+        pendingBinds.set(bindRequestId, {
+            sessionId,
+            bindingEpoch,
+            restoreAccepted: false,
+            resolve,
+            timer,
+            queued: [],
+        });
+        activeRecoveryId = bindRequestId;
+        try {
+            const published = publish({
+                sessionId,
+                protocolVersion: 3,
+                bindRequestId,
+                bindingEpoch,
+            });
+            if (published === false) {
+                finishBind(bindRequestId, false, false);
+            }
+        } catch (error) {
+            console.error('[WS] Failed to publish Session bind:', error);
+            finishBind(bindRequestId, false, false);
+        }
+    });
+}
+
+function finishBind(bindRequestId: string, restored: boolean, replayQueued: boolean): void {
+    const pending = pendingBinds.get(bindRequestId);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    pendingBinds.delete(bindRequestId);
+    if (activeRecoveryId === bindRequestId) activeRecoveryId = null;
+    pending.resolve(restored);
+    if (replayQueued) pending.queued.forEach(message => dispatch(message));
+}
+
+/**
+ * dispatch — 按 type 字段分发 Server→Client 消息到对应 Store。
+ * @param data 原始 JSON body (WsMessage 格式: { type, ts, ...payload })
+ */
+export function dispatch(data: ServerMessage & { ts?: number }): void {
+    const routed = data as ServerMessage & { ts?: number; _sessionId?: string; _bindingEpoch?: number };
+    if (activeRecoveryId && !RECOVERY_BYPASS_TYPES.has(data.type)) {
+        const pending = pendingBinds.get(activeRecoveryId);
+        if (pending) {
+            if (routed._sessionId && (routed._sessionId !== pending.sessionId
+                    || routed._bindingEpoch !== pending.bindingEpoch)) {
+                console.warn(`[WS] Recovery filter: discarding message type=${data.type}, sessionId mismatch`);
+                return;
+            }
+            if (pending.queued.length >= 5000) pending.queued.shift();
+            pending.queued.push(data);
+            console.warn(`[WS] Recovery filter: queuing message type=${data.type} until session restore completes`);
+            return;
+        }
+    }
+    if (!activeRecoveryId && routed._sessionId && boundSessionId
+            && (routed._sessionId !== boundSessionId || routed._bindingEpoch !== boundBindingEpoch)) {
+        return;
+    }
+    // 序列号/时间戳校验
+    if (data.ts) {
+        if (data.ts < lastSeqTs) {
+            console.warn(`[WS] Out-of-order message: ts=${data.ts} < lastTs=${lastSeqTs}, type=${data.type}`);
+        }
+        lastSeqTs = data.ts;
+    }
+
+    const handler = handlers[data.type];
+    if (handler) {
+        handler(data as any);
+    } else {
+        console.warn(`[WS] Unknown message type: ${data.type}`);
+    }
+}
+
+/** 重置序列号 (断线重连时调用) */
+export function resetSequence(): void {
+    lastSeqTs = 0;
+}
+
+// ==================== 事件分发表 — 覆盖全部 25 种消息 ====================
+
+const handlers: Record<string, (data: any) => void> = {
+    'protocol_error': (d: { code: string; supportedVersion: number; bindRequestId?: string; bindingEpoch?: number }) => {
+        const pending = d.bindRequestId
+            ? pendingBinds.get(d.bindRequestId)
+            : undefined;
+        // Ignore a late failure from a timed-out or superseded bind. Its
+        // generation is no longer authoritative and must not disturb the
+        // current Session or surface a misleading notification.
+        if (d.bindRequestId && !pending) return;
+        const failedSessionId = pending?.sessionId;
+        if (d.bindRequestId) finishBind(d.bindRequestId, false, false);
+        const didClearSession = d.code === 'SESSION_NOT_FOUND'
+                && failedSessionId
+                && useSessionStore.getState().sessionId === failedSessionId;
+        if (didClearSession) {
+            void useSessionStore.getState().resumeSession('');
+        }
+        useNotificationStore.getState().addNotification({
+            key: 'protocol-error', level: 'error',
+            message: d.code === 'UPGRADE_REQUIRED'
+                ? `客户端协议版本不兼容（服务端需要 v${d.supportedVersion}），请刷新页面`
+                : d.code === 'SESSION_NOT_FOUND'
+                    ? didClearSession
+                        ? '原会话已不存在，已清除本地恢复状态'
+                        : '请求恢复的会话已不存在，当前会话未受影响'
+                : '实时连接协议错误',
+            timeout: 0,
+        });
+    },
+    'interaction_created': (d: InteractionView) => handleInteractionCreated(d),
+    // === messageStore (5 种) ===
+    'stream_delta':       (d) => {
+        // 首次 delta 时在 messageStore 创建占位 assistant 消息
+        if (!useMessageStore.getState().streamingMessageId) {
+            useMessageStore.getState().appendStreamDelta('');
+        }
+        // 后续 delta 仅写入外部高性能 store（绕过 Immer 开销）
+        appendStreamDelta(d.delta);
+    },
+    'thinking_delta':     (d) => useMessageStore.getState().appendThinkingDelta(d.delta),
+    'tool_use_start':     (d) => useMessageStore.getState().startToolCall(d.toolUseId, d.toolName, d.input),
+    'tool_use_input':     (d) => {
+        useMessageStore.getState().updateToolCallInput(d.toolUseId, d.input);
+    },
+    'tool_use_progress':  (d) => useMessageStore.getState().updateToolCallProgress(d.toolUseId, d.progress),
+    'tool_result':        (d) => useMessageStore.getState().completeToolCall(d.toolUseId, d.result ?? { content: d.content ?? '', isError: d.isError ?? false }),
+
+    'run_input_queued':   (d: { requestId: string }) => {
+        const key = `run-input-${d.requestId}`;
+        useNotificationStore.getState().removeNotification(key);
+        useNotificationStore.getState().addNotification({
+            key,
+            level: 'info',
+            message: '指令已排队，将在当前操作完成后应用',
+            timeout: 8000,
+        });
+    },
+    'run_input_applied':  (d: {
+        requestId: string;
+        text: string;
+        appliedAt: number;
+    }) => {
+        const key = `run-input-${d.requestId}`;
+        const messageStore = useMessageStore.getState();
+        const alreadyApplied = messageStore.messages.some(
+            message => message.uuid === d.requestId);
+        useNotificationStore.getState().removeNotification(key);
+        // 先结束当前 assistant 段，再插入 steering user 消息；Run 本身仍保持运行中。
+        // 重连后可能重放同一 applied receipt；此时快照已含该 user 消息，
+        // 不得再次封口随后正在生成的 assistant 段。
+        if (!alreadyApplied) messageStore.finalizeAssistantSegment();
+        messageStore.addMessage({
+            type: 'user',
+            uuid: d.requestId,
+            timestamp: d.appliedAt,
+            content: [{ type: 'text', text: d.text }],
+        } as Message);
+        useNotificationStore.getState().addNotification({
+            key,
+            level: 'success',
+            message: '运行中指令已应用',
+            timeout: 4000,
+        });
+    },
+    'run_input_rejected': (d: {
+        requestId: string;
+        code: string;
+        message: string;
+    }) => {
+        const key = `run-input-${d.requestId}`;
+        useNotificationStore.getState().removeNotification(key);
+        useNotificationStore.getState().addNotification({
+            key,
+            level: 'error',
+            message: d.message || `运行中指令未应用（${d.code}）`,
+            timeout: 8000,
+        });
+        if (d.code === 'NO_ACTIVE_RUN') {
+            useSessionStore.getState().setStatus('idle');
+        }
+    },
+
+    // === messageStore + sessionStore (2 种) ===
+    'error':              (d) => handleError(d),
+    'compact_complete':   (d) => handleCompactComplete(d),
+
+    // === messageStore + sessionStore (1 种) ===
+    'message_complete':   (d) => handleMessageComplete(d),
+
+    // === sessionStore (2 种) ===
+    'compact_start':      ()  => useSessionStore.getState().setStatus('compacting'),
+    'rate_limit':         (d) => useSessionStore.getState().handleRateLimit(d),
+
+    // === permissionStore + sessionStore (1 种) ===
+    'permission_request': (d) => handlePermissionRequest(d, useSessionStore.getState().sessionId),
+
+    // === activityStore: 权限拒绝后清除 changedFiles (1 种) ===
+    'tool_permission_denied': (d: ToolPermissionDeniedPayload) => {
+        useActivityStore.getState().markToolUseDenied(d.toolUseId);
+        console.log('[APOS] tool_permission_denied: cleared changedFiles for', d.toolUseId, d.toolName);
+    },
+
+    // === costStore (1 种) ===
+    'cost_update':        (d) => useCostStore.getState().updateCost(d),
+
+    // === taskStore (7 种，兼容旧 Agent* 与新 agent_* 生命周期) ===
+    'task_update':        (d) => useTaskStore.getState().updateTask(d.taskId, d),
+    'agent_spawn':        (d) => useTaskStore.getState().addAgentTask(d),
+    'agent_update':       (d) => useTaskStore.getState().updateAgentTask(d.taskId, d.progress),
+    'agent_complete':     (d) => useTaskStore.getState().completeAgentTask(d.taskId, d.result),
+    'agent_started':      (d: { agentId: string; prompt: string }) => {
+        const task = {
+            taskId: d.agentId,
+            agentName: d.agentId,
+            agentType: 'subagent',
+        };
+        useTaskStore.getState().addAgentTask(task);
+        useTaskStore.getState().updateAgentTask(d.agentId, d.prompt);
+        useCoordinatorStore.getState().addAgentTask({ type: 'agent_spawn', ...task });
+        useCoordinatorStore.getState().updateAgentTask(d.agentId, d.prompt);
+    },
+    'agent_completed':    (d: { agentId: string; result: string }) => {
+        useTaskStore.getState().completeAgentTask(d.agentId, d.result);
+        useCoordinatorStore.getState().completeAgentTask(d.agentId, d.result);
+    },
+    'agent_failed':       (d: { agentId: string; error: string }) => {
+        useTaskStore.getState().failAgentTask(d.agentId, d.error);
+        useCoordinatorStore.getState().failAgentTask(d.agentId, d.error);
+    },
+
+    // === appUiStore (3 种) ===
+    'elicitation':        (d) => {
+        useAppUiStore.getState().showElicitationDialog(d);
+        if (d.interactionId) void import('./stompClient').then(({ send }) =>
+            send('/app/interaction-received', { interactionId: d.interactionId }));
+    },
+    'interaction_updated': (d: InteractionUpdatedPayload) => {
+        pendingInteractionAcks.delete(d.interactionId);
+        const deadline = clientDeadline(d.decisionDeadlineAt, d.serverNow);
+        if (deadline === undefined) {
+            console.warn('[WS] interaction_updated: deadline computation failed, store not updated', {
+                interactionId: d.interactionId,
+                decisionDeadlineAt: d.decisionDeadlineAt,
+                serverNow: d.serverNow,
+            });
+            return;
+        }
+        usePermissionStore.getState().updateInteractionDeadline(d.interactionId, deadline, d.version);
+        useAppUiStore.getState().updateElicitationDeadline(d.interactionId, deadline, d.version);
+    },
+    'interaction_terminal': (d: InteractionTerminalPayload) => {
+        pendingInteractionAcks.delete(d.interactionId);
+        usePermissionStore.getState().removeInteraction(d.interactionId);
+        if (d.interactionType === 'elicitation'
+            && useAppUiStore.getState().elicitationDialog?.interactionId === d.interactionId) {
+            useAppUiStore.getState().dismissElicitationDialog(d.interactionId);
+        }
+    },
+    'prompt_suggestion':  (d) => useAppUiStore.getState().setPromptSuggestion(d),
+    'speculation_result': (d) => useAppUiStore.getState().updateSpeculation(d),
+
+    // === bridgeStore (1 种) ===
+    'bridge_status':      (d) => useBridgeStore.getState().updateBridgeStatus(d),
+
+    // === notificationStore (1 种) ===
+    'notification':       (d) => useNotificationStore.getState().addNotification(d),
+
+    // === inboxStore (1 种) ===
+    'teammate_message':   (d) => {
+        useInboxStore.getState().addInboxMessage(d);
+        useCoordinatorStore.getState().addMailboxEvent({
+            from: d.fromId,
+            to: 'coordinator',
+            messageSize: new TextEncoder().encode(d.content).byteLength,
+            contentType: 'task_spec',
+            timestamp: Date.now(),
+        });
+    },
+
+    // === mcpStore (1 种) ===
+    'mcp_tool_update':    (d) => useMcpStore.getState().updateMcpTools(d),
+
+    // === mcpStore: MCP 健康状态 (1 种) ===
+    'mcp_health_status':  (d: { serverName: string; status: string; consecutiveFailures?: number; lastSuccessfulPing?: number; timestamp?: number }) => {
+        useMcpStore.getState().updateHealthStatus({
+            serverName: d.serverName,
+            status: d.status,
+            consecutiveFailures: d.consecutiveFailures ?? 0,
+            lastSuccessfulPing: d.lastSuccessfulPing ?? null,
+            timestamp: d.timestamp ?? Date.now(),
+        });
+    },
+
+    // === mcpStore: M4 工具调用进度 (1 种) ===
+    'mcp_tool_progress':  (d: { progressToken: string; serverName: string; toolName: string; progress: number; total: number; message: string }) => {
+        useMcpStore.getState().updateMcpProgress({
+            type: 'mcp_tool_progress',
+            progressToken: d.progressToken,
+            serverName: d.serverName,
+            toolName: d.toolName,
+            progress: d.progress ?? 0,
+            total: d.total ?? 0,
+            message: d.message ?? '',
+        });
+    },
+
+    // === 断线重连 (1 种) ===
+    'session_restored':   (d) => handleSessionRestore(d),
+
+    // === 心跳 (1 种) ===
+    'pong':               ()  => { /* 连接存活确认, 重置超时计时器 */ },
+
+    // === 新增: 压缩进度/token警告/中断确认 (3 种) ===
+    'compact_event':      (d: { phase: string; usagePercent: number }) => {
+        if (d.phase === 'warning') {
+            useNotificationStore.getState().addNotification({
+                key: 'compact-warning',
+                level: 'warning',
+                message: `\u4e0a\u4e0b\u6587\u4f7f\u7528\u7387 ${d.usagePercent}%\uff0c\u5373\u5c06\u81ea\u52a8\u538b\u7f29`,
+                timeout: 5000,
+            });
+        }
+    },
+    'token_warning':      (d: { currentTokens: number; maxTokens: number; usagePercent: number; warningLevel: string }) => {
+        useNotificationStore.getState().addNotification({
+            key: 'token-warning',
+            level: d.warningLevel === 'critical' ? 'error' : 'warning',
+            message: `Token \u4f7f\u7528\u7387 ${d.usagePercent}% (${d.currentTokens}/${d.maxTokens})`,
+            timeout: 5000,
+        });
+        useMessageStore.getState().setTokenWarning(d as TokenWarningPayload);
+    },
+    'interrupt_ack':      (d: { reason: string }) => {
+        useSessionStore.getState().setStatus('idle');
+        if (d.reason === 'USER_INTERRUPT') {
+            useMessageStore.getState().addMessage({
+                type: 'system',
+                uuid: generateUUID(),
+                timestamp: Date.now(),
+                content: '\u5df2\u4e2d\u65ad AI \u54cd\u5e94',
+                subtype: 'interrupt',
+            } as Message);
+        }
+    },
+    // === 新增: 模型/权限模式切换确认 (2 种) ===
+    'model_changed':            (d: { model: string }) => {
+        useSessionStore.getState().setModel(d.model);
+    },
+    // === 智能模型路由通知（图片自动路由到视觉模型）===
+    // 后端在用户当前模型不支持图片时自动切换到视觉模型，并推送本事件用于 UI 提示。
+    'model_routed':             (d: { originalModel: string; routedModel: string; routedModelName: string; reason: string }) => {
+        const message = d.reason
+            || `图片已自动路由到 ${d.routedModelName} 处理（原模型 ${d.originalModel} 不支持图片）`;
+        useNotificationStore.getState().addNotification({
+            key: `model-routed-${d.routedModel}`,
+            level: 'info',
+            message,
+            timeout: 6000,
+        });
+    },
+    'permission_mode_changed':  (d: { mode: string }) => {
+        // 后端枚举为大写，前端使用小写稳定值。
+        const normalizedMode = d.mode.toLowerCase();
+        if (!isPermissionMode(normalizedMode)) {
+            console.error('[Protocol] Invalid permission mode:', d.mode);
+            return;
+        }
+        // 服务端确认是唯一的主动切换提交点。
+        usePermissionStore.getState().setPermissionMode(normalizedMode);
+        // 通知用户权限模式已变更
+        useNotificationStore.getState().addNotification({
+            key: 'permission-mode-changed',
+            level: 'info',
+            message: `权限模式已切换为: ${normalizedMode}`,
+            timeout: 3000,
+        });
+    },
+    // === 新增: 命令结果/文件回退完成 (2 种) ===
+    'command_result':     (d: { command: string; resultType: 'text' | 'jsx' | 'prompt'; output?: string; data?: Record<string, unknown> }) => {
+        if (d.resultType === 'jsx' && d.data) {
+            // JSX 类型: 创建带 metadata 的 system Message
+            useMessageStore.getState().addMessage({
+                type: 'system',
+                uuid: generateUUID(),
+                timestamp: Date.now(),
+                content: '',
+                subtype: 'jsx_result',
+                metadata: { command: d.command, ...d.data },
+            } as Message);
+        } else if (d.resultType === 'prompt') {
+            // PROMPT 命令: 显示简洁的加载指示器（不含完整提示词）
+            useMessageStore.getState().addMessage({
+                type: 'system',
+                uuid: generateUUID(),
+                timestamp: Date.now(),
+                content: `AI 正在处理 /${d.command} 命令...`,
+                subtype: 'prompt_executing',
+            } as Message);
+        } else {
+            // TEXT 类型: LOCAL 命令结果，保持原有行为
+            useMessageStore.getState().addMessage({
+                type: 'system',
+                uuid: generateUUID(),
+                timestamp: Date.now(),
+                content: `/${d.command}: ${d.output ?? ''}`,
+                subtype: 'command_result',
+            } as Message);
+        }
+    },
+    'rewind_complete':    (d: { messageId: string; files: string[] }) => {
+        useNotificationStore.getState().addNotification({
+            key: `rewind-${d.messageId}`,
+            level: 'info',
+            message: `\u5df2\u56de\u9000 ${d.files.length} \u4e2a\u6587\u4ef6`,
+            timeout: 5000,
+        });
+    },
+    // === #37: Token 预算续写 nudge (1 种) ===
+    'token_budget_nudge':  (d: { pct: number; currentTokens: number; budgetTokens: number }) => {
+        useMessageStore.getState().setTokenBudgetState({
+            pct: d.pct,
+            currentTokens: d.currentTokens,
+            budgetTokens: d.budgetTokens,
+            visible: true,
+        });
+    },
+
+    // === #38-40: Swarm 消息 (3 种) ===
+    'swarm_state_update':  (d: import('@/types').SwarmStateUpdatePayload) => {
+        useSwarmStore.getState().updateSwarmState(d);
+        useCoordinatorStore.getState().updateSwarmState(d);
+    },
+    'worker_progress':     (d: import('@/types').WorkerProgressPayload) => {
+        useSwarmStore.getState().updateWorkerProgress(d);
+        useCoordinatorStore.getState().updateWorkerProgress(d);
+
+        // Phase 2: 异常检测触发 — 独立 try-catch 保护，不影响主流程
+        if (d.recentToolCalls && Array.isArray(d.recentToolCalls) && d.recentToolCalls.length > 0) {
+            try {
+                const firstItem = d.recentToolCalls[0];
+                if (typeof firstItem === 'object' && firstItem !== null && 'toolName' in firstItem) {
+                    const swarms = useSwarmStore.getState().swarms;
+                    let worker: import('@/types').WorkerInfo | undefined;
+                    for (const [, swarm] of swarms) {
+                        if (swarm.workers[d.workerId]) {
+                            worker = swarm.workers[d.workerId];
+                            break;
+                        }
+                    }
+                    if (worker) {
+                        const anomalies = anomalyEngine.evaluate(worker, d.recentToolCalls as unknown as import('@/types/apos').ToolCallRecord[]);
+                        anomalies.forEach(a => {
+                            a.swarmId = d.swarmId || '';
+                            useAnomalyStore.getState().addAnomaly(a);
+                        });
+                    }
+                }
+            } catch (err) {
+                console.error('[dispatch] worker_progress anomaly detection failed:', err);
+                // 异常检测失败不影响 Worker 进度更新（updateWorkerProgress 已在上方执行）
+            }
+        }
+    },
+    // === #41: Coordinator 工作流 (1 种) ===
+    'workflow_phase_update': (d: import('@/types').WorkflowPhaseUpdatePayload) => {
+        useCoordinatorStore.getState().updateWorkflowPhase(d);
+    },
+
+    // === 会话列表变更通知 (1 种) ===
+    'session_list_updated': () => {
+        // 延迟 200ms 再通知刷新，确保数据库落盘完成（SQLite WAL 可见性）
+        setTimeout(() => {
+            window.dispatchEvent(new CustomEvent('session-list-updated'));
+        }, 200);
+    },
+
+    // === messageStore: 记忆变更通知 (1 种, 配合 P0-2 统一存储) ===
+    'memory_update': (d: { action: 'created' | 'updated' | 'deleted'; entry?: Record<string, unknown>; entryId?: string }) => {
+        useMessageStore.getState().addMessage({
+            type: 'system',
+            uuid: generateUUID(),
+            timestamp: Date.now(),
+            content: '',
+            subtype: 'memory_update',
+            metadata: d,
+        } as Message);
+    },
+
+    // === planStore: Plan Mode 更新 (1 种) ===
+    'plan_update': (d: {
+        isPlanMode: boolean;
+        planName?: string;
+        planOverview?: string;
+        steps?: PlanStep[];
+        currentStepId?: string;
+    }) => {
+        const store = usePlanStore.getState();
+        if (d.isPlanMode !== undefined) {
+            d.isPlanMode
+                ? store.enablePlanMode(d.planName || '', d.planOverview || '')
+                : store.disablePlanMode();
+        }
+        if (d.steps) store.setSteps(d.steps);
+        if (d.currentStepId) store.setCurrentStep(d.currentStepId);
+    },
+
+    // === messageStore: 差异化升级 v1.5 §4.5 C — 结构化输出自动可视化 (1 种) ===
+    'visualization': (d: { uuid?: string; ts?: number; viewType: string; props?: Record<string, unknown> }) => {
+        useMessageStore.getState().addMessage({
+            type: 'visualization',
+            uuid: d.uuid ?? generateUUID(),
+            timestamp: d.ts ?? Date.now(),
+            viewType: d.viewType,
+            props: d.props ?? {},
+        } as Message);
+    },
+
+    // === APOS / Runtime Verification: 验证结果 + 验证进度 (2 种) ===
+    'verification_result': (d: any) => {
+        try {
+            // PR-C.6 路径：运行时验证（Runtime Verification）— payload 含 verdict/bundleId
+            if ('verdict' in d) {
+                useJourneyVerifyStore.getState().setResult(
+                    d.verdict,
+                    d.bundleId ?? '',
+                    d.errorMessage ?? '',
+                );
+                return;
+            }
+
+            // Phase 2 路径：payload 直接包含 signal 字段（由 VerifyCheckService.pushVerificationResult 推送）
+            if ('signal' in d && 'overallStatus' in d) {
+                const response: import('@/types/apos').VerifyCheckResponse = {
+                    results: d.results ?? [],
+                    heuristic: d.heuristic ?? { affectedApiCount: 0, indirectImpactCount: 0, potentialImpactCount: 0, hasHighConfidenceImpact: false, truncated: false, filesAffected: [] },
+                    signal: d.signal,
+                    signalReason: d.signalReason ?? '',
+                    overallStatus: d.overallStatus,
+                    duration: d.duration ?? 0,
+                    timestamp: d.timestamp ?? new Date().toISOString(),
+                };
+                useInsightStore.getState().handleVerificationResult(response);
+                return;
+            }
+
+            // Phase 1 兼容路径：payload 包含 operationId + result（旧版 legacy-checks 推送）
+            const { operationId, result } = d;
+            if (!operationId || !result) {
+                console.warn('[APOS] verification_result missing fields:', d);
+                return;
+            }
+            const assessment = mapRunChecksResponseToRiskAssessment(result);
+            useInsightStore.getState().addAssessment(operationId, assessment);
+        } catch (err) {
+            console.error('[APOS] Failed to process verification_result:', err);
+        }
+    },
+    'verify_progress': (d: any) => {
+        // PR-C.6 路径：运行时验证步骤进度（含 stepIndex/action/ok/durationMs）
+        if (typeof d?.stepIndex === 'number' && typeof d?.action === 'string') {
+            useJourneyVerifyStore.getState().addStepProgress({
+                stepIndex: d.stepIndex,
+                action: d.action,
+                ok: !!d.ok,
+                durationMs: typeof d.durationMs === 'number' ? d.durationMs : 0,
+            });
+            return;
+        }
+        // 旧路径：APOS 文件级进度（operationId + check + progress）
+        console.debug('[APOS] verify_progress:', d.operationId, d.check, d.progress);
+    },
+
+    // === RV-4: 证据包待审批通知（推送至移动端审批面板） ===
+    'verify_attention': (d: any) => {
+        if (!d?.bundleId) {
+            console.warn('[RV-4] verify_attention missing bundleId:', d);
+            return;
+        }
+        useEvidenceStore.getState().addAttention({
+            type: 'verify_attention',
+            sessionId: d.sessionId ?? '',
+            bundleId: d.bundleId,
+            verdict: d.verdict ?? 'inconclusive',
+            claim: d.claim ?? '',
+            summary: d.summary ?? '',
+            requiresApproval: d.requiresApproval !== false,
+            timestamp: d.timestamp ?? new Date().toISOString(),
+        });
+    },
+};
+
+// ==================== 跨 Store 私有方法 ====================
+
+/** 权限请求 — permissionStore + sessionStore */
+function handlePermissionRequest(data: PermissionRequest, sessionId: string | null): void {
+    usePermissionStore.getState().showPermission(data);
+    useSessionStore.getState().setStatus('waiting_permission');
+    // 只有 Store 已接收并能展示该请求后才发送 ACK，避免后端误以为用户已经看到弹窗。
+    queueInteractionAck(sessionId, data.interactionId, data.deliveryGeneration, data.toolUseId);
+}
+
+/**
+ * 助手回合完成 — messageStore + sessionStore
+ * v1.53.0: 不再更新 costStore，费用由 #15 cost_update 权威推送
+ */
+function handleMessageComplete(data: MessageCompletePayload): void {
+    // 延迟 finalizeStream，确保最后的 stream_delta 已渲染
+    queueMicrotask(() => {
+        const currentSessionId = useSessionStore.getState().sessionId;
+        const hasCommittedMessages = Array.isArray(data.committedMessages);
+        const sessionMatches = !data.sessionId || data.sessionId === currentSessionId;
+        // A late completion from a session the user has already left must never
+        // overwrite or reload the newly selected session.
+        if (hasCommittedMessages && !sessionMatches) return;
+        const reconciled = hasCommittedMessages && sessionMatches
+            ? useMessageStore.getState().reconcileCommittedRun(
+                data.replaceAfterMessageId ?? null,
+                data.committedMessages ?? [],
+            )
+            : false;
+        if (!reconciled) {
+            if (hasCommittedMessages) {
+                recoverAuthoritativeSession(currentSessionId);
+                return;
+            }
+            useMessageStore.getState().finalizeStream(data.usage);
+        }
+        // ★ 回合结束时清除 token budget 状态
+        useMessageStore.getState().clearTokenBudgetState();
+        if (data.stopReason !== 'tool_use') {
+            useSessionStore.getState().setStatus('idle');
+        }
+    });
+    // stopReason === 'tool_use' 时保持 streaming 状态，等待工具结果
+}
+
+function recoverAuthoritativeSession(sessionId: string | null): void {
+    if (!sessionId) {
+        useMessageStore.getState().finalizeStream({
+            inputTokens: 0,
+            outputTokens: 0,
+            cacheReadInputTokens: 0,
+            cacheCreationInputTokens: 0,
+        });
+        useSessionStore.getState().setStatus('idle');
+        return;
+    }
+    resetBoundSession();
+    void import('@/services/sessionActivation')
+        .then(({ activateSessionCandidate }) => activateSessionCandidate(sessionId))
+        .then(result => {
+            if (result.status !== 'failed') return;
+            useSessionStore.getState().setStatus('idle');
+            useNotificationStore.getState().addNotification({
+                key: 'message-reconciliation-failed',
+                level: 'error',
+                message: '任务已完成，但会话同步失败；当前内容已保留，请刷新后重试',
+                timeout: 0,
+            });
+        })
+        .catch(() => {
+            useSessionStore.getState().setStatus('idle');
+            useNotificationStore.getState().addNotification({
+                key: 'message-reconciliation-failed',
+                level: 'error',
+                message: '任务已完成，但会话同步失败；当前内容已保留，请刷新后重试',
+                timeout: 0,
+            });
+        });
+}
+
+/** API 错误 — messageStore + sessionStore */
+function handleError(data: { code: string; message: string; retryable: boolean }): void {
+    useMessageStore.getState().addMessage({
+        type: 'system',
+        uuid: generateUUID(),
+        timestamp: Date.now(),
+        content: data.message,
+        subtype: 'error',
+        errorCode: data.code,
+        retryable: data.retryable,
+    } as Message);
+    useSessionStore.getState().setStatus('idle');
+}
+
+/** 上下文压缩完成 — messageStore + sessionStore */
+function handleCompactComplete(data: {
+    summary?: string; tokensSaved?: number;  // 旧格式: 自动压缩
+    displayText?: string; compactionData?: Record<string, unknown>;  // 新格式: /compact 手动压缩
+}): void {
+    // 自动压缩属于 QueryEngine 运行的一部分；独立 /compact 完成才回到 idle。
+    useSessionStore.getState().setStatus(data.compactionData ? 'idle' : 'streaming');
+    if (data.compactionData) {
+        // 新格式: 来自 /compact 命令
+        useMessageStore.getState().addMessage({
+            type: 'system',
+            uuid: generateUUID(),
+            timestamp: Date.now(),
+            content: data.displayText ?? '',
+            subtype: 'compact_result',
+            metadata: data.compactionData,
+        } as Message);
+    } else {
+        // 旧格式: 来自自动压缩
+        useMessageStore.getState().addMessage({
+            type: 'system',
+            uuid: generateUUID(),
+            timestamp: Date.now(),
+            content: `上下文已压缩，节省 ${data.tokensSaved ?? 0} tokens`,
+            subtype: 'compact_boundary',
+        } as Message);
+    }
+}
+
+/**
+ * 断线重连恢复 — 全量同步
+ * messageStore + sessionStore + bridgeStore + notificationStore
+ */
+function handleSessionRestore(data: {
+    bindRequestId: string;
+    bindingEpoch: number;
+    messages: Message[];
+    activities?: ActivityData[];
+    totalActivityCount?: number;
+    hasMore?: boolean;
+    metadata: {
+        sessionId: string;
+        model: string;
+        permissionMode: string;
+        status: 'idle' | 'interrupted';
+    };
+    runSnapshot?: { id: string; status: string };
+    snapshotEventSeq?: number;
+    activeToolCalls?: Array<{ toolUseId: string; toolName: string; input: unknown; startedAt?: number }>;
+    costSummary?: { totalCost?: number };
+}): void {
+    const pending = pendingBinds.get(data.bindRequestId);
+    if (!pending || pending.sessionId !== data.metadata.sessionId
+            || pending.bindingEpoch !== data.bindingEpoch) return;
+    const restoredPermissionMode = data.metadata.permissionMode?.toLowerCase();
+    if (!isPermissionMode(restoredPermissionMode)) {
+        console.error('[Protocol] Invalid restored permission mode:',
+            data.metadata.permissionMode);
+        return;
+    }
+    // From this point the bind is confirmed. If interaction recovery exceeds
+    // the outer timeout, queued frames must be replayed rather than discarded.
+    pending.restoreAccepted = true;
+    // 1. 重置序列号
+    resetSequence();
+
+    // 2. 这个 matching restore 是 Session 投影的唯一提交点。
+    // 先同步清除旧 Session 的交互投影，避免旧权限/提问对话框泄漏到新 Session。
+    usePermissionStore.getState().clearPermissions();
+    useAppUiStore.setState({ elicitationDialog: null });
+
+    // 3. 原子替换消息历史和仍在运行的工具投影。
+    const runStatus = data.runSnapshot?.status;
+    const runCanHaveActiveTools = runStatus === 'RUNNING'
+        || runStatus === 'CANCELLING'
+        || runStatus === 'WAITING_INTERACTION';
+    useMessageStore.getState().restoreSessionSnapshot(
+        data.messages,
+        runCanHaveActiveTools ? data.activeToolCalls ?? [] : [],
+    );
+    if (data.runSnapshot?.id) {
+        useRunStore.getState().replaceRecoverySnapshot(
+            data.runSnapshot.id,
+            data.runSnapshot as unknown as Record<string, unknown>,
+            data.snapshotEventSeq ?? 0,
+        );
+    }
+
+    // 4. 恢复会话元数据
+    useSessionStore.getState().resumeSession(data.metadata.sessionId);
+    useSessionStore.getState().setModel(data.metadata.model);
+    usePermissionStore.getState().setPermissionMode(restoredPermissionMode);
+    // session_restored 是服务端 bind-session 的确认；只有收到它才记为已绑定。
+    markSessionBound(data.metadata.sessionId);
+    boundBindingEpoch = data.bindingEpoch;
+    boundBindRequestId = data.bindRequestId;
+
+    // 5. 恢复状态
+    if (data.metadata.status === 'interrupted' || data.runSnapshot?.status === 'INTERRUPTED') {
+        useSessionStore.getState().setStatus('idle');
+        useNotificationStore.getState().addNotification({
+            key: 'session-restore-interrupted',
+            level: 'warning',
+            message: 'AI 输出在断线期间被中断，你可以发送消息继续对话',
+            timeout: 8000,
+        });
+    } else if (data.runSnapshot?.status === 'RUNNING' || data.runSnapshot?.status === 'CANCELLING') {
+        useSessionStore.getState().setStatus('streaming');
+    } else if (data.runSnapshot?.status === 'WAITING_INTERACTION') {
+        useSessionStore.getState().setStatus('waiting_permission');
+    } else {
+        useSessionStore.getState().setStatus('idle');
+    }
+
+    if (data.costSummary && typeof data.costSummary.totalCost === 'number') {
+        const currentCost = useCostStore.getState();
+        useCostStore.getState().updateCost({
+            sessionCost: data.costSummary.totalCost,
+            totalCost: currentCost.totalCost,
+            usage: currentCost.usage,
+        });
+    }
+
+    // 6. 更新连接状态
+    useBridgeStore.getState().updateBridgeStatus({ status: 'connected', url: '' });
+
+    // 7. 恢复 Activity 数据（从后端持久化存储，最多 50 条最近记录）
+    if (data.activities && data.activities.length > 0) {
+        const activityStore = useActivityStore.getState();
+        activityStore.clearAll();
+        data.activities.forEach(a => {
+            // 防御性规范化：确保 changedFiles 始终为数组（后端可能为 null）
+            const normalized = {
+                ...a,
+                changedFiles: Array.isArray(a.changedFiles) ? a.changedFiles : [],
+                sessionId: a.sessionId ?? data.metadata.sessionId,
+            };
+            activityStore.addActivity(normalized);
+        });
+
+        // Phase 2: hasMore 标志处理 — 通知 activityStore 有更多历史数据可按需加载
+        if (data.hasMore && data.totalActivityCount) {
+            activityStore.setHasMoreHistory(true, data.totalActivityCount);
+        }
+    }
+
+    // 快照已包含 snapshotEventSeq；bind 后收到的帧由恢复门暂存，完成投影后再依次重放。
+    const authority: BindRecoveryAuthority = {
+        sessionId: data.metadata.sessionId,
+        bindRequestId: data.bindRequestId,
+        bindingEpoch: data.bindingEpoch,
+    };
+    void recoverPendingInteractionsForBind(authority)
+        .catch((error) => {
+            if (!isAuthoritativeBindRecovery(authority)) return;
+            useNotificationStore.getState().addNotification({
+                key: 'run-event-recovery-failed', level: 'warning',
+                message: `运行状态补齐失败：${error instanceof Error ? error.message : String(error)}`,
+                timeout: 8000,
+            });
+        })
+        .finally(() => finishBind(data.bindRequestId, true, true));
+}
+
+interface BindRecoveryAuthority {
+    sessionId: string;
+    bindRequestId: string;
+    bindingEpoch: number;
+}
+
+function isAuthoritativeBindRecovery(authority: BindRecoveryAuthority): boolean {
+    return authority.bindingEpoch === nextBindingEpoch
+        && authority.bindingEpoch === boundBindingEpoch
+        && authority.bindRequestId === boundBindRequestId
+        && authority.sessionId === boundSessionId
+        && authority.sessionId === useSessionStore.getState().sessionId;
+}
+
+async function fetchPendingInteractions(sessionId: string): Promise<InteractionView[]> {
+    const response = await fetch(`/api/interactions/pending?sessionId=${encodeURIComponent(sessionId)}`, {
+        headers: { 'X-Session-Id': sessionId },
+    });
+    if (!response.ok) throw new Error(`INTERACTION_RECOVERY_${response.status}`);
+    return await response.json() as InteractionView[];
+}
+
+function applyPendingInteractions(pending: InteractionView[]): void {
+    for (const interaction of pending) {
+        handleInteractionCreated(interaction);
+    }
+}
+
+async function recoverPendingInteractionsForBind(authority: BindRecoveryAuthority): Promise<void> {
+    const pending = await fetchPendingInteractions(authority.sessionId);
+    if (!isAuthoritativeBindRecovery(authority)) return;
+    applyPendingInteractions(pending);
+}
+
+/**
+ * Refreshes pending interactions for callers already operating on a Session
+ * (for example DialogManager after a decision conflict). Bind-time recovery
+ * uses the generation-guarded private variant above.
+ */
+export async function recoverPendingInteractions(sessionId: string): Promise<void> {
+    if (boundBindRequestId === null || boundBindingEpoch === 0
+            || boundSessionId !== sessionId
+            || useSessionStore.getState().sessionId !== sessionId) return;
+    const authority: BindRecoveryAuthority = {
+        sessionId,
+        bindRequestId: boundBindRequestId,
+        bindingEpoch: boundBindingEpoch,
+    };
+    const pending = await fetchPendingInteractions(sessionId);
+    if (!isAuthoritativeBindRecovery(authority)) return;
+    applyPendingInteractions(pending);
+}

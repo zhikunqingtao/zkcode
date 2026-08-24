@@ -1,0 +1,495 @@
+{
+  "_meta": {
+    "source": "static scan of zhikuncode controller sources (read-only)",
+    "reason": "/v3/api-docs returns HTTP 500 (springdoc 2.6.0 vs Spring 6.2.15 NoSuchMethodError)",
+    "generated": "2026-08-15"
+  },
+  "endpoints": [
+    {
+      "controller": "ActivityController.java",
+      "method": "GET",
+      "path": "/api/sessions/{sessionId}/activities"
+    },
+    {
+      "controller": "AdminController.java",
+      "method": "POST",
+      "path": "/api/admin/login"
+    },
+    {
+      "controller": "AdminController.java",
+      "method": "GET",
+      "path": "/api/admin/status"
+    },
+    {
+      "controller": "AdminController.java",
+      "method": "POST",
+      "path": "/api/admin/logout"
+    },
+    {
+      "controller": "AttachmentController.java",
+      "method": "POST",
+      "path": "/api/attachments/upload"
+    },
+    {
+      "controller": "AttachmentController.java",
+      "method": "GET",
+      "path": "/api/attachments/{fileUuid}"
+    },
+    {
+      "controller": "AuthController.java",
+      "method": "GET",
+      "path": "/api/auth/status"
+    },
+    {
+      "controller": "AuthController.java",
+      "method": "GET",
+      "path": "/api/auth/token"
+    },
+    {
+      "controller": "BrowserReplayController.java",
+      "method": "GET",
+      "path": "/api/browser/replay/{sessionId}"
+    },
+    {
+      "controller": "BrowserReplayController.java",
+      "method": "DELETE",
+      "path": "/api/browser/replay/{sessionId}"
+    },
+    {
+      "controller": "CodeDiagramController.java",
+      "method": "POST",
+      "path": "/api/code-diagrams/generate"
+    },
+    {
+      "controller": "CodePathController.java",
+      "method": "POST",
+      "path": "/api/code-path/endpoints"
+    },
+    {
+      "controller": "CodePathController.java",
+      "method": "POST",
+      "path": "/api/code-path/trace"
+    },
+    {
+      "controller": "CommandController.java",
+      "method": "GET",
+      "path": "/api/commands"
+    },
+    {
+      "controller": "ConfigController.java",
+      "method": "GET",
+      "path": "/api/config"
+    },
+    {
+      "controller": "ConfigController.java",
+      "method": "PUT",
+      "path": "/api/config"
+    },
+    {
+      "controller": "ConfigController.java",
+      "method": "GET",
+      "path": "/api/config/project"
+    },
+    {
+      "controller": "ConfigController.java",
+      "method": "PUT",
+      "path": "/api/config/project"
+    },
+    {
+      "controller": "DialogController.java",
+      "method": "POST",
+      "path": "/api/dialogs/snapshot-update/{requestId}/decision"
+    },
+    {
+      "controller": "DialogController.java",
+      "method": "POST",
+      "path": "/api/dialogs/plugin-permission/{requestId}/decision"
+    },
+    {
+      "controller": "FileController.java",
+      "method": "GET",
+      "path": "/api/files/search"
+    },
+    {
+      "controller": "FileController.java",
+      "method": "GET",
+      "path": "/api/sessions/{sessionId}/files/preview"
+    },
+    {
+      "controller": "FileController.java",
+      "method": "POST",
+      "path": "/api/sessions/{sessionId}/files/reveal"
+    },
+    {
+      "controller": "FileHistoryController.java",
+      "method": "GET",
+      "path": "/api/sessions/{sessionId}/history/snapshots"
+    },
+    {
+      "controller": "FileHistoryController.java",
+      "method": "POST",
+      "path": "/api/sessions/{sessionId}/history/rewind"
+    },
+    {
+      "controller": "FileHistoryController.java",
+      "method": "GET",
+      "path": "/api/sessions/{sessionId}/history/diff"
+    },
+    {
+      "controller": "HealthController.java",
+      "method": "GET",
+      "path": "/api/health"
+    },
+    {
+      "controller": "HealthController.java",
+      "method": "GET",
+      "path": "/api/health/live"
+    },
+    {
+      "controller": "HealthController.java",
+      "method": "GET",
+      "path": "/api/health/ready"
+    },
+    {
+      "controller": "HealthController.java",
+      "method": "GET",
+      "path": "/api/doctor"
+    },
+    {
+      "controller": "InteractionController.java",
+      "method": "GET",
+      "path": "/api/interactions/pending"
+    },
+    {
+      "controller": "InteractionController.java",
+      "method": "POST",
+      "path": "/api/interactions/{interactionId}/decisions"
+    },
+    {
+      "controller": "McpCapabilityController.java",
+      "method": "GET",
+      "path": "/api/mcp/capabilities"
+    },
+    {
+      "controller": "McpCapabilityController.java",
+      "method": "GET",
+      "path": "/api/mcp/capabilities/{id}"
+    },
+    {
+      "controller": "McpCapabilityController.java",
+      "method": "PUT",
+      "path": "/api/mcp/capabilities/{id}"
+    },
+    {
+      "controller": "McpCapabilityController.java",
+      "method": "PATCH",
+      "path": "/api/mcp/capabilities/{id}/toggle"
+    },
+    {
+      "controller": "McpCapabilityController.java",
+      "method": "POST",
+      "path": "/api/mcp/capabilities"
+    },
+    {
+      "controller": "McpCapabilityController.java",
+      "method": "DELETE",
+      "path": "/api/mcp/capabilities/{id}"
+    },
+    {
+      "controller": "McpCapabilityController.java",
+      "method": "GET",
+      "path": "/api/mcp/capabilities/domains"
+    },
+    {
+      "controller": "McpCapabilityController.java",
+      "method": "GET",
+      "path": "/api/mcp/capabilities/{id}/server-tools"
+    },
+    {
+      "controller": "McpCapabilityController.java",
+      "method": "POST",
+      "path": "/api/mcp/capabilities/{id}/test"
+    },
+    {
+      "controller": "McpCapabilityController.java",
+      "method": "POST",
+      "path": "/api/mcp/capabilities/{id}/invoke"
+    },
+    {
+      "controller": "McpController.java",
+      "method": "GET",
+      "path": "/api/mcp/servers"
+    },
+    {
+      "controller": "McpController.java",
+      "method": "POST",
+      "path": "/api/mcp/servers"
+    },
+    {
+      "controller": "McpController.java",
+      "method": "DELETE",
+      "path": "/api/mcp/servers/{name}"
+    },
+    {
+      "controller": "McpController.java",
+      "method": "POST",
+      "path": "/api/mcp/servers/{name}/restart"
+    },
+    {
+      "controller": "McpController.java",
+      "method": "GET",
+      "path": "/api/mcp/servers/{name}/logs"
+    },
+    {
+      "controller": "McpController.java",
+      "method": "GET",
+      "path": "/api/mcp/resources"
+    },
+    {
+      "controller": "McpController.java",
+      "method": "GET",
+      "path": "/api/mcp/resources/read"
+    },
+    {
+      "controller": "McpController.java",
+      "method": "GET",
+      "path": "/api/mcp/prompts"
+    },
+    {
+      "controller": "McpController.java",
+      "method": "POST",
+      "path": "/api/mcp/prompts/execute"
+    },
+    {
+      "controller": "McpController.java",
+      "method": "POST",
+      "path": "/api/mcp/reconnect"
+    },
+    {
+      "controller": "MemoryController.java",
+      "method": "GET",
+      "path": "/api/memory"
+    },
+    {
+      "controller": "MemoryController.java",
+      "method": "PUT",
+      "path": "/api/memory"
+    },
+    {
+      "controller": "MemoryController.java",
+      "method": "POST",
+      "path": "/api/memory"
+    },
+    {
+      "controller": "MemoryController.java",
+      "method": "GET",
+      "path": "/api/memory/all"
+    },
+    {
+      "controller": "MemoryController.java",
+      "method": "DELETE",
+      "path": "/api/memory/{memoryId}"
+    },
+    {
+      "controller": "ModelController.java",
+      "method": "GET",
+      "path": "/api/models"
+    },
+    {
+      "controller": "PermissionGrantController.java",
+      "method": "GET",
+      "path": "/api/permissions/grants"
+    },
+    {
+      "controller": "PermissionGrantController.java",
+      "method": "DELETE",
+      "path": "/api/permissions/grants/{grantId}"
+    },
+    {
+      "controller": "PluginController.java",
+      "method": "GET",
+      "path": "/api/plugins"
+    },
+    {
+      "controller": "PluginController.java",
+      "method": "POST",
+      "path": "/api/plugins/install"
+    },
+    {
+      "controller": "PluginController.java",
+      "method": "DELETE",
+      "path": "/api/plugins/{pluginId}"
+    },
+    {
+      "controller": "PluginController.java",
+      "method": "POST",
+      "path": "/api/plugins/reload"
+    },
+    {
+      "controller": "ProjectController.java",
+      "method": "GET",
+      "path": "/api/projects"
+    },
+    {
+      "controller": "ProjectController.java",
+      "method": "GET",
+      "path": "/api/projects/directories"
+    },
+    {
+      "controller": "ProjectController.java",
+      "method": "POST",
+      "path": "/api/projects/directories/pick"
+    },
+    {
+      "controller": "ProjectController.java",
+      "method": "POST",
+      "path": "/api/projects"
+    },
+    {
+      "controller": "ProjectController.java",
+      "method": "DELETE",
+      "path": "/api/projects/{projectId}"
+    },
+    {
+      "controller": "QueryController.java",
+      "method": "POST",
+      "path": "/api/query"
+    },
+    {
+      "controller": "QueryController.java",
+      "method": "POST",
+      "path": "/api/query/stream"
+    },
+    {
+      "controller": "QueryController.java",
+      "method": "POST",
+      "path": "/api/query/conversation"
+    },
+    {
+      "controller": "RemoteControlController.java",
+      "method": "GET",
+      "path": "/api/remote/status"
+    },
+    {
+      "controller": "RemoteControlController.java",
+      "method": "POST",
+      "path": "/api/remote/interrupt"
+    },
+    {
+      "controller": "RunController.java",
+      "method": "GET",
+      "path": "/api/runs/session/{sessionId}"
+    },
+    {
+      "controller": "RunController.java",
+      "method": "GET",
+      "path": "/api/runs/{runId}"
+    },
+    {
+      "controller": "RunController.java",
+      "method": "GET",
+      "path": "/api/runs/{runId}/events"
+    },
+    {
+      "controller": "RunController.java",
+      "method": "POST",
+      "path": "/api/runs/{runId}/cancel"
+    },
+    {
+      "controller": "SessionController.java",
+      "method": "POST",
+      "path": "/api/sessions"
+    },
+    {
+      "controller": "SessionController.java",
+      "method": "GET",
+      "path": "/api/sessions"
+    },
+    {
+      "controller": "SessionController.java",
+      "method": "GET",
+      "path": "/api/sessions/{sessionId}"
+    },
+    {
+      "controller": "SessionController.java",
+      "method": "DELETE",
+      "path": "/api/sessions/{sessionId}"
+    },
+    {
+      "controller": "SessionController.java",
+      "method": "POST",
+      "path": "/api/sessions/{sessionId}/resume"
+    },
+    {
+      "controller": "SessionController.java",
+      "method": "POST",
+      "path": "/api/sessions/{sessionId}/compact"
+    },
+    {
+      "controller": "SessionController.java",
+      "method": "POST",
+      "path": "/api/sessions/{sessionId}/export"
+    },
+    {
+      "controller": "SessionController.java",
+      "method": "GET",
+      "path": "/api/sessions/{sessionId}/messages"
+    },
+    {
+      "controller": "SessionSnapshotController.java",
+      "method": "GET",
+      "path": "/api/sessions/snapshots"
+    },
+    {
+      "controller": "SessionSnapshotController.java",
+      "method": "POST",
+      "path": "/api/sessions/{sessionId}/snapshot"
+    },
+    {
+      "controller": "SessionSnapshotController.java",
+      "method": "POST",
+      "path": "/api/sessions/{sessionId}/snapshot/resume"
+    },
+    {
+      "controller": "SessionSnapshotController.java",
+      "method": "DELETE",
+      "path": "/api/sessions/snapshots/{sessionId}"
+    },
+    {
+      "controller": "SkillController.java",
+      "method": "GET",
+      "path": "/api/skills"
+    },
+    {
+      "controller": "SkillController.java",
+      "method": "GET",
+      "path": "/api/skills/{name}"
+    },
+    {
+      "controller": "ToolController.java",
+      "method": "GET",
+      "path": "/api/tools"
+    },
+    {
+      "controller": "ToolController.java",
+      "method": "GET",
+      "path": "/api/tools/{toolName}"
+    },
+    {
+      "controller": "ToolController.java",
+      "method": "PATCH",
+      "path": "/api/tools/{toolName}"
+    },
+    {
+      "controller": "VerifyController.java",
+      "method": "POST",
+      "path": "/api/verify/run-checks"
+    },
+    {
+      "controller": "VerifyController.java",
+      "method": "POST",
+      "path": "/api/verify/legacy-checks"
+    }
+  ],
+  "total": 97
+}

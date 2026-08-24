@@ -1,0 +1,34 @@
+name: Bug report
+description: Report a reproducible zkcode problem
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not report vulnerabilities here. Use the private security reporting flow.
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What happened and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction
+      description: Provide the shortest reproducible sequence with secrets removed.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: macOS and architecture
+      placeholder: macOS version, arm64 or x86_64
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Sanitized logs
+      render: shell

@@ -1,0 +1,18 @@
+[package]
+name = "zk-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+repository.workspace = true
+authors.workspace = true
+
+# 依赖方向铁律：zk-core 是 workspace 最底层（**只出不入**）——不得依赖任何
+# 其他 zk-* crate，也不引入 tokio / serde / 任何 async 运行时。唯一外部依赖
+# 是 tracing：迁移的降级路径需要 warn 日志，且它对运行时零耦合。
+[dependencies]
+tracing = { workspace = true }
+
+[lints]
+workspace = true

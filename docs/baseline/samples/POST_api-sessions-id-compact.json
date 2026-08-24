@@ -1,0 +1,15 @@
+{
+  "_meta": {
+    "endpoint": "/api/sessions/{id}/compact",
+    "method": "POST",
+    "status_code": 200,
+    "content_type": "application/json",
+    "sampled_at": "2026-08-15T19:05+08:00",
+    "note": "empty session; compact on empty history"
+  },
+  "response": {
+    "success": true,
+    "tokensBefore": 0,
+    "tokensAfter": 0
+  }
+}

@@ -1,0 +1,19 @@
+[package]
+name = "zk-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# 契约层核心三件套：serde（tag/flatten/rename_all 派生）、serde_json（Value 透传
+# 与测试断言）、thiserror（错误建模）。全部走 workspace 池，禁止写死版本（见根 Cargo.toml 注释）。
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

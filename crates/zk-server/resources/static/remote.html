@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>zkcode Local Control</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0f172a; color: #e2e8f0;
+            min-height: 100vh; display: flex; flex-direction: column;
+            align-items: center; justify-content: center; padding: 24px;
+        }
+        h1 { font-size: 20px; font-weight: 600; margin-bottom: 24px; color: #94a3b8; }
+        .status-panel {
+            background: #1e293b; border-radius: 12px; padding: 20px;
+            width: 100%; max-width: 400px; margin-bottom: 32px;
+        }
+        .status-row {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 8px 0; border-bottom: 1px solid #334155;
+        }
+        .status-row:last-child { border-bottom: none; }
+        .status-label { color: #94a3b8; font-size: 14px; }
+        .status-value { font-weight: 600; font-size: 14px; }
+        .status-value.active { color: #22c55e; }
+        .status-value.idle { color: #94a3b8; }
+        .stop-btn {
+            width: 200px; height: 200px; border-radius: 50%;
+            background: linear-gradient(145deg, #ef4444, #b91c1c);
+            border: 6px solid #7f1d1d; color: white;
+            font-size: 24px; font-weight: 700; cursor: pointer;
+            display: flex; align-items: center; justify-content: center;
+            box-shadow: 0 8px 32px rgba(239, 68, 68, 0.4);
+            transition: all 0.2s; -webkit-tap-highlight-color: transparent;
+            user-select: none; touch-action: manipulation;
+        }
+        .stop-btn:active:not(:disabled) {
+            transform: scale(0.95);
+            box-shadow: 0 4px 16px rgba(239, 68, 68, 0.3);
+        }
+        .stop-btn:disabled {
+            background: linear-gradient(145deg, #6b7280, #4b5563);
+            border-color: #374151; cursor: not-allowed;
+            box-shadow: 0 4px 16px rgba(107, 114, 128, 0.2);
+        }
+        .result-msg {
+            margin-top: 24px; padding: 12px 20px; border-radius: 8px;
+            font-size: 14px; text-align: center; min-height: 44px;
+            display: flex; align-items: center; justify-content: center;
+        }
+        .result-msg.success { background: #14532d; color: #4ade80; }
+        .result-msg.error { background: #7f1d1d; color: #fca5a5; }
+        .result-msg.info { background: #1e293b; color: #94a3b8; }
+        .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 8px; }
+        .dot.green { background: #22c55e; animation: pulse 2s infinite; }
+        .dot.gray { background: #6b7280; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+        .footer { margin-top: 32px; color: #475569; font-size: 12px; }
+    </style>
+</head>
+<body>
+    <h1>zkcode Local Control</h1>
+
+    <div class="status-panel">
+        <div class="status-row">
+            <span class="status-label">Server</span>
+            <span class="status-value" id="serverStatus">
+                <span class="dot green"></span>Online
+            </span>
+        </div>
+        <div class="status-row">
+            <span class="status-label">Active Sessions</span>
+            <span class="status-value" id="sessionCount">--</span>
+        </div>
+        <div class="status-row">
+            <span class="status-label">Uptime</span>
+            <span class="status-value idle" id="uptime">--</span>
+        </div>
+    </div>
+
+    <button class="stop-btn" id="stopBtn" onclick="emergencyStop()">
+        STOP
+    </button>
+
+    <div class="result-msg info" id="resultMsg">Ready</div>
+
+    <div class="footer">Auto-refresh every 3s</div>
+
+    <script>
+        const stopBtn = document.getElementById('stopBtn');
+        const resultMsg = document.getElementById('resultMsg');
+        const sessionCountEl = document.getElementById('sessionCount');
+        const uptimeEl = document.getElementById('uptime');
+        const serverStatusEl = document.getElementById('serverStatus');
+        let polling = null;
+
+        async function fetchStatus() {
+            try {
+                const resp = await fetch('/api/remote/status');
+                if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                const data = await resp.json();
+                sessionCountEl.textContent = data.activeSessions;
+                sessionCountEl.className = 'status-value ' + (data.activeSessions > 0 ? 'active' : 'idle');
+                uptimeEl.textContent = data.serverUptime;
+                serverStatusEl.innerHTML = '<span class="dot green"></span>Online';
+            } catch (e) {
+                serverStatusEl.innerHTML = '<span class="dot gray"></span>Offline';
+                sessionCountEl.textContent = '--';
+                uptimeEl.textContent = '--';
+            }
+        }
+
+        async function emergencyStop() {
+            stopBtn.disabled = true;
+            resultMsg.className = 'result-msg info';
+            resultMsg.textContent = 'Sending interrupt...';
+
+            try {
+                const resp = await fetch('/api/remote/interrupt', { method: 'POST' });
+                if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                const data = await resp.json();
+                resultMsg.className = 'result-msg success';
+                let msg = 'Interrupted ' + data.sessionCount + ' session(s)';
+                if (data.partialFailure) msg += ' (some failed)';
+                resultMsg.textContent = msg;
+                // Refresh status immediately
+                await fetchStatus();
+            } catch (e) {
+                resultMsg.className = 'result-msg error';
+                resultMsg.textContent = 'Failed: ' + e.message;
+            }
+
+            // Re-enable after 3 seconds (debounce)
+            setTimeout(() => { stopBtn.disabled = false; }, 3000);
+        }
+
+        // Initial fetch + polling
+        fetchStatus();
+        polling = setInterval(fetchStatus, 3000);
+    </script>
+</body>
+</html>

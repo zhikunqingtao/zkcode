@@ -1,0 +1,21 @@
+title = "zkcode local workspace secret scanning"
+
+# The release config remains strict and is used by CI against committed content.
+# Local developer credentials are ignored only for the directory scan because
+# `.env*` files are excluded from publication by `.gitignore`.
+[extend]
+path = ".gitleaks.toml"
+
+[allowlist]
+description = "Files excluded from publication by .gitignore or repository metadata"
+paths = [
+  '''(^|/)\.git/''',
+  '''(^|/)target(?:-[^/]+)?/''',
+  '''(^|/)node_modules/''',
+  '''(^|/)(?:dist|coverage|test-results|playwright-report|htmlcov)/''',
+  '''(^|/)(?:\.venv|venv|__pycache__|\.pytest_cache|\.mypy_cache|\.ruff_cache|\.hypothesis|\.runtime|\.tmp|\.zk)/''',
+  '''(^|/)[^/]+\.egg-info/''',
+  '''(^|/)\.env$''',
+  '''(^|/)\.env\.local$''',
+  '''(^|/)\.env\.[^/]+\.local$''',
+]

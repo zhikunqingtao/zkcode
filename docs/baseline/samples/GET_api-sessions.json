@@ -1,0 +1,64 @@
+{
+  "_meta": {
+    "endpoint": "/api/sessions?limit=5",
+    "method": "GET",
+    "status_code": 200,
+    "content_type": "application/json",
+    "sampled_at": "2026-08-15T19:05+08:00"
+  },
+  "response": {
+    "sessions": [
+      {
+        "id": "e7ce9134-c467-4424-be96-710a2666ddad",
+        "model": "qwen3.7-max",
+        "workingDirectory": "/Users/example/projects/zhikuncode",
+        "messageCount": 0,
+        "costUsd": 0.0,
+        "createdAt": "2026-08-15T11:07:20.564532Z",
+        "updatedAt": "2026-08-15T11:07:20.564532Z"
+      },
+      {
+        "id": "8aabcac4-a835-498b-84a2-d423af7a75b0",
+        "goalPreview": "示例任务：实现一个本地演示应用",
+        "model": "deepseek-v4-pro",
+        "workingDirectory": "/Users/example/projects/sample-app",
+        "messageCount": 450,
+        "costUsd": 0.0,
+        "createdAt": "2026-08-12T17:19:18.227179Z",
+        "updatedAt": "2026-08-12T19:58:13.001354Z"
+      },
+      {
+        "id": "c44412ab-c767-4e1c-9d4f-4004c09bbf72",
+        "goalPreview": "示例任务：生成一个介绍页面",
+        "model": "kimi-k3",
+        "workingDirectory": "/Users/example/projects",
+        "messageCount": 25,
+        "costUsd": 0.0,
+        "createdAt": "2026-08-12T10:08:24.925686Z",
+        "updatedAt": "2026-08-12T10:12:18.421191Z"
+      },
+      {
+        "id": "b8f86099-452d-4ba6-89c2-c3fee8f4b422",
+        "goalPreview": "示例任务：实现一个交互式学习项目",
+        "model": "kimi-k3",
+        "workingDirectory": "/Users/example/projects/demo",
+        "messageCount": 506,
+        "costUsd": 0.0,
+        "createdAt": "2026-08-08T17:26:20.878232Z",
+        "updatedAt": "2026-08-09T03:48:50.743198Z"
+      },
+      {
+        "id": "32f9a9fb-cf5e-4104-9335-e2e0dc170061",
+        "goalPreview": "示例任务：生成一个流程图",
+        "model": "qwen3.8-max",
+        "workingDirectory": "/Users/example/projects/zhikuncode",
+        "messageCount": 2,
+        "costUsd": 0.0,
+        "createdAt": "2026-08-08T10:38:11.962670Z",
+        "updatedAt": "2026-08-08T10:38:15.413839Z"
+      }
+    ],
+    "hasMore": true,
+    "nextCursor": "MjAyNi0wOC0wOFQxMDozODoxNS40MTM4MzlafDMyZjlhOWZiLWNmNWUtNDEwNC05MzM1LWUyZTBkYzE3MDA2MQ=="
+  }
+}

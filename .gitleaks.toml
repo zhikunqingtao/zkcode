@@ -1,0 +1,18 @@
+title = "zkcode secret scanning"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Generated, dependency, and runtime directories are never published"
+paths = [
+  '''(^|/)target(?:-[^/]*)?/''',
+  '''(^|/)node_modules/''',
+  '''(^|/)\.venv/''',
+  '''(^|/)\.zk/''',
+  '''(^|/)\.runtime/''',
+  '''(^|/)dist/''',
+  '''(^|/)coverage/''',
+  '''(^|/)test-results/''',
+  '''(^|/)playwright-report/''',
+]

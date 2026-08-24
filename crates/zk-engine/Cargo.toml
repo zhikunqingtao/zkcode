@@ -1,0 +1,84 @@
+[package]
+name = "zk-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# 依赖方向（S9 铁律）：zk-engine → {zk-core, zk-protocol, zk-llm, zk-tools, zk-db}，
+# 禁止依赖 zk-server；下行推送经 MessageSink 窄接口解耦（server 侧为
+# WsHub 实现）。
+# #65：暂存区路径改由最底层 zk-core 解析（`.zk/scratchpad` 单一事实源），
+# 本 crate 不再自行拼目录名。
+zk-core = { version = "0.1.0", path = "../zk-core" }
+zk-protocol = { version = "0.1.0", path = "../zk-protocol" }
+zk-llm = { version = "0.1.0", path = "../zk-llm" }
+zk-tools = { version = "0.1.0", path = "../zk-tools" }
+zk-db = { version = "0.1.0", path = "../zk-db" }
+# 运行时（每 run 一 spawn）/ 流消费 / 取消令牌三层树 / runId 生成 /
+# 工具入参 JSON flush。
+tokio = { workspace = true }
+futures = { workspace = true }
+tokio-util = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+serde_json = { workspace = true }
+# Batch 5 Step 7：会话快照载荷的 derive（`SessionSnapshot` /
+# `SessionSnapshotSummary` 直接读写磁盘 JSON，字段名与旧 record 逐字一致）。
+serde = { workspace = true }
+# 系统提示环境信息段的宿主标识：`nix::sys::utsname::uname`（安全封装，
+# 本 crate 仍受 workspace `unsafe_code = "forbid"` 约束）。
+nix = { workspace = true }
+# Batch 0 P0-16：项目提示热重载（prompt::watcher）的无锁内容缓存。读路径
+# （后续 Batch 1 系统提示动态段消费方）零锁，写仅在探测到 mtime 变更时触发。
+arc-swap = { workspace = true }
+# Batch 0 P0-21：精确 Token 计数（context::token_counter 四级回退链的第 1 级）。
+# `cl100k_base` 编码器经 OnceLock 全进程共享，首次初始化摊销一次、后续零成本。
+tiktoken-rs = { workspace = true }
+# Batch 0 P0-15：图片/Base64 上下文预算守卫（context::image_budget）。
+# - base64/sha2 无条件启用（体积可忽略、且 Phase 1 的纯字符判定与
+#   `retained_image_hashes` 指纹都需要它们）：指纹算法逐字对照旧
+#   `MessageDigest.getInstance("SHA-256")` + `HexFormat.of().formatHex`；
+#   Base64 编解码对齐旧 `java.util.Base64`（标准 alphabet + padding）。
+# - image 由 `image-budget` feature 门控：仅 Phase 2 的缩略图替换（640px /
+#   q=0.6）需要解码器，关闭时热路径插桩点空转、依赖图不含 image。
+base64 = { workspace = true }
+sha2 = { workspace = true }
+image = { workspace = true, optional = true }
+# Batch 5 Step 2：Memdir 写入失败的错误建模（`MemdirError`，对照旧
+# `MemdirService.MemdirException`）。与 zk-db / zk-llm / zk-protocol 同源走
+# workspace 池，不写死版本。
+thiserror = { workspace = true }
+# Batch 7b Step 4：自修正错误解析器（correction::compile_error_parser /
+# test_failure_parser）逐字移植旧 CompileErrorParser / TestFailureParser 的
+# 正则集。走 workspace 池（已声明 `regex = "1"`），不写死版本。
+regex = { workspace = true }
+# Batch 6: concurrent hash map for WorktreeManager / BackgroundAgentTracker / TaskCoordinator
+dashmap = { workspace = true }
+# Batch 8B（Hook 系统）：HTTP 通道 hook（http_executor，POST JSON + SSRF 防护）
+# 复用 workspace reqwest（json feature）；DNS 解析后钉 IP 走 resolve_to_addrs
+# 消除 TOCTOU，禁重定向 + 10s 超时。
+reqwest = { workspace = true }
+# Batch 8B：`.zk/hooks.toml` 配置解析（HookRegistry::load_from_dir）。
+toml = { workspace = true }
+
+[features]
+# Batch 0 P0-15 图片预算治理总开关。
+# 开启：`ContextCascade::execute_pre_api_cascade` 前置执行 Phase 1 Base64 清理，
+# 并编译 Phase 2 缩略图降级链（`enforce_phase2`）。
+# 关闭：`image_budget::apply` 空转返回（热路径与接入前逐字一致）、Phase 2 API
+# 不编译——最小构建/CI 无需 image crate 及其解码器传递依赖。
+image-budget = ["dep:image"]
+
+[dev-dependencies]
+# Run 生命周期集成测试直读 `run_envelopes` / `run_event_log`（无公开读 API），
+# 并逐字复刻 zk-authz `load_root` 的祖先链 SQL——铁律禁止 zk-engine → zk-authz。
+# 仅测试期依赖，不改动生产 crate 拓扑。
+rusqlite = { workspace = true }

@@ -1,0 +1,18 @@
+{
+  "_schema_version": "1.0",
+  "mcp_tools": [
+    {
+      "id": "mcp_web_search_pro",
+      "name": "智谱网页搜索",
+      "toolName": "webSearchPro",
+      "sseUrl": "https://dashscope.aliyuncs.com/api/v1/mcps/zhipu-websearch/sse",
+      "apiKeyConfig": "llm-provider.dashscope.api-key",
+      "domain": "web_search",
+      "category": "MCP_TOOL",
+      "briefDescription": "联网网页搜索（DashScope 托管 zhipu-websearch MCP，与 ZhikunCode 同源配置）",
+      "timeoutMs": 30000,
+      "enabled": true
+    }
+  ],
+  "lastUpdated": "2026-08-23"
+}

@@ -1,0 +1,6 @@
+# rustfmt 配置：仅使用稳定选项。
+# imports_granularity / group_imports / reorder_impl_items 等 nightly-only 项
+# 刻意不启用，避免本地与 CI 因工具链差异产生格式漂移。
+edition = "2024"
+max_width = 100
+newline_style = "Unix"

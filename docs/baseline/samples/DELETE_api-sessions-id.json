@@ -1,0 +1,13 @@
+{
+  "_meta": {
+    "endpoint": "/api/sessions/{id}",
+    "method": "DELETE",
+    "status_code": 200,
+    "content_type": "application/json",
+    "sampled_at": "2026-08-15T19:05+08:00",
+    "note": "cleanup of the baseline test session"
+  },
+  "response": {
+    "success": true
+  }
+}

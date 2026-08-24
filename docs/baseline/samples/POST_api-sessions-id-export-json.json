@@ -1,0 +1,29 @@
+{
+  "_meta": {
+    "endpoint": "/api/sessions/{id}/export?format=json",
+    "method": "POST",
+    "status_code": 200,
+    "content_type": "application/json",
+    "sampled_at": "2026-08-15T19:05+08:00",
+    "note": "Content-Disposition attachment expected"
+  },
+  "response": {
+    "sessionId": "e7ce9134-c467-4424-be96-710a2666ddad",
+    "model": "qwen3.7-max",
+    "workingDir": "/Users/example/projects/zhikuncode",
+    "title": null,
+    "status": "active",
+    "messages": [],
+    "config": {},
+    "totalUsage": {
+      "inputTokens": 0,
+      "outputTokens": 0,
+      "cacheReadInputTokens": 0,
+      "cacheCreationInputTokens": 0
+    },
+    "totalCostUsd": 0.0,
+    "summary": null,
+    "createdAt": 1786792040.564532,
+    "updatedAt": 1786792040.564532
+  }
+}

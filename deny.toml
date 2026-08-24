@@ -1,0 +1,35 @@
+# cargo-deny 配置：CI 由 EmbarkStudios/cargo-deny-action 消费。
+# S3 骨架阶段 workspace 依赖图为空，各检查自首个真实依赖引入起生效。
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+# v2 schema 中漏洞（vulnerability）恒为 deny，无需也无法单独配置。
+unmaintained = "workspace"
+yanked = "deny"
+
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+]
+
+[bans]
+# 引用图重复（multiple-versions）取 warn：传递依赖重复常见且常不可控，
+# 由人工在 CI 日志中甄别后用 skip 决策，不阻断流水线。
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

@@ -1,0 +1,55 @@
+[package]
+name = "zk-tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# 依赖方向（Phase 2 铁律）：zk-tools 与 zk-llm 平级，均被 zk-engine 依赖；
+# 本 crate 不依赖 zk-protocol / zk-db / zk-llm（ToolSpec 自持，引擎侧转换）。
+# Batch 2 例外：zk-core 是 workspace 最底层 crate（zk-authz / zk-engine 同样
+# 依赖它），TodoWrite 的 `.zk/todos.md` 必须经 `zk_core::paths` 单一事实源
+# 消费目录名，禁止自行 `join(".zk")`。
+zk-core = { version = "0.1.0", path = "../zk-core" }
+# 运行时（每工具调用一 spawn / Semaphore / 超时 sleep）/ 取消令牌树 / 入参 JSON。
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+futures = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+# 2.3 基础工具族：正则搜索 / glob 匹配 / 目录遍历（.gitignore 尊重）/
+# 进程组信号（安全封装，无 unsafe）。
+regex = { workspace = true }
+globset = { workspace = true }
+ignore = { workspace = true }
+nix = { workspace = true }
+# Batch 2 P0-1（Edit 工具）：SHA-256 读后写冲突检测（对照旧
+# `FileVersionTracker.computeHash` = MessageDigest SHA-256 + 小写 hex）+
+# unified diff 生成（对照旧 java-diff-utils）。
+sha2 = { workspace = true }
+similar = { workspace = true }
+# Batch 6: TaskCreate tool UUID generation
+uuid = { workspace = true }
+# Batch 8D：REPL 会话表 / Cron 任务台账的并发映射（与 zk-engine 的
+# agent / task 状态表同一实现，避免自研分段锁）。
+dashmap = { workspace = true }
+# Batch 8D：`CronTask` 的 durable 台账 `.zk/scheduled_tasks.json` 需
+# derive 序列化。
+serde = { workspace = true }
+# Batch 8D：Monitor 的系统指标 / Cron 的表达式解析与时刻推算。
+sysinfo = { workspace = true }
+cron = { workspace = true }
+chrono = { workspace = true }
+url = { workspace = true }
+
+[dev-dependencies]
+# Batch 2 P0-5（AskUserQuestion）：`#[tokio::test(start_paused = true)]` 需要
+# tokio 的 `test-util` 特性，用以在虚拟时钟下验证 5 分钟发问看门狗而不真等。
+tokio = { workspace = true, features = ["test-util"] }

@@ -1,0 +1,75 @@
+# Rust
+target/
+/target-*/
+*.profraw
+*.profdata
+tarpaulin-report.html
+
+# Node / frontend
+node_modules/
+dist/
+coverage/
+test-results/
+playwright-report/
+.vite/
+.eslintcache
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Data & runtime
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+*.sqlite
+*.sqlite3
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite-journal
+*.sock
+*.pid
+.zk/
+.runtime/
+.tmp/
+
+# Logs & temporary files
+*.log
+*.tmp
+*.temp
+*.bak
+*.swp
+*~
+
+# OS & editor
+.DS_Store
+._*
+.idea/
+
+# Env & secrets
+.env
+.env.local
+.env.*.local
+**/.env.local
+**/.env.*.local
+docs/baseline/samples/.env*
+
+# Sanitized baseline fixtures under docs/baseline are intentionally public.
+
+# Test-generated MCP registry (tests must use a temporary directory)
+/crates/zk-mcp/unused.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.coverage*
+htmlcov/

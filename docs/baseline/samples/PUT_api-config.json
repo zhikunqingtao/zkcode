@@ -1,0 +1,27 @@
+{
+  "_meta": {
+    "endpoint": "/api/config",
+    "method": "PUT",
+    "status_code": 200,
+    "content_type": "application/json",
+    "sampled_at": "2026-08-15T19:05+08:00",
+    "note": "idempotent write-back of current theme value"
+  },
+  "response": {
+    "success": true,
+    "config": {
+      "authType": "localhost",
+      "defaultModel": "deepseek-v4-pro",
+      "modelAliases": {},
+      "theme": "dark",
+      "locale": "en",
+      "defaultPermissionMode": "DEFAULT",
+      "globalAlwaysAllowRules": [],
+      "globalAlwaysDenyRules": [],
+      "mcpServers": {},
+      "analyticsEnabled": false,
+      "autoCompactEnabled": true,
+      "autoCompactThreshold": 80
+    }
+  }
+}

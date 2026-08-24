@@ -1,0 +1,33 @@
+[package]
+name = "zk-authz"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+repository.workspace = true
+authors.workspace = true
+license.workspace = true
+
+# 依赖方向铁律（Phase 2 §2.5）：zk-authz → (zk-core, zk-protocol, zk-db)。
+# 不得反向依赖 zk-server / zk-engine / zk-tools——工具身份经本 crate 自持的
+# `ToolFacts` trait 反转（zk-server 组合根提供 zk-tools 适配实现）。
+[dependencies]
+# #65：目录名（当前 `.zk` 与旧布局遗留名）的唯一事实源——保护名单与
+# scratchpad 默认根都引用它，本 crate 不再硬编码目录字面量。
+zk-core = { version = "0.1.0", path = "../zk-core" }
+zk-protocol = { version = "0.1.0", path = "../zk-protocol" }
+zk-db = { version = "0.1.0", path = "../zk-db" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+rusqlite = { workspace = true }
+uuid = { workspace = true }
+sha2 = { workspace = true }
+regex = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+
+[lints]
+workspace = true
