@@ -1,8 +1,8 @@
 //! MCP Streamable HTTP 传输 — MCP 2025-03-26 规范的单端点双向通道。
 //!
 //! 逐字对照 Java 基线 `mcp/McpStreamableHttpTransport.java`（332 行）：
-//! - 构造：剥除 `baseUrl` 尾部 `/`；HTTP 客户端 connect 10s / read 60s /
-//!   write 10s；
+//! - 构造：剥除 `baseUrl` 尾部 `/`；HTTP 客户端 connect 10s / read 不限时
+//!   （Java v1.1 `readTimeout(Duration.ZERO)`）/ write 10s；
 //! - `connect()`：POST `initialize`（`protocolVersion = 2025-03-26`、
 //!   `clientInfo = {zkcode-mcp-client, 1.0.0}`）→ 置连接态 → 发
 //!   `notifications/initialized`；失败则置断连并返回错误；
@@ -17,8 +17,8 @@
 //!
 //! 形态差异（Rust 侧必然）：
 //! - Java 用 okhttp 同步 `execute()`；此处 `reqwest` 异步，超时由
-//!   `tokio::time::timeout` 施加在整个「POST + 读完响应体」上（Java 由
-//!   okhttp 的 read/write 超时间接施加，`timeoutMs` 参数实际未被使用）；
+//!   `tokio::time::timeout` 施加在整个「POST + 读完响应体」上（Java v1.1 起
+//!   由 per-call `call.timeout()` 施加同粒度超时）；
 //! - Java 的 `pendingRequests` 从未被写入（响应同步取自 POST 响应体），仅在
 //!   `close()` 里清空；此处不保留该永空集合。
 //!
@@ -37,7 +37,9 @@
 //! 4. **新增 GET 通知流**（Java 类注释声称「通知接收: GET → SSE 流」但无实现）：
 //!    握手成功后后台起一条 `GET` SSE 流承接服务端主动通知；服务端不支持
 //!    （常见 `405`）时仅 debug 记录，不影响连接状态、不触发重连。
-//! 5. **`timeoutMs` 真正生效**（Java 该参数在此传输被完全忽略）。
+//! 5. **`timeoutMs == 0` 时以 [`DEFAULT_REQUEST_TIMEOUT`] 兜底**（Java v1.1 起
+//!    per-call `call.timeout()` 已让正超时真正生效，但 0 值时 okhttp 不限时；
+//!    Rust 侧经 [`timeout_or_default`] 统一取 30s 兜底）。
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
@@ -66,9 +68,6 @@ use crate::transport::{
 /// HTTP 连接建立超时（对照 Java `connectTimeout(Duration.ofSeconds(10))`）。
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// 单次 POST 的响应读超时（对照 Java `readTimeout(Duration.ofSeconds(60))`）。
-const READ_TIMEOUT: Duration = Duration::from_mins(1);
-
 /// MCP 会话 ID 头（对照 Java `"Mcp-Session-Id"`）。
 const SESSION_HEADER: &str = "Mcp-Session-Id";
 
@@ -86,7 +85,8 @@ pub struct StreamableHttpTransport {
 }
 
 impl StreamableHttpTransport {
-    /// 用默认 HTTP 客户端（connect 10s / read 60s）构造。
+    /// 用默认 HTTP 客户端（connect 10s，read 不限时——对照 Java v1.1
+    /// `readTimeout(Duration.ZERO)`；per-call 超时由请求路径统一施加）构造。
     ///
     /// # Errors
     /// HTTP 客户端构建失败时返回。
@@ -96,7 +96,9 @@ impl StreamableHttpTransport {
     ) -> Result<Self, McpProtocolError> {
         let client = reqwest::Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
-            .read_timeout(READ_TIMEOUT)
+            // Capability destinations are validated before connect.  Following
+            // redirects would bypass that boundary and could forward headers.
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|error| {
                 McpProtocolError::wrapped(format!("Failed to build HTTP client: {error}"))

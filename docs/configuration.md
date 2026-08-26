@@ -11,9 +11,14 @@ zkcode 0.1.x 仅支持 macOS Apple Silicon 本地运行。`start.sh` 会读取�
 不要在等号两侧加空格；包含空格或 shell 特殊字符的值应使用单引号。不要提交、
 截图或粘贴真实密钥。
 
-## 最小模型配置
+## 模型与首次启动凭据
 
-至少配置一个 provider。以 DashScope Token Plan 和 `qwen3.8-max` 为例：
+清洁首次启动时，服务会验证仓库中受版本控制的公开引导数据库，并将其中限额
+DashScope Token Plan 演示凭据复制到私有运行库。引导库不是用户运行库，凭据对
+所有下载者可提取、可共享且可能随时失效，不能当作秘密或用于敏感内容。
+
+建议启动后在 **设置 → API Keys** 替换为自己的凭据；也可以在 `.env` 配置。
+以 DashScope Token Plan 和 `qwen3.8-max` 为例：
 
 ```dotenv
 LLM_PROVIDER_DASHSCOPE_TOKEN_PLAN_API_KEY=在本机填写真实密钥
@@ -36,6 +41,8 @@ provider 会被注册。通用变量规则如下：
 `<NAME>` 支持 `DASHSCOPE`、`DASHSCOPE_TOKEN_PLAN`、`DEEPSEEK`、`MOONSHOT`、
 `ZHIPU`、`MINIMAX`、`ZENMUX`、`ANTHROPIC` 和 `OPENAI`。服务内置这些
 provider 的官方端点；只有使用兼容代理或私有网关时才需要覆盖 `BASE_URL`。
+`OPENAI` 默认固定使用 `https://api.openai.com/v1`，不会把 OpenAI key 发送到
+DashScope；只有用户显式设置 `LLM_PROVIDER_OPENAI_BASE_URL` 才会改写该端点。
 
 如果没有配置任何 `LLM_PROVIDER_*_API_KEY`，服务会回退到旧的单 provider
 变量 `ZK_LLM_API_KEY`、`ZK_LLM_BASE_URL` 和 `ZK_DEFAULT_MODEL`。
@@ -45,9 +52,10 @@ provider 的官方端点；只有使用兼容代理或私有网关时才需要�
 | 变量 | 支持配置中的默认值 | 说明 |
 |---|---|---|
 | `ZK_HOST` | `127.0.0.1` | 只允许 loopback；`start.sh` 会强制覆盖 |
-| `ZK_PORT` | `8081` | 本地后端端口 |
+| `ZK_PORT` | `8082` | 本地后端端口 |
 | `ZK_AUTH_MODE` | `localhost` | 当前唯一支持的鉴权模式；启动时强制覆盖 |
 | `ZK_DB_PATH` | `.zk/data.db` | 单库 SQLite 路径，相对仓库根目录 |
+| `ZK_DEMO_CREDENTIAL_DB` | `configuration/bootstrap/demo-credentials.db` | 公开、只读的首次启动种子库；不应指向用户运行库 |
 | `ZK_SNAPSHOT_DIR` | `~/.zk/snapshots` | Session 快照目录 |
 | `ZK_WORKSPACE_DEFAULT_ROOT` | 当前启动目录 | 目录选择器的初始根 |
 | `ZK_WORKSPACE_ALLOWED_ROOTS` | 空 | 可选的逗号分隔绝对路径白名单 |

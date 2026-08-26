@@ -18,7 +18,7 @@ use std::time::Duration;
 use axum::Router;
 use futures::{SinkExt, StreamExt};
 use tokio::net::TcpListener;
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
 use zk_db::model::{MessageRole, NewMessage, StoredBlock};
@@ -58,9 +58,14 @@ async fn spawn_server() -> (SocketAddr, WsHub, zk_db::Db) {
 /// 连接 `/ws`（tungstenite 0.28 默认 auto-pong：read 到 Ping 自动 queue Pong，
 /// flush 后发出——贴近浏览器行为）。
 async fn connect(addr: SocketAddr) -> WsStream {
-    let (stream, _) = connect_async(format!("ws://{addr}/ws"))
-        .await
-        .expect("ws connect");
+    let mut request = format!("ws://{addr}/ws")
+        .into_client_request()
+        .expect("ws request");
+    request.headers_mut().insert(
+        "Origin",
+        "http://localhost:5273".parse().expect("trusted origin"),
+    );
+    let (stream, _) = connect_async(request).await.expect("ws connect");
     stream
 }
 
@@ -145,6 +150,26 @@ fn error_msg(code: &str) -> zk_protocol::ServerMessage {
 }
 
 // ── 场景 1：未绑定 ping → bindRequired pong（pushToPrincipal 语义） ─────────
+
+#[tokio::test]
+async fn websocket_upgrade_rejects_untrusted_browser_origin() {
+    let (addr, _hub, _db) = spawn_server().await;
+    let mut request = format!("ws://{addr}/ws")
+        .into_client_request()
+        .expect("ws request");
+    request.headers_mut().insert(
+        "Origin",
+        "https://attacker.example".parse().expect("hostile origin"),
+    );
+    let error = connect_async(request)
+        .await
+        .expect_err("cross-origin websocket must not upgrade");
+    let response = match error {
+        tokio_tungstenite::tungstenite::Error::Http(response) => response,
+        other => panic!("expected HTTP rejection, got {other}"),
+    };
+    assert_eq!(response.status(), 403);
+}
 
 #[tokio::test]
 async fn unbound_ping_gets_bind_required_pong() {

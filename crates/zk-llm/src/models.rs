@@ -3,7 +3,7 @@
 //! 建模来源（旧仓库只读权威规格，`main@581d407b`）：
 //! - `llm/ModelCapabilities.java`：能力记录字段序与保守默认值
 //!   （`DEFAULT` = unknown / 4096 输出 / 8192 窗口 / `tokenCharRatio` 3.5）；
-//! - `llm/ModelRegistry.java`：`BUILTIN_MODELS` 内置表（22 条，逐条数值对照）
+//! - `llm/ModelRegistry.java`：`BUILTIN_MODELS` 内置表（25 条，逐条数值对照）
 //!   与 `getCapabilities` 的查表顺序。
 //!
 //! - `llm/ModelCapabilitiesProperties.java`：`model.capabilities.<id>.*` 配置绑定
@@ -314,6 +314,45 @@ pub static BUILTIN_MODELS: &[ModelCapabilities] = &[
         0.0005,
         0.002,
     ),
+    ModelCapabilities::caps(
+        "deepseek-v4-flash-vision-exp",
+        "DeepSeek V4 Flash Vision Exp",
+        384_000,
+        1_000_000,
+        true,
+        true,
+        true,
+        5,
+        true,
+        0.0005,
+        0.002,
+    ),
+    ModelCapabilities::caps(
+        "deepseek-v4-pro-0813",
+        "DeepSeek V4 Pro 0813（百炼）",
+        384_000,
+        1_000_000,
+        true,
+        true,
+        false,
+        0,
+        true,
+        0.001,
+        0.004,
+    ),
+    ModelCapabilities::caps(
+        "deepseek-v4-flash-0731",
+        "DeepSeek V4 Flash 0731（百炼）",
+        384_000,
+        1_000_000,
+        true,
+        true,
+        false,
+        0,
+        true,
+        0.0005,
+        0.002,
+    ),
     // Moonshot
     ModelCapabilities::caps(
         "kimi-k3", "Kimi K3", 131_072, 1_000_000, true, true, true, 8, true, 0.002, 0.012,
@@ -372,7 +411,7 @@ pub static BUILTIN_MODELS: &[ModelCapabilities] = &[
     ),
     ModelCapabilities::caps(
         "qwen3.8-max",
-        "Qwen 3.8 Max (百炼订阅)",
+        "Qwen 3.8 Max（百炼）",
         65536,
         1_000_000,
         true,
@@ -397,7 +436,7 @@ pub static BUILTIN_MODELS: &[ModelCapabilities] = &[
         0.002,
     ),
     ModelCapabilities::caps(
-        "glm-5.2", "GLM-5.2", 131_072, 1_048_576, true, true, false, 0, true, 0.001, 0.001,
+        "glm-5.3", "GLM-5.3", 131_072, 1_048_576, true, true, false, 0, true, 0.001, 0.001,
     ),
     ModelCapabilities::caps(
         "glm-5v-turbo",
@@ -833,8 +872,8 @@ mod tests {
                 caps.model_id
             );
         }
-        // 表规模与旧 BUILTIN_MODELS 一致（22 条）。
-        assert_eq!(BUILTIN_MODELS.len(), 22);
+        // 表规模与旧 BUILTIN_MODELS 一致（25 条）。
+        assert_eq!(BUILTIN_MODELS.len(), 25);
         // 键唯一。
         let mut ids: Vec<&str> = BUILTIN_MODELS
             .iter()
@@ -851,7 +890,68 @@ mod tests {
         assert_eq!(max_output_tokens_for("kimi-k3"), 131_072);
         assert_eq!(max_output_tokens_for("qwen3.7-max"), 65536);
         assert_eq!(max_output_tokens_for("deepseek-v4-pro"), 384_000);
+        assert_eq!(
+            max_output_tokens_for("deepseek-v4-flash-vision-exp"),
+            384_000
+        );
         assert_eq!(max_output_tokens_for("nope"), 4096);
+    }
+
+    #[test]
+    fn new_deepseek_entries_match_legacy_registry_diff() {
+        // 旧 ModelRegistry.java 新增三条：vision-exp 开图片输入（5 张上限）；
+        // 0813 / 0731 为百炼渠道别名，参数与 pro / flash 本体逐字段一致。
+        let vision = capabilities_for("deepseek-v4-flash-vision-exp");
+        assert_eq!(vision.display_name, "DeepSeek V4 Flash Vision Exp");
+        assert_eq!(vision.max_output_tokens, 384_000);
+        assert_eq!(vision.context_window, 1_000_000);
+        assert!(vision.supports_streaming);
+        assert!(vision.supports_thinking);
+        assert!(vision.supports_images);
+        assert_eq!(vision.max_images, 5);
+        assert!(vision.supports_tool_use);
+        assert!((vision.cost_per_1k_input - 0.0005).abs() < f64::EPSILON);
+        assert!((vision.cost_per_1k_output - 0.002).abs() < f64::EPSILON);
+
+        let pro = capabilities_for("deepseek-v4-pro-0813");
+        assert_eq!(pro.display_name, "DeepSeek V4 Pro 0813（百炼）");
+        assert_eq!(pro.max_output_tokens, 384_000);
+        assert_eq!(pro.context_window, 1_000_000);
+        assert!(pro.supports_thinking);
+        assert!(!pro.supports_images);
+        assert_eq!(pro.max_images, 0);
+        assert!((pro.cost_per_1k_input - 0.001).abs() < f64::EPSILON);
+        assert!((pro.cost_per_1k_output - 0.004).abs() < f64::EPSILON);
+
+        let flash = capabilities_for("deepseek-v4-flash-0731");
+        assert_eq!(flash.display_name, "DeepSeek V4 Flash 0731（百炼）");
+        assert_eq!(flash.max_output_tokens, 384_000);
+        assert_eq!(flash.context_window, 1_000_000);
+        assert!(flash.supports_thinking);
+        assert!(!flash.supports_images);
+        assert!((flash.cost_per_1k_input - 0.0005).abs() < f64::EPSILON);
+        assert!((flash.cost_per_1k_output - 0.002).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn glm_53_replaces_legacy_glm_entry() {
+        // 旧 ModelRegistry.java：GLM 文本模型条目升级为 glm-5.3（参数不变，仅 ID 与展示名）。
+        let caps = capabilities_for("glm-5.3");
+        assert_eq!(caps.display_name, "GLM-5.3");
+        assert_eq!(caps.max_output_tokens, 131_072);
+        assert_eq!(caps.context_window, 1_048_576);
+        assert!(!caps.supports_images);
+        assert!((caps.cost_per_1k_input - 0.001).abs() < f64::EPSILON);
+        assert!((caps.cost_per_1k_output - 0.001).abs() < f64::EPSILON);
+        assert!(is_known_model("glm-5.3"));
+        // 旧 ID 已从内置表移除：`glm-5.` 前缀条目仅剩 glm-5.3 一条。
+        assert_eq!(
+            BUILTIN_MODELS
+                .iter()
+                .filter(|caps| caps.model_id.starts_with("glm-5."))
+                .count(),
+            1
+        );
     }
 
     /// 旧 `application.yml` 的 `model.capabilities` 节（L295+，8 个模型）一对一

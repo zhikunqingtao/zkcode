@@ -540,6 +540,39 @@ mod tests {
         );
     }
 
+    /// url 型图片块（无 base64 载荷）经快照保存 → 加载逐字等价。
+    #[tokio::test]
+    async fn url_image_blocks_survive_snapshot_round_trip() {
+        let root = fixture();
+        let service = SessionSnapshotService::with_dir(root.clone());
+        let mut original = snapshot("s-url", Some(1_700_000_123_456));
+        original.messages[0]
+            .content
+            .push(zk_db::StoredBlock::Image {
+                source: zk_db::model::ImageSource {
+                    kind: "url".into(),
+                    media_type: None,
+                    data: None,
+                    url: Some(
+                        "https://bkt.oss.example.com/zhikuncode-artifacts/clipboard/a.png".into(),
+                    ),
+                },
+                width: None,
+                height: None,
+            });
+        service
+            .save_snapshot("s-url", &original)
+            .await
+            .expect("save");
+        let loaded = service
+            .load_snapshot("s-url")
+            .await
+            .expect("load")
+            .expect("snapshot present");
+        assert_eq!(loaded.messages, original.messages);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// 保存 → 加载往返：全部分量逐字等价，文件名为 `{sessionId}.json`。
     #[tokio::test]
     async fn save_then_load_round_trips_all_fields() {

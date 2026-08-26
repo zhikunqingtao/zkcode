@@ -36,7 +36,7 @@ class ZkcodeClient:
 
     def __init__(
         self,
-        server: str = "http://127.0.0.1:8081",
+        server: str = "http://127.0.0.1:8082",
         token: Optional[str] = None,
         timeout: int = 90,
     ) -> None:

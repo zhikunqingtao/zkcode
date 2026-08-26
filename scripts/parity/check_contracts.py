@@ -88,7 +88,7 @@ def check_supported_env() -> None:
     values = parse_env_example(ROOT / ".env.example")
     expected = {
         "ZK_HOST": "127.0.0.1",
-        "ZK_PORT": "8081",
+        "ZK_PORT": "8082",
         "ZK_AUTH_MODE": "localhost",
         "ZK_LOCAL_PICKER_ENABLED": "true",
         "ZK_PYTHON_ENABLED": "true",

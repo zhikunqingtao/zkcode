@@ -914,3 +914,37 @@ fn phase1_active_kinds() {
     .collect();
     assert_eq!(active, want);
 }
+
+/// A1：图片块新旧两种线上形状的双向 roundtrip——旧 base64 形状
+/// （`{mediaType, base64Data}`）与新 url 形状（`{mediaType, url}`）都必须可
+/// 反序列化，且序列化时缺省侧的键被省略（对齐旧 Jackson `NON_NULL`）。
+#[test]
+fn image_block_roundtrips_legacy_base64_and_url_shapes() {
+    let legacy = json!({"type": "image", "mediaType": "image/png", "base64Data": "aGk="});
+    let block: ContentBlock = serde_json::from_value(legacy.clone()).expect("legacy image");
+    assert_eq!(
+        block,
+        ContentBlock::Image {
+            media_type: "image/png".into(),
+            base64_data: Some("aGk=".into()),
+            url: None,
+        }
+    );
+    assert_eq!(serde_json::to_value(&block).expect("serialize"), legacy);
+
+    let remote = json!({
+        "type": "image",
+        "mediaType": "image/png",
+        "url": "https://bucket.oss.example.com/zhikuncode-artifacts/clipboard/a.png"
+    });
+    let block: ContentBlock = serde_json::from_value(remote.clone()).expect("url image");
+    assert_eq!(
+        block,
+        ContentBlock::Image {
+            media_type: "image/png".into(),
+            base64_data: None,
+            url: Some("https://bucket.oss.example.com/zhikuncode-artifacts/clipboard/a.png".into()),
+        }
+    );
+    assert_eq!(serde_json::to_value(&block).expect("serialize"), remote);
+}

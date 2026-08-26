@@ -40,7 +40,7 @@ async function mockHttpApi(page: import('@playwright/test').Page) {
     } else if (pathname === '/api/sessions' && request.method() === 'POST') {
       await route.fulfill({ status: 201, json: {
         sessionId: 'session-auto-approve', projectId: project.id,
-        permissionMode: 'DEFAULT',
+        permissionMode: 'AUTO_APPROVE',
       }});
     } else if (pathname === '/api/sessions') {
       await route.fulfill({ json: { sessions: [], hasMore: false, nextCursor: null } });
@@ -95,7 +95,7 @@ test.describe('AUTO_APPROVE permission mode', () => {
               messages: [], activities: [], totalActivityCount: 0, hasMore: false,
               metadata: {
                 sessionId: bind.sessionId, model: 'test-model',
-                permissionMode: 'DEFAULT', status: 'idle',
+                permissionMode: 'AUTO_APPROVE', status: 'idle',
               },
             });
           } else if (frame.command === 'SEND'
@@ -103,7 +103,7 @@ test.describe('AUTO_APPROVE permission mode', () => {
             requestedMode = (JSON.parse(frame.body) as { mode: string }).mode;
             sendMessage({
               type: 'permission_mode_changed', ts: Date.now(),
-              mode: 'AUTO_APPROVE', previous: 'DEFAULT',
+              mode: 'AUTO_APPROVE', previous: 'AUTO_APPROVE',
             });
           }
         }

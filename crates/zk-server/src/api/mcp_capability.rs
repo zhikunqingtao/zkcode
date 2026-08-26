@@ -14,25 +14,23 @@
 //! | `GET /api/mcp/capabilities/domains` | `listDomains` L112-115 | 200 `{domains}` | — |
 //! | `GET /api/mcp/capabilities/{id}/server-tools` | `listServerTools` L117-147 | 200 三形态 | 404 空体 |
 //! | `POST /api/mcp/capabilities/{id}/test` | `testCapability` L149-170 | 200 `{id,status,serverKey}` | 404 空体 |
-//! | `POST /api/mcp/capabilities/{id}/invoke` | `invokeCapability` L172-235 | 200 `{id,status,…}` | 404 空体 / 400 体不可解析 |
+//! | `POST /api/mcp/capabilities/{id}/invoke` | legacy `invokeCapability` | — | 403；必须改走带 session/run 上下文的 `/mcp tools/call` |
 //!
 //! # 必须照抄的旧行为怪癖
 //!
 //! 1. **失败体是空体**——旧端用 `ResponseEntity.notFound().build()` /
 //!    `.badRequest().build()`，既不带全局错误信封也不带任何正文；前端
 //!    `mcpCapabilityStore.ts` 只判 `resp.ok`，故照抄空体。
-//! 2. `server-tools` / `test` / `invoke` 把**一切**下游异常吞成 200 +
+//! 2. `server-tools` / `test` 把**一切**下游异常吞成 200 +
 //!    `{"status":"error"}`；只有「能力 id 不在注册表」才是 404。
 //! 3. `server-tools` 的错误分支**不带** `serverKey`（旧 L143-144），而成功分支
 //!    与 `not_connected` 分支带。
-//! 4. `invoke` 的 `arguments` 缺省时整体回落**整个请求体**（旧 L180-181），
-//!    连 `timeout` 键一起当工具参数传下去。
-//! 5. `toggle` 关闭时有「同服务器多工具保护」：仅当**无**其他启用能力共享同一
+//! 4. `toggle` 关闭时有「同服务器多工具保护」：仅当**无**其他启用能力共享同一
 //!    `serverKey` 才摘除服务器（旧 L80-86）。
-//! 6. `total` / `enabledCount` 取自**整表**，与 `capabilities` 的过滤结果无关
+//! 5. `total` / `enabledCount` 取自**整表**，与 `capabilities` 的过滤结果无关
 //!    （旧 L46-49）。
-//! 7. `initialize` 握手补偿的异常被**静默忽略**（旧 `catch (Exception ignored)`
-//!    L133 / L197）——已初始化的服务器会拒绝重复握手，属预期。
+//! 6. `initialize` 握手补偿的异常被**静默忽略**（旧 L133）——已初始化的服务器
+//!    会拒绝重复握手，属预期。
 //!
 //! # 偏离
 //!
@@ -48,19 +46,16 @@
 //!   [`McpServerConnection::connect`] 自吞错误不返回 `Result`，连接失败体现为
 //!   `is_alive() == false` → `"unreachable"`（旧同样绝大多数失败落
 //!   `"unreachable"`，仅构造期异常才 `"error"`）。
-//! - `B4B-12`：`invoke` / `server-tools` 的 `toolName` 为 `null` 时以 `""` 调用
-//!   （旧 `Map.of("toolName", null)` 抛 NPE 被自身 catch 兜住 → 200
-//!   `{"status":"error","error":null}`，是纯缺陷）。
-//! - `B4B-13`：`invoke` 的 `arguments` 非对象时回 200
-//!   `{"status":"error","error":"Invalid 'arguments': expected a JSON object"}`
-//!   （旧为 `ClassCastException` 的 JVM 文本，语义同、措辞不同）。
-//! - `B4B-14`：`invoke` 的 `timeout` 键非数字时视为缺省（旧
-//!   `((Number) …)` 抛 CCE → 200 `{"status":"error"}`）。
-//! - `B4B-15`：`server-tools` / `invoke` 的下游 `result` 缺失时回 `null`
+//! - `B4B-12`：`server-tools` 的 `toolName` 为 `null` 时以 `""` 调用。
+//! - `B4B-15`：`server-tools` 的下游 `result` 缺失时回 `null`
 //!   （旧 `Map.of("tools", null)` 抛 NPE → 200 `{"status":"error"}`，是纯缺陷）。
 //! - `B4B-16`：请求体不可解析 → 400 `INVALID_REQUEST_BODY`（旧
 //!   `HttpMessageNotReadableException` 无专门 handler → 500）；与
 //!   [`crate::api::mcp`] 的 `add_server` 取同一约定。
+//! - **安全边界**：能力定义是本地 HTTP 可变输入，新增/更新会拒绝非 TLS、
+//!   loopback/私网、URL userinfo、任意 `apiKeyConfig` 与非 `DashScope` 凭据
+//!   主机。legacy `invoke` 缺少权威 session/run 上下文，无法复用生产
+//!   Hook/Admission/ToolRegistry，故失败关闭。
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -77,7 +72,10 @@ use zk_mcp::protocol::{
     CLIENT_NAME, METHOD_INITIALIZE, METHOD_INITIALIZED, METHOD_TOOLS_LIST, PROTOCOL_VERSION,
     client_info,
 };
-use zk_mcp::{McpCapabilityDefinition, McpClientManager, McpConnectionStatus, McpServerConnection};
+use zk_mcp::{
+    McpCapabilityDefinition, McpConnectionStatus, McpServerConnection,
+    validate_capability_definition, validate_capability_destination,
+};
 
 use crate::api::http_params::{optional_spring_bool, require_spring_bool};
 use crate::api::mcp::manager_error;
@@ -86,12 +84,6 @@ use crate::state::AppState;
 
 /// `initialize` / `tools/list` 的请求超时（旧两处硬编码 `15000`）。
 const MCP_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
-
-/// 临时连接的 SSE 握手等待（旧 `Thread.sleep(2000)`，L214）。
-const SSE_HANDSHAKE_WAIT: Duration = Duration::from_secs(2);
-
-/// `invoke` 的兜底超时（旧 `30000`，L184）。
-const DEFAULT_INVOKE_TIMEOUT_MS: i64 = 30_000;
 
 // ===== 视图与共用助手 =====
 
@@ -122,6 +114,18 @@ fn ok_json(body: Value) -> Response {
 /// `{"id":…,"status":"error","error":…}`——三个自吞异常端点的统一失败形状。
 fn error_view(id: &str, message: &str) -> Value {
     json!({ "id": id, "status": "error", "error": message })
+}
+
+fn capability_security_error(error: impl std::fmt::Display) -> ApiError {
+    ApiError::validation_with_code("MCP_CAPABILITY_REJECTED", &error.to_string())
+}
+
+fn direct_invoke_error(code: &str, message: &str) -> ApiError {
+    ApiError {
+        status: StatusCode::FORBIDDEN,
+        code: code.to_owned(),
+        message: message.to_owned(),
+    }
 }
 
 /// 解析 `PUT` 的能力定义体，`id` 缺失 / 为 `null` 时以 URL 的 `id` 补齐
@@ -155,43 +159,6 @@ async fn ensure_initialized(connection: &Arc<McpServerConnection>) {
         tracing::debug!(server = connection.name(), %error, "MCP re-initialize ignored");
     }
     connection.send_notification(METHOD_INITIALIZED, None).await;
-}
-
-/// `invoke` 的参数提取（旧 L179-181）。
-///
-/// - `arguments` 缺省 → **整个请求体**（怪癖 4）；
-/// - `arguments: null` → 无参数（旧 `(Map) null` 强转成功）；
-/// - `arguments` 非对象 → `Err`（见模块偏离 `B4B-13`）。
-fn invoke_arguments(payload: &Value) -> Result<Option<Value>, &'static str> {
-    match payload.get("arguments") {
-        None => Ok(Some(payload.clone())),
-        Some(Value::Null) => Ok(None),
-        Some(Value::Object(map)) => Ok(Some(Value::Object(map.clone()))),
-        Some(_) => Err("Invalid 'arguments': expected a JSON object"),
-    }
-}
-
-/// `Number.longValue()` 的等价物：整数直取，浮点截断（见模块偏离 `B4B-14`）。
-fn number_to_millis(value: &Value) -> Option<i64> {
-    #[allow(clippy::cast_possible_truncation)] // 旧 `Number.longValue()` 对浮点同样截断
-    value
-        .as_i64()
-        .or_else(|| value.as_f64().map(|millis| millis as i64))
-}
-
-/// `invoke` 的超时解析（旧 L182-184）：体内 `timeout` → 定义 `timeoutMs`（>0）
-/// → 30s。
-fn invoke_timeout(payload: &Value, definition: &McpCapabilityDefinition) -> Duration {
-    let millis =
-        payload
-            .get("timeout")
-            .and_then(number_to_millis)
-            .unwrap_or(if definition.timeout_ms > 0 {
-                definition.timeout_ms
-            } else {
-                DEFAULT_INVOKE_TIMEOUT_MS
-            });
-    Duration::from_millis(u64::try_from(millis).unwrap_or(0))
 }
 
 // ===== CRUD 端点 =====
@@ -286,6 +253,7 @@ pub(crate) async fn update_capability(
     body: Bytes,
 ) -> Result<Response, ApiError> {
     let updated = parse_definition(&body, &id)?;
+    validate_capability_definition(&updated).map_err(capability_security_error)?;
     match state.mcp_capabilities.update_capability(&id, updated) {
         Ok(definition) => Ok(ok_json(capability_view(&definition))),
         // 旧端 `catch (IllegalArgumentException)` 覆盖整段 → 一律 404 空体。
@@ -312,6 +280,7 @@ pub(crate) async fn add_capability(
     }
     let definition: McpCapabilityDefinition =
         serde_json::from_slice(&body).map_err(|_| ApiError::invalid_request_body())?;
+    validate_capability_definition(&definition).map_err(capability_security_error)?;
     match state.mcp_capabilities.add_capability(definition) {
         Ok(created) => Ok((StatusCode::CREATED, Json(capability_view(&created))).into_response()),
         Err(RegistryError::NotFound(_) | RegistryError::AlreadyExists(_)) => {
@@ -368,6 +337,18 @@ pub(crate) async fn toggle_capability(
 ) -> Result<Response, ApiError> {
     let enabled = require_spring_bool(&query, "enabled")?;
     let registry = Arc::clone(&state.mcp_capabilities);
+    if enabled {
+        let Some(definition) = registry.find_by_id(&id) else {
+            return Ok(not_found());
+        };
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            validate_capability_destination(&definition),
+        )
+        .await
+        .map_err(|_| capability_security_error("MCP capability DNS validation timed out"))?
+        .map_err(capability_security_error)?;
+    }
     let Ok(definition) = registry.toggle_enabled(&id, enabled) else {
         return Ok(not_found());
     };
@@ -458,32 +439,38 @@ pub(crate) async fn list_server_tools(
 pub(crate) async fn test_capability(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
-) -> Response {
+) -> Result<Response, ApiError> {
     let Some(definition) = state.mcp_capabilities.find_by_id(&id) else {
-        return not_found();
+        return Ok(not_found());
     };
-    let config = McpClientManager::build_config_from_registry(&definition);
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        validate_capability_destination(&definition),
+    )
+    .await
+    .map_err(|_| capability_security_error("MCP capability DNS validation timed out"))?
+    .map_err(capability_security_error)?;
+    let config = state.mcp().build_resolved_config_from_registry(&definition);
     let connection = McpServerConnection::new(config);
     connection.connect().await;
     let alive = connection.is_alive();
     connection.close().await;
     let status = if alive { "reachable" } else { "unreachable" };
-    ok_json(json!({
+    Ok(ok_json(json!({
         "id": id,
         "status": status,
         "serverKey": definition.extract_server_key(),
-    }))
+    })))
 }
 
-/// `POST /api/mcp/capabilities/{id}/invoke`——直接调用工具，持久连接优先、
-/// 临时连接回退（旧 `invokeCapability` L172-235）。
+/// `POST /api/mcp/capabilities/{id}/invoke`——legacy 直调入口失败关闭。
 #[utoipa::path(
     post,
     path = "/api/mcp/capabilities/{id}/invoke",
     tag = "mcp",
     params(("id" = String, Path, description = "能力 id")),
     responses(
-        (status = 200, description = "{id,status:\"success\",toolName,connectionType,result} 或 {id,status:\"error\",error}"),
+        (status = 403, description = "能力已关闭，或 legacy 直调被禁用；使用 /mcp tools/call"),
         (status = 400, description = "体缺失或不可解析（INVALID_REQUEST_BODY，见偏离 B4B-16）"),
         (status = 404, description = "id 不在注册表（空体）")
     )
@@ -497,69 +484,25 @@ pub(crate) async fn invoke_capability(
         return Err(ApiError::invalid_request_body());
     }
     // 旧端 `@RequestBody` 的反序列化先于方法体——体不可解析时不进 404 分支。
-    let payload: Value =
+    let _payload: Value =
         serde_json::from_slice(&body).map_err(|_| ApiError::invalid_request_body())?;
     let Some(definition) = state.mcp_capabilities.find_by_id(&id) else {
         return Ok(not_found());
     };
-    let arguments = match invoke_arguments(&payload) {
-        Ok(arguments) => arguments,
-        Err(message) => return Ok(ok_json(error_view(&id, message))),
-    };
-    let timeout = invoke_timeout(&payload, &definition);
-    let tool_name = definition.tool_name.clone().unwrap_or_default();
-    let server_key = definition.extract_server_key();
-    let manager = state.mcp();
-
-    // 优先复用已建立的持久连接。
-    if let Some(connection) = manager
-        .get_connection(&server_key)
-        .filter(|connection| connection.is_alive())
-    {
-        ensure_initialized(&connection).await;
-        return Ok(
-            match connection
-                .call_tool(&tool_name, arguments, timeout, None)
-                .await
-            {
-                Ok(result) => ok_json(json!({
-                    "id": id,
-                    "status": "success",
-                    "toolName": tool_name,
-                    "connectionType": "persistent",
-                    "result": result,
-                })),
-                Err(error) => ok_json(error_view(&id, &error.to_string())),
-            },
-        );
+    if !definition.enabled {
+        return Err(direct_invoke_error(
+            "MCP_CAPABILITY_DISABLED",
+            "MCP capability is disabled",
+        ));
     }
-
-    // 回退临时连接：连接 → 等握手 → 调用 → 无条件关闭。
-    let config = McpClientManager::build_config_from_registry(&definition);
-    let temporary = McpServerConnection::new(config);
-    temporary.connect().await;
-    tokio::time::sleep(SSE_HANDSHAKE_WAIT).await;
-    if !temporary.is_alive() {
-        temporary.close().await;
-        return Ok(ok_json(error_view(
-            &id,
-            "Connection not alive after handshake",
-        )));
-    }
-    let outcome = temporary
-        .call_tool(&tool_name, arguments, timeout, None)
-        .await;
-    temporary.close().await;
-    Ok(match outcome {
-        Ok(result) => ok_json(json!({
-            "id": id,
-            "status": "success",
-            "toolName": tool_name,
-            "connectionType": "temporary",
-            "result": result,
-        })),
-        Err(error) => ok_json(error_view(&id, &error.to_string())),
-    })
+    // This legacy endpoint carries no authoritative session/run context and
+    // therefore cannot enter Hook -> Admission -> ToolRegistry safely.  Fail
+    // closed and direct callers to the reverse MCP endpoint, whose tools/call
+    // path requires both identifiers and uses the production Admission stack.
+    Err(direct_invoke_error(
+        "MCP_DIRECT_INVOKE_DISABLED",
+        "Direct capability invocation is disabled; use /mcp tools/call with session and run context",
+    ))
 }
 
 #[cfg(test)]
@@ -622,56 +565,6 @@ mod tests {
                 .expect_err("array")
                 .status,
             StatusCode::BAD_REQUEST
-        );
-    }
-
-    #[test]
-    fn invoke_arguments_falls_back_to_whole_body() {
-        let payload = json!({ "city": "Hangzhou", "timeout": 5000 });
-        // 怪癖 4：arguments 缺省 → 整个请求体（含 timeout）原样下传。
-        assert_eq!(invoke_arguments(&payload).expect("fallback"), Some(payload));
-
-        let wrapped = json!({ "arguments": { "city": "Hangzhou" }, "timeout": 5000 });
-        assert_eq!(
-            invoke_arguments(&wrapped).expect("wrapped"),
-            Some(json!({ "city": "Hangzhou" }))
-        );
-
-        assert_eq!(
-            invoke_arguments(&json!({ "arguments": null })).expect("null"),
-            None
-        );
-        assert!(invoke_arguments(&json!({ "arguments": "oops" })).is_err());
-    }
-
-    #[test]
-    fn invoke_timeout_prefers_body_then_definition_then_default() {
-        let mut def = definition("mcp_weather");
-        assert_eq!(
-            invoke_timeout(&json!({ "timeout": 1500 }), &def),
-            Duration::from_millis(1500)
-        );
-        // 浮点走 Number.longValue() 的截断路径。
-        assert_eq!(
-            invoke_timeout(&json!({ "timeout": 1500.9 }), &def),
-            Duration::from_millis(1500)
-        );
-        // timeoutMs == 0 → 兜底 30s。
-        assert_eq!(invoke_timeout(&json!({}), &def), Duration::from_secs(30));
-        def.timeout_ms = 7_000;
-        assert_eq!(invoke_timeout(&json!({}), &def), Duration::from_secs(7));
-        // 非数字 timeout 视为缺省（偏离 B4B-14）。
-        assert_eq!(
-            invoke_timeout(&json!({ "timeout": "soon" }), &def),
-            Duration::from_secs(7)
-        );
-        // 定义侧非正值同样落兜底 30s（旧 `timeoutMs() > 0 ? … : 30000`）。
-        def.timeout_ms = -1;
-        assert_eq!(invoke_timeout(&json!({}), &def), Duration::from_secs(30));
-        // 体内负数不会 panic，退化为 0。
-        assert_eq!(
-            invoke_timeout(&json!({ "timeout": -5 }), &def),
-            Duration::ZERO
         );
     }
 

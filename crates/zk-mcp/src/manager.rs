@@ -33,7 +33,7 @@
 //! - `abortContextLookup()` 无对应物——取消经 `zk_tools::ToolContext::cancel`
 //!   传递（见 `tool_adapter` 模块文档）。
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
@@ -43,12 +43,19 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use zk_tools::Tool;
 
-use crate::capability_registry::{McpCapabilityDefinition, McpCapabilityRegistry};
+use crate::capability_registry::{
+    McpCapabilityDefinition, McpCapabilityRegistry, expand_env_placeholders,
+    is_blank_or_placeholder, java_is_blank,
+};
 use crate::config::{McpConfigScope, McpConfigurationResolver, McpServerConfig, McpTransportType};
 use crate::connection::{McpConnectionStatus, McpServerConnection};
 use crate::prompt_adapter::McpPromptAdapter;
 use crate::protocol::{
     METHOD_ROOTS_LIST_CHANGED, ProgressTracker, PromptDefinition, RootsProvider,
+};
+use crate::security::{
+    McpCredentialResolver, default_credential_resolver, resolve_capability_credential,
+    validate_capability_destination,
 };
 use crate::sse::lock;
 use crate::tool_adapter::{MCP_TOOL_NAME_PREFIX, McpToolAdapter, ResultCache};
@@ -96,6 +103,9 @@ pub enum ManagerError {
     /// 对照 `IllegalArgumentException("MCP server not found: " + name)`。
     #[error("MCP server not found: {0}")]
     ServerNotFound(String),
+    /// A user-editable capability attempted an unsafe outbound connection.
+    #[error("MCP_CAPABILITY_ENDPOINT_REJECTED: {0}")]
+    UnsafeCapabilityEndpoint(String),
 }
 
 /// 服务器信任判定端口（对照 Java `McpApprovalService`）。
@@ -225,6 +235,7 @@ pub struct McpClientManager {
     progress_tracker: Option<Arc<dyn ProgressTracker>>,
     channel_permissions: BTreeMap<String, Vec<String>>,
     result_cache: Arc<ResultCache>,
+    credential_resolver: Arc<dyn McpCredentialResolver>,
 
     connections: Mutex<HashMap<String, Arc<McpServerConnection>>>,
     connection_generations: Mutex<HashMap<String, Arc<AtomicU64>>>,
@@ -233,9 +244,12 @@ pub struct McpClientManager {
     active_reconnects: Mutex<HashMap<String, ReconnectTask>>,
     consecutive_failures: Mutex<HashMap<String, u32>>,
     last_successful_ping: Mutex<HashMap<String, SystemTime>>,
+    registry_owned_servers: Mutex<HashSet<String>>,
 
     reconnect_permits: Semaphore,
     next_task_id: AtomicU64,
+    credential_refresh_running: AtomicBool,
+    credential_refresh_pending: AtomicBool,
     running: AtomicBool,
     shutdown_done: AtomicBool,
 }
@@ -262,6 +276,7 @@ pub struct McpClientManagerBuilder {
     progress_tracker: Option<Arc<dyn ProgressTracker>>,
     channel_permissions: BTreeMap<String, Vec<String>>,
     result_cache: Option<Arc<ResultCache>>,
+    credential_resolver: Arc<dyn McpCredentialResolver>,
 }
 
 impl McpClientManagerBuilder {
@@ -279,6 +294,7 @@ impl McpClientManagerBuilder {
             progress_tracker: None,
             channel_permissions: BTreeMap::new(),
             result_cache: None,
+            credential_resolver: default_credential_resolver(),
         }
     }
 
@@ -339,6 +355,14 @@ impl McpClientManagerBuilder {
         self
     }
 
+    /// Resolve known provider credential identities for capability-registry
+    /// connections.  The registry cannot select arbitrary environment names.
+    #[must_use]
+    pub fn credential_resolver(mut self, resolver: Arc<dyn McpCredentialResolver>) -> Self {
+        self.credential_resolver = resolver;
+        self
+    }
+
     /// 装配管理器。
     #[must_use]
     pub fn build(self) -> Arc<McpClientManager> {
@@ -355,6 +379,7 @@ impl McpClientManagerBuilder {
             result_cache: self
                 .result_cache
                 .unwrap_or_else(crate::tool_adapter::shared_result_cache),
+            credential_resolver: self.credential_resolver,
             connections: Mutex::new(HashMap::new()),
             connection_generations: Mutex::new(HashMap::new()),
             reconnecting_servers: Mutex::new(HashMap::new()),
@@ -362,8 +387,11 @@ impl McpClientManagerBuilder {
             active_reconnects: Mutex::new(HashMap::new()),
             consecutive_failures: Mutex::new(HashMap::new()),
             last_successful_ping: Mutex::new(HashMap::new()),
+            registry_owned_servers: Mutex::new(HashSet::new()),
             reconnect_permits: Semaphore::new(RECONNECT_CONCURRENCY),
             next_task_id: AtomicU64::new(0),
+            credential_refresh_running: AtomicBool::new(false),
+            credential_refresh_pending: AtomicBool::new(false),
             running: AtomicBool::new(false),
             shutdown_done: AtomicBool::new(false),
         })
@@ -475,11 +503,37 @@ impl McpClientManager {
         }
         let enabled = registry.list_enabled();
         let mut activated = 0usize;
+        let mut attempted_servers = HashSet::new();
         for capability in &enabled {
-            if self
-                .get_connection(&capability.extract_server_key())
-                .is_some()
+            let server_key = capability.extract_server_key();
+            if self.get_connection(&server_key).is_some()
+                || !attempted_servers.insert(server_key.clone())
             {
+                continue;
+            }
+            // 连接前置校验（对照 Java v1.1 `initializeAll` 注册表段）：端点 URL
+            // 或声明必需的 API Key 未配置时跳过，避免以残缺配置反复建连失败。
+            let candidate = self.build_resolved_config_from_registry(capability);
+            if candidate.url.as_deref().is_none_or(java_is_blank) {
+                tracing::info!(
+                    server = %server_key,
+                    "Skipping MCP registry server — endpoint URL is not configured"
+                );
+                continue;
+            }
+            let requires_api_key = capability
+                .api_key_config
+                .as_deref()
+                .is_some_and(|value| !java_is_blank(value))
+                || capability
+                    .api_key_default
+                    .as_deref()
+                    .is_some_and(|value| !java_is_blank(value));
+            if requires_api_key && !candidate.headers.contains_key("Authorization") {
+                tracing::info!(
+                    server = %server_key,
+                    "Skipping MCP registry server — API key is not configured"
+                );
                 continue;
             }
             match self.enable_from_registry(capability).await {
@@ -496,6 +550,60 @@ impl McpClientManager {
             enabled_entries = enabled.len(),
             "MCP registry activation complete"
         );
+    }
+
+    /// Rebuild capability-registry connections after the host changes provider
+    /// credentials.  Existing connections must be closed first because their
+    /// transport owns an immutable Authorization header map.
+    pub async fn refresh_registry_credentials(self: &Arc<Self>) {
+        if !self.is_running() {
+            return;
+        }
+        if self.registry.is_none() {
+            return;
+        }
+        // Only connections created by enable_from_registry are eligible.  A
+        // manually configured server with the same name must never be removed.
+        let server_keys = lock(&self.registry_owned_servers).clone();
+        for server_key in server_keys {
+            let _removed = self.remove_server(&server_key).await;
+        }
+        self.activate_registry_capabilities().await;
+    }
+
+    /// Queue a non-blocking credential refresh. Concurrent updates are
+    /// coalesced, but an update arriving during a refresh always schedules one
+    /// more pass so the newest key wins.
+    pub fn schedule_registry_credential_refresh(self: &Arc<Self>) {
+        self.credential_refresh_pending
+            .store(true, Ordering::Release);
+        if self
+            .credential_refresh_running
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        let manager = Arc::clone(self);
+        tokio::spawn(async move {
+            loop {
+                manager
+                    .credential_refresh_pending
+                    .store(false, Ordering::Release);
+                manager.refresh_registry_credentials().await;
+                if !manager.credential_refresh_pending.load(Ordering::Acquire) {
+                    break;
+                }
+            }
+            manager
+                .credential_refresh_running
+                .store(false, Ordering::Release);
+            // Close the small race between the last pending check and clearing
+            // running: a concurrent scheduler may have observed running=true.
+            if manager.credential_refresh_pending.load(Ordering::Acquire) {
+                manager.schedule_registry_credential_refresh();
+            }
+        });
     }
 
     /// `addServer` 的日志包装 —— Java 在 `initializeAll` 中直接调用 `addServer`
@@ -559,10 +667,10 @@ impl McpClientManager {
 impl McpClientManager {
     /// 动态添加 MCP 服务器（对照 `addServer(config)`）。
     ///
-    /// 信任分三档，逐字对照 Java：
-    /// 1. 来源可信（非运行时手动添加）且尚未信任 → 自动记录 `{SCOPE}_RUNTIME`；
-    /// 2. 仍不可信 → 建连接对象但置 `NEEDS_AUTH`，不发起连接；
-    /// 3. 可信 → 建连 + 握手 + 注册工具。
+    /// Trust provenance is assigned only by the explicit configuration-source
+    /// loaders and registry activation path.  This generic runtime method never
+    /// auto-trusts from caller-controlled `config.scope`; an unapproved config
+    /// is installed as `NEEDS_AUTH` and no transport is opened.
     ///
     /// Java 用 `config.scope() != null` 区分「配置文件解析」与「手动添加」；
     /// zkcode 的 `scope` 是非可空枚举，故以 [`McpConfigScope::Dynamic`]
@@ -583,16 +691,6 @@ impl McpClientManager {
     ) -> Result<Arc<McpServerConnection>, ManagerError> {
         self.require_running()?;
         let generation = self.next_generation(&config.name);
-
-        if !self.approval.is_trusted(&config) && config.scope != McpConfigScope::Dynamic {
-            self.approval
-                .record_approval(&config, &format!("{}_RUNTIME", config.scope.as_str()));
-            tracing::info!(
-                server = %config.name,
-                scope = %config.scope,
-                "Auto-trusted runtime MCP server"
-            );
-        }
 
         if !self.approval.is_trusted(&config) {
             tracing::info!(server = %config.name, "MCP server not trusted, pending approval");
@@ -633,6 +731,7 @@ impl McpClientManager {
     /// 移除 MCP 服务器（对照 `removeServer(name)`）。
     pub async fn remove_server(&self, name: &str) -> bool {
         self.next_generation(name);
+        lock(&self.registry_owned_servers).remove(name);
         let connection = lock(&self.connections).remove(name);
         self.cancel_reconnect_work(name);
         let Some(connection) = connection else {
@@ -816,13 +915,13 @@ impl McpClientManager {
         let capability = self
             .registry
             .as_ref()
-            .and_then(|registry| registry.find_by_tool_name(connection.name(), &tool.name));
+            .and_then(|registry| registry.find_enabled_by_tool_name(connection.name(), &tool.name));
         let (enhanced_description, timeout_ms) =
             capability.as_ref().map_or((None, 0), |capability| {
                 (capability.description.clone(), capability.timeout_ms)
             });
         let mut adapter = McpToolAdapter::new(
-            format!("{}{}", tool_prefix(connection.name()), tool.name),
+            build_external_tool_name(connection.name(), &tool.name, capability.as_ref()),
             Some(tool.description.clone()),
             Some(tool.input_schema.clone()),
             Arc::clone(connection),
@@ -903,18 +1002,28 @@ impl McpClientManager {
         }));
     }
 
-    /// 频道权限判定（对照 `isToolAllowed`：空表放行；`"*"` 屏蔽整服务器）。
+    /// 工具放行判定（对照 `isToolAllowed`）：频道权限黑名单（空表放行；`"*"`
+    /// 屏蔽整服务器）叠加注册表 allowlist——注册表管理的服务器仅放行已启用
+    /// 条目，防止远端 `tools/list` 暴露未启用工具。
     fn is_tool_allowed(&self, server_name: &str, tool_name: &str) -> bool {
-        if self.channel_permissions.is_empty() {
-            return true;
+        let channel_blocked = !self.channel_permissions.is_empty()
+            && self
+                .channel_permissions
+                .get(server_name)
+                .is_some_and(|blocked| {
+                    blocked
+                        .iter()
+                        .any(|entry| entry == tool_name || entry == "*")
+                });
+        if channel_blocked {
+            return false;
         }
-        self.channel_permissions
-            .get(server_name)
-            .is_none_or(|blocked| {
-                !blocked
-                    .iter()
-                    .any(|entry| entry == tool_name || entry == "*")
-            })
+        self.registry.as_ref().is_none_or(|registry| {
+            !registry.has_definitions_for_server(server_name)
+                || registry
+                    .find_enabled_by_tool_name(server_name, tool_name)
+                    .is_some()
+        })
     }
 
     /// 发现所有已连接服务器的 prompt 模板（对照 `discoverPrompts()`）。
@@ -1324,7 +1433,10 @@ impl McpClientManager {
         self: &Arc<Self>,
         definition: &McpCapabilityDefinition,
     ) -> Result<Arc<McpServerConnection>, ManagerError> {
-        let config = Self::build_config_from_registry(definition);
+        validate_capability_destination(definition)
+            .await
+            .map_err(|error| ManagerError::UnsafeCapabilityEndpoint(error.to_string()))?;
+        let config = self.build_resolved_config_from_registry(definition);
         tracing::info!(
             capability = %definition.id,
             server = %config.name,
@@ -1334,36 +1446,158 @@ impl McpClientManager {
             self.approval.record_approval(&config, "REGISTRY");
             tracing::info!(capability = %definition.id, "Auto-trusted registry capability");
         }
-        self.add_server(config).await
+        let server_name = config.name.clone();
+        let connection = self.add_server(config).await?;
+        lock(&self.registry_owned_servers).insert(server_name);
+        Ok(connection)
     }
 
-    /// 由注册表条目构建 SSE 服务器配置（对照 `buildConfigFromRegistry`）。
+    /// 由注册表条目构建服务器配置（对照 `buildConfigFromRegistry`；传输类型取
+    /// [`McpCapabilityDefinition::resolved_transport_type`]，v1.0 条目保持 SSE）。
     ///
-    /// API Key 经 [`McpCapabilityDefinition::resolve_api_key`] 解析（Java 走
-    /// Spring `Environment`，zkcode 走环境变量 + `${VAR}` 展开，见
-    /// `capability_registry` 模块偏离 3）。
+    /// API Key 经受限 [`McpCredentialResolver`] 解析：注册表只能选择已知
+    /// `DashScope` provider 身份，不会把任意 `apiKeyConfig` 转换成环境变量名。
+    /// 端点 URL 同样过占位符展开，空白或
+    /// 未解析的整串 `${...}` 归 `None`（对照 Java v1.1 对 `endpointUrl` 的
+    /// `resolvePlaceholders` + 过滤）。
     #[must_use]
     pub fn build_config_from_registry(definition: &McpCapabilityDefinition) -> McpServerConfig {
+        let resolver = default_credential_resolver();
+        Self::build_config_from_registry_with(definition, resolver.as_ref())
+    }
+
+    /// Build a capability config with the host-injected credential resolver.
+    #[must_use]
+    pub fn build_resolved_config_from_registry(
+        &self,
+        definition: &McpCapabilityDefinition,
+    ) -> McpServerConfig {
+        Self::build_config_from_registry_with(definition, self.credential_resolver.as_ref())
+    }
+
+    fn build_config_from_registry_with(
+        definition: &McpCapabilityDefinition,
+        resolver: &dyn McpCredentialResolver,
+    ) -> McpServerConfig {
+        let endpoint_url = definition
+            .url
+            .as_deref()
+            .map(expand_env_placeholders)
+            .filter(|value| !is_blank_or_placeholder(value));
         let mut headers = BTreeMap::new();
-        if let Some(api_key) = definition.resolve_api_key() {
+        if let Some(api_key) = resolve_capability_credential(definition, resolver) {
             headers.insert("Authorization".to_owned(), format!("Bearer {api_key}"));
         }
         McpServerConfig {
             name: definition.extract_server_key(),
-            transport: McpTransportType::Sse,
+            transport: definition.resolved_transport_type(),
             command: None,
             args: Vec::new(),
             env: BTreeMap::new(),
-            url: definition.sse_url.clone(),
+            url: endpoint_url,
             headers,
             scope: McpConfigScope::Dynamic,
         }
     }
 }
 
-/// `mcp__<server>__` 前缀（对照 Java 各处的字符串拼接）。
+/// `mcp__<server>__` 前缀（对照 Java v1.1 `mcpToolPrefix`：服务器名先经
+/// [`safe_tool_name_component`] 安全化）。
 fn tool_prefix(server_name: &str) -> String {
-    format!("{MCP_TOOL_NAME_PREFIX}{server_name}__")
+    format!(
+        "{MCP_TOOL_NAME_PREFIX}{}__",
+        safe_tool_name_component(Some(server_name), "server")
+    )
+}
+
+/// 对外工具名长度上限（对照 Java `buildExternalToolName` 的 64——`OpenAI`
+/// 风格 function-name 约束）。
+const MAX_EXTERNAL_TOOL_NAME_LEN: usize = 64;
+
+/// 对外工具名（对照 Java `buildExternalToolName`）：必须兼容 `OpenAI` 风格的
+/// function-name 约束（`[A-Za-z0-9_-]`，≤64 字符）。远端原始工具名仍保存在
+/// [`McpToolAdapter`] 中，实际 `tools/call` 不受重命名影响。
+///
+/// 原始工具名不满足约束时依次回落：注册表条目 id（剥 `mcp_` 前缀）→
+/// `tool_<hash>`；拼接超长则截断并追加 `_<hash>` 后缀（候选名仅含 ASCII，
+/// 按字节截断即 Java 的 `substring` 语义）。
+fn build_external_tool_name(
+    server_name: &str,
+    original_tool_name: &str,
+    capability: Option<&McpCapabilityDefinition>,
+) -> String {
+    let safe_server = safe_tool_name_component(Some(server_name), "server");
+    // 对照 Java `matches("[A-Za-z0-9_-]+")`：整串合法才直接采用。
+    let mut safe_tool = Some(original_tool_name)
+        .filter(|name| {
+            !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        })
+        .map(str::to_owned);
+    if safe_tool.as_deref().is_none_or(java_is_blank) {
+        safe_tool = capability.map(|capability| {
+            capability
+                .id
+                .strip_prefix("mcp_")
+                .unwrap_or(&capability.id)
+                .to_owned()
+        });
+    }
+    let fallback = format!("tool_{}", short_name_hash(original_tool_name));
+    let safe_tool = safe_tool_name_component(safe_tool.as_deref(), &fallback);
+    let candidate = format!("{MCP_TOOL_NAME_PREFIX}{safe_server}__{safe_tool}");
+    if candidate.len() <= MAX_EXTERNAL_TOOL_NAME_LEN {
+        return candidate;
+    }
+    let suffix = format!("_{}", short_name_hash(&candidate));
+    format!(
+        "{}{suffix}",
+        &candidate[..MAX_EXTERNAL_TOOL_NAME_LEN - suffix.len()]
+    )
+}
+
+/// 对照 Java `safeToolNameComponent`：空值/空白 → fallback；非法字符替换为
+/// `_` 并折叠连续 `_`（`replaceAll("[^A-Za-z0-9_-]", "_").replaceAll("_+",
+/// "_")`）；替换后仍空白 → fallback。
+fn safe_tool_name_component(value: Option<&str>, fallback: &str) -> String {
+    let Some(value) = value.filter(|value| !java_is_blank(value)) else {
+        return fallback.to_owned();
+    };
+    let mut safe = String::with_capacity(value.len());
+    for c in value.chars() {
+        let mapped = if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+            c
+        } else {
+            '_'
+        };
+        if mapped == '_' && safe.ends_with('_') {
+            continue;
+        }
+        safe.push(mapped);
+    }
+    if java_is_blank(&safe) {
+        fallback.to_owned()
+    } else {
+        safe
+    }
+}
+
+/// 对照 Java `shortNameHash`：`String.format("%08x", value.hashCode())`——
+/// 负 hash 按 32 位补码输出（如 `Integer.MIN_VALUE` → `80000000`）。
+fn short_name_hash(value: &str) -> String {
+    format!("{:08x}", java_string_hashcode(value).cast_unsigned())
+}
+
+/// 对照 Java `String.hashCode()`：按 UTF-16 码元累加
+/// `s[0]·31^(n-1) + … + s[n-1]`，32 位有符号回绕。
+fn java_string_hashcode(value: &str) -> i32 {
+    let mut hash = 0i32;
+    for unit in value.encode_utf16() {
+        hash = hash.wrapping_mul(31).wrapping_add(i32::from(unit));
+    }
+    hash
 }
 
 /// 仅当映射中该键仍指向同一连接时移除（对照 `Map.remove(key, value)`）。
@@ -1595,6 +1829,21 @@ mod tests {
         manager.running.store(true, Ordering::Release);
     }
 
+    /// Tests that exercise post-connection behavior must explicitly establish
+    /// trust first. The production `add_server` path intentionally never
+    /// derives trust from caller-controlled scope.
+    async fn add_trusted(
+        manager: &Arc<McpClientManager>,
+        approval: &Arc<RecordingApproval>,
+        config: McpServerConfig,
+    ) -> Arc<McpServerConnection> {
+        approval.record_approval(&config, "TEST");
+        manager
+            .add_server(config)
+            .await
+            .expect("trusted test server")
+    }
+
     fn tool_def(name: &str) -> ToolDefinition {
         ToolDefinition {
             name: name.to_owned(),
@@ -1691,7 +1940,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn add_server_auto_trusts_config_file_scope_and_connects() {
+    async fn add_server_never_trusts_caller_claimed_config_file_scope() {
         let approval = RecordingApproval::shared();
         let sink = RecordingSink::shared();
         let manager = builder(&approval, &sink).build();
@@ -1704,9 +1953,9 @@ mod tests {
                 McpConfigScope::User,
             ))
             .await
-            .expect("可信配置应建连");
-        assert_eq!(connection.status(), McpConnectionStatus::Connected);
-        assert_eq!(approval.sources_for("srv"), vec!["USER_RUNTIME".to_owned()]);
+            .expect("untrusted config is retained for approval");
+        assert_eq!(connection.status(), McpConnectionStatus::NeedsAuth);
+        assert!(approval.sources_for("srv").is_empty());
         assert_eq!(manager.connection_count(), 1);
     }
 
@@ -1759,14 +2008,12 @@ mod tests {
         let sink = RecordingSink::shared();
         let manager = builder(&approval, &sink).build();
         running(&manager);
-        let connection = manager
-            .add_server(config_with(
-                "srv",
-                McpTransportType::Sdk,
-                McpConfigScope::User,
-            ))
-            .await
-            .expect("建连");
+        let connection = add_trusted(
+            &manager,
+            &approval,
+            config_with("srv", McpTransportType::Sdk, McpConfigScope::User),
+        )
+        .await;
 
         assert!(manager.remove_server("srv").await);
         assert_eq!(sink.unregistered(), vec!["mcp__srv__".to_owned()]);
@@ -1781,14 +2028,12 @@ mod tests {
         let sink = RecordingSink::shared();
         let manager = builder(&approval, &sink).build();
         running(&manager);
-        let connection = manager
-            .add_server(config_with(
-                "srv",
-                McpTransportType::Sdk,
-                McpConfigScope::User,
-            ))
-            .await
-            .expect("建连");
+        let connection = add_trusted(
+            &manager,
+            &approval,
+            config_with("srv", McpTransportType::Sdk, McpConfigScope::User),
+        )
+        .await;
         connection.set_tools(vec![tool_def("alpha")]);
 
         assert_eq!(
@@ -1929,23 +2174,19 @@ mod tests {
         let sink = RecordingSink::shared();
         let manager = builder(&approval, &sink).build();
         running(&manager);
-        let live = manager
-            .add_server(config_with(
-                "live",
-                McpTransportType::Sdk,
-                McpConfigScope::User,
-            ))
-            .await
-            .expect("建连");
+        let live = add_trusted(
+            &manager,
+            &approval,
+            config_with("live", McpTransportType::Sdk, McpConfigScope::User),
+        )
+        .await;
         live.set_tools(vec![tool_def("alpha")]);
-        let dead = manager
-            .add_server(config_with(
-                "dead",
-                McpTransportType::Sdk,
-                McpConfigScope::User,
-            ))
-            .await
-            .expect("建连");
+        let dead = add_trusted(
+            &manager,
+            &approval,
+            config_with("dead", McpTransportType::Sdk, McpConfigScope::User),
+        )
+        .await;
         dead.set_tools(vec![tool_def("beta")]);
         dead.set_status(McpConnectionStatus::Failed);
 
@@ -1966,7 +2207,7 @@ mod tests {
         ));
         let mut definition = McpCapabilityDefinition::new("mcp_alpha");
         definition.tool_name = Some("alpha".to_owned());
-        definition.sse_url = Some("http://127.0.0.1:1/srv/sse".to_owned());
+        definition.url = Some("http://127.0.0.1:1/srv/sse".to_owned());
         definition.description = Some("registry description".to_owned());
         definition.timeout_ms = 7_000;
         definition.enabled = true;
@@ -1976,14 +2217,12 @@ mod tests {
             .registry(Arc::clone(&registry))
             .build();
         running(&manager);
-        let connection = manager
-            .add_server(config_with(
-                "srv",
-                McpTransportType::Sdk,
-                McpConfigScope::User,
-            ))
-            .await
-            .expect("建连");
+        let connection = add_trusted(
+            &manager,
+            &approval,
+            config_with("srv", McpTransportType::Sdk, McpConfigScope::User),
+        )
+        .await;
         connection.set_tools(vec![tool_def("alpha")]);
 
         let tools = manager.discover_and_wrap_tools();
@@ -2000,14 +2239,12 @@ mod tests {
         let sink = RecordingSink::shared();
         let manager = builder(&approval, &sink).build();
         running(&manager);
-        let connection = manager
-            .add_server(config_with(
-                "srv",
-                McpTransportType::Sdk,
-                McpConfigScope::User,
-            ))
-            .await
-            .expect("建连");
+        let connection = add_trusted(
+            &manager,
+            &approval,
+            config_with("srv", McpTransportType::Sdk, McpConfigScope::User),
+        )
+        .await;
 
         manager.health_check().await;
 
@@ -2024,7 +2261,7 @@ mod tests {
         running(&manager);
         let mut config = config_with("srv", McpTransportType::Stdio, McpConfigScope::Local);
         config.command = Some("/nonexistent/zkmcp-test-binary".to_owned());
-        let connection = manager.add_server(config).await.expect("落连接对象");
+        let connection = add_trusted(&manager, &approval, config).await;
         assert_eq!(connection.status(), McpConnectionStatus::Failed);
 
         manager.health_check().await;
@@ -2038,14 +2275,12 @@ mod tests {
         let sink = RecordingSink::shared();
         let manager = builder(&approval, &sink).build();
         running(&manager);
-        let connection = manager
-            .add_server(config_with(
-                "srv",
-                McpTransportType::Sdk,
-                McpConfigScope::User,
-            ))
-            .await
-            .expect("建连");
+        let connection = add_trusted(
+            &manager,
+            &approval,
+            config_with("srv", McpTransportType::Sdk, McpConfigScope::User),
+        )
+        .await;
         connection.set_transport_for_test(Arc::new(StubTransport {
             connected: true,
             ping: true,
@@ -2067,14 +2302,12 @@ mod tests {
             .health_observer(Arc::clone(&observer) as Arc<dyn McpHealthObserver>)
             .build();
         running(&manager);
-        let connection = manager
-            .add_server(config_with(
-                "srv",
-                McpTransportType::Sdk,
-                McpConfigScope::User,
-            ))
-            .await
-            .expect("建连");
+        let connection = add_trusted(
+            &manager,
+            &approval,
+            config_with("srv", McpTransportType::Sdk, McpConfigScope::User),
+        )
+        .await;
         connection.set_transport_for_test(Arc::new(StubTransport {
             connected: true,
             ping: false,
@@ -2128,14 +2361,12 @@ mod tests {
             .health_observer(Arc::clone(&observer) as Arc<dyn McpHealthObserver>)
             .build();
         running(&manager);
-        let connection = manager
-            .add_server(config_with(
-                "srv",
-                McpTransportType::Sdk,
-                McpConfigScope::User,
-            ))
-            .await
-            .expect("建连");
+        let connection = add_trusted(
+            &manager,
+            &approval,
+            config_with("srv", McpTransportType::Sdk, McpConfigScope::User),
+        )
+        .await;
 
         // CONNECTED 但无传输 → is_alive() 为假 → FAILED → 调度延迟重连。
         manager.health_check().await;
@@ -2245,17 +2476,21 @@ mod tests {
     #[test]
     fn build_config_from_registry_maps_sse_url_and_authorization() {
         let mut definition = McpCapabilityDefinition::new("mcp_alpha");
-        definition.sse_url = Some("https://mcp.example.com/registry-server/sse".to_owned());
-        definition.api_key_default = Some("secret-key".to_owned());
+        definition.url =
+            Some("https://dashscope.aliyuncs.com/api/v1/mcps/registry-server/sse".to_owned());
+        definition.api_key_config = Some(crate::security::DASHSCOPE_API_KEY_CONFIG.to_owned());
 
-        let config = McpClientManager::build_config_from_registry(&definition);
+        let resolver = |provider: &str| {
+            (provider == crate::security::DASHSCOPE_PROVIDER).then(|| "secret-key".to_owned())
+        };
+        let config = McpClientManager::build_config_from_registry_with(&definition, &resolver);
 
         assert_eq!(config.name, "registry-server");
         assert_eq!(config.transport, McpTransportType::Sse);
         assert_eq!(config.scope, McpConfigScope::Dynamic);
         assert_eq!(
             config.url.as_deref(),
-            Some("https://mcp.example.com/registry-server/sse")
+            Some("https://dashscope.aliyuncs.com/api/v1/mcps/registry-server/sse")
         );
         assert_eq!(
             config.headers.get("Authorization").map(String::as_str),
@@ -2268,34 +2503,91 @@ mod tests {
     #[test]
     fn build_config_from_registry_omits_authorization_without_key() {
         let mut definition = McpCapabilityDefinition::new("mcp_alpha");
-        definition.sse_url = Some("https://mcp.example.com/registry-server/sse".to_owned());
+        definition.url = Some("https://mcp.example.com/registry-server/sse".to_owned());
 
         let config = McpClientManager::build_config_from_registry(&definition);
         assert!(config.headers.is_empty());
     }
 
+    #[test]
+    fn injected_provider_key_becomes_the_next_registry_authorization_header() {
+        let keys = Arc::new(Mutex::new(BTreeMap::<String, String>::new()));
+        let resolver_keys = Arc::clone(&keys);
+        let resolver: Arc<dyn McpCredentialResolver> =
+            Arc::new(move |provider: &str| lock(&resolver_keys).get(provider).cloned());
+        let approval = RecordingApproval::shared();
+        let sink = RecordingSink::shared();
+        let manager = builder(&approval, &sink)
+            .credential_resolver(resolver)
+            .build();
+        let mut definition = McpCapabilityDefinition::new("mcp_search");
+        definition.url =
+            Some("https://dashscope.aliyuncs.com/api/v1/mcps/zhipu-websearch/sse".to_owned());
+        definition.api_key_config = Some(crate::security::DASHSCOPE_API_KEY_CONFIG.to_owned());
+
+        let before = manager.build_resolved_config_from_registry(&definition);
+        assert!(!before.headers.contains_key("Authorization"));
+
+        lock(&keys).insert(
+            crate::security::DASHSCOPE_TOKEN_PLAN_PROVIDER.to_owned(),
+            "new-subscription-key".to_owned(),
+        );
+        let after = manager.build_resolved_config_from_registry(&definition);
+        assert_eq!(
+            after.headers.get("Authorization").map(String::as_str),
+            Some("Bearer new-subscription-key")
+        );
+    }
+
     #[tokio::test]
-    async fn enable_from_registry_records_registry_approval() {
+    async fn credential_refresh_never_removes_same_named_manual_server() {
+        let approval = RecordingApproval::shared();
+        let sink = RecordingSink::shared();
+        let registry = Arc::new(McpCapabilityRegistry::new(
+            std::env::temp_dir().join("zkmcp-refresh-manual-preserved.json"),
+        ));
+        let mut definition = McpCapabilityDefinition::new("mcp_search");
+        definition.server_key = Some("shared-name".to_owned());
+        definition.url =
+            Some("https://dashscope.aliyuncs.com/api/v1/mcps/zhipu-websearch/sse".to_owned());
+        definition.api_key_config = Some(crate::security::DASHSCOPE_API_KEY_CONFIG.to_owned());
+        definition.enabled = true;
+        registry.add_capability(definition).expect("add capability");
+        let manager = builder(&approval, &sink)
+            .registry(registry)
+            .credential_resolver(Arc::new(|_: &str| None))
+            .build();
+        running(&manager);
+
+        let manual = config_with("shared-name", McpTransportType::Sdk, McpConfigScope::Local);
+        let connection = manager.add_server(manual).await.expect("manual server");
+        manager.refresh_registry_credentials().await;
+
+        let preserved = manager
+            .get_connection("shared-name")
+            .expect("manual server must remain");
+        assert!(Arc::ptr_eq(&connection, &preserved));
+        assert!(lock(&manager.registry_owned_servers).is_empty());
+    }
+
+    #[tokio::test]
+    async fn enable_from_registry_rejects_loopback_before_connect_or_approval() {
         let approval = RecordingApproval::shared();
         let sink = RecordingSink::shared();
         let manager = builder(&approval, &sink).build();
         running(&manager);
         let mut definition = McpCapabilityDefinition::new("mcp_alpha");
         // 127.0.0.1:1 立即 ECONNREFUSED —— 不产生真实外网访问。
-        definition.sse_url = Some("http://127.0.0.1:1/registry-server/sse".to_owned());
+        definition.url = Some("http://127.0.0.1:1/registry-server/sse".to_owned());
         definition.enabled = true;
 
-        let connection = manager
-            .enable_from_registry(&definition)
-            .await
-            .expect("注册表条目应落连接对象");
+        let Err(error) = manager.enable_from_registry(&definition).await else {
+            panic!("loopback capability must be rejected");
+        };
 
-        assert_eq!(connection.name(), "registry-server");
-        assert_eq!(connection.status(), McpConnectionStatus::Failed);
-        assert_eq!(
-            approval.sources_for("registry-server"),
-            vec!["REGISTRY".to_owned()]
-        );
+        assert!(matches!(error, ManagerError::UnsafeCapabilityEndpoint(_)));
+        assert!(manager.get_connection("registry-server").is_none());
+        assert!(approval.sources_for("registry-server").is_empty());
     }
 
     // ===== Roots / prompts =====
@@ -2358,5 +2650,135 @@ mod tests {
             .expect("建连");
 
         assert!(manager.discover_prompts().await.is_empty());
+    }
+
+    // ===== 对外工具名与注册表 allowlist（v1.1）=====
+
+    #[test]
+    fn java_string_hashcode_matches_jdk_golden_values() {
+        // 黄金值来自 JDK 21 `String.hashCode()` 实测对拍。
+        assert_eq!(java_string_hashcode(""), 0);
+        assert_eq!(java_string_hashcode("hello"), 99_162_322);
+        assert_eq!(java_string_hashcode("zkcode-mcp"), 801_921_003);
+        assert_eq!(java_string_hashcode("图像编辑"), 684_371_084);
+        // 32 位有符号回绕：该串的 hashCode 恰为 Integer.MIN_VALUE。
+        assert_eq!(java_string_hashcode("polygenelubricants"), i32::MIN);
+        assert_eq!(short_name_hash("hello"), "05e918d2");
+        assert_eq!(short_name_hash(""), "00000000");
+        assert_eq!(short_name_hash("polygenelubricants"), "80000000");
+    }
+
+    #[test]
+    fn external_tool_name_sanitizes_and_falls_back() {
+        // 合法名原样拼接。
+        assert_eq!(
+            build_external_tool_name("srv", "tool", None),
+            "mcp__srv__tool"
+        );
+        // 服务器名非法字符替换为 `_`（对照 Java 实测：尾随 `_` 与分隔符相邻）。
+        assert_eq!(
+            build_external_tool_name("my server!", "tool", None),
+            "mcp__my_server___tool"
+        );
+        // 非法工具名回落注册表条目 id（剥 `mcp_` 前缀）。
+        let capability = McpCapabilityDefinition::new("mcp_image_edit");
+        assert_eq!(
+            build_external_tool_name("srv", "图像编辑", Some(&capability)),
+            "mcp__srv__image_edit"
+        );
+        // 无注册表条目时回落 `tool_<hash>`（hash 为原始名的 Java hashCode）。
+        assert_eq!(
+            build_external_tool_name("srv", "图像编辑", None),
+            "mcp__srv__tool_28caac8c"
+        );
+    }
+
+    #[test]
+    fn external_tool_name_truncates_with_hash_suffix() {
+        let long_tool = "a".repeat(60);
+        let renamed = build_external_tool_name("dashscope-media", &long_tool, None);
+        assert_eq!(renamed.len(), MAX_EXTERNAL_TOOL_NAME_LEN);
+        // 黄金值来自 JDK 21 对拍：候选名 82 字符 → 截断 55 + `_` + 8 位 hash。
+        assert_eq!(
+            renamed,
+            format!("mcp__dashscope-media__{}_8c74417f", "a".repeat(33))
+        );
+    }
+
+    #[test]
+    fn tool_prefix_sanitizes_server_name() {
+        assert_eq!(tool_prefix("my server!"), "mcp__my_server___");
+    }
+
+    #[tokio::test]
+    async fn registry_allowlist_blocks_unlisted_tools() {
+        let approval = RecordingApproval::shared();
+        let sink = RecordingSink::shared();
+        let registry = Arc::new(McpCapabilityRegistry::new(
+            std::env::temp_dir().join("zkmcp-manager-allowlist-absent.json"),
+        ));
+        let mut listed = McpCapabilityDefinition::new("mcp_alpha");
+        listed.tool_name = Some("alpha".to_owned());
+        listed.server_key = Some("srv".to_owned());
+        listed.enabled = true;
+        registry.add_capability(listed).expect("注册表条目写入");
+        let mut disabled = McpCapabilityDefinition::new("mcp_beta");
+        disabled.tool_name = Some("beta".to_owned());
+        disabled.server_key = Some("srv".to_owned());
+        registry.add_capability(disabled).expect("注册表条目写入");
+
+        let manager = builder(&approval, &sink)
+            .registry(Arc::clone(&registry))
+            .build();
+        // 注册表管理的服务器：仅放行已启用条目。
+        assert!(manager.is_tool_allowed("srv", "alpha"));
+        assert!(!manager.is_tool_allowed("srv", "beta"));
+        assert!(!manager.is_tool_allowed("srv", "gamma"));
+        // 非注册表管理的服务器不受 allowlist 影响。
+        assert!(manager.is_tool_allowed("other", "anything"));
+    }
+
+    #[tokio::test]
+    async fn registry_activation_skips_unconfigured_servers() {
+        let approval = RecordingApproval::shared();
+        let sink = RecordingSink::shared();
+        let registry = Arc::new(McpCapabilityRegistry::new(
+            std::env::temp_dir().join("zkmcp-manager-skip-absent.json"),
+        ));
+        // 无端点 URL → 跳过。
+        let mut no_url = McpCapabilityDefinition::new("mcp_no_url");
+        no_url.server_key = Some("no-url-srv".to_owned());
+        no_url.enabled = true;
+        registry.add_capability(no_url).expect("注册表条目写入");
+        // 声明了 API Key 需求但未配置（默认值是未解析的整串占位）→ 跳过。
+        let mut no_key = McpCapabilityDefinition::new("mcp_no_key");
+        no_key.url = Some("http://127.0.0.1:1/no-key-srv/sse".to_owned());
+        no_key.api_key_default = Some("${__ZK_MCP_TEST_UNSET_KEY__}".to_owned());
+        no_key.enabled = true;
+        registry.add_capability(no_key).expect("注册表条目写入");
+
+        let manager = builder(&approval, &sink)
+            .registry(Arc::clone(&registry))
+            .build();
+        running(&manager);
+        manager.activate_registry_capabilities().await;
+
+        assert!(manager.get_connection("no-url-srv").is_none());
+        assert!(manager.get_connection("no-key-srv").is_none());
+        assert!(approval.sources_for("no-url-srv").is_empty());
+        assert!(approval.sources_for("no-key-srv").is_empty());
+    }
+
+    #[test]
+    fn build_config_from_registry_resolves_transport_and_filters_placeholder_url() {
+        let mut definition = McpCapabilityDefinition::new("mcp_alpha");
+        definition.server_key = Some("srv".to_owned());
+        definition.url = Some("${__ZK_MCP_TEST_UNSET_URL__}".to_owned());
+        definition.transport_type = Some(McpTransportType::Http);
+
+        let config = McpClientManager::build_config_from_registry(&definition);
+
+        assert_eq!(config.transport, McpTransportType::Http);
+        assert!(config.url.is_none());
     }
 }

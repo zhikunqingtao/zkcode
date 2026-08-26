@@ -6,7 +6,7 @@ use std::sync::Arc;
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
 use zk_db::Db;
-use zk_llm::ProviderRegistry;
+use zk_llm::SwappableProvider;
 use zk_tools::{AgentInvocation, AgentToolBackend, Tool, ToolContext, ToolOutput};
 
 use super::SkillRegistry;
@@ -18,7 +18,7 @@ const MAX_SKILL_TOKEN_BUDGET: usize = 32 * 1024;
 /// Skill registry adapter exposed to the LLM tool catalog.
 pub struct SkillTool {
     skills: Arc<SkillRegistry>,
-    providers: Arc<ProviderRegistry>,
+    providers: Arc<SwappableProvider>,
     db: Db,
     known_tools: BTreeSet<String>,
     fork_backend: Option<Arc<dyn AgentToolBackend>>,
@@ -39,7 +39,7 @@ impl SkillTool {
     #[must_use]
     pub fn new(
         skills: Arc<SkillRegistry>,
-        providers: Arc<ProviderRegistry>,
+        providers: Arc<SwappableProvider>,
         db: Db,
         known_tools: impl IntoIterator<Item = String>,
         fork_backend: Option<Arc<dyn AgentToolBackend>>,
@@ -60,17 +60,14 @@ impl SkillTool {
         if requested.eq_ignore_ascii_case("inherit") {
             return Ok(None);
         }
+        let providers = self.providers.load();
         let resolved = if matches!(requested, "default" | "premium") {
-            self.providers.default_model()
+            providers.default_model()
         } else {
             requested
         };
-        if !self.providers.models().is_empty()
-            && !self
-                .providers
-                .models()
-                .iter()
-                .any(|model| model == resolved)
+        if !providers.models().is_empty()
+            && !providers.models().iter().any(|model| model == resolved)
         {
             return Err(error(
                 "SKILL_MODEL_INVALID",
@@ -277,6 +274,7 @@ mod tests {
 
     use super::*;
     use crate::skill::{SkillDefinition, SkillSource};
+    use zk_llm::ProviderRegistry;
 
     fn context() -> ToolContext {
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -293,7 +291,9 @@ mod tests {
         ));
         SkillTool::new(
             registry,
-            Arc::new(ProviderRegistry::new().with_default_model("model-a")),
+            Arc::new(SwappableProvider::new(
+                ProviderRegistry::new().with_default_model("model-a"),
+            )),
             Db::open_in_memory().expect("db"),
             tools.iter().map(|tool| (*tool).to_owned()),
             None,
@@ -390,7 +390,9 @@ mod tests {
         ));
         let tool = SkillTool::new(
             registry,
-            Arc::new(ProviderRegistry::new().with_default_model("model-a")),
+            Arc::new(SwappableProvider::new(
+                ProviderRegistry::new().with_default_model("model-a"),
+            )),
             db.clone(),
             ["Skill".to_owned()],
             None,
@@ -427,7 +429,9 @@ mod tests {
         let backend = Arc::new(RecordingAgentBackend::default());
         let tool = SkillTool::new(
             registry,
-            Arc::new(ProviderRegistry::new().with_default_model("model-a")),
+            Arc::new(SwappableProvider::new(
+                ProviderRegistry::new().with_default_model("model-a"),
+            )),
             Db::open_in_memory().expect("db"),
             ["Read".to_owned(), "Skill".to_owned()],
             Some(Arc::clone(&backend) as Arc<dyn AgentToolBackend>),

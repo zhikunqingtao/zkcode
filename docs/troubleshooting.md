@@ -97,7 +97,7 @@ python-service/.venv/bin/python -m playwright install chromium
 ### 端口被占用
 
 ```bash
-lsof -nP -iTCP:8081 -sTCP:LISTEN
+lsof -nP -iTCP:8082 -sTCP:LISTEN
 lsof -nP -iTCP:5273 -sTCP:LISTEN
 ```
 

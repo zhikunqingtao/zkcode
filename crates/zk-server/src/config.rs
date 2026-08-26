@@ -4,10 +4,11 @@
 //!
 //! | 变量 | 默认 | 语义 |
 //! |---|---|---|
-//! | `ZK_PORT` | `8081` | 监听端口（开发轨 8081；验收轨以 `ZK_PORT=8080` 切换，U3） |
+//! | `ZK_PORT` | `8082` | 监听端口（开发轨 8082；验收轨以 `ZK_PORT=8080` 切换，U3） |
 //! | `ZK_HOST` | `127.0.0.1` | 监听地址（macOS 本地 Beta 仅接受 loopback IP） |
 //! | `ZK_DB_PATH` | `.zk/data.db` | `SQLite` 库路径（D6，相对启动目录） |
-//! | `ZK_DEFAULT_MODEL` | `qwen3.7-max` | 创建会话缺省模型（对齐旧 `LlmProviderRegistry.getDefaultModel` 兜底值） |
+//! | `ZK_DEMO_CREDENTIAL_DB` | `configuration/bootstrap/demo-credentials.db` | 公开、只读的首次启动凭据种子；不是用户运行库 |
+//! | `ZK_DEFAULT_MODEL` | `qwen3.8-max` | 创建会话缺省模型 |
 //! | `ZK_AUTH_MODE` | `localhost` | 鉴权模式（`localhost` / `lan_token`，对齐旧 `auth.mode`；只影响 `/api/auth/*` 上报与 token 下发，准入判定恒走 `access_guard`） |
 //! | `ZK_STATIC_DIR` | 自动探测 `resources/static` | 静态资源根（`remote.html`；旧 `src/main/resources/static`） |
 //! | `ZK_CORS_ALLOWED_ORIGINS` | 空 | 追加 CORS 白名单（逗号分隔，对齐旧 `CORS_ALLOWED_ORIGINS`） |
@@ -52,7 +53,7 @@ use zk_core::FeatureFlags;
 use zk_core::feature_flags;
 
 /// 开发轨默认端口（U3：与旧系统 8080 并行可跑，便于对照调试）。
-pub const DEFAULT_PORT: u16 = 8081;
+pub const DEFAULT_PORT: u16 = 8082;
 
 /// macOS 本地 Beta 的默认且受支持监听地址：loopback。
 pub const DEFAULT_HOST: &str = "127.0.0.1";
@@ -82,10 +83,12 @@ pub const DEFAULT_PYTHON_HEALTH_CHECK_INTERVAL_MS: u64 = 30_000;
 pub struct Config {
     /// 监听地址（默认 [`DEFAULT_HOST`]：仅本机可达）。
     pub host: String,
-    /// 监听端口（默认 8081 开发轨；验收轨经 `ZK_PORT=8080` 切换）。
+    /// 监听端口（默认 8082 开发轨；验收轨经 `ZK_PORT=8080` 切换）。
     pub port: u16,
     /// `SQLite` 库文件路径（D6 默认 `zkcode/.zk/data.db`，此处以相对路径表达）。
     pub db_path: PathBuf,
+    /// 仓库随附的只读公共 demo 凭据种子库。它只用于清洁首次启动，绝不是用户库。
+    pub demo_credentials_path: PathBuf,
     /// 会话快照目录。测试装配为 `None`，由 `AppState` 分配独占临时目录。
     pub snapshot_dir: Option<PathBuf>,
     /// 创建会话的缺省模型。
@@ -163,6 +166,14 @@ pub struct Config {
     /// `None` = 未配置（`ZK_ADMIN_PASSWORD` 缺失 / 空白）——此时
     /// `/api/admin/login` 回 503、`/api/admin/status` 的 `configured=false`。
     pub admin_password_hash: Option<String>,
+    /// OSS endpoint（旧 `zhikuncode.oss.endpoint`；本端仅用于剪贴板图片 URL
+    /// 信任校验——OSS 发布链路其余能力不在迁移范围）。`None` = 未配置，url
+    /// 附件一律拒绝（fail-closed）。
+    pub oss_endpoint: Option<String>,
+    /// OSS bucket（旧 `zhikuncode.oss.bucket`）。
+    pub oss_bucket: Option<String>,
+    /// OSS 对象 key 前缀（旧 `zhikuncode.oss.prefix`，缺省 `zhikuncode-artifacts`）。
+    pub oss_prefix: String,
 }
 
 impl Config {
@@ -196,13 +207,17 @@ impl Config {
             host,
             port,
             db_path: PathBuf::from(env_or("ZK_DB_PATH", ".zk/data.db")),
+            demo_credentials_path: PathBuf::from(env_or(
+                "ZK_DEMO_CREDENTIAL_DB",
+                "configuration/bootstrap/demo-credentials.db",
+            )),
             snapshot_dir: Some(PathBuf::from(env_or(
                 "ZK_SNAPSHOT_DIR",
                 &zk_core::paths::user_config_dir()
                     .join(zk_engine::SNAPSHOT_DIR_NAME)
                     .to_string_lossy(),
             ))),
-            default_model: env_or("ZK_DEFAULT_MODEL", "qwen3.7-max"),
+            default_model: env_or("ZK_DEFAULT_MODEL", "qwen3.8-max"),
             auth_mode: env_or("ZK_AUTH_MODE", AUTH_MODE_LOCALHOST),
             access_token_path: Some(crate::access_token::default_token_path()),
             static_dir: PathBuf::from(env_or("ZK_STATIC_DIR", &default_static_dir())),
@@ -258,6 +273,13 @@ impl Config {
                 .ok()
                 .filter(|value| !value.trim().is_empty())
                 .map(|value| crate::api::admin::sha256_hex(&value)),
+            oss_endpoint: std::env::var("ZK_OSS_ENDPOINT")
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
+            oss_bucket: std::env::var("ZK_OSS_BUCKET")
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
+            oss_prefix: env_or("ZK_OSS_PREFIX", "zhikuncode-artifacts"),
         })
     }
 
@@ -277,8 +299,9 @@ impl Config {
             host: "127.0.0.1".into(),
             port: DEFAULT_PORT,
             db_path: PathBuf::from(":memory:"),
+            demo_credentials_path: PathBuf::from("configuration/bootstrap/demo-credentials.db"),
             snapshot_dir: None,
-            default_model: "qwen3.7-max".into(),
+            default_model: "qwen3.8-max".into(),
             auth_mode: AUTH_MODE_LOCALHOST.into(),
             // 测试装配不落盘：token 只存活于进程内，绝不污染用户 `~/.zk/`。
             access_token_path: None,
@@ -317,6 +340,10 @@ impl Config {
             mcp_trust_file: None,
             // 测试装配不配置 admin 密码：`/api/admin/login` 恒 503，不依赖宿主环境。
             admin_password_hash: None,
+            // 测试装配不配置 OSS：url 附件信任校验恒拒绝（fail-closed）。
+            oss_endpoint: None,
+            oss_bucket: None,
+            oss_prefix: "zhikuncode-artifacts".into(),
         }
     }
 }

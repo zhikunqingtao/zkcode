@@ -154,19 +154,64 @@ impl ApprovalPort for TrustFileApproval {
     }
 }
 
-/// 配置指纹（旧 `computeConfigHash`：`type|command|args(逗号连接)|url` 的
-/// SHA-256 小写 hex；`null` 字段以空串参与，摘要异常时旧源返回 `""`——Rust 的
-/// `Sha256` 无失败路径，故恒得指纹）。
+/// Security-sensitive configuration fingerprint.
+///
+/// Every executable or credential-bearing field participates, including
+/// `scope`, environment variables and HTTP headers.  Fields use length-prefix
+/// framing rather than separators so an attacker cannot manufacture an
+/// ambiguous byte stream.  Changing any field invalidates prior approval.
 #[must_use]
 pub fn compute_config_hash(config: &McpServerConfig) -> String {
-    let material = format!(
-        "{}|{}|{}|{}",
-        config.transport.as_str(),
-        config.command.as_deref().unwrap_or_default(),
-        config.args.join(","),
-        config.url.as_deref().unwrap_or_default()
+    fn field(hasher: &mut Sha256, value: &[u8]) {
+        hasher.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
+        hasher.update(value);
+    }
+    fn optional_field(hasher: &mut Sha256, value: Option<&str>) {
+        match value {
+            Some(value) => {
+                hasher.update([1]);
+                field(hasher, value.as_bytes());
+            }
+            None => hasher.update([0]),
+        }
+    }
+
+    let mut hasher = Sha256::new();
+    field(&mut hasher, config.name.as_bytes());
+    field(&mut hasher, config.transport.as_str().as_bytes());
+    optional_field(&mut hasher, config.command.as_deref());
+    field(
+        &mut hasher,
+        &u64::try_from(config.args.len())
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
     );
-    let digest = Sha256::digest(material.as_bytes());
+    for arg in &config.args {
+        field(&mut hasher, arg.as_bytes());
+    }
+    field(
+        &mut hasher,
+        &u64::try_from(config.env.len())
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
+    for (name, value) in &config.env {
+        field(&mut hasher, name.as_bytes());
+        field(&mut hasher, value.as_bytes());
+    }
+    optional_field(&mut hasher, config.url.as_deref());
+    field(
+        &mut hasher,
+        &u64::try_from(config.headers.len())
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
+    for (name, value) in &config.headers {
+        field(&mut hasher, name.as_bytes());
+        field(&mut hasher, value.as_bytes());
+    }
+    field(&mut hasher, config.scope.as_str().as_bytes());
+    let digest = hasher.finalize();
     digest
         .iter()
         .fold(String::with_capacity(64), |mut hex, byte| {
@@ -514,18 +559,26 @@ mod tests {
         dir.join(TRUST_FILE_NAME)
     }
 
-    /// 指纹取 `type|command|args|url` 四段：改任一段即换指纹，改无关段
-    /// （env / headers / scope）则不变——旧 `computeConfigHash` 的取材范围。
+    /// All executable and credential-bearing fields participate in approval.
     #[test]
-    fn config_hash_covers_exactly_four_fields() {
+    fn config_hash_covers_scope_environment_and_headers() {
         let base = stdio_config("weather", "npx");
         let hash = compute_config_hash(&base);
         assert_eq!(hash.len(), 64, "SHA-256 小写 hex");
 
-        let mut same_scope = base.clone();
-        same_scope.scope = McpConfigScope::Project;
-        same_scope.env.insert("K".to_owned(), "V".to_owned());
-        assert_eq!(compute_config_hash(&same_scope), hash, "env/scope 不入指纹");
+        let mut other_scope = base.clone();
+        other_scope.scope = McpConfigScope::Project;
+        assert_ne!(compute_config_hash(&other_scope), hash);
+
+        let mut other_env = base.clone();
+        other_env.env.insert("K".to_owned(), "V".to_owned());
+        assert_ne!(compute_config_hash(&other_env), hash);
+
+        let mut other_header = base.clone();
+        other_header
+            .headers
+            .insert("Authorization".to_owned(), "Bearer changed".to_owned());
+        assert_ne!(compute_config_hash(&other_header), hash);
 
         let mut other_command = base.clone();
         other_command.command = Some("uvx".to_owned());

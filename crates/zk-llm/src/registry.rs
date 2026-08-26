@@ -754,7 +754,7 @@ mod tests {
             "kimi-k3".into(),
             "qwen3.7-max".into(),
             "deepseek-chat".into(),
-            "glm-5.2".into(),
+            "glm-5.3".into(),
         ]);
         // 请求模型在链中 → 取其后继（含自身共 MAX_FALLBACK_DEPTH 个）。
         assert_eq!(
@@ -763,7 +763,7 @@ mod tests {
         );
         assert_eq!(
             registry.candidate_models("deepseek-chat"),
-            ["deepseek-chat", "glm-5.2"]
+            ["deepseek-chat", "glm-5.3"]
         );
         // 请求模型不在链中 → 接整条链（同样截断）。
         assert_eq!(

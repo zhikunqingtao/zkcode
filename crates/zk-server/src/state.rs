@@ -1,6 +1,7 @@
 //! 应用状态——handler 层共享句柄（`Db` + 配置 + 启动时刻）。
 
-use std::sync::{Arc, OnceLock};
+use std::collections::BTreeMap;
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Instant;
 
 use zk_core::FeatureFlags;
@@ -10,7 +11,7 @@ use zk_engine::{
     HookService, JsonlObservabilitySink, MemdirStore, ObservabilityRecorder, PluginManager,
     SessionSnapshotService,
 };
-use zk_llm::ProviderRegistry;
+use zk_llm::{ProviderRegistry, SwappableProvider};
 use zk_mcp::{ApprovalPort, McpCapabilityRegistry, McpClientManager};
 use zk_tools::ToolRegistry;
 
@@ -52,7 +53,12 @@ pub struct AppState {
     pub hub: WsHub,
     /// 多提供商注册表（2.7：`GET /api/models` 动态聚合数据源 + 引擎路由/熔断/
     /// 降级链承载；自身即 `ChatProvider`，克隆共享同一实例）。
-    pub providers: Arc<ProviderRegistry>,
+    pub providers: Arc<SwappableProvider>,
+    /// DB-backed provider credentials mirrored in memory for trusted local
+    /// integrations such as the built-in MCP web-search client.  The map is
+    /// never serialized into responses or logs; updates happen only after the
+    /// corresponding runtime DB write and provider hot-swap have succeeded.
+    llm_provider_keys: Arc<RwLock<BTreeMap<String, String>>>,
     /// Python 侧车 HTTP 客户端（2.6；UDS 传输 + 能力缓存，恒存在——侧车未
     /// 启动时所有调用走能力域门控优雅降级，不 panic 不阻断核心对话）。
     pub python: Arc<PythonClient>,
@@ -183,9 +189,109 @@ impl AppState {
     /// 注入多提供商注册表（main 启动序列：先装配 registry 再交给 handler 层，
     /// `GET /api/models` 与引擎共用同一实例）。
     #[must_use]
-    pub fn with_providers(mut self, providers: Arc<ProviderRegistry>) -> Self {
-        self.providers = providers;
+    pub fn with_providers(mut self, providers: ProviderRegistry) -> Self {
+        self.providers = Arc::new(SwappableProvider::new(providers));
         self
+    }
+
+    /// 从 DB 读取 LLM 密钥并热替换 provider 注册表（启动时合并 DB 密钥）。
+    ///
+    /// 读取 `config` 表 `llm_provider_keys` 行，解析为 `BTreeMap<String, String>`。
+    /// 若运行时 DB、provider 环境变量和 Phase 1 环境变量都没有密钥（首次
+    /// 启动），从仓库随附的、只读且可公开提取的 demo 种子库复制凭据到私有
+    /// 运行时 DB。此后合并环境变量密钥后重建 registry 并 `swap`。种子读取
+    /// 失败只记日志，不伪造或回退到源码常量。
+    ///
+    /// 共享合并逻辑见 [`crate::api::llm_keys::build_merged_provider_configs`]。
+    pub async fn merge_db_llm_keys(&self) {
+        let stored = match self.db.get_config_value("llm_provider_keys").await {
+            Ok(value) => value,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "failed to read llm_provider_keys; keeping env-based providers"
+                );
+                return;
+            }
+        };
+        let mut db_keys: BTreeMap<String, String> = match stored {
+            Some(json) => match serde_json::from_str(&json) {
+                Ok(keys) => keys,
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        "stored llm provider keys are invalid; preserving current providers"
+                    );
+                    return;
+                }
+            },
+            None => BTreeMap::new(),
+        };
+        let env_configs = zk_llm::provider_configs_from_env();
+        let legacy_key_configured = !self.config.llm_api_key.is_empty();
+        if db_keys.is_empty() && env_configs.is_empty() && !legacy_key_configured {
+            match crate::demo_credentials::load(&self.config.demo_credentials_path) {
+                Ok(seed) => match serde_json::to_string(&seed) {
+                    Ok(json) => {
+                        if let Err(err) = self.db.put_config_value("llm_provider_keys", &json).await
+                        {
+                            tracing::warn!(error = %err, "failed to copy public demo credential into the runtime DB");
+                        } else {
+                            tracing::info!(
+                                provider = "dashscope-token-plan",
+                                "copied public first-run demo credential into the private runtime DB"
+                            );
+                            db_keys = seed;
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!(error = %err, "failed to serialize public demo credential");
+                    }
+                },
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        path = %self.config.demo_credentials_path.display(),
+                        "public demo credential database is unavailable; continuing without it"
+                    );
+                }
+            }
+        }
+        match crate::api::llm_keys::build_provider_registry(&self.config, &db_keys) {
+            Ok(registry) => {
+                let provider_count = registry.len();
+                let model_count = registry.models().len();
+                self.replace_llm_provider_keys(db_keys.clone());
+                self.providers.swap(registry);
+                tracing::info!(
+                    db_key_count = db_keys.len(),
+                    provider_count,
+                    model_count,
+                    "merged DB LLM keys into provider registry"
+                );
+            }
+            Err(err) => {
+                tracing::error!(
+                    error = %err,
+                    "failed to rebuild provider registry from DB keys"
+                );
+            }
+        }
+    }
+
+    /// Replace the DB-backed credential mirror after a successful durable
+    /// update. Poison recovery deliberately keeps the last map available.
+    pub(crate) fn replace_llm_provider_keys(&self, keys: BTreeMap<String, String>) {
+        match self.llm_provider_keys.write() {
+            Ok(mut current) => *current = keys,
+            Err(poisoned) => *poisoned.into_inner() = keys,
+        }
+    }
+
+    /// Shared credential mirror used by the MCP composition root.
+    #[must_use]
+    pub(crate) fn llm_provider_keys_handle(&self) -> Arc<RwLock<BTreeMap<String, String>>> {
+        Arc::clone(&self.llm_provider_keys)
     }
 
     /// 注入 Python 侧车进程管理器（main 启动序列：`spawn` 侧车后回填，
@@ -260,7 +366,8 @@ impl AppState {
             feature_flags,
             started_at: Instant::now(),
             hub,
-            providers: Arc::new(ProviderRegistry::new()),
+            providers: Arc::new(SwappableProvider::new(ProviderRegistry::new())),
+            llm_provider_keys: Arc::new(RwLock::new(BTreeMap::new())),
             python,
             python_sidecar: None,
             authz,
@@ -346,11 +453,22 @@ impl AppState {
                 self.hub.clone(),
                 Arc::clone(&self.mcp),
             ));
+            let provider_keys = self.llm_provider_keys_handle();
+            let environment_fallback = zk_mcp::security::default_credential_resolver();
+            let credential_resolver: Arc<dyn zk_mcp::McpCredentialResolver> =
+                Arc::new(move |provider: &str| {
+                    let db_key = match provider_keys.read() {
+                        Ok(keys) => keys.get(provider).cloned(),
+                        Err(poisoned) => poisoned.into_inner().get(provider).cloned(),
+                    };
+                    db_key.or_else(|| environment_fallback.resolve(provider))
+                });
             McpClientManager::builder(Arc::clone(&self.mcp_approval), tool_sink)
                     .resolver(zk_mcp::McpConfigurationResolver::new(Some(
                         std::path::PathBuf::from(&self.config.workspace_default_root),
                     )))
                     .registry(Arc::clone(&self.mcp_capabilities))
+                    .credential_resolver(credential_resolver)
                     .health_observer(observer)
                     .progress_tracker(
                         Arc::clone(&self.mcp_progress) as Arc<dyn zk_mcp::ProgressTracker>
@@ -378,6 +496,7 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
     use std::sync::Arc;
 
     use zk_core::FlagValue;
@@ -417,6 +536,45 @@ mod tests {
         assert!(Arc::ptr_eq(&first, &second));
         assert!(Arc::ptr_eq(&first, &state.clone().tools()));
         assert!(!first.is_empty(), "组合根注册清单非空");
+    }
+
+    #[tokio::test]
+    async fn first_run_copies_the_tracked_seed_into_the_runtime_database() {
+        if !zk_llm::provider_configs_from_env().is_empty() {
+            // An explicit provider environment is authoritative by design; the
+            // clean-first-run path is exercised only in its absence.
+            return;
+        }
+        let mut config = crate::config::Config::test_config();
+        config.demo_credentials_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../configuration/bootstrap/demo-credentials.db");
+        let state = AppState::new(
+            zk_db::Db::open_in_memory().expect("runtime SQLite opens"),
+            config,
+        );
+
+        state.merge_db_llm_keys().await;
+
+        let stored = state
+            .db
+            .get_config_value("llm_provider_keys")
+            .await
+            .expect("runtime SQLite read succeeds")
+            .expect("clean first run copies the public seed");
+        let stored: std::collections::BTreeMap<String, String> =
+            serde_json::from_str(&stored).expect("runtime credential map is valid JSON");
+        assert_eq!(stored.len(), 1);
+        assert!(stored.contains_key("dashscope-token-plan"));
+        let provider_keys = state.llm_provider_keys_handle();
+        let has_seed_key = match provider_keys.read() {
+            Ok(keys) => keys.contains_key("dashscope-token-plan"),
+            Err(poisoned) => poisoned.into_inner().contains_key("dashscope-token-plan"),
+        };
+        assert!(has_seed_key);
+        assert_eq!(
+            state.providers.load().resolve_provider("qwen3.8-max"),
+            Some("dashscope-token-plan")
+        );
     }
 
     /// 命令注册表装配即含全部内建命令，且克隆共享同一实例（WS 分发与

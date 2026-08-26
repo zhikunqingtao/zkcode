@@ -1,7 +1,7 @@
 # Local development
 
 zkcode's supported development topology is macOS local-only: Vite on
-`127.0.0.1:5273`, `zk-server` on `127.0.0.1:8081`, and the Python sidecar on a
+`127.0.0.1:5273`, `zk-server` on `127.0.0.1:8082`, and the Python sidecar on a
 mode `0600` Unix-domain socket. Run all commands from the repository root.
 
 ## One-time setup
@@ -20,7 +20,7 @@ commit or paste credentials into logs.
 
 ```sh
 ./start.sh
-curl --fail http://127.0.0.1:8081/api/health
+curl --fail http://127.0.0.1:8082/api/health
 ./stop.sh
 ```
 

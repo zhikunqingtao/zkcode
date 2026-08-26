@@ -5,7 +5,8 @@
 //! - 启动加载：文件不存在 → warn 后留空；`mcp_tools` 非数组 → warn 后留空；
 //!   逐条 `treeToValue`，单条解析失败仅 warn（不影响其余条目），`id` 为空跳过；
 //! - 查询：`listAll` / `listByDomain` / `listEnabled` / `findById` /
-//!   `findByToolName(serverKey, toolName)` / `listDomains`（去重 + 升序）/
+//!   `findByToolName(serverKey, toolName)` / `findEnabledByToolName` /
+//!   `hasDefinitionsForServer` / `listDomains`（去重 + 升序）/
 //!   `size` / `enabledCount`；
 //! - 修改：`toggleEnabled` / `updateCapability` / `addCapability` /
 //!   `deleteCapability`，前三者「不存在 / 已存在」抛
@@ -13,7 +14,8 @@
 //! - 持久化：每次修改触发 500ms 防抖（新任务取消旧任务），落盘时**保留**原文件
 //!   除 `mcp_tools` / `lastUpdated` 外的所有字段（`description`、
 //!   `usage_guide`、`_schema_version` 等），条目按 `id` 升序，缩进输出；
-//! - `extractServerKey()`：取 `sseUrl` path 的倒数第二段，异常/缺失回落 `id`。
+//! - `extractServerKey()`：`serverKey` 字段（非空白）优先，其次取端点 URL
+//!   path 的倒数第二段，异常/缺失回落 `id`。
 //!
 //! 形态差异（Rust 侧必然）：
 //! - Jackson `@JsonInclude(NON_NULL)` → 全部可选字段 `Option<_>` +
@@ -34,13 +36,11 @@
 //! 2. **`lastUpdated` 取 UTC 日期**：Java `LocalDate.now()` 是 JVM 默认时区；
 //!    Rust 标准库无时区数据库（引 chrono 仅为一个日期串不值当），故写 UTC
 //!    `YYYY-MM-DD`。该字段仅为人读元信息，不参与任何逻辑。
-//! 3. **`apiKeyConfig` 解析走环境变量**：Java 经 Spring `Environment` 读
-//!    `application.yml` 属性（如 `dashscope.api-key`）；zkcode 无 Spring 属性
-//!    体系，故按 Spring relaxed-binding 规则把属性名转为环境变量名
-//!    （`dashscope.api-key` → `DASHSCOPE_API_KEY`）后读 `std::env::var`，
-//!    并对 `apiKeyDefault` 中的 `${VAR}` 占位做一次环境展开（Java 侧该展开由
-//!    Spring 的属性占位符解析器完成，Jackson 读出的原文若不展开会把
-//!    `${LLM_API_KEY}` 字面量当作 API Key 发出去）。
+//! 3. **`apiKeyConfig` 是受限身份，不是环境变量名**：运行时条目可由本地
+//!    HTTP API 修改，故不得按 relaxed-binding 把任意属性名转换成环境变量名。
+//!    仅接受 `llm.providers.dashscope.api-key`，并由宿主注入的
+//!    [`crate::security::McpCredentialResolver`] 解析已加载的 provider 密钥；
+//!    `apiKeyDefault` 不作为凭据来源。
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -51,6 +51,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use tokio_util::sync::CancellationToken;
 
+use crate::config::McpTransportType;
 use crate::sse::{lock, read_lock, write_lock};
 
 /// 能力注册表默认路径（对照 Java `capability-registry-path` 的默认值
@@ -88,9 +89,19 @@ pub struct McpCapabilityDefinition {
     /// MCP 服务器上的原始工具名。
     #[serde(default, rename = "toolName", skip_serializing_if = "Option::is_none")]
     pub tool_name: Option<String>,
-    /// MCP 服务器的 SSE 端点 URL。
-    #[serde(default, rename = "sseUrl", skip_serializing_if = "Option::is_none")]
-    pub sse_url: Option<String>,
+    /// 服务器 key 的显式声明（schema 1.1 起；缺失时回落 URL 解析 / `id`）。
+    #[serde(default, rename = "serverKey", skip_serializing_if = "Option::is_none")]
+    pub server_key: Option<String>,
+    /// MCP 服务器的端点 URL（schema 1.0 的字段名 `sseUrl` 经 alias 兼容读入）。
+    #[serde(default, alias = "sseUrl", skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// 传输类型（schema 1.1 起；缺失按 SSE，见 [`Self::resolved_transport_type`]）。
+    #[serde(
+        default,
+        rename = "transportType",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub transport_type: Option<McpTransportType>,
     /// API Key 的配置属性名。
     #[serde(
         default,
@@ -153,7 +164,9 @@ impl McpCapabilityDefinition {
             id: id.into(),
             name: None,
             tool_name: None,
-            sse_url: None,
+            server_key: None,
+            url: None,
+            transport_type: None,
             api_key_config: None,
             api_key_default: None,
             domain: None,
@@ -178,15 +191,30 @@ impl McpCapabilityDefinition {
         }
     }
 
-    /// 从 `sseUrl` 提取服务器 key（URL path 倒数第二段），缺失/异常回落 `id`。
+    /// 旧注册表未声明传输类型时保持 SSE 默认行为（对照 Java
+    /// `resolvedTransportType()`）。
+    #[must_use]
+    pub fn resolved_transport_type(&self) -> McpTransportType {
+        self.transport_type.unwrap_or(McpTransportType::Sse)
+    }
+
+    /// 提取服务器 key：`serverKey` 字段（非空白）优先，其次取端点 URL path 的
+    /// 倒数第二段，缺失/异常回落 `id`。
     ///
-    /// 对照 Java `extractServerKey()`：`URI.create(sseUrl).getPath()` 按 `/`
+    /// 对照 Java `extractServerKey()`：`URI.create(url).getPath()` 按 `/`
     /// 切分、丢空段，段数 ≥2 取倒数第二段。此处不引 URL 解析库——Java 取的仅是
     /// path，故先剥离 `scheme://authority`（首个 `://` 之后的第一个 `/` 起）与
     /// 尾部 `?query` / `#fragment`，再按同规则切分。
     #[must_use]
     pub fn extract_server_key(&self) -> String {
-        let Some(url) = self.sse_url.as_deref() else {
+        if let Some(server_key) = self
+            .server_key
+            .as_deref()
+            .filter(|value| !java_is_blank(value))
+        {
+            return server_key.to_owned();
+        }
+        let Some(url) = self.url.as_deref() else {
             return self.id.clone();
         };
         let path = url_path(url);
@@ -198,24 +226,14 @@ impl McpCapabilityDefinition {
         }
     }
 
-    /// 解析该能力的 API Key（模块级偏离 3）。
+    /// 用受限的缺省 resolver 解析该能力的 API Key（模块级偏离 3）。
     ///
-    /// 顺序对照 Java `buildConfigFromRegistry`：先取 `apiKeyConfig` 指向的配置
-    /// 值，为空则回落 `apiKeyDefault`。
+    /// 仅供不持管理器实例的兼容调用方；生产组合根会给管理器注入 DB-backed
+    /// resolver。`apiKeyConfig` 不会被转换为任意环境变量名。
     #[must_use]
     pub fn resolve_api_key(&self) -> Option<String> {
-        let from_config = self
-            .api_key_config
-            .as_deref()
-            .and_then(property_from_env)
-            .filter(|value| !value.is_empty());
-        if from_config.is_some() {
-            return from_config;
-        }
-        self.api_key_default
-            .as_deref()
-            .map(expand_env_placeholders)
-            .filter(|value| !value.is_empty())
+        let resolver = crate::security::default_credential_resolver();
+        crate::security::resolve_capability_credential(self, resolver.as_ref())
     }
 }
 
@@ -237,20 +255,27 @@ fn url_path(url: &str) -> &str {
     &after_authority[..end]
 }
 
-/// Spring 属性名 → 环境变量名（relaxed binding：`.`/`-` → `_`，大写）。
-fn property_from_env(property: &str) -> Option<String> {
-    let key: String = property
-        .chars()
-        .map(|c| match c {
-            '.' | '-' => '_',
-            other => other.to_ascii_uppercase(),
-        })
-        .collect();
-    std::env::var(key).ok()
+/// 值是否为空白或未解析的整串 `${...}` 占位（对照 Java `buildConfigFromRegistry`
+/// 对端点 URL 与 API Key 的共同过滤）。
+pub(crate) fn is_blank_or_placeholder(value: &str) -> bool {
+    java_is_blank(value) || (value.starts_with("${") && value.ends_with('}'))
+}
+
+/// Java `String.isBlank()` 的精确复刻——`Character.isWhitespace` 较 Rust
+/// `char::is_whitespace` 多 `\u{1C}`–`\u{1F}` 分隔符，少 `\u{85}` 与 NBSP 族
+/// （`\u{A0}` / `\u{2007}` / `\u{202F}`）。
+pub(crate) fn java_is_blank(value: &str) -> bool {
+    value.chars().all(java_is_whitespace)
+}
+
+/// 对照 Java `Character.isWhitespace(char)`。
+fn java_is_whitespace(c: char) -> bool {
+    matches!(c, '\u{1c}'..='\u{1f}')
+        || (c.is_whitespace() && !matches!(c, '\u{85}' | '\u{a0}' | '\u{2007}' | '\u{202f}'))
 }
 
 /// 展开 `${VAR}` 占位符（未定义的变量原样保留，与 Spring 无默认值时的行为一致）。
-fn expand_env_placeholders(raw: &str) -> String {
+pub(crate) fn expand_env_placeholders(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     let mut rest = raw;
     while let Some(start) = rest.find("${") {
@@ -408,6 +433,33 @@ impl McpCapabilityRegistry {
                     && definition.extract_server_key() == server_key
             })
             .cloned()
+    }
+
+    /// 按「服务器 key + 原始工具名」查找已启用条目（对照 Java
+    /// `findEnabledByToolName`）。
+    #[must_use]
+    pub fn find_enabled_by_tool_name(
+        &self,
+        server_key: &str,
+        tool_name: &str,
+    ) -> Option<McpCapabilityDefinition> {
+        read_lock(&self.capabilities)
+            .values()
+            .find(|definition| {
+                definition.enabled
+                    && definition.tool_name.as_deref() == Some(tool_name)
+                    && definition.extract_server_key() == server_key
+            })
+            .cloned()
+    }
+
+    /// 该服务器 key 下是否存在任何注册表条目（对照 Java
+    /// `hasDefinitionsForServer`）。
+    #[must_use]
+    pub fn has_definitions_for_server(&self, server_key: &str) -> bool {
+        read_lock(&self.capabilities)
+            .values()
+            .any(|definition| definition.extract_server_key() == server_key)
     }
 
     /// 全部功能域（去重 + 升序）。
@@ -626,7 +678,7 @@ mod tests {
     fn sample() -> McpCapabilityDefinition {
         McpCapabilityDefinition {
             tool_name: Some("modelstudio_image_edit_wan25".to_owned()),
-            sse_url: Some("https://dashscope.aliyuncs.com/api/v1/mcps/Wan25Media/sse".to_owned()),
+            url: Some("https://dashscope.aliyuncs.com/api/v1/mcps/Wan25Media/sse".to_owned()),
             domain: Some("image_processing".to_owned()),
             timeout_ms: 120_000,
             enabled: true,
@@ -649,7 +701,7 @@ mod tests {
     #[test]
     fn falls_back_to_id_when_path_too_short() {
         let short = McpCapabilityDefinition {
-            sse_url: Some("https://example.com/sse".to_owned()),
+            url: Some("https://example.com/sse".to_owned()),
             ..McpCapabilityDefinition::new("cap-1")
         };
         assert_eq!(short.extract_server_key(), "cap-1");
@@ -660,7 +712,7 @@ mod tests {
     #[test]
     fn ignores_query_and_fragment_when_extracting_key() {
         let definition = McpCapabilityDefinition {
-            sse_url: Some("https://host/api/mcps/Search/sse?key=1#frag".to_owned()),
+            url: Some("https://host/api/mcps/Search/sse?key=1#frag".to_owned()),
             ..McpCapabilityDefinition::new("cap-3")
         };
         assert_eq!(definition.extract_server_key(), "Search");
@@ -803,7 +855,8 @@ mod tests {
             written["lastUpdated"].as_str().map(str::len),
             Some("2026-01-01".len())
         );
-        // NON_NULL：未设置的可选字段不写出。
+        // NON_NULL：未设置的可选字段不写出（schema 1.1 起端点键名为 `url`）。
+        assert!(written["mcp_tools"][0].get("url").is_none());
         assert!(written["mcp_tools"][0].get("sseUrl").is_none());
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -846,39 +899,120 @@ mod tests {
     }
 
     #[test]
-    fn api_key_prefers_property_then_expands_default_placeholder() {
-        // 属性名 → 环境变量名（relaxed binding）。
-        let unique = uuid::Uuid::new_v4().simple().to_string();
-        let property = format!("zk.mcp-{unique}");
-        let env_name = property
-            .chars()
-            .map(|c| match c {
-                '.' | '-' => '_',
-                other => other.to_ascii_uppercase(),
-            })
-            .collect::<String>();
+    fn arbitrary_api_key_property_and_default_are_not_resolved() {
         let definition = McpCapabilityDefinition {
-            api_key_config: Some(property),
-            api_key_default: Some(format!("${{ZK_MCP_FALLBACK_{unique}}}")),
+            api_key_config: Some("aws.secret-access-key".to_owned()),
+            api_key_default: Some("literal-secret".to_owned()),
             ..McpCapabilityDefinition::new("cap")
         };
-
-        // 两者都未定义：占位符原样保留（Java 同样把原文发出去）。
-        assert_eq!(
-            definition.resolve_api_key(),
-            Some(format!("${{ZK_MCP_FALLBACK_{unique}}}"))
-        );
-
-        // 仅 default 的环境变量存在 → 展开。
-        // SAFETY-free：`std::env::set_var` 在 2024 edition 为 unsafe，故此处不改
-        // 进程环境，仅验证展开纯函数。
+        assert_eq!(definition.resolve_api_key(), None);
         assert_eq!(
             expand_env_placeholders("a${__ZK_MCP_UNSET__}b"),
             "a${__ZK_MCP_UNSET__}b"
         );
         assert_eq!(expand_env_placeholders("plain"), "plain");
         assert_eq!(expand_env_placeholders("${unterminated"), "${unterminated");
-        assert!(std::env::var(&env_name).is_err());
+    }
+
+    #[test]
+    fn extract_server_key_prefers_explicit_server_key() {
+        let explicit = McpCapabilityDefinition {
+            server_key: Some("Explicit".to_owned()),
+            ..sample()
+        };
+        assert_eq!(explicit.extract_server_key(), "Explicit");
+        // 空白 serverKey 视同缺失（Java `isBlank`，含 \u{1C} 类分隔符）。
+        let blank = McpCapabilityDefinition {
+            server_key: Some(" \t\u{1c}".to_owned()),
+            ..sample()
+        };
+        assert_eq!(blank.extract_server_key(), "Wan25Media");
+    }
+
+    #[test]
+    fn serde_alias_reads_legacy_sse_url_and_writes_url() {
+        let legacy: McpCapabilityDefinition =
+            serde_json::from_str(r#"{"id":"cap","sseUrl":"https://host/api/mcps/Legacy/sse"}"#)
+                .expect("parse legacy");
+        assert_eq!(
+            legacy.url.as_deref(),
+            Some("https://host/api/mcps/Legacy/sse")
+        );
+        assert_eq!(legacy.extract_server_key(), "Legacy");
+
+        let modern: McpCapabilityDefinition = serde_json::from_str(
+            r#"{"id":"cap","url":"https://host/api/mcps/Modern/sse","serverKey":"K","transportType":"HTTP"}"#,
+        )
+        .expect("parse modern");
+        assert_eq!(modern.extract_server_key(), "K");
+        assert_eq!(modern.resolved_transport_type(), McpTransportType::Http);
+
+        // 写出走新键名 `url`，不再产出 `sseUrl`。
+        let written = serde_json::to_value(&legacy).expect("serialize");
+        assert_eq!(
+            written["url"],
+            Value::from("https://host/api/mcps/Legacy/sse")
+        );
+        assert!(written.get("sseUrl").is_none());
+    }
+
+    #[test]
+    fn resolved_transport_type_defaults_to_sse() {
+        assert_eq!(
+            McpCapabilityDefinition::new("cap").resolved_transport_type(),
+            McpTransportType::Sse
+        );
+    }
+
+    #[test]
+    fn find_enabled_by_tool_name_excludes_disabled() {
+        let dir = temp_dir("find-enabled");
+        let registry = McpCapabilityRegistry::new(dir.join("registry.json"));
+        registry.add_capability(sample()).expect("add");
+        assert!(
+            registry
+                .find_enabled_by_tool_name("Wan25Media", "modelstudio_image_edit_wan25")
+                .is_some()
+        );
+        registry
+            .toggle_enabled("mcp_wan25_image_edit", false)
+            .expect("toggle");
+        assert!(
+            registry
+                .find_enabled_by_tool_name("Wan25Media", "modelstudio_image_edit_wan25")
+                .is_none()
+        );
+        // 停用后 findByToolName 仍可见（Java 两方法的差异点）。
+        assert!(
+            registry
+                .find_by_tool_name("Wan25Media", "modelstudio_image_edit_wan25")
+                .is_some()
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn has_definitions_for_server_matches_extracted_key() {
+        let dir = temp_dir("has-defs");
+        let registry = McpCapabilityRegistry::new(dir.join("registry.json"));
+        registry.add_capability(sample()).expect("add");
+        assert!(registry.has_definitions_for_server("Wan25Media"));
+        assert!(!registry.has_definitions_for_server("other"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn api_key_rejects_template_and_blank_values() {
+        let template = McpCapabilityDefinition {
+            api_key_default: Some("your-api-key-here".to_owned()),
+            ..McpCapabilityDefinition::new("cap")
+        };
+        assert_eq!(template.resolve_api_key(), None);
+        let blank = McpCapabilityDefinition {
+            api_key_default: Some("   ".to_owned()),
+            ..McpCapabilityDefinition::new("cap")
+        };
+        assert_eq!(blank.resolve_api_key(), None);
     }
 
     #[test]

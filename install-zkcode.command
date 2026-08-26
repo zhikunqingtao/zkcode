@@ -246,6 +246,11 @@ command -v lsof >/dev/null 2>&1 || fail "macOS lsof is missing"
 mkdir -p "$RUNTIME_DIR"
 TEMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/zkcode-install.XXXXXX") || fail "could not create a temporary directory"
 
+info "Validating the public first-run credential asset"
+run_bounded 15 "public demo credential validation" \
+    "$ROOT_DIR/scripts/parity/check-demo-credential-db.sh" || \
+    fail "the public demo credential database is missing or invalid"
+
 # Bound the package managers' own retry behavior as well as the outer process.
 export HOMEBREW_NO_AUTO_UPDATE=${HOMEBREW_NO_AUTO_UPDATE:-1}
 export NPM_CONFIG_FETCH_RETRIES=${NPM_CONFIG_FETCH_RETRIES:-2}
@@ -290,7 +295,7 @@ set -a
 # setup-macos.sh creates this trusted, user-owned local configuration when absent.
 . "$ROOT_DIR/.env"
 set +a
-EFFECTIVE_PORT=${ZK_PORT:-8081}
+EFFECTIVE_PORT=${ZK_PORT:-8082}
 case "$EFFECTIVE_PORT" in
     *[!0-9]*|'') fail "ZK_PORT in .env must be a numeric TCP port" ;;
 esac
@@ -332,5 +337,6 @@ printf '\nzkcode installation is complete and all services are healthy.\n'
 printf 'Open: %s\n' "$FRONTEND_URL"
 printf 'Stop later with: %s/stop.sh\n' "$ROOT_DIR"
 if ! grep -Eq '^(ZK_LLM_API_KEY|LLM_PROVIDER_[A-Z0-9_]+_API_KEY)=.+$' "$ROOT_DIR/.env"; then
-    warn "no LLM API key is configured; add one to $ROOT_DIR/.env, then run ./stop.sh and ./start.sh before chatting"
+    printf '\nA built-in DashScope test API key will be configured automatically on first launch.\n'
+    printf 'Replace it later via Settings → API Keys in the browser UI.\n'
 fi

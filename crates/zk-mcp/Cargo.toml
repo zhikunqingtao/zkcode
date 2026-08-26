@@ -33,6 +33,9 @@ tokio-util = { workspace = true }
 futures = { workspace = true }
 # SSE / Streamable HTTP 两种传输的 HTTP 客户端（stream 特性 = bytes_stream）。
 reqwest = { workspace = true }
+# Capability-registry endpoints are user-editable.  Parse their remote URLs
+# structurally before any transport can attach credentials or open a socket.
+url = { workspace = true }
 # MCP WS / WS_IDE 客户端传输；native-tls 与 workspace 的 reqwest TLS 栈一致，
 # 同时覆盖 ws:// 与 wss://，不在日志中暴露握手 headers。
 tokio-tungstenite = { workspace = true, features = ["native-tls"] }

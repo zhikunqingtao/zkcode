@@ -104,7 +104,7 @@ pub use correction::loop_ctrl::{
 };
 pub use correction::{ParsedError, ParsedTestFailure};
 pub use cost::{CostTracker, NoopCostTracker};
-pub use engine::{ConversationRunOptions, Engine};
+pub use engine::{ConversationRunOptions, Engine, TrustedImageUrlCheck};
 pub use env_info::environment_section;
 pub use file_history::{
     DiffStats, FileHistoryService, RewindResult, SnapshotInfo, TransactionRecord, TurnSnapshots,

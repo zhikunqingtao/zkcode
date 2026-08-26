@@ -20,7 +20,7 @@ use std::time::Duration;
 use axum::Router;
 use futures::{SinkExt, StreamExt};
 use tokio::net::TcpListener;
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
 use zk_protocol::ClientMessage;
@@ -95,9 +95,14 @@ async fn spawn_bound_with_db() -> (SocketAddr, String, Arc<RecordingEngine>, zk_
 
 /// 连接 `/ws` 并完成 bind 握手（消费 `session_restored`）。
 async fn connect_bound(addr: SocketAddr, session_id: &str) -> WsStream {
-    let (mut ws, _) = connect_async(format!("ws://{addr}/ws"))
-        .await
-        .expect("ws connect");
+    let mut request = format!("ws://{addr}/ws")
+        .into_client_request()
+        .expect("ws request");
+    request.headers_mut().insert(
+        "Origin",
+        "http://localhost:5273".parse().expect("trusted origin"),
+    );
+    let (mut ws, _) = connect_async(request).await.expect("ws connect");
     send_json(
         &mut ws,
         &serde_json::json!({

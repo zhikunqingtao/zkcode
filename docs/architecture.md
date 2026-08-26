@@ -5,7 +5,7 @@ zkcode is a macOS-local application with three cooperating components:
 1. `zk-server`, a Rust/Axum process that owns REST, native WebSocket, SSE,
    conversations, authorization, tools, agents, MCP, and persistence.
 2. A React/Vite frontend bound to `127.0.0.1:5273` and proxied to the Rust
-   backend on `127.0.0.1:8081`.
+   backend on `127.0.0.1:8082`.
 3. A Python 3.11/3.12 capability service managed by `zk-server` over a
    permission-`0600` Unix Domain Socket.
 

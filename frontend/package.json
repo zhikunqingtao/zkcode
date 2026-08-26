@@ -2,7 +2,7 @@
   "name": "zkcode-frontend",
   "description": "Web interface for the zkcode local AI coding assistant",
   "version": "0.1.0",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "author": "zkcode contributors",
   "repository": {
     "type": "git",

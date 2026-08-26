@@ -73,7 +73,7 @@ pub use swarm::SwarmRecord;
 pub use task::{TaskRecord, new_task_record};
 pub use workbench::{AcceptanceCriterionRecord, WorkbenchBindingRecord, WorkbenchRecord};
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -134,16 +134,27 @@ impl Db {
     /// 建目录 / 打开连接 / PRAGMA / 迁移任一失败时返回。
     pub fn open(path: impl AsRef<Path>) -> Result<Self, DbError> {
         let path = path.as_ref();
-        if let Some(parent) = path.parent() {
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            let parent_existed = parent.try_exists()?;
             std::fs::create_dir_all(parent)?;
+            Self::restrict_runtime_directory(parent, !parent_existed)?;
         }
+        // Pre-create with 0600 on Unix so there is no 0644 window between
+        // SQLite's create(2) and a later chmod. Existing files are tightened
+        // before SQLite reads their header.
+        Self::prepare_database_file(path)?;
         let mut writer = Connection::open(path)?;
         Self::init_writer(&mut writer)?;
+        Self::restrict_sqlite_files(path)?;
         let reader_count = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
         let mut conns = Vec::with_capacity(reader_count);
         for _ in 0..reader_count {
             conns.push(Mutex::new(Self::open_reader(path)?));
         }
+        Self::restrict_sqlite_files(path)?;
         Ok(Self {
             writer: Arc::new(Mutex::new(writer)),
             readers: Some(Arc::new(ReaderPool {
@@ -205,6 +216,85 @@ impl Db {
         conn.pragma_update(None, "cache_size", -8000)?;
         conn.pragma_update(None, "temp_store", "MEMORY")?;
         Ok(conn)
+    }
+
+    /// 收紧 zkcode 自有运行目录权限。
+    ///
+    /// 仅处理本次调用新建的精确父目录，或名称明确为 `.zk` / `.zkcode` 的
+    /// 已有目录；绝不修改任意已有用户目录（例如 workspace 根目录或 HOME）。
+    #[cfg(unix)]
+    fn restrict_runtime_directory(path: &Path, created_by_us: bool) -> std::io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let is_known_runtime_dir = path
+            .file_name()
+            .is_some_and(|name| name == ".zk" || name == ".zkcode");
+        if created_by_us || is_known_runtime_dir {
+            let mut permissions = std::fs::metadata(path)?.permissions();
+            permissions.set_mode(0o700);
+            std::fs::set_permissions(path, permissions)?;
+        }
+        Ok(())
+    }
+
+    /// 非 Unix 平台保持原行为；zkcode 当前仅发布 macOS，但该空实现保证
+    /// crate 的跨平台编译边界清晰。
+    #[cfg(not(unix))]
+    fn restrict_runtime_directory(_path: &Path, _created_by_us: bool) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn prepare_database_file(path: &Path) -> std::io::Result<()> {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(path)?;
+        Self::restrict_file_permissions(path)
+    }
+
+    #[cfg(not(unix))]
+    fn prepare_database_file(_path: &Path) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    /// 若文件存在，将权限设为仅当前用户可读写。WAL/SHM 是按需文件，尚未
+    /// 生成时不视为错误。
+    #[cfg(unix)]
+    fn restrict_file_permissions(path: &Path) -> std::io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut permissions = match std::fs::metadata(path) {
+            Ok(metadata) => metadata.permissions(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        permissions.set_mode(0o600);
+        std::fs::set_permissions(path, permissions)
+    }
+
+    #[cfg(not(unix))]
+    fn restrict_file_permissions(_path: &Path) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    /// 复核数据库主体及 `SQLite` 的两个并行副文件。
+    fn restrict_sqlite_files(path: &Path) -> std::io::Result<()> {
+        Self::restrict_file_permissions(path)?;
+        Self::restrict_file_permissions(&Self::sqlite_sidecar_path(path, "-wal"))?;
+        Self::restrict_file_permissions(&Self::sqlite_sidecar_path(path, "-shm"))?;
+        Ok(())
+    }
+
+    fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
+        let mut sidecar = path.as_os_str().to_os_string();
+        sidecar.push(suffix);
+        PathBuf::from(sidecar)
     }
 
     /// 读路径统一出口：轮转选取只读连接 → `spawn_blocking` 执行。
@@ -289,4 +379,115 @@ impl Db {
 fn crate_boots() {
     let db = crate::Db::open_in_memory().expect("in-memory db boots with migrations");
     drop(db);
+}
+
+#[cfg(all(test, unix))]
+mod unix_permission_tests {
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+
+    struct TestDirectory(PathBuf);
+
+    impl TestDirectory {
+        fn create(label: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "zk-db-permissions-{label}-{}-{}",
+                std::process::id(),
+                uuid::Uuid::new_v4()
+            ));
+            std::fs::create_dir(&path).expect("create unique test directory");
+            Self(path)
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn set_mode(path: &Path, mode: u32) {
+        let mut permissions = std::fs::metadata(path)
+            .unwrap_or_else(|error| panic!("read permissions for {}: {error}", path.display()))
+            .permissions();
+        permissions.set_mode(mode);
+        std::fs::set_permissions(path, permissions)
+            .unwrap_or_else(|error| panic!("set permissions for {}: {error}", path.display()));
+    }
+
+    fn assert_mode(path: &Path, expected: u32) {
+        let actual = std::fs::metadata(path)
+            .unwrap_or_else(|error| panic!("read metadata for {}: {error}", path.display()))
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            actual,
+            expected,
+            "unexpected permissions for {}",
+            path.display()
+        );
+    }
+
+    fn sidecar(path: &Path, suffix: &str) -> PathBuf {
+        let mut value = path.as_os_str().to_os_string();
+        value.push(suffix);
+        PathBuf::from(value)
+    }
+
+    fn assert_sqlite_files_private(path: &Path) {
+        assert_mode(path, 0o600);
+        assert_mode(&sidecar(path, "-wal"), 0o600);
+        assert_mode(&sidecar(path, "-shm"), 0o600);
+    }
+
+    #[test]
+    fn new_runtime_directory_and_sqlite_files_are_private() {
+        let root = TestDirectory::create("new");
+        let runtime_dir = root.0.join("runtime");
+        let database = runtime_dir.join("data.db");
+
+        let db = crate::Db::open(&database).expect("open database in new runtime directory");
+
+        assert_mode(&runtime_dir, 0o700);
+        assert_sqlite_files_private(&database);
+        drop(db);
+    }
+
+    #[test]
+    fn existing_arbitrary_parent_is_untouched_and_existing_files_are_repaired() {
+        let root = TestDirectory::create("existing-parent");
+        set_mode(&root.0, 0o751);
+        let database = root.0.join("data.db");
+
+        let first = crate::Db::open(&database).expect("create database");
+        assert_mode(&root.0, 0o751);
+
+        let wal = sidecar(&database, "-wal");
+        let shm = sidecar(&database, "-shm");
+        set_mode(&database, 0o666);
+        set_mode(&wal, 0o666);
+        set_mode(&shm, 0o666);
+
+        let reopened = crate::Db::open(&database).expect("reopen database and repair permissions");
+        assert_mode(&root.0, 0o751);
+        assert_sqlite_files_private(&database);
+        drop(reopened);
+        drop(first);
+    }
+
+    #[test]
+    fn existing_named_runtime_directory_is_hardened() {
+        let root = TestDirectory::create("named-runtime");
+        let runtime_dir = root.0.join(".zk");
+        std::fs::create_dir(&runtime_dir).expect("create .zk directory");
+        set_mode(&runtime_dir, 0o777);
+        let database = runtime_dir.join("data.db");
+
+        let db = crate::Db::open(&database).expect("open database in .zk directory");
+
+        assert_mode(&runtime_dir, 0o700);
+        assert_sqlite_files_private(&database);
+        drop(db);
+    }
 }

@@ -53,8 +53,9 @@
 use std::net::SocketAddr;
 use std::time::Instant;
 
+use axum::body::HttpBody as _;
 use axum::extract::{ConnectInfo, MatchedPath, Request, State};
-use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, Uri, header};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 
@@ -210,6 +211,130 @@ pub(crate) async fn access_guard(
     // 档 6：全部落空（旧 L171-173）。
     tracing::warn!(peer = %peer, "authentication required, denying");
     ApiError::unauthorized().into_response()
+}
+
+/// CSRF/content-type boundary for state-changing MCP routes and the WebSocket
+/// upgrade endpoint.
+///
+/// Loopback alone is not sufficient here: a hostile web page can send a
+/// browser request to `127.0.0.1`.  Every MCP mutation and WebSocket upgrade
+/// therefore needs either an exact trusted browser Origin or the server's
+/// local Bearer access token.
+/// JSON-bearing endpoints additionally reject simple-request content types,
+/// so a cross-origin form/text request cannot reach a parser before CORS is
+/// considered by the browser.
+pub(crate) async fn mcp_mutation_guard(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if !is_mcp_protected_request(request.method(), request.uri().path()) {
+        return next.run(request).await;
+    }
+
+    let trusted_origin = request
+        .headers()
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|origin| is_trusted_mcp_origin(&state, origin));
+    let trusted_token =
+        bearer_token(request.headers()).is_some_and(|token| state.access_tokens.matches(&token));
+    // Same-origin browser GETs commonly omit Origin. `Sec-Fetch-Site` is a
+    // forbidden request header in browsers, so page JavaScript cannot forge
+    // `same-origin`.  This fallback is limited to the read endpoints that can
+    // trigger outbound MCP calls; mutations and WebSocket upgrades still need
+    // an exact Origin or Bearer token.
+    let trusted_same_origin_fetch =
+        is_network_backed_mcp_get(request.method(), request.uri().path())
+            && request.headers().get(header::ORIGIN).is_none()
+            && request
+                .headers()
+                .get("sec-fetch-site")
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value == "same-origin");
+    if !trusted_origin && !trusted_token && !trusted_same_origin_fetch {
+        tracing::warn!(
+            path = request.uri().path(),
+            "MCP request rejected: trusted Origin or Bearer token required"
+        );
+        return ApiError {
+            status: StatusCode::FORBIDDEN,
+            code: "MCP_REQUEST_ORIGIN_DENIED".to_owned(),
+            message: "MCP network operations require a trusted local Origin or Bearer access token"
+                .to_owned(),
+        }
+        .into_response();
+    }
+
+    // Preserve the endpoint's stable INVALID_REQUEST_BODY response for an
+    // actually empty body. A non-empty JSON-bearing request must still carry
+    // application/json, which blocks browser-simple CSRF payloads.
+    let body_is_empty = request.body().size_hint().exact() == Some(0);
+    if !body_is_empty
+        && mcp_route_requires_json(request.method(), request.uri().path())
+        && !has_json_content_type(request.headers())
+    {
+        return ApiError {
+            status: StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            code: "MCP_CONTENT_TYPE_UNSUPPORTED".to_owned(),
+            message: "MCP request Content-Type must be application/json".to_owned(),
+        }
+        .into_response();
+    }
+    next.run(request).await
+}
+
+fn is_mcp_protected_request(method: &Method, path: &str) -> bool {
+    (path == "/ws" && *method == Method::GET)
+        || (path == "/api/llm-keys" && *method == Method::PUT)
+        || path == "/mcp"
+        || is_network_backed_mcp_get(method, path)
+        || (path.starts_with("/api/mcp/")
+            && (method == Method::POST
+                || method == Method::PUT
+                || method == Method::PATCH
+                || method == Method::DELETE))
+}
+
+fn is_network_backed_mcp_get(method: &Method, path: &str) -> bool {
+    *method == Method::GET
+        && (matches!(
+            path,
+            "/api/mcp/resources" | "/api/mcp/resources/read" | "/api/mcp/prompts"
+        ) || (path.starts_with("/api/mcp/capabilities/") && path.ends_with("/server-tools")))
+}
+
+fn mcp_route_requires_json(method: &Method, path: &str) -> bool {
+    (path == "/api/llm-keys" && *method == Method::PUT)
+        || path == "/mcp"
+        || (*method == Method::POST
+            && matches!(
+                path,
+                "/api/mcp/servers" | "/api/mcp/prompts/execute" | "/api/mcp/capabilities"
+            ))
+        || (*method == Method::PUT && path.starts_with("/api/mcp/capabilities/"))
+        || (*method == Method::POST
+            && path.starts_with("/api/mcp/capabilities/")
+            && path.ends_with("/invoke"))
+}
+
+fn has_json_content_type(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|media_type| media_type.trim().eq_ignore_ascii_case("application/json"))
+}
+
+fn is_trusted_mcp_origin(state: &AppState, origin: &str) -> bool {
+    crate::routes::BASE_CORS_ORIGINS.contains(&origin)
+        || origin == format!("http://127.0.0.1:{}", state.config.port)
+        || origin == format!("http://localhost:{}", state.config.port)
+        || state
+            .config
+            .extra_cors_origins
+            .iter()
+            .any(|allowed| origin == allowed)
 }
 
 /// 对端地址（`into_make_service_with_connect_info` 注入；旧
@@ -427,5 +552,27 @@ mod tests {
             let uri: Uri = raw.parse().expect("uri");
             assert_eq!(location_without_token(&uri), expected, "{raw}");
         }
+    }
+
+    #[test]
+    fn websocket_upgrade_is_protected_but_does_not_require_json() {
+        assert!(is_mcp_protected_request(&Method::GET, "/ws"));
+        assert!(!mcp_route_requires_json(&Method::GET, "/ws"));
+    }
+
+    #[test]
+    fn outbound_mcp_gets_are_protected() {
+        for path in [
+            "/api/mcp/resources",
+            "/api/mcp/resources/read",
+            "/api/mcp/prompts",
+            "/api/mcp/capabilities/weather/server-tools",
+        ] {
+            assert!(
+                is_mcp_protected_request(&Method::GET, path),
+                "{path} can trigger a network request"
+            );
+        }
+        assert!(!is_mcp_protected_request(&Method::GET, "/api/mcp/servers"));
     }
 }

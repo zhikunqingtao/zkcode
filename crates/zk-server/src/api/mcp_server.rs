@@ -17,11 +17,10 @@ use zk_engine::{HookContext, PreHookDecision};
 use zk_tools::{CallEnv, ToolEvent, ToolExecutor};
 
 use crate::authz::EngineAdmission;
-use crate::mcp_tools::{allowed_mime, allowed_uri};
+use crate::mcp_tools::{MAX_RESOURCE_BYTES, ResourcePolicyError, validate_declared_resource};
 use crate::state::AppState;
 
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
-const MAX_RESOURCE_BYTES: usize = 1024 * 1024;
 const MAX_LISTED_RESOURCES: usize = 256;
 const SERVER_NAME: &str = "zkcode";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -329,22 +328,20 @@ async fn read_resource(state: &AppState, params: &Value) -> Result<Value, RpcFai
         .and_then(|meta| meta.get("server"))
         .and_then(Value::as_str)
         .ok_or_else(|| RpcFailure::new(-32602, "resource _meta.server is required"))?;
-    if !allowed_uri(uri) {
-        return Err(RpcFailure::new(-32602, "resource URI scheme rejected"));
-    }
     let connection = state
         .mcp()
         .get_connection(server)
         .ok_or_else(|| RpcFailure::new(-32004, "MCP resource server not found"))?;
-    let declared = connection
-        .discover_resources()
-        .await
-        .into_iter()
-        .find(|resource| resource.uri == uri)
-        .ok_or_else(|| RpcFailure::new(-32004, "MCP resource is not declared"))?;
-    if !allowed_mime(declared.mime_type.as_deref()) {
-        return Err(RpcFailure::new(-32004, "MCP resource MIME type rejected"));
-    }
+    let resources = connection.discover_resources().await;
+    let declared = validate_declared_resource(uri, &resources).map_err(|error| match error {
+        ResourcePolicyError::UriRejected => {
+            RpcFailure::new(-32602, "resource URI scheme or length rejected")
+        }
+        ResourcePolicyError::NotDeclared => RpcFailure::new(-32004, "MCP resource is not declared"),
+        ResourcePolicyError::MimeRejected => {
+            RpcFailure::new(-32004, "MCP resource MIME type rejected")
+        }
+    })?;
     let content = connection
         .read_resource(uri)
         .await

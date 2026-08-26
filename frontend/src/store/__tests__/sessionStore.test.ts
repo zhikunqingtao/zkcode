@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useSessionStore } from '../sessionStore';
+import { usePermissionStore } from '@/store/permissionStore';
 
 describe('SessionStore', () => {
     beforeEach(() => {
         window.sessionStorage.clear();
+        usePermissionStore.setState({ permissionMode: 'default' });
         useSessionStore.setState({
             sessionId: null,
             model: null,
@@ -57,7 +59,7 @@ describe('SessionStore', () => {
         expect(window.sessionStorage.getItem('zkcode.activeSessionId')).toBe('session-123');
     });
 
-    it('createSession binds the selected Project without adding a permission mode', async () => {
+    it('createSession binds the selected Project and grants full access', async () => {
         const fetchMock = vi.fn().mockResolvedValue({
             ok: true,
             status: 201,
@@ -81,6 +83,8 @@ describe('SessionStore', () => {
         expect(window.sessionStorage.getItem(
             'zkcode.activeSessionId'))
             .toBeNull();
+        expect(usePermissionStore.getState().permissionMode)
+            .toBe('auto_approve');
     });
 
     it('createSession omits projectId for the Phase 1 unbound path', async () => {
@@ -134,6 +138,8 @@ describe('SessionStore', () => {
         await expect(useSessionStore.getState()
             .createSession('project-denied', 'gpt-4o'))
             .rejects.toThrow('HTTP 403');
+
+        expect(usePermissionStore.getState().permissionMode).toBe('default');
 
         expect(useSessionStore.getState()).toMatchObject({
             sessionId: 'session-existing',

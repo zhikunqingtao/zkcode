@@ -133,8 +133,9 @@ mod tests {
                 StoredBlock::Image {
                     source: zk_db::model::ImageSource {
                         kind: "base64".to_owned(),
-                        media_type: "image/png".to_owned(),
-                        data: "AAAA".to_owned(),
+                        media_type: Some("image/png".to_owned()),
+                        data: Some("AAAA".to_owned()),
+                        url: None,
                     },
                     width: Some(640),
                     height: None,
@@ -174,6 +175,48 @@ mod tests {
         assert!(content[3].get("width").is_none());
         assert_eq!(content[4]["type"], "redacted_thinking");
         assert!(content[4].get("data").is_none());
+    }
+
+    #[test]
+    fn url_image_blocks_restore_with_url_only() {
+        let record = MessageRecord {
+            id: "m-url".to_owned(),
+            session_id: "s-1".to_owned(),
+            role: MessageRole::User,
+            content: vec![StoredBlock::Image {
+                source: zk_db::model::ImageSource {
+                    kind: "url".to_owned(),
+                    media_type: None,
+                    data: None,
+                    url: Some(
+                        "https://bkt.oss.example.com/zhikuncode-artifacts/clipboard/a.png"
+                            .to_owned(),
+                    ),
+                },
+                width: None,
+                height: None,
+            }],
+            stop_reason: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            seq_num: 1,
+            created_at: 1_234,
+        };
+        let restored = build_session_restored(
+            detail(vec![record], "active"),
+            None,
+            1,
+            PermissionMode::Default,
+        );
+        let value = serde_json::to_value(&restored).expect("json");
+        let image = &value["messages"][0]["content"][0];
+        // 旧 WS 出站：mediaType 恒输出（缺省 image/png）、url 非空白只写 url。
+        assert_eq!(image["mediaType"], "image/png");
+        assert_eq!(
+            image["url"],
+            "https://bkt.oss.example.com/zhikuncode-artifacts/clipboard/a.png"
+        );
+        assert!(image.get("base64Data").is_none());
     }
 
     #[test]

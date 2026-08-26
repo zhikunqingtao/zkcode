@@ -8,7 +8,7 @@
 //! [`CatalogEntry::protocol`]（`OpenAI` 兼容 vs `Anthropic` 原生，D-P2-3）与
 //! [`CatalogEntry::in_default_catalog`]（是否进入 `GET /api/models` 的声明式
 //! 聚合基线；`openai` 回退通道与 `anthropic` 原生通道均不进——两者的模型面
-//! 由环境变量给出，进目录会破坏 15 条基线契约）。
+//! 由环境变量给出，进目录会破坏 18 条基线契约）。
 //!
 //! # 环境变量约定（2.7 冻结）
 //!
@@ -46,6 +46,8 @@ pub const MINIMAX_BASE_URL: &str = "https://api.minimax.chat/v1";
 pub const ZENMUX_BASE_URL: &str = "https://zenmux.ai/api/v1";
 /// `Anthropic` 原生 Messages API 端点（路径由 provider 自行补 `/v1/messages`）。
 pub const ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com";
+/// `OpenAI` 官方 API 端点（`openai` 直连 `provider`）。
+pub const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 
 /// provider 环境变量前缀（`LLM_PROVIDER_<NAME>_*`）。
 pub const PROVIDER_ENV_PREFIX: &str = "LLM_PROVIDER_";
@@ -179,14 +181,14 @@ pub struct CatalogEntry {
     pub models: &'static [&'static str],
     /// 线协议。
     pub protocol: ProviderProtocol,
-    /// 是否进入声明式模型聚合基线（`GET /api/models` 的 15 条契约来源）。
+    /// 是否进入声明式模型聚合基线（`GET /api/models` 的 18 条契约来源）。
     pub in_default_catalog: bool,
 }
 
 /// 8+1 家 provider 声明目录（顺序 = 方案 §13-3 表格顺序 = 模型聚合顺序）。
 ///
 /// 前 7 家 `in_default_catalog = true`，其 `models` 并集恰为
-/// `GET /api/models` 的 15 条基线（顺序一致）；`openai`（Phase 1 回退通道）
+/// `GET /api/models` 的 18 条基线（顺序一致）；`openai`（Phase 1 回退通道）
 /// 与 `anthropic`（原生协议通道）不进基线目录。
 pub const PROVIDER_CATALOG: &[CatalogEntry] = &[
     CatalogEntry {
@@ -201,7 +203,11 @@ pub const PROVIDER_CATALOG: &[CatalogEntry] = &[
         name: "dashscope-token-plan",
         base_url: DASHSCOPE_TOKEN_PLAN_BASE_URL,
         default_model: "qwen3.8-max",
-        models: &["qwen3.8-max"],
+        models: &[
+            "qwen3.8-max",
+            "deepseek-v4-pro-0813",
+            "deepseek-v4-flash-0731",
+        ],
         protocol: ProviderProtocol::OpenAiCompat,
         in_default_catalog: true,
     },
@@ -209,7 +215,11 @@ pub const PROVIDER_CATALOG: &[CatalogEntry] = &[
         name: "deepseek",
         base_url: DEEPSEEK_BASE_URL,
         default_model: "deepseek-v4-pro",
-        models: &["deepseek-v4-pro", "deepseek-v4-flash"],
+        models: &[
+            "deepseek-v4-pro",
+            "deepseek-v4-flash",
+            "deepseek-v4-flash-vision-exp",
+        ],
         protocol: ProviderProtocol::OpenAiCompat,
         in_default_catalog: true,
     },
@@ -224,8 +234,8 @@ pub const PROVIDER_CATALOG: &[CatalogEntry] = &[
     CatalogEntry {
         name: "zhipu",
         base_url: ZHIPU_BASE_URL,
-        default_model: "glm-5.2",
-        models: &["glm-5.2", "glm-5v-turbo"],
+        default_model: "glm-5.3",
+        models: &["glm-5.3", "glm-5v-turbo"],
         protocol: ProviderProtocol::OpenAiCompat,
         in_default_catalog: true,
     },
@@ -264,21 +274,16 @@ pub const PROVIDER_CATALOG: &[CatalogEntry] = &[
     },
     CatalogEntry {
         name: "openai",
-        base_url: DASHSCOPE_BASE_URL,
-        default_model: "qwen3.7-max",
-        models: &[
-            "qwen3.7-max",
-            "qwen3.7-plus",
-            "qwen-turbo",
-            "qwen-coder-plus",
-        ],
+        base_url: OPENAI_BASE_URL,
+        default_model: "gpt-4o",
+        models: &["gpt-4o", "gpt-4o-mini"],
         protocol: ProviderProtocol::OpenAiCompat,
         in_default_catalog: false,
     },
 ];
 
 /// 声明目录默认模型（旧 `LlmProviderRegistry.getDefaultModel` 兜底值）。
-pub const DEFAULT_MODEL: &str = "qwen3.7-max";
+pub const DEFAULT_MODEL: &str = "qwen3.8-max";
 
 /// 按名查目录条目。
 #[must_use]
@@ -430,15 +435,15 @@ mod tests {
                 "dashscope-token-plan",
                 DASHSCOPE_TOKEN_PLAN_BASE_URL,
                 "qwen3.8-max",
-                1,
+                3,
             ),
-            ("deepseek", DEEPSEEK_BASE_URL, "deepseek-v4-pro", 2),
+            ("deepseek", DEEPSEEK_BASE_URL, "deepseek-v4-pro", 3),
             ("moonshot", MOONSHOT_BASE_URL, "kimi-k3", 3),
-            ("zhipu", ZHIPU_BASE_URL, "glm-5.2", 2),
+            ("zhipu", ZHIPU_BASE_URL, "glm-5.3", 2),
             ("minimax", MINIMAX_BASE_URL, "MiniMax-M3", 1),
             ("zenmux", ZENMUX_BASE_URL, "anthropic/claude-opus-4.8", 4),
             ("anthropic", ANTHROPIC_BASE_URL, "claude-sonnet-4-6", 3),
-            ("openai", DASHSCOPE_BASE_URL, "qwen3.7-max", 4),
+            ("openai", OPENAI_BASE_URL, "gpt-4o", 2),
         ];
         assert_eq!(PROVIDER_CATALOG.len(), expected.len());
         for (entry, (name, base_url, default_model, model_count)) in
@@ -460,21 +465,24 @@ mod tests {
         }
     }
 
-    /// 声明式基线 = 前 7 家并集 = `GET /api/models` 的 15 条（顺序一致）。
+    /// 声明式基线 = 前 7 家并集 = `GET /api/models` 的 18 条（顺序一致）。
     #[test]
-    fn declared_models_match_fifteen_model_baseline() {
+    fn declared_models_match_eighteen_model_baseline() {
         assert_eq!(
             declared_models(),
             vec![
                 "qwen3.7-max",
                 "qwen3.7-plus",
                 "qwen3.8-max",
+                "deepseek-v4-pro-0813",
+                "deepseek-v4-flash-0731",
                 "deepseek-v4-pro",
                 "deepseek-v4-flash",
+                "deepseek-v4-flash-vision-exp",
                 "kimi-k3",
                 "kimi-k2.7-code",
                 "moonshot-v1-128k",
-                "glm-5.2",
+                "glm-5.3",
                 "glm-5v-turbo",
                 "MiniMax-M3",
                 "anthropic/claude-opus-4.8",

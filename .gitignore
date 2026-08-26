@@ -29,6 +29,9 @@ pnpm-debug.log*
 *.sqlite-shm
 *.sqlite-wal
 *.sqlite-journal
+# Deliberately public, read-only first-run bootstrap asset. This is not a user
+# runtime database and contains no private credential; see README security note.
+!configuration/bootstrap/demo-credentials.db
 *.sock
 *.pid
 .zk/
@@ -73,3 +76,5 @@ venv/
 .hypothesis/
 .coverage*
 htmlcov/
+
+docs/local

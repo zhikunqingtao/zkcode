@@ -5,15 +5,43 @@ use std::time::Duration;
 
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
-use zk_mcp::{McpClientManager, McpConnectionStatus};
+use zk_mcp::{McpClientManager, McpConnectionStatus, ResourceDefinition};
 use zk_tools::{Tool, ToolContext, ToolOutput};
 
 const MAX_LISTED_RESOURCES: usize = 256;
-const MAX_RESOURCE_BYTES: usize = 1024 * 1024;
-const MAX_URI_BYTES: usize = 4096;
+pub(crate) const MAX_RESOURCE_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_URI_BYTES: usize = 4096;
 const ALLOWED_SCHEMES: [&str; 8] = [
     "file", "http", "https", "mcp", "resource", "postgres", "sqlite", "memory",
 ];
+
+/// Shared policy result for every MCP resource entry point (model tool, REST,
+/// and reverse MCP server).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResourcePolicyError {
+    UriRejected,
+    NotDeclared,
+    MimeRejected,
+}
+
+/// Require an exact resources/list declaration before resources/read, and
+/// validate its URI scheme and declared MIME type.
+pub(crate) fn validate_declared_resource<'a>(
+    uri: &str,
+    declared: &'a [ResourceDefinition],
+) -> Result<&'a ResourceDefinition, ResourcePolicyError> {
+    if uri.len() > MAX_URI_BYTES || !allowed_uri(uri) {
+        return Err(ResourcePolicyError::UriRejected);
+    }
+    let resource = declared
+        .iter()
+        .find(|resource| resource.uri == uri)
+        .ok_or(ResourcePolicyError::NotDeclared)?;
+    if !allowed_mime(resource.mime_type.as_deref()) {
+        return Err(ResourcePolicyError::MimeRejected);
+    }
+    Ok(resource)
+}
 
 fn manager(slot: &OnceLock<Arc<McpClientManager>>) -> Result<Arc<McpClientManager>, ToolOutput> {
     slot.get()
@@ -144,9 +172,6 @@ impl Tool for ReadMcpResourceTool {
             let Some(uri) = input.get("uri").and_then(Value::as_str) else {
                 return ToolOutput::error("MCP_RESOURCE_URI_REQUIRED");
             };
-            if uri.len() > MAX_URI_BYTES || !allowed_uri(uri) {
-                return ToolOutput::error("MCP_RESOURCE_URI_REJECTED");
-            }
             let manager = match manager(&self.manager) {
                 Ok(manager) => manager,
                 Err(error) => return error,
@@ -157,17 +182,19 @@ impl Tool for ReadMcpResourceTool {
             if connection.status() != McpConnectionStatus::Connected {
                 return ToolOutput::error("MCP_RESOURCE_SERVER_NOT_CONNECTED");
             }
-            let declared = connection
-                .discover_resources()
-                .await
-                .into_iter()
-                .find(|resource| resource.uri == uri);
-            let Some(declared) = declared else {
-                return ToolOutput::error("MCP_RESOURCE_NOT_DECLARED");
+            let resources = connection.discover_resources().await;
+            let declared = match validate_declared_resource(uri, &resources) {
+                Ok(declared) => declared,
+                Err(ResourcePolicyError::UriRejected) => {
+                    return ToolOutput::error("MCP_RESOURCE_URI_REJECTED");
+                }
+                Err(ResourcePolicyError::NotDeclared) => {
+                    return ToolOutput::error("MCP_RESOURCE_NOT_DECLARED");
+                }
+                Err(ResourcePolicyError::MimeRejected) => {
+                    return ToolOutput::error("MCP_RESOURCE_MIME_REJECTED");
+                }
             };
-            if !allowed_mime(declared.mime_type.as_deref()) {
-                return ToolOutput::error("MCP_RESOURCE_MIME_REJECTED");
-            }
             match connection.read_resource(uri).await {
                 Ok(content) if content.len() <= MAX_RESOURCE_BYTES => ToolOutput::ok(
                     serde_json::to_string(&json!({
@@ -234,5 +261,40 @@ mod tests {
         assert!(allowed_mime(Some("application/problem+json")));
         assert!(allowed_mime(Some("text/plain; charset=utf-8")));
         assert!(!allowed_mime(Some("image/png")));
+    }
+
+    #[test]
+    fn resource_must_be_exactly_declared_with_safe_mime() {
+        let declared = vec![ResourceDefinition {
+            uri: "mcp://weather/today".to_owned(),
+            name: "today".to_owned(),
+            mime_type: Some("application/json".to_owned()),
+            description: None,
+        }];
+        assert_eq!(
+            validate_declared_resource("mcp://weather/today", &declared)
+                .expect("declared safe resource")
+                .name,
+            "today"
+        );
+        assert_eq!(
+            validate_declared_resource("mcp://weather/tomorrow", &declared),
+            Err(ResourcePolicyError::NotDeclared)
+        );
+        assert_eq!(
+            validate_declared_resource("javascript:alert(1)", &declared),
+            Err(ResourcePolicyError::UriRejected)
+        );
+
+        let unsafe_mime = vec![ResourceDefinition {
+            uri: "mcp://weather/image".to_owned(),
+            name: "image".to_owned(),
+            mime_type: Some("image/png".to_owned()),
+            description: None,
+        }];
+        assert_eq!(
+            validate_declared_resource("mcp://weather/image", &unsafe_mime),
+            Err(ResourcePolicyError::MimeRejected)
+        );
     }
 }

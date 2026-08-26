@@ -37,9 +37,14 @@ within seven business days.
 
 ## User responsibilities
 
-- Never commit `.env`, API keys, access tokens, databases, or `.zk/` runtime data.
-- Keep zkcode bound to loopback and do not expose ports 5273 or 8081 publicly.
-- Review every write, shell, hook, MCP, and network permission request.
+- Never commit `.env`, private API keys, access tokens, user/runtime databases,
+  or `.zk/` runtime data. The sole exception is the explicitly public,
+  read-only `configuration/bootstrap/demo-credentials.db`; never place a
+  private credential or user data in that asset.
+- Keep zkcode bound to loopback and do not expose ports 5273 or 8082 publicly.
+- The default `AUTO_APPROVE` mode does not prompt for each operation. Switch a
+  session to Default mode before working with untrusted content if you want to
+  review individual write, shell, hook, MCP, and network permission requests.
 - Treat third-party MCP servers, Skills, hooks, and project scripts as executable code.
 - Keep macOS and all locked project dependencies updated.
 

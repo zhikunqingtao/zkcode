@@ -107,7 +107,7 @@ async fn collect_checks(ctx: &CommandContext) -> Vec<Value> {
         None,
     );
     // 2. LLM providers（旧 L42-47）。
-    let (value, status, hint) = if ctx.state.providers.names().is_empty() {
+    let (value, status, hint) = if ctx.state.providers.load().names().is_empty() {
         ("未注册", CHECK_ERROR, Some("请配置 LLM API Key"))
     } else {
         ("已注册", CHECK_OK, None)

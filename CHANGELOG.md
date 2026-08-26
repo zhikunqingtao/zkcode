@@ -11,6 +11,12 @@
 - 增加全新 Apple Silicon Mac 的一键安装命令：安装受支持工具链与锁定依赖、处理
   本机版本冲突、限时启动全部服务并自动打开浏览器。
 
+### 变更
+
+- 项目许可证由 MIT 迁移至 Apache License 2.0：根目录 LICENSE 已更新为官方
+  文本，上游 ZhikunCode 的 MIT 声明完整保留于 THIRD_PARTY_NOTICES.md，
+  贡献条款（CONTRIBUTING.md）同步更新。
+
 ### 安全
 
 - 所有一键安装网络步骤使用有限重试、连接/总超时和失败关闭；不执行无限循环，

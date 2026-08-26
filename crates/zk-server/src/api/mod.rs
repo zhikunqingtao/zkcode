@@ -33,10 +33,12 @@
 
 pub(crate) mod config;
 pub(crate) mod doctor;
+// ── Task 4 Step 5：LLM 密钥管理端点（GET/PUT /api/llm-keys）──
 pub(crate) mod dto;
 pub(crate) mod evidence;
 pub(crate) mod grant;
 pub(crate) mod interaction;
+pub(crate) mod llm_keys;
 pub(crate) mod mapping;
 pub(crate) mod mcp;
 pub(crate) mod mcp_capability;

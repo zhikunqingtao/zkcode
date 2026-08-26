@@ -13,6 +13,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::Response;
 use serde_json::Value;
+use zk_authz::model::PermissionMode;
 use zk_db::model::SessionPage;
 
 use crate::api::dto::{
@@ -37,7 +38,7 @@ const MESSAGES_DEFAULT_LIMIT: u32 = 50;
     tag = "sessions",
     responses(
         (status = 201, description = "创建成功（POST_api-sessions.json 样例形状）"),
-        (status = 400, description = "体非法或 workingDirectory 非空"),
+        (status = 400, description = "体非法、workingDirectory 非空或 permissionMode 非法"),
         (status = 404, description = "projectId 未知（PROJECT_NOT_FOUND）")
     )
 )]
@@ -71,13 +72,20 @@ pub(crate) async fn create_session(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map_or_else(|| state.config.default_model.clone(), str::to_owned);
+    // 新建会话默认授予完全访问权限（免首轮逐次工具确认）；请求显式携带
+    // permissionMode 时以请求为准，非法值按 query 端同规则 400。
     let permission_mode = request
         .as_ref()
         .and_then(|req| req.permission_mode.as_deref())
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or("DEFAULT")
-        .to_owned();
+        .map_or(Some(PermissionMode::AutoApprove), PermissionMode::parse)
+        .ok_or_else(|| {
+            ApiError::validation_with_code(
+                "INVALID_PERMISSION_MODE",
+                "Session permissionMode is invalid",
+            )
+        })?;
     // working_dir 解析（旧 `resolveWorkspace(projectId)`）：projectId 非空
     // → 查库 + 存量绑定复核（未知 404）；缺省 → 服务器进程当前目录
     // （Phase 1 行为不变，旧 `${user.dir}` 等价）。
@@ -113,6 +121,13 @@ pub(crate) async fn create_session(
         )
     };
     let summary = state.db.create_session(&model, &working_dir).await?;
+    // 登记到 PermissionModeRegistry——缺了这步 `get_mode` 会回退 DEFAULT，
+    // WS 绑定后的 session_restored 便把 DEFAULT 当作生效模式回传前端。
+    state
+        .authz
+        .modes
+        .set_mode(&summary.id, permission_mode)
+        .await;
     Ok((
         StatusCode::CREATED,
         Json(CreateSessionResponse {
@@ -121,7 +136,7 @@ pub(crate) async fn create_session(
             created_at: format_rfc3339_micros(summary.created_at),
             session_id: summary.id,
             model,
-            permission_mode,
+            permission_mode: permission_mode.as_str().to_owned(),
         }),
     ))
 }

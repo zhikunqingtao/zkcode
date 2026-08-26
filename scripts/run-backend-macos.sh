@@ -12,7 +12,7 @@ set -a
 set +a
 
 export ZK_HOST=127.0.0.1
-export ZK_PORT=${ZK_PORT:-8081}
+export ZK_PORT=${ZK_PORT:-8082}
 export ZK_AUTH_MODE=localhost
 export ZK_PYTHON_SERVICE_DIR="$ROOT_DIR/python-service"
 export ZK_PYTHON_CMD="$ROOT_DIR/python-service/.venv/bin/python"

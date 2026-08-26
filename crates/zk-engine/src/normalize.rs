@@ -274,4 +274,25 @@ mod tests {
         normalize(&mut messages);
         assert_eq!(messages, original);
     }
+
+    #[test]
+    fn keeps_user_images_including_url_only_payloads() {
+        // url-only 图片消息（无 base64 载荷）不得被清洗丢弃或改写。
+        let original = vec![
+            ChatMessage::user_with_images(
+                "看看这张图",
+                vec![zk_llm::ImageSource {
+                    media_type: "image/png".into(),
+                    data: None,
+                    url: Some(
+                        "https://bkt.oss.example.com/zhikuncode-artifacts/clipboard/a.png".into(),
+                    ),
+                }],
+            ),
+            ChatMessage::assistant("已收到"),
+        ];
+        let mut messages = original.clone();
+        normalize(&mut messages);
+        assert_eq!(messages, original);
+    }
 }

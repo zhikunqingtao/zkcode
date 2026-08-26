@@ -7,6 +7,7 @@
 import { create } from 'zustand';
 import { immer } from 'zustand/middleware/immer';
 import { subscribeWithSelector } from 'zustand/middleware';
+import { usePermissionStore } from './permissionStore';
 
 const ACTIVE_SESSION_KEY = 'zkcode.activeSessionId';
 
@@ -91,6 +92,8 @@ export const useSessionStore = create<SessionStoreState>()(
                 throw new Error(
                     '服务端返回了无效的 Session');
             }
+            // 新建对话默认授予完全访问权限，避免逐次工具确认打断首轮对话。
+            usePermissionStore.getState().setPermissionMode('auto_approve');
             // REST creation only yields a candidate. The active Session and
             // sessionStorage are committed by the matching session_restored
             // frame after WebSocket binding succeeds.

@@ -5,12 +5,13 @@
  * 包含: 主题设置、模型选择、权限模式、快捷键等
  */
 
-import React, { useCallback } from 'react';
-import { X, Moon, Sun, Monitor, Keyboard, Shield, Globe, Sparkles } from 'lucide-react';
+import React, { useCallback, useState } from 'react';
+import { X, Moon, Sun, Monitor, Keyboard, Shield, Globe, Sparkles, KeyRound } from 'lucide-react';
 import { useConfigStore } from '@/store/configStore';
 import { useSessionStore } from '@/store/sessionStore';
 import { usePermissionStore } from '@/store/permissionStore';
 import { useNotificationStore } from '@/store/notificationStore';
+import { ApiKeysTab } from '@/components/settings/ApiKeysTab';
 import { sendSetPermissionMode } from '@/api/stompClient';
 import { isSessionBound } from '@/api/dispatch';
 import type { ThemeConfig, PermissionMode } from '@/types';
@@ -20,6 +21,7 @@ interface SettingsPanelProps {
 }
 
 export const SettingsPanel: React.FC<SettingsPanelProps> = ({ onClose }) => {
+    const [activeSection, setActiveSection] = useState<'general' | 'api-keys'>('general');
     const { theme, setTheme, locale, setLocale } = useConfigStore();
     const { sessionId, model, setModel, effortValue, setEffort } = useSessionStore();
     const { permissionMode } = usePermissionStore();
@@ -51,21 +53,56 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ onClose }) => {
 
     return (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-            <div className="w-full max-w-2xl mx-4 max-h-[80vh] rounded-xl border border-[var(--border)]
-                            bg-[var(--bg-primary)] shadow-2xl overflow-hidden flex flex-col">
+            <div
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="settings-dialog-title"
+                className="w-full max-w-2xl mx-4 max-h-[80vh] rounded-xl border border-[var(--border)]
+                           bg-[var(--bg-primary)] shadow-2xl overflow-hidden flex flex-col"
+            >
                 {/* Header */}
                 <div className="px-6 py-4 border-b border-[var(--border)] flex items-center justify-between">
-                    <h2 className="text-lg font-semibold text-[var(--text-primary)]">设置</h2>
+                    <h2 id="settings-dialog-title" className="text-lg font-semibold text-[var(--text-primary)]">设置</h2>
                     <button
+                        type="button"
                         onClick={onClose}
+                        aria-label="关闭设置"
                         className="p-2 rounded-lg hover:bg-[var(--bg-hover)] text-[var(--text-muted)]"
                     >
                         <X className="w-5 h-5" />
                     </button>
                 </div>
 
+                <div
+                    role="tablist"
+                    aria-label="设置分类"
+                    className="flex gap-1 px-6 pt-4 border-b border-[var(--border)]"
+                >
+                    <SettingsTabButton
+                        id="settings-general-tab"
+                        panelId="settings-general-panel"
+                        label="常规"
+                        selected={activeSection === 'general'}
+                        onClick={() => setActiveSection('general')}
+                    />
+                    <SettingsTabButton
+                        id="settings-api-keys-tab"
+                        panelId="settings-api-keys-panel"
+                        label="API Keys"
+                        selected={activeSection === 'api-keys'}
+                        onClick={() => setActiveSection('api-keys')}
+                        icon={<KeyRound className="w-4 h-4" aria-hidden="true" />}
+                    />
+                </div>
+
                 {/* Content */}
-                <div className="flex-1 overflow-y-auto p-6 space-y-8">
+                {activeSection === 'general' ? (
+                    <div
+                        id="settings-general-panel"
+                        role="tabpanel"
+                        aria-labelledby="settings-general-tab"
+                        className="flex-1 overflow-y-auto p-6 space-y-8"
+                    >
                     {/* Theme Section */}
                     <section>
                         <h3 className="text-sm font-medium text-[var(--text-secondary)] mb-3 flex items-center gap-2">
@@ -121,7 +158,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ onClose }) => {
                             <option value="kimi-k3">Kimi K3</option>
                             <option value="kimi-k2.7-code">Kimi K2.7 Code</option>
                             <option value="moonshot-v1-128k">Moonshot V1 128K</option>
-                            <option value="glm-5.2">GLM-5.2</option>
+                            <option value="glm-5.3">GLM-5.3</option>
                             <option value="glm-5v-turbo">GLM-5V-Turbo</option>
                             <option value="MiniMax-M3">MiniMax M3</option>
                             <option value="anthropic/claude-opus-4.8">Claude Opus 4.8 (zenmux)</option>
@@ -242,11 +279,22 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ onClose }) => {
                             <ShortcutItem keys={['Ctrl', 'C']} description="中断生成" />
                         </div>
                     </section>
-                </div>
+                    </div>
+                ) : (
+                    <div
+                        id="settings-api-keys-panel"
+                        role="tabpanel"
+                        aria-labelledby="settings-api-keys-tab"
+                        className="flex-1 overflow-y-auto p-6"
+                    >
+                        <ApiKeysTab />
+                    </div>
+                )}
 
                 {/* Footer */}
                 <div className="px-6 py-4 border-t border-[var(--border)] flex justify-end">
                     <button
+                        type="button"
                         onClick={onClose}
                         className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-sm"
                     >
@@ -257,6 +305,42 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ onClose }) => {
         </div>
     );
 };
+
+function SettingsTabButton({
+    id,
+    panelId,
+    label,
+    selected,
+    onClick,
+    icon,
+}: {
+    id: string;
+    panelId: string;
+    label: string;
+    selected: boolean;
+    onClick: () => void;
+    icon?: React.ReactNode;
+}) {
+    return (
+        <button
+            id={id}
+            type="button"
+            role="tab"
+            aria-selected={selected}
+            aria-controls={panelId}
+            tabIndex={selected ? 0 : -1}
+            onClick={onClick}
+            className={`flex items-center gap-2 px-4 py-2 -mb-px border-b-2 text-sm transition-colors
+                ${selected
+                    ? 'border-blue-500 text-blue-500'
+                    : 'border-transparent text-[var(--text-muted)] hover:text-[var(--text-primary)]'
+                }`}
+        >
+            {icon}
+            {label}
+        </button>
+    );
+}
 
 // Theme Option Component
 function ThemeOption({

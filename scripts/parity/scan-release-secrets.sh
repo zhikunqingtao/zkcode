@@ -24,5 +24,12 @@ rsync -rlt \
   --exclude-from="$ROOT_DIR/.gitignore" \
   "$ROOT_DIR/" "$SCAN_DIR/"
 
+# rsync's --exclude-from syntax does not implement gitignore negation.  Restore
+# the single deliberate `*.db` publication exception explicitly so the local
+# release scan examines the same public asset that the repository will track.
+mkdir -p "$SCAN_DIR/configuration/bootstrap"
+cp -p "$ROOT_DIR/configuration/bootstrap/demo-credentials.db" \
+  "$SCAN_DIR/configuration/bootstrap/demo-credentials.db"
+
 cd "$ROOT_DIR"
 gitleaks dir "$SCAN_DIR" --redact --config "$ROOT_DIR/.gitleaks-local.toml"

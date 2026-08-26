@@ -1030,7 +1030,8 @@ async fn handle_set_model(state: &AppState, conn_id: &str, model: &str) {
         return;
     };
     let trimmed = model.trim();
-    let known = state.providers.models();
+    let providers = state.providers.load();
+    let known = providers.models();
     let supported = !trimmed.is_empty() && (known.is_empty() || known.iter().any(|m| m == trimmed));
     if !supported {
         state

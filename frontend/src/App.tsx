@@ -198,11 +198,12 @@ function App() {
     }
     if (event.attachments && event.attachments.length > 0) {
       for (const att of event.attachments) {
-        if (att.type === 'image' && att.base64Data) {
+        if (att.type === 'image' && (att.base64Data || att.url)) {
           contentBlocks.push({
             type: 'image',
             mediaType: att.mediaType || 'image/png',
             base64Data: att.base64Data,
+            url: att.url,
           });
         }
       }

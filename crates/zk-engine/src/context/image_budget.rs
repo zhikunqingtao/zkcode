@@ -1225,6 +1225,22 @@ mod tests {
         })
     }
 
+    #[test]
+    fn url_image_blocks_are_ignored_by_budget_and_hashing() {
+        // url 型图片块无 base64 载荷：哈希缺席、token 贡献 0，绝不 panic。
+        let url_block = json!({
+            "type": "image",
+            "source": {
+                "type": "url",
+                "url": "https://bkt.oss.example.com/zhikuncode-artifacts/clipboard/a.png",
+            },
+        });
+        assert_eq!(image_block_hash(&url_block), None);
+        let messages = vec![json!({ "role": "user", "content": [url_block] })];
+        assert_eq!(estimate_api_tokens(&messages, TEXT_TOKEN_RATIO), 0);
+        assert!(collect_image_hashes(&messages).is_empty());
+    }
+
     // ==================== Phase 1：魔数识别与阈值 ====================
 
     #[test]

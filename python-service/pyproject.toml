@@ -1,12 +1,12 @@
 [build-system]
-requires = ["setuptools>=68.0", "wheel"]
+requires = ["setuptools>=77.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "zkcode-python-service"
 version = "0.1.0"
 description = "Python capability service for zkcode"
-license = {text = "MIT"}
+license = "Apache-2.0"
 authors = [{name = "zkcode contributors"}]
 requires-python = ">=3.11,<3.13"
 dependencies = [

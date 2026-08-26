@@ -44,7 +44,8 @@ impl Command for ModelCommand {
         ctx: &'a CommandContext,
     ) -> BoxFuture<'a, CommandResult> {
         Box::pin(async move {
-            let available = ctx.state.providers.models();
+            let providers = ctx.state.providers.load();
+            let available = providers.models();
             // 旧 L41-51：无参列清单。
             if args.trim().is_empty() {
                 let mut text = String::from("Available Models:\n\n");

@@ -50,9 +50,9 @@
 //! - **`B4B-03`**：`POST /api/mcp/servers` 的体校验早于业务。旧 Jackson 对缺失
 //!   `name` / `type` 填 `null`，随后在 `addServer` → `connect` 的 switch 上
 //!   NPE → 500；Rust 侧两字段为必填，缺失即 400 `INVALID_REQUEST_BODY`。缺失
-//!   `scope` 的语义**逐字保留**：旧 `config.scope() != null` 为假 → 不自动信任
-//!   → 连接落 `NEEDS_AUTH`，Rust 侧缺省填 [`McpConfigScope::Dynamic`]，
-//!   `McpClientManager::add_server` 内 `scope != Dynamic` 判定与之等价。
+//!   `scope` 缺省填 [`McpConfigScope::Dynamic`]；显式提交其他 scope 会以
+//!   `MCP_SCOPE_NOT_ALLOWED` 拒绝。配置来源的信任等级只能由服务端加载器赋予，
+//!   防止请求体伪造 `PROJECT` / `USER` 后自动批准并启动命令。
 //! - **`B4B-04`**：`readResource` 旧有两条 catch（`McpProtocolException` →
 //!   `"Failed to read resource: …"`；`Exception` → `"Unexpected error: …"`）。
 //!   Rust 侧 `read_resource` 的错误类型只有 `McpProtocolError`，故仅第一条可达，
@@ -86,6 +86,7 @@ use zk_mcp::{
 
 use crate::api::http_params::{parse_spring_int, require_param};
 use crate::error::ApiError;
+use crate::mcp_tools::{MAX_RESOURCE_BYTES, ResourcePolicyError, validate_declared_resource};
 use crate::state::AppState;
 
 /// 日志行数缺省（旧 `@RequestParam(defaultValue = "100") int lines`）。
@@ -98,7 +99,9 @@ const MAX_ARGUMENT_VALUE_LENGTH: usize = 10_000;
 ///
 /// 字段与 [`McpServerConfig`] 一一对应，差别只在**缺省填充**：旧 Jackson 对
 /// record 的缺失字段填 `null` / 保留 `null` 集合，此处以 `serde` 默认值复刻
-/// （`scope` 的 `null` ⇔ [`McpConfigScope::Dynamic`]，见模块偏离 `B4B-03`）。
+/// Runtime REST registration is always [`McpConfigScope::Dynamic`].  A caller
+/// may send `scope: "DYNAMIC"` for compatibility, but may not claim a trusted
+/// config-file scope such as `PROJECT` or `USER`.
 #[derive(Debug, Deserialize)]
 struct AddServerRequest {
     /// 服务器名（唯一标识）。
@@ -132,6 +135,20 @@ const fn default_scope() -> McpConfigScope {
 }
 
 impl AddServerRequest {
+    /// Reject attempts to claim a trusted config-file scope through the
+    /// runtime API.  Trust provenance is assigned by the server, never by a
+    /// request-body field.
+    fn validate_runtime_scope(&self) -> Result<(), ApiError> {
+        if self.scope == McpConfigScope::Dynamic {
+            Ok(())
+        } else {
+            Err(ApiError::validation_with_code(
+                "MCP_SCOPE_NOT_ALLOWED",
+                "Runtime MCP servers must use DYNAMIC scope and require explicit approval",
+            ))
+        }
+    }
+
     /// 转为管理器可消费的配置。
     fn into_config(self) -> McpServerConfig {
         McpServerConfig {
@@ -142,7 +159,8 @@ impl AddServerRequest {
             env: self.env,
             url: self.url,
             headers: self.headers,
-            scope: self.scope,
+            // Never derive trust provenance from an HTTP request body.
+            scope: McpConfigScope::Dynamic,
         }
     }
 }
@@ -156,7 +174,9 @@ impl AddServerRequest {
 /// `@ExceptionHandler(Exception.class)` → 500 `INTERNAL_ERROR`。
 pub(crate) fn manager_error(error: &ManagerError) -> ApiError {
     match error {
-        ManagerError::ServerNotFound(_) => ApiError::validation(error.to_string()),
+        ManagerError::ServerNotFound(_) | ManagerError::UnsafeCapabilityEndpoint(_) => {
+            ApiError::validation(error.to_string())
+        }
         ManagerError::NotRunning
         | ManagerError::CannotRestartAfterShutdown
         | ManagerError::LifecycleChanged => {
@@ -359,6 +379,7 @@ pub(crate) async fn add_server(
     }
     let request: AddServerRequest =
         serde_json::from_slice(&body).map_err(|_| ApiError::invalid_request_body())?;
+    request.validate_runtime_scope()?;
     let config = request.into_config();
     let name = config.name.clone();
     state
@@ -517,13 +538,34 @@ pub(crate) async fn read_resource(
             "MCP server '{server}' not connected (status: {status})"
         )));
     }
+    let resources = connection.discover_resources().await;
+    let _declared = validate_declared_resource(&uri, &resources).map_err(|error| match error {
+        ResourcePolicyError::UriRejected => ApiError::validation_with_code(
+            "MCP_RESOURCE_URI_REJECTED",
+            "MCP resource URI scheme or length is not allowed",
+        ),
+        ResourcePolicyError::NotDeclared => ApiError::validation_with_code(
+            "MCP_RESOURCE_NOT_DECLARED",
+            "MCP resource was not declared by resources/list",
+        ),
+        ResourcePolicyError::MimeRejected => ApiError::validation_with_code(
+            "MCP_RESOURCE_MIME_REJECTED",
+            "MCP resource MIME type is not allowed",
+        ),
+    })?;
     match connection.read_resource(&uri).await {
-        Ok(content) => Ok((
+        Ok(content) if content.len() <= MAX_RESOURCE_BYTES => Ok((
             StatusCode::OK,
             Json(json!({ "uri": uri, "serverName": server, "content": content })),
         )),
+        Ok(_) => Err(ApiError::validation_with_code(
+            "MCP_RESOURCE_TOO_LARGE",
+            "MCP resource exceeds the 1 MiB response limit",
+        )),
         Err(error) => {
-            tracing::error!(%uri, %server, %error, "Failed to read MCP resource");
+            // Resource URIs may themselves contain bearer material; never log
+            // the caller-controlled URI on a protocol failure.
+            tracing::error!(%server, %error, "Failed to read MCP resource");
             Err(server_error(&format!("Failed to read resource: {error}")))
         }
     }
@@ -843,6 +885,19 @@ mod tests {
         assert_eq!(config.transport, McpTransportType::Stdio);
         assert!(config.args.is_empty());
         assert!(config.url.is_none());
+    }
+
+    #[test]
+    fn add_server_request_cannot_claim_trusted_scope() {
+        let request: AddServerRequest = serde_json::from_str(
+            r#"{"name":"s","type":"STDIO","command":"node","scope":"PROJECT"}"#,
+        )
+        .unwrap();
+        let error = request
+            .validate_runtime_scope()
+            .expect_err("runtime requests cannot claim project trust");
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error.code, "MCP_SCOPE_NOT_ALLOWED");
     }
 
     /// 缺 `type` → 反序列化失败（Rust 侧 400，见模块偏离 `B4B-03`）。

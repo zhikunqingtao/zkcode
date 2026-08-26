@@ -158,16 +158,35 @@ impl SseDecoder {
     }
 }
 
-/// 解析 `endpoint` 事件给出的会话端点（对照 Java 三分支拼接：绝对 URL 原样、
-/// 绝对路径拼 origin、相对路径拼在 `postUrl` 之后）。
-pub(crate) fn resolve_session_endpoint(base_origin: &str, post_url: &str, data: &str) -> String {
-    if data.starts_with("http") {
+/// Parse the session endpoint while preserving the original three relative
+/// shapes.  Absolute endpoints are accepted only when they stay on the
+/// validated SSE origin; otherwise a server could redirect credential-bearing
+/// POSTs to an internal or attacker-controlled host.
+pub(crate) fn resolve_session_endpoint(
+    base_origin: &str,
+    post_url: &str,
+    data: &str,
+) -> Result<String, McpProtocolError> {
+    let endpoint = if data.starts_with("http") {
         data.to_owned()
     } else if data.starts_with('/') {
         format!("{base_origin}{data}")
     } else {
         format!("{post_url}/{data}")
+    };
+    let base = reqwest::Url::parse(base_origin)
+        .map_err(|_| McpProtocolError::wrapped("Invalid MCP SSE base origin"))?;
+    let parsed = reqwest::Url::parse(&endpoint)
+        .map_err(|_| McpProtocolError::wrapped("Invalid MCP SSE session endpoint"))?;
+    let same_origin = parsed.scheme() == base.scheme()
+        && parsed.host_str() == base.host_str()
+        && parsed.port_or_known_default() == base.port_or_known_default();
+    if !same_origin || !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(McpProtocolError::wrapped(
+            "MCP SSE session endpoint must remain on the configured origin",
+        ));
     }
+    Ok(endpoint)
 }
 
 /// JSON-RPC `id` → pending 表键（对照 Java `idNode.asText()`：数字与字符串
@@ -328,6 +347,9 @@ impl SseTransport {
         let client = reqwest::Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
             .read_timeout(READ_TIMEOUT)
+            // Do not let a validated public capability endpoint redirect the
+            // credential-bearing request to a private or different host.
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|error| {
                 McpProtocolError::wrapped(format!("Failed to build SSE HTTP client: {error}"))
@@ -671,7 +693,15 @@ fn handle_sse_event(
     connect_sender: &mut Option<oneshot::Sender<Result<(), McpProtocolError>>>,
 ) {
     if event.event_type == ENDPOINT_EVENT_TYPE {
-        let endpoint = resolve_session_endpoint(&shared.base_origin, &shared.post_url, &event.data);
+        let endpoint =
+            match resolve_session_endpoint(&shared.base_origin, &shared.post_url, &event.data) {
+                Ok(endpoint) => endpoint,
+                Err(error) => {
+                    complete_connect(connect_sender, Err(error));
+                    shared.mark_disconnected("Unsafe SSE session endpoint rejected");
+                    return;
+                }
+            };
         tracing::info!(endpoint = %endpoint, "MCP SSE endpoint");
         *write_lock(&shared.session_endpoint) = Some(endpoint);
         complete_connect(connect_sender, Ok(()));
@@ -845,19 +875,21 @@ mod tests {
     }
 
     #[test]
-    fn resolves_endpoint_in_three_shapes() {
+    fn resolves_same_origin_endpoint_shapes_and_rejects_cross_origin() {
         let origin = "http://127.0.0.1:9000";
         let post = "http://127.0.0.1:9000/mcp";
         assert_eq!(
-            resolve_session_endpoint(origin, post, "http://other/x"),
-            "http://other/x"
+            resolve_session_endpoint(origin, post, "http://other/x")
+                .expect_err("cross-origin endpoint must fail")
+                .to_string(),
+            "MCP SSE session endpoint must remain on the configured origin"
         );
         assert_eq!(
-            resolve_session_endpoint(origin, post, "/messages?id=1"),
+            resolve_session_endpoint(origin, post, "/messages?id=1").expect("same origin"),
             "http://127.0.0.1:9000/messages?id=1"
         );
         assert_eq!(
-            resolve_session_endpoint(origin, post, "messages"),
+            resolve_session_endpoint(origin, post, "messages").expect("same origin"),
             "http://127.0.0.1:9000/mcp/messages"
         );
     }

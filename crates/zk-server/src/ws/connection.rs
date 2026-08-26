@@ -38,8 +38,9 @@ use crate::state::AppState;
 
 /// `GET /ws`——原生 WebSocket 升级入口（非 SockJS；方案 §4.2）。
 ///
-/// 鉴权由 Router 层 `localnet_guard` 承担（D7 层级 1：loopback 直信）——
-/// 升级请求与 REST 请求同栈过守卫，非 loopback 对端 403，不进入本 handler。
+/// 鉴权由 Router 层 `localnet_guard` 承担：请求必须来自 loopback，且携带
+/// 受信任的精确 Origin 或本地 Bearer 凭据；仅 loopback 来源本身不构成授权。
+/// 不满足条件的升级请求不会进入本 handler。
 /// principal 即连接内 UUID（`ConnId`），替代旧 Spring 用户名体系。
 pub async fn handle_ws(
     ws: WebSocketUpgrade,

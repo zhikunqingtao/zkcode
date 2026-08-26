@@ -386,10 +386,22 @@ fn convert_messages(messages: &[crate::provider::ChatMessage]) -> Vec<Value> {
                 if !message.content.is_empty() {
                     blocks.push(json!({"type":"text", "text":message.content}));
                 }
-                blocks.extend(message.images.iter().map(|image| json!({
-                    "type":"image",
-                    "source": {"type":"base64", "media_type":image.media_type, "data":image.data}
-                })));
+                blocks.extend(message.images.iter().filter_map(|image| {
+                    // URL 图片直发 Anthropic `url` source；否则 base64 source；
+                    // 两者皆无跳过（与 OpenAI 侧 `appendImageUrlPart` 同语义）。
+                    if let Some(url) = image.url.as_deref().filter(|url| !url.trim().is_empty()) {
+                        return Some(json!({
+                            "type":"image",
+                            "source": {"type":"url", "url": url}
+                        }));
+                    }
+                    image.data.as_deref().map(|data| {
+                        json!({
+                            "type":"image",
+                            "source": {"type":"base64", "media_type":image.media_type, "data":data}
+                        })
+                    })
+                }));
                 out.push(json!({"role":"user", "content":blocks}));
             }
             // system 历史与 user 同列（协议不允许 messages 内 system 角色）。
@@ -1320,7 +1332,8 @@ mod tests {
             "inspect",
             vec![crate::ImageSource {
                 media_type: "image/png".into(),
-                data: "aGVsbG8=".into(),
+                data: Some("aGVsbG8=".into()),
+                url: None,
             }],
         )]);
         assert_eq!(messages[0]["content"][0]["type"], "text");
@@ -1330,5 +1343,26 @@ mod tests {
             messages[0]["content"][1]["source"]["media_type"],
             "image/png"
         );
+    }
+
+    #[test]
+    fn anthropic_messages_serialize_url_images_as_url_source() {
+        let messages = convert_messages(&[ChatMessage::user_with_images(
+            "inspect",
+            vec![crate::ImageSource {
+                media_type: "image/png".into(),
+                data: None,
+                url: Some(
+                    "https://bkt.oss.example.com/zhikuncode-artifacts/clipboard/a.png".into(),
+                ),
+            }],
+        )]);
+        assert_eq!(messages[0]["content"][1]["type"], "image");
+        assert_eq!(messages[0]["content"][1]["source"]["type"], "url");
+        assert_eq!(
+            messages[0]["content"][1]["source"]["url"],
+            "https://bkt.oss.example.com/zhikuncode-artifacts/clipboard/a.png"
+        );
+        assert!(messages[0]["content"][1]["source"].get("data").is_none());
     }
 }

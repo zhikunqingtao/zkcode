@@ -19,9 +19,12 @@ use zk_engine::{
     CLEARED_MESSAGE, ConversationRunOptions, ConversationService, Engine,
     MAX_TOKENS_RECOVERY_MESSAGE, MessageSink, calculate_token_warning_state,
 };
-use zk_llm::{ChatProvider, ChatRequest, FinishReason, ProviderError, ProviderEvent, Role};
+use zk_llm::{
+    ChatProvider, ChatRequest, FinishReason, ProviderError, ProviderEvent, ProviderRegistry, Role,
+    VisionProviderView,
+};
 use zk_protocol::model::Usage;
-use zk_protocol::{ClientMessage, ServerMessage};
+use zk_protocol::{Attachment, ClientMessage, ServerMessage};
 use zk_tools::{EchoTool, Tool, ToolContext, ToolOutput, ToolRegistry};
 
 /// 下行录制桩（顺序即引擎推送顺序）。
@@ -160,6 +163,204 @@ async fn run(engine: &Arc<Engine>, session_id: &str, text: &str) {
     Arc::clone(engine)
         .run_user_message(session_id.to_owned(), text.to_owned())
         .await;
+}
+
+fn trusted_url_attachment(index: usize) -> Attachment {
+    Attachment {
+        kind: "image".into(),
+        path: None,
+        media_type: Some("image/png".into()),
+        base64_data: None,
+        url: Some(format!("https://trusted.example.test/image-{index}.png")),
+    }
+}
+
+async fn run_with_url_images(
+    engine: &Arc<Engine>,
+    sink: &RecordingSink,
+    session_id: &str,
+    image_count: usize,
+    terminal_kind: &'static str,
+) {
+    engine.handle_client_message(
+        session_id,
+        ClientMessage::UserMessage {
+            text: "inspect the image".into(),
+            attachments: Some((0..image_count).map(trusted_url_attachment).collect()),
+            references: None,
+        },
+    );
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if sink.kinds().contains(&terminal_kind) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("engine should reach a terminal message");
+}
+
+fn registry_with_models(provider: Arc<MockProvider>, models: &[&str]) -> Arc<ProviderRegistry> {
+    let mut registry = ProviderRegistry::new();
+    registry.register(
+        "zhipu",
+        provider as Arc<dyn ChatProvider>,
+        models.iter().map(|model| (*model).to_owned()).collect(),
+    );
+    Arc::new(registry)
+}
+
+fn engine_with_vision_registry(
+    db: Db,
+    provider: &Arc<MockProvider>,
+    sink: &Arc<RecordingSink>,
+    models: &[&str],
+) -> Arc<Engine> {
+    let registry = registry_with_models(Arc::clone(provider), models);
+    Arc::new(
+        Engine::new(
+            db,
+            Arc::clone(&registry) as Arc<dyn ChatProvider>,
+            Arc::clone(sink) as Arc<dyn MessageSink>,
+        )
+        .with_trusted_image_url(Arc::new(|_| true))
+        .with_vision_provider_view(registry as Arc<dyn VisionProviderView>),
+    )
+}
+
+#[tokio::test]
+async fn image_request_routes_glm_5_3_to_configured_glm_5v_for_this_run() {
+    let db = Db::open_in_memory().expect("in-memory db");
+    let session = db
+        .create_session("glm-5.3", "/tmp")
+        .await
+        .expect("create session");
+    let provider = Arc::new(MockProvider::new(vec![events(vec![
+        ProviderEvent::Finish {
+            finish_reason: FinishReason::EndTurn,
+            usage: None,
+        },
+    ])]));
+    let sink = Arc::new(RecordingSink::default());
+    let engine =
+        engine_with_vision_registry(db.clone(), &provider, &sink, &["glm-5.3", "glm-5v-turbo"]);
+
+    run_with_url_images(&engine, &sink, &session.id, 1, "session_list_updated").await;
+
+    assert_eq!(provider.request_count(), 1);
+    let request = provider.request_at(0);
+    assert_eq!(request.model, "glm-5v-turbo");
+    assert_eq!(
+        request.messages.last().expect("user message").images.len(),
+        1
+    );
+    assert!(
+        request
+            .system_text()
+            .expect("system prompt")
+            .contains("你由模型 glm-5v-turbo 驱动")
+    );
+    assert_eq!(sink.kinds().first(), Some(&"model_routed"));
+    let routed = sink.json_at(0);
+    assert_eq!(routed["originalModel"], "glm-5.3");
+    assert_eq!(routed["routedModel"], "glm-5v-turbo");
+    assert_eq!(routed["routedModelName"], "GLM-5V-Turbo");
+    assert_eq!(
+        routed["reason"],
+        "当前模型不支持图片，已自动切换到 GLM-5V-Turbo"
+    );
+    let persisted = db
+        .get_session(&session.id)
+        .await
+        .expect("get session")
+        .expect("session remains");
+    assert_eq!(
+        persisted.model, "glm-5.3",
+        "routing must not mutate session model"
+    );
+}
+
+#[tokio::test]
+async fn image_request_without_configured_vision_model_fails_before_provider() {
+    let db = Db::open_in_memory().expect("in-memory db");
+    let session = db
+        .create_session("glm-5.3", "/tmp")
+        .await
+        .expect("create session");
+    let provider = Arc::new(MockProvider::new(Vec::new()));
+    let sink = Arc::new(RecordingSink::default());
+    let empty_registry = Arc::new(ProviderRegistry::new());
+    let engine = Arc::new(
+        Engine::new(
+            db.clone(),
+            Arc::clone(&provider) as Arc<dyn ChatProvider>,
+            Arc::clone(&sink) as Arc<dyn MessageSink>,
+        )
+        .with_trusted_image_url(Arc::new(|_| true))
+        .with_vision_provider_view(empty_registry as Arc<dyn VisionProviderView>),
+    );
+
+    run_with_url_images(&engine, &sink, &session.id, 1, "error").await;
+
+    assert_eq!(provider.request_count(), 0);
+    assert_eq!(sink.kinds(), vec!["error"]);
+    assert_eq!(sink.json_at(0)["code"], "ATTACHMENT_MODEL_UNSUPPORTED");
+    let messages = db
+        .list_messages(&session.id, None, 10)
+        .await
+        .expect("list messages")
+        .expect("session exists");
+    assert!(
+        messages.messages.is_empty(),
+        "rejected input must not persist"
+    );
+}
+
+#[tokio::test]
+async fn native_vision_model_keeps_model_and_emits_no_route_event() {
+    let db = Db::open_in_memory().expect("in-memory db");
+    let session = db
+        .create_session("glm-5v-turbo", "/tmp")
+        .await
+        .expect("create session");
+    let provider = Arc::new(MockProvider::new(vec![events(vec![
+        ProviderEvent::Finish {
+            finish_reason: FinishReason::EndTurn,
+            usage: None,
+        },
+    ])]));
+    let sink = Arc::new(RecordingSink::default());
+    let engine = engine_with_vision_registry(db, &provider, &sink, &["glm-5v-turbo"]);
+
+    run_with_url_images(&engine, &sink, &session.id, 1, "session_list_updated").await;
+
+    assert_eq!(provider.request_at(0).model, "glm-5v-turbo");
+    assert!(!sink.kinds().contains(&"model_routed"));
+}
+
+#[tokio::test]
+async fn routed_model_image_limit_is_enforced_before_event_or_provider_call() {
+    let db = Db::open_in_memory().expect("in-memory db");
+    let session = db
+        .create_session("glm-5.3", "/tmp")
+        .await
+        .expect("create session");
+    let provider = Arc::new(MockProvider::new(Vec::new()));
+    let sink = Arc::new(RecordingSink::default());
+    let engine = engine_with_vision_registry(db, &provider, &sink, &["glm-5.3", "glm-5v-turbo"]);
+
+    // GLM-5.3 自身 max_images=0；路由后的 GLM-5V-Turbo max_images=150。
+    run_with_url_images(&engine, &sink, &session.id, 151, "error").await;
+
+    assert_eq!(provider.request_count(), 0);
+    assert_eq!(sink.kinds(), vec!["error"]);
+    assert_eq!(sink.json_at(0)["code"], "ATTACHMENT_COUNT_EXCEEDED");
+    assert_eq!(
+        sink.json_at(0)["message"],
+        "Model glm-5v-turbo accepts at most 150 images"
+    );
 }
 
 #[tokio::test]

@@ -172,6 +172,23 @@ describe('native WS client', () => {
             }
         });
 
+        it('passes attachment url through the user_message payload verbatim', () => {
+            const ws = connectAndOpen();
+
+            sendUserMessage('see image', [{
+                type: 'image', name: 'shot.png', mediaType: 'image/png',
+                url: 'https://oss.example.com/shot.png',
+            }], []);
+            expect(ws.lastSentJson()).toEqual({
+                type: 'user_message', text: 'see image',
+                attachments: [{
+                    type: 'image', name: 'shot.png', mediaType: 'image/png',
+                    url: 'https://oss.example.com/shot.png',
+                }],
+                references: [],
+            });
+        });
+
         it('serializes each convenience sender with exact type and camelCase fields', () => {
             const ws = connectAndOpen();
 

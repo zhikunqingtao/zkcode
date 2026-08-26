@@ -99,7 +99,7 @@ impl Command for CompactCommand {
             let lightweight_model = std::env::var("ZK_LIGHTWEIGHT_MODEL")
                 .ok()
                 .filter(|model| !model.trim().is_empty())
-                .unwrap_or_else(|| ctx.state.providers.default_model().to_owned());
+                .unwrap_or_else(|| ctx.state.providers.load().default_model().to_owned());
             let provider: std::sync::Arc<dyn ChatProvider> = ctx.state.providers.clone();
             let summarizer = LlmSummarizer::new(provider, lightweight_model);
             let result =

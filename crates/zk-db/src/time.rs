@@ -6,7 +6,7 @@
 //! `ORDER BY updated_at DESC` 排序、`updated_at < ?` 游标锚点、
 //! `Base64("updated_at|session_id")` 游标内容**全部依赖该字符串**。zk-db
 //! 照抄 TEXT 存储形状（迁移逐列照抄，见 `migrations/`），使 zkcode 与旧
-//! 系统 data.db 双表二进制互读（U3 对照调试 8081/8080 并行依赖此性质）。
+//! 系统 data.db 双表二进制互读（U3 对照调试 8082/8080 并行依赖此性质）。
 //!
 //! # 写出恒定 6 位微秒（对旧格式的有意收紧）
 //!

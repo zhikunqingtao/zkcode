@@ -3,7 +3,7 @@
 //!
 //! 9-crate 拓扑定位：最顶层 crate，依赖 zk-protocol / zk-db / zk-llm /
 //! zk-engine 并完成装配。遵循 U2（SessionController 全部 8 端点）、U3（开发态
-//! 8081 / 验收态 8080 双轨端口）、D7（localhost 鉴权模式）。
+//! 8082 / 验收态 8080 双轨端口）、D7（localhost 鉴权模式）。
 //!
 //! # Phase 1（S7）范围
 //!
@@ -65,6 +65,7 @@ pub mod authz;
 pub mod command;
 pub mod config;
 pub mod cost;
+mod demo_credentials;
 pub mod engine_bridge;
 pub mod error;
 pub mod file_access;
@@ -73,10 +74,12 @@ pub mod http_search;
 pub mod interaction;
 pub mod iso;
 pub mod mcp;
+pub mod mcp_search;
 pub mod mcp_tools;
 pub mod metrics_recorder;
 pub mod middleware;
 pub mod network;
+pub mod oss_trust;
 pub mod python;
 pub mod routes;
 pub mod run_termination;

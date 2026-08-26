@@ -115,7 +115,10 @@ async fn execute(
     state.authz.modes.set_mode(&session_id, mode).await;
     if let Some(model) = request.model.as_deref() {
         let resolved = resolve_model(state, model)?;
-        state.db.update_session_model(&session_id, resolved).await?;
+        state
+            .db
+            .update_session_model(&session_id, &resolved)
+            .await?;
     }
     let service = state.conversation().ok_or_else(|| {
         ApiError::feature_not_ready("Query", "the shared ConversationService is wired")
@@ -274,22 +277,23 @@ async fn resolve_session(
         .as_deref()
         .map(|model| resolve_model(state, model))
         .transpose()?
-        .unwrap_or(&state.config.default_model);
+        .unwrap_or_else(|| state.config.default_model.clone());
     Ok(state
         .db
-        .create_session(model, &project.workspace_root)
+        .create_session(&model, &project.workspace_root)
         .await?
         .id)
 }
 
-fn resolve_model<'a>(state: &'a AppState, requested: &'a str) -> Result<&'a str, ApiError> {
+fn resolve_model(state: &AppState, requested: &str) -> Result<String, ApiError> {
     let requested = requested.trim();
+    let providers = state.providers.load();
     let resolved = if matches!(requested, "premium" | "default" | "inherit") {
-        state.providers.default_model()
+        providers.default_model()
     } else {
         requested
     };
-    let models = state.providers.models();
+    let models = providers.models();
     if resolved.is_empty() || (!models.is_empty() && !models.iter().any(|model| model == resolved))
     {
         return Err(ApiError::validation_with_code(
@@ -297,5 +301,5 @@ fn resolve_model<'a>(state: &'a AppState, requested: &'a str) -> Result<&'a str,
             &format!("Unsupported model: {requested}"),
         ));
     }
-    Ok(resolved)
+    Ok(resolved.to_owned())
 }

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { useConfigStore } from '../configStore';
+import { DEFAULT_MODEL, useConfigStore } from '../configStore';
 
 describe('ConfigStore', () => {
     beforeEach(() => {
@@ -17,7 +17,7 @@ describe('ConfigStore', () => {
             verbose: false,
             expandedView: false,
             outputStyle: { availableStyles: [], activeStyleName: null },
-            defaultModel: 'qwen3.6-plus',
+            defaultModel: DEFAULT_MODEL,
         });
     });
 
@@ -49,7 +49,8 @@ describe('ConfigStore', () => {
     });
 
     it('default model is set', () => {
-        expect(useConfigStore.getState().defaultModel).toBe('qwen3.6-plus');
+        expect(DEFAULT_MODEL).toBe('qwen3.8-max');
+        expect(useConfigStore.getState().defaultModel).toBe(DEFAULT_MODEL);
     });
 
     it('setOutputStyles updates available styles', () => {

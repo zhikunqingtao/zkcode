@@ -78,7 +78,7 @@ async fn main() {
     // 未配任何 provider key 时退化为 Phase 1 单 provider（`ZK_LLM_BASE_URL` /
     // `ZK_LLM_API_KEY`），行为与 S9 一致。默认模型统一取 `ZK_DEFAULT_MODEL`
     // （与创建会话共用同一配置源）。密钥不落日志（ApiKey 脱敏）。
-    let providers = std::sync::Arc::new(build_provider_registry(&config));
+    let providers = build_provider_registry(&config);
     tracing::info!(
         provider_count = providers.len(),
         model_count = providers.models().len(),
@@ -87,6 +87,9 @@ async fn main() {
         "wiring chat engine"
     );
     let mut state = AppState::new(db, config.clone()).with_providers(providers);
+    // Task 4 Step 6：启动时合并 DB 保存的 LLM 密钥——若 DB 有密钥则重建
+    // registry 并热替换；无 DB 密钥时保留环境变量 / Phase 1 初始 registry。
+    state.merge_db_llm_keys().await;
     match state.db.interrupt_active_tasks().await {
         Ok(count) if count > 0 => {
             tracing::warn!(count, "marked tasks interrupted by process restart");
@@ -416,7 +419,9 @@ async fn shutdown_signal() {
 /// fast 退出——与原 S9 provider 构建失败的处置一致。
 fn build_provider_registry(config: &Config) -> zk_llm::ProviderRegistry {
     let env_configs = zk_llm::provider_configs_from_env();
-    let registry = if env_configs.is_empty() {
+    let registry = if !env_configs.is_empty() {
+        zk_llm::ProviderRegistry::from_configs(env_configs)
+    } else if !config.llm_api_key.is_empty() {
         let phase1 = zk_llm::ProviderConfig::new(
             "openai-compat",
             config.llm_base_url.clone(),
@@ -426,7 +431,7 @@ fn build_provider_registry(config: &Config) -> zk_llm::ProviderRegistry {
         );
         zk_llm::ProviderRegistry::from_configs(vec![phase1])
     } else {
-        zk_llm::ProviderRegistry::from_env()
+        Ok(zk_llm::ProviderRegistry::new())
     };
     registry
         .unwrap_or_else(|err| {
@@ -434,4 +439,5 @@ fn build_provider_registry(config: &Config) -> zk_llm::ProviderRegistry {
             std::process::exit(1);
         })
         .with_default_model(config.default_model.clone())
+        .with_fallback_chain(zk_llm::config::fallback_chain_from_env())
 }

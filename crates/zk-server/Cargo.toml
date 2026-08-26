@@ -52,6 +52,8 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+# 可热替换的 Provider 代理层（SwappableProvider 包裹 ArcSwap）。
+arc-swap = { workspace = true }
 # 2.6 引入：Python 侧车 IPC（HTTP over UDS）——hyper http1 客户端 + TokioIo
 # 适配 UnixStream + Full/collect 体处理；bytes 为请求体载体。
 hyper = { workspace = true }
@@ -79,6 +81,8 @@ serde = { workspace = true }
 # S7b：OpenAPI 文档（path 注解 + ApiDoc 聚合 → GET /api/openapi.json）。
 utoipa = { workspace = true }
 serde_json = { workspace = true }
+# Phase A7（剪贴板图片 URL 信任校验）：结构化 URL 解析。
+url = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 

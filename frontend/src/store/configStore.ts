@@ -40,6 +40,8 @@ const DEFAULT_THEME: ThemeConfig = {
     borderRadius: 'md',
 };
 
+export const DEFAULT_MODEL = 'qwen3.8-max';
+
 export const useConfigStore = create<ConfigStoreState>()(
     subscribeWithSelector(
         persist(
@@ -62,7 +64,7 @@ export const useConfigStore = create<ConfigStoreState>()(
                 verbose: false,
                 expandedView: false,
                 outputStyle: { availableStyles: [] as OutputStyleDef[], activeStyleName: null as string | null },
-                defaultModel: 'qwen3.7-max',
+                defaultModel: DEFAULT_MODEL,
 
                 setTheme: (update) => set(d => { Object.assign(d.theme, update); }),
                 resetTheme: () => set(d => { d.theme = { ...DEFAULT_THEME }; }),

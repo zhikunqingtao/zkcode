@@ -116,12 +116,20 @@ pub enum ContentBlock {
         thinking: String,
     },
     /// 图片块（Java `ContentBlock.ImageBlock`；`width`/`height` 被 WS 层丢弃）。
+    ///
+    /// `base64Data` 与 `url` 二选一：可信 OSS 剪贴板图片出站只写 `url`
+    /// （旧 `WebSocketController` L1988 出站分支），其余仍为 base64；缺省侧
+    /// 键被省略（对齐旧 Jackson `NON_NULL`）。
     #[serde(rename_all = "camelCase")]
     Image {
-        /// MIME 类型（如 `image/png`）。
+        /// MIME 类型（如 `image/png`；旧出站恒写 `mediaType`）。
         media_type: String,
-        /// base64 编码数据。
-        base64_data: String,
+        /// base64 编码数据（url 场景缺省）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base64_data: Option<String>,
+        /// 可信远程 URL（base64 场景缺省）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        url: Option<String>,
     },
     /// 脱敏思考块（Java `ContentBlock.RedactedThinkingBlock`；WS 形状无字段）。
     RedactedThinking,
@@ -174,7 +182,7 @@ impl std::ops::Add for Usage {
 /// 些调用点显式 `toEpochMilli()`（如 `interaction_updated` ACK 路径的
 /// `decisionDeadlineAt`）；前端 `dispatch.ts:109 clientDeadline` 对两种格式做容错。
 /// zkcode 新实现统一发 epoch 毫秒，但契约层必须能解析旧线上两种流量（对照调试期
-/// 8081/8080 并行，见 U3）。
+/// 8082/8080 并行，见 U3）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FlexEpoch(i64);
 

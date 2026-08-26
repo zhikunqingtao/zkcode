@@ -19,7 +19,7 @@ use std::time::Duration;
 use axum::Router;
 use futures::{SinkExt, StreamExt};
 use tokio::net::TcpListener;
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
 use zk_server::config::Config;
@@ -64,7 +64,7 @@ async fn spawn_server() -> (SocketAddr, String) {
 
 /// 连接 `/ws` 并完成 bind 握手（消费 `session_restored`）。
 async fn connect_bound(addr: SocketAddr, session_id: &str) -> WsStream {
-    let (mut ws, _) = connect_async(format!("ws://{addr}/ws"))
+    let (mut ws, _) = connect_async(trusted_ws_request(addr))
         .await
         .expect("ws connect");
     send_json(
@@ -81,6 +81,17 @@ async fn connect_bound(addr: SocketAddr, session_id: &str) -> WsStream {
     let restored = next_json(&mut ws).await;
     assert_eq!(restored["type"], "session_restored");
     ws
+}
+
+fn trusted_ws_request(addr: SocketAddr) -> tokio_tungstenite::tungstenite::http::Request<()> {
+    let mut request = format!("ws://{addr}/ws")
+        .into_client_request()
+        .expect("ws request");
+    request.headers_mut().insert(
+        "Origin",
+        "http://localhost:5273".parse().expect("trusted origin"),
+    );
+    request
 }
 
 /// 发送一帧 JSON 文本。
@@ -201,7 +212,7 @@ async fn unknown_operation_reports_invalid_op() {
 #[tokio::test]
 async fn unbound_connection_drops_mcp_operation() {
     let (addr, session_id) = spawn_server().await;
-    let (mut ws, _) = connect_async(format!("ws://{addr}/ws"))
+    let (mut ws, _) = connect_async(trusted_ws_request(addr))
         .await
         .expect("ws connect");
 

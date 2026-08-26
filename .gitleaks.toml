@@ -3,8 +3,14 @@ title = "zkcode secret scanning"
 [extend]
 useDefault = true
 
+[[rules]]
+id = "dashscope-token-plan-api-key"
+description = "DashScope token-plan API key"
+regex = '''sk-sp-[A-Za-z0-9._-]{35,}'''
+keywords = ["sk-sp-"]
+
 [allowlist]
-description = "Generated, dependency, and runtime directories are never published"
+description = "Generated/runtime paths plus the explicitly public first-run demo credential asset"
 paths = [
   '''(^|/)target(?:-[^/]*)?/''',
   '''(^|/)node_modules/''',
@@ -15,4 +21,5 @@ paths = [
   '''(^|/)coverage/''',
   '''(^|/)test-results/''',
   '''(^|/)playwright-report/''',
+  '''^configuration/bootstrap/demo-credentials\.db$''',
 ]

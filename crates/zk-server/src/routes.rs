@@ -49,6 +49,7 @@ use crate::api::file;
 use crate::api::grant;
 use crate::api::history;
 use crate::api::interaction;
+use crate::api::llm_keys;
 use crate::api::mcp;
 use crate::api::mcp_capability;
 use crate::api::mcp_server;
@@ -73,11 +74,13 @@ use crate::python::proxy as python_proxy;
 use crate::state::AppState;
 
 /// CORS 白名单基础四来源（形制沿用旧 `SecurityConfig`）。
-const BASE_CORS_ORIGINS: [&str; 4] = [
+pub(crate) const BASE_CORS_ORIGINS: [&str; 6] = [
     "http://localhost:5273",
     "http://localhost:8080",
+    "http://localhost:8082",
     "http://127.0.0.1:5273",
     "http://127.0.0.1:8080",
+    "http://127.0.0.1:8082",
 ];
 
 /// 组装应用 Router（U2 八端点 + 系统域 + 模型/配置域 + Projects 域 +
@@ -139,6 +142,11 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/config/project",
             get(config_api::get_project_config).put(config_api::put_project_config),
+        )
+        // ── LLM 密钥管理域（Task 4 Step 5，GET/PUT /api/llm-keys）──
+        .route(
+            "/api/llm-keys",
+            get(llm_keys::get_llm_keys).put(llm_keys::put_llm_keys),
         )
         // ── Projects 域（2.1，旧 ProjectController 5 端点）──
         .route(
@@ -400,6 +408,13 @@ pub fn build_router(state: AppState) -> Router {
         // 本机 `remote.html` 由此出站；未命中文件时 404（同旧端）。
         .fallback_service(ServeDir::new(state.config.static_dir.clone()))
         .layer(from_fn(crate::middleware::observe))
+        // Loopback is not a CSRF boundary.  MCP mutations additionally require
+        // an exact trusted Origin or the local Bearer token, and JSON-bearing
+        // routes reject browser-simple content types.
+        .layer(from_fn_with_state(
+            state.clone(),
+            crate::middleware::mcp_mutation_guard,
+        ))
         // 准入守卫要读凭证，故经 `from_fn_with_state` 拿 `AppState`。
         .layer(from_fn_with_state(
             state.clone(),
@@ -429,6 +444,7 @@ fn cors_layer(state: &AppState) -> CorsLayer {
             Method::GET,
             Method::POST,
             Method::PUT,
+            Method::PATCH,
             Method::DELETE,
             Method::OPTIONS,
         ])

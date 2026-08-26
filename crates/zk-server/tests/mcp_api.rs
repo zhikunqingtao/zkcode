@@ -20,9 +20,12 @@
 mod common;
 
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::{net::SocketAddr, str::FromStr};
 
 use axum::Router;
-use axum::http::StatusCode;
+use axum::body::Body;
+use axum::extract::ConnectInfo;
+use axum::http::{Method, Request, StatusCode, header};
 use common::{call, json_body, local_delete, local_get, local_patch, local_post, local_put};
 use zk_server::config::Config;
 
@@ -45,7 +48,7 @@ fn capability_body(id: &str, enabled: bool) -> String {
         "id": id,
         "name": "天气查询",
         "toolName": "get_forecast",
-        "sseUrl": "http://127.0.0.1:9/weather/sse",
+        "sseUrl": "https://dashscope.aliyuncs.com/api/v1/mcps/weather/sse",
         "domain": "weather",
         "category": "MCP_TOOL",
         "briefDescription": "查询天气",
@@ -130,6 +133,25 @@ async fn add_server_rejects_missing_body() {
     let (status, _, body) = call(&mut app, local_post("/api/mcp/servers", None)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(json_body(&body)["code"], "INVALID_REQUEST_BODY");
+}
+
+/// The HTTP caller cannot claim a config-file scope to trigger manager
+/// auto-approval.  Runtime registrations always remain DYNAMIC/pending.
+#[tokio::test]
+async fn add_server_rejects_forged_trusted_scope_before_manager_start() {
+    let mut app = app_with_isolated_registry();
+    let body = serde_json::json!({
+        "name": "attacker",
+        "type": "STDIO",
+        "command": "/bin/sh",
+        "args": ["-c", "echo unsafe"],
+        "env": {"TOKEN": "exfiltrate"},
+        "scope": "PROJECT"
+    })
+    .to_string();
+    let (status, _, response) = call(&mut app, local_post("/api/mcp/servers", Some(body))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(json_body(&response)["code"], "MCP_SCOPE_NOT_ALLOWED");
 }
 
 /// 必填 query 缺省 → 400 `MISSING_PARAMETER`（Spring
@@ -267,7 +289,7 @@ async fn capability_crud_round_trip() {
     let patch = serde_json::json!({
         "name": "天气查询 v2",
         "toolName": "get_forecast",
-        "sseUrl": "http://127.0.0.1:9/weather/sse",
+        "sseUrl": "https://dashscope.aliyuncs.com/api/v1/mcps/weather/sse",
         "domain": "weather",
         "timeoutMs": 20000,
         "enabled": true,
@@ -428,9 +450,9 @@ async fn server_tools_reports_not_connected_without_connection() {
     assert_eq!(payload["serverKey"], "weather");
 }
 
-/// `invoke`：`arguments` 非对象 → 200 + `{status:"error"}`（偏离 B4B-13）。
+/// Legacy direct invoke fails closed before any network call when disabled.
 #[tokio::test]
-async fn invoke_rejects_non_object_arguments_with_error_status() {
+async fn disabled_capability_cannot_be_invoked() {
     let mut app = app_with_isolated_registry();
     let (status, _, _) = call(
         &mut app,
@@ -450,13 +472,147 @@ async fn invoke_rejects_non_object_arguments_with_error_status() {
         ),
     )
     .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(json_body(&body)["code"], "MCP_CAPABILITY_DISABLED");
+}
+
+fn raw_mcp_request(
+    uri: &str,
+    content_type: &str,
+    origin: Option<&str>,
+    body: String,
+) -> Request<Body> {
+    let peer = SocketAddr::from_str(common::LOCAL_PEER).expect("loopback peer");
+    let mut builder = Request::builder()
+        .method(Method::POST)
+        .uri(uri)
+        .extension(ConnectInfo(peer))
+        .header(header::CONTENT_TYPE, content_type);
+    if let Some(origin) = origin {
+        builder = builder.header(header::ORIGIN, origin);
+    }
+    builder.body(Body::from(body)).expect("request")
+}
+
+fn raw_mcp_get(uri: &str, origin: Option<&str>, fetch_site: Option<&str>) -> Request<Body> {
+    let peer = SocketAddr::from_str(common::LOCAL_PEER).expect("loopback peer");
+    let mut builder = Request::builder()
+        .method(Method::GET)
+        .uri(uri)
+        .extension(ConnectInfo(peer));
+    if let Some(origin) = origin {
+        builder = builder.header(header::ORIGIN, origin);
+    }
+    if let Some(fetch_site) = fetch_site {
+        builder = builder.header("sec-fetch-site", fetch_site);
+    }
+    builder.body(Body::empty()).expect("request")
+}
+
+#[tokio::test]
+async fn mcp_mutations_reject_untrusted_origin_and_simple_content_type() {
+    let mut app = app_with_isolated_registry();
+    let body = capability_body("csrf", false);
+
+    let (status, _, response) = call(
+        &mut app,
+        raw_mcp_request(
+            "/api/mcp/capabilities",
+            "application/json",
+            Some("https://attacker.example"),
+            body.clone(),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(json_body(&response)["code"], "MCP_REQUEST_ORIGIN_DENIED");
+
+    let (status, _, response) = call(
+        &mut app,
+        raw_mcp_request(
+            "/api/mcp/capabilities",
+            "text/plain",
+            Some("http://127.0.0.1:5273"),
+            body,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    assert_eq!(json_body(&response)["code"], "MCP_CONTENT_TYPE_UNSUPPORTED");
+}
+
+#[tokio::test]
+async fn network_backed_mcp_gets_reject_untrusted_browser_origin() {
+    let mut app = app_with_isolated_registry();
+    for path in [
+        "/api/mcp/resources",
+        "/api/mcp/resources/read?uri=mcp%3A%2F%2Fx&server=x",
+        "/api/mcp/prompts",
+        "/api/mcp/capabilities/x/server-tools",
+    ] {
+        let (status, _, response) = call(
+            &mut app,
+            raw_mcp_get(path, Some("https://attacker.example"), Some("cross-site")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{path}");
+        assert_eq!(
+            json_body(&response)["code"],
+            "MCP_REQUEST_ORIGIN_DENIED",
+            "{path}"
+        );
+    }
+
+    // Browsers omit Origin on ordinary same-origin GETs. Fetch Metadata is a
+    // browser-controlled signal and keeps this legitimate path working.
+    let (status, _, response) = call(
+        &mut app,
+        raw_mcp_get("/api/mcp/resources", None, Some("same-origin")),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        json_body(&body),
-        serde_json::json!({
-            "id": "mcp_invoke",
-            "status": "error",
-            "error": "Invalid 'arguments': expected a JSON object",
-        })
-    );
+    assert_eq!(json_body(&response)["totalCount"], 0);
+
+    // No Origin and explicit cross-site metadata must still fail closed.
+    let (status, _, response) = call(
+        &mut app,
+        raw_mcp_get("/api/mcp/prompts", None, Some("cross-site")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(json_body(&response)["code"], "MCP_REQUEST_ORIGIN_DENIED");
+}
+
+#[tokio::test]
+async fn capability_api_rejects_ssrf_and_arbitrary_environment_selectors() {
+    let mut app = app_with_isolated_registry();
+    let private = serde_json::json!({
+        "id": "metadata",
+        "toolName": "read",
+        "url": "https://169.254.169.254/latest/meta-data",
+        "transportType": "HTTP",
+        "enabled": false
+    })
+    .to_string();
+    let (status, _, response) =
+        call(&mut app, local_post("/api/mcp/capabilities", Some(private))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(json_body(&response)["code"], "MCP_CAPABILITY_REJECTED");
+
+    let arbitrary_env = serde_json::json!({
+        "id": "env-leak",
+        "toolName": "leak",
+        "url": "https://example.com/mcp",
+        "transportType": "HTTP",
+        "apiKeyConfig": "aws.secret-access-key",
+        "enabled": false
+    })
+    .to_string();
+    let (status, _, response) = call(
+        &mut app,
+        local_post("/api/mcp/capabilities", Some(arbitrary_env)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(json_body(&response)["code"], "MCP_CAPABILITY_REJECTED");
 }

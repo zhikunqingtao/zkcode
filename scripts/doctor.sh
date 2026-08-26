@@ -5,7 +5,7 @@ ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 . "$ROOT_DIR/scripts/macos-toolchain-env.sh"
 zk_use_macos_toolchain
 FAILED=0
-DIAGNOSTIC_PORT=8081
+DIAGNOSTIC_PORT=8082
 
 check_command() {
     if command -v "$1" >/dev/null 2>&1; then
@@ -42,9 +42,9 @@ if [ -f "$ROOT_DIR/.env" ]; then
     set -a
     . "$ROOT_DIR/.env"
     set +a
-    DIAGNOSTIC_PORT=${ZK_PORT:-8081}
+    DIAGNOSTIC_PORT=${ZK_PORT:-8082}
     case "$DIAGNOSTIC_PORT" in
-        *[!0-9]*|'') echo "fail ZK_PORT            must be numeric" >&2; FAILED=1; DIAGNOSTIC_PORT=8081 ;;
+        *[!0-9]*|'') echo "fail ZK_PORT            must be numeric" >&2; FAILED=1; DIAGNOSTIC_PORT=8082 ;;
     esac
 else
     echo "fail .env               run ./scripts/setup-macos.sh" >&2

@@ -252,7 +252,8 @@ async fn database_check(state: &AppState) -> DoctorCheck {
 /// provider」，不发网络请求；未注册时旧 hint 为「请配置 LLM API Key」，
 /// 本端点消息统一英文以对齐本端点其余检查项的文案语种）。
 fn llm_providers_check(state: &AppState) -> DoctorCheck {
-    let names = state.providers.names();
+    let providers = state.providers.load();
+    let names = providers.names();
     if names.is_empty() {
         DoctorCheck::new(
             "llm_providers",

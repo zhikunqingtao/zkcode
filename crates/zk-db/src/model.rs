@@ -64,16 +64,42 @@ impl MessageRole {
     }
 }
 
-/// 图片块内层 `source` 对象（存储形状：`{type:"base64", media_type, data}`）。
+/// 图片块内层 `source` 对象（存储形状：`{type:"base64", media_type, data}`
+/// 或 `{type:"url", url}`——旧 `SessionManager.contentBlockToMap` url 分支
+/// 不写 `media_type`）。
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ImageSource {
-    /// 来源类型，恒 `"base64"`（保留字段以忠实存储形状）。
+    /// 来源类型，`"base64"` 或 `"url"`（保留字段以忠实存储形状）。
     #[serde(rename = "type")]
     pub kind: String,
-    /// MIME 类型（如 `image/png`）。
-    pub media_type: String,
-    /// base64 编码数据。
-    pub data: String,
+    /// MIME 类型（如 `image/png`；url 形状缺省，读取侧兜底见
+    /// [`Self::media_type_or_default`]）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_type: Option<String>,
+    /// base64 编码数据（url 形状缺省）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<String>,
+    /// 可信远程图片地址（base64 形状缺省）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+impl ImageSource {
+    /// MIME 类型，缺省 `image/png`（旧 `parseContentBlocks` 缺省值）。
+    #[must_use]
+    pub fn media_type_or_default(&self) -> &str {
+        self.media_type.as_deref().unwrap_or("image/png")
+    }
+
+    /// url 型来源的非空白远程地址（旧 parse `"url".equals(type) && url != null`
+    /// 判定；空白地址下游必然跳过，此处一并收紧）。
+    #[must_use]
+    pub fn remote_url(&self) -> Option<&str> {
+        if self.kind != "url" {
+            return None;
+        }
+        self.url.as_deref().filter(|url| !url.trim().is_empty())
+    }
 }
 
 /// 消息内容块——`content_json` 的**存储形状**（`snake_case`）。
@@ -118,7 +144,7 @@ pub enum StoredBlock {
     },
     /// 图片块（`{type:"image", source:{...}, width?, height?}`）。
     Image {
-        /// base64 来源描述。
+        /// 来源描述（base64 或 url）。
         source: ImageSource,
         /// 原始宽度（旧系统仅在 >0 时写出）。
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -151,6 +177,13 @@ pub fn parse_blocks(content_json: &str) -> Vec<StoredBlock> {
         Ok(nodes) => nodes
             .into_iter()
             .filter_map(|node| serde_json::from_value::<StoredBlock>(node).ok())
+            .filter(|block| match block {
+                // url / data 皆无的图片块整块丢弃（旧 parse else-if 语义）。
+                StoredBlock::Image { source, .. } => {
+                    source.remote_url().is_some() || source.data.is_some()
+                }
+                _ => true,
+            })
             .collect(),
         Err(_) => vec![StoredBlock::Text {
             text: content_json.to_owned(),
@@ -351,8 +384,9 @@ mod tests {
             StoredBlock::Image {
                 source: ImageSource {
                     kind: "base64".into(),
-                    media_type: "image/png".into(),
-                    data: "AAAA".into(),
+                    media_type: Some("image/png".into()),
+                    data: Some("AAAA".into()),
+                    url: None,
                 },
                 width: None,
                 height: None,
@@ -376,6 +410,43 @@ mod tests {
         assert!(json.contains(r#""type":"redacted_thinking","data":"blob""#));
         // roundtrip。
         assert_eq!(parse_blocks(&json), blocks);
+    }
+
+    #[test]
+    fn image_url_storage_shape_omits_media_type_and_data() {
+        // url 存储形状只有 `{type:"url", url}`（旧 url 分支不写 media_type/data）。
+        let block = StoredBlock::Image {
+            source: ImageSource {
+                kind: "url".into(),
+                media_type: None,
+                data: None,
+                url: Some(
+                    "https://bkt.oss.example.com/zhikuncode-artifacts/clipboard/a.png".into(),
+                ),
+            },
+            width: None,
+            height: None,
+        };
+        let json = serde_json::to_string(&vec![block.clone()]).unwrap();
+        assert!(json.contains(r#""source":{"type":"url","url":"https://"#));
+        assert!(!json.contains("media_type") && !json.contains(r#""data""#));
+        // roundtrip + 读取侧缺省 media_type 兜底 image/png（旧 parse 缺省值）。
+        let parsed = parse_blocks(&json);
+        assert_eq!(parsed, vec![block]);
+        let StoredBlock::Image { source, .. } = &parsed[0] else {
+            panic!("expected image block");
+        };
+        assert_eq!(source.media_type_or_default(), "image/png");
+        assert_eq!(
+            source.remote_url(),
+            Some("https://bkt.oss.example.com/zhikuncode-artifacts/clipboard/a.png")
+        );
+        // url / data 皆无的图片块被整块丢弃（旧 parse else-if 语义）。
+        let empty = r#"[{"type":"image","source":{"type":"base64"}},{"type":"text","text":"k"}]"#;
+        assert_eq!(
+            parse_blocks(empty),
+            vec![StoredBlock::Text { text: "k".into() }]
+        );
     }
 
     #[test]

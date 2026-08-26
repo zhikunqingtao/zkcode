@@ -33,7 +33,7 @@ pub(crate) struct CreateSessionRequest {
     pub working_directory: Option<String>,
     /// 模型（空 → 默认模型）。
     pub model: Option<String>,
-    /// 权限模式（空 → `DEFAULT`）。
+    /// 权限模式（空 → `AUTO_APPROVE`，即新建会话默认完全访问权限）。
     pub permission_mode: Option<String>,
     /// resume 语义占位（Phase 1 不消费；resume 走独立端点）。
     #[allow(dead_code)]
@@ -205,9 +205,12 @@ pub(crate) enum ApiBlock {
         /// MIME 类型。
         #[serde(rename = "mediaType")]
         media_type: String,
-        /// base64 数据。
-        #[serde(rename = "base64Data")]
-        base64_data: String,
+        /// base64 数据（url 型图片缺省，仅在存在时写出——Jackson `NON_NULL`）。
+        #[serde(rename = "base64Data", skip_serializing_if = "Option::is_none")]
+        base64_data: Option<String>,
+        /// 可信远程图片地址（base64 型图片缺省）。
+        #[serde(skip_serializing_if = "Option::is_none")]
+        url: Option<String>,
         /// 宽（恒输出，缺省 0）。
         width: i64,
         /// 高（恒输出，缺省 0）。

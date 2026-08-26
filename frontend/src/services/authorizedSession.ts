@@ -1,4 +1,4 @@
-import { useConfigStore } from '@/store/configStore';
+import { DEFAULT_MODEL, useConfigStore } from '@/store/configStore';
 import { useProjectStore } from '@/store/projectStore';
 import { useSessionStore } from '@/store/sessionStore';
 
@@ -47,7 +47,7 @@ export function requestAuthorizedSession(): Promise<string | null> {
         const sessionState = useSessionStore.getState();
         const selectedModel = sessionState.model
             ?? useConfigStore.getState().defaultModel
-            ?? 'qwen3.7-max';
+            ?? DEFAULT_MODEL;
         return sessionState.createSession(
             project.id,
             selectedModel,

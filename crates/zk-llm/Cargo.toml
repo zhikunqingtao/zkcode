@@ -25,3 +25,5 @@ reqwest = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 bytes = { workspace = true }
+# 可热替换的 Provider 代理层（ArcSwap 无锁原子读路径）。
+arc-swap = { workspace = true }

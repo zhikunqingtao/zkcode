@@ -47,6 +47,8 @@
 //!   指数退避 + 25% jitter + `Retry-After`，对照旧 `ApiRetryService`）。
 //! - [`models`]：内置模型能力表（`ModelCapabilities` / `capabilities_for` /
 //!   `max_output_tokens_for`，对照旧 `ModelRegistry.BUILTIN_MODELS`）。
+//! - [`vision_router`]：视觉模型路由（图片消息 + 当前模型不支持图片时的
+//!   单请求级模型切换，对照旧 `VisionModelRouter`）。
 //! - [`secret`]：`ApiKey`。
 //! - [`error`]：`ProviderError`。
 
@@ -62,6 +64,8 @@ pub mod provider;
 pub mod registry;
 pub mod retry;
 pub mod secret;
+pub mod swappable;
+pub mod vision_router;
 
 pub use anthropic::AnthropicProvider;
 pub use breaker::{BreakerState, CircuitBreaker, DEGRADE_WINDOW_MS, FAILURE_THRESHOLD};
@@ -70,9 +74,9 @@ pub use cache::{
     first_mcp_index, tool_cache_breakpoint,
 };
 pub use config::{
-    ANTHROPIC_BASE_URL, DASHSCOPE_BASE_URL, DEFAULT_MODEL, FALLBACK_CHAIN_ENV, PROVIDER_CATALOG,
-    PROVIDER_ENV_PREFIX, ProviderConfig, ProviderProtocol, declared_models, has_provider_env,
-    provider_configs_from_env,
+    ANTHROPIC_BASE_URL, DASHSCOPE_BASE_URL, DEFAULT_MODEL, FALLBACK_CHAIN_ENV, OPENAI_BASE_URL,
+    PROVIDER_CATALOG, PROVIDER_ENV_PREFIX, ProviderConfig, ProviderProtocol, declared_models,
+    has_provider_env, provider_configs_from_env,
 };
 pub use error::ProviderError;
 pub use models::{
@@ -91,6 +95,10 @@ pub use retry::{
     RetryState, retry_config_for, wait_for_retry,
 };
 pub use secret::{ApiKey, ApiKeyRing, KEY_COOLDOWN_MS};
+pub use swappable::SwappableProvider;
+pub use vision_router::{
+    DEEPSEEK_VISION_MODEL, FALLBACK_VISION_MODEL, VisionProviderView, resolve_vision_model,
+};
 
 /// 骨架连续性测试：验证 crate 编译、workspace lints 接线与 test harness 加载。
 #[test]

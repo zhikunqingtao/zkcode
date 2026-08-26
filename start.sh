@@ -41,7 +41,7 @@ set -a
 # .env is a user-owned local configuration file. It must contain shell-style KEY=VALUE entries.
 . "$ROOT_DIR/.env"
 set +a
-ZK_PORT=${ZK_PORT:-8081}
+ZK_PORT=${ZK_PORT:-8082}
 PYTHON_ENABLED=${ZK_PYTHON_ENABLED:-true}
 PYTHON_SOCKET=${ZK_PYTHON_UDS:-$RUNTIME_DIR/python.sock}
 case "$PYTHON_SOCKET" in

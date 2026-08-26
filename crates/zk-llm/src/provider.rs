@@ -116,12 +116,19 @@ pub struct ChatMessage {
 }
 
 /// Provider-neutral validated image input.
+///
+/// Exactly one of `data` / `url` is expected to be present; providers skip
+/// the image when both are absent (Java `appendImageUrlPart` return
+/// semantics).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ImageSource {
     /// Whitelisted media type (`image/png`, `image/jpeg`, `image/gif`, `image/webp`).
     pub media_type: String,
-    /// Standard padded base64 payload without a data-URI prefix.
-    pub data: String,
+    /// Standard padded base64 payload without a data-URI prefix (`None` for
+    /// URL-referenced images).
+    pub data: Option<String>,
+    /// Trusted remote image URL, forwarded verbatim to the provider when present.
+    pub url: Option<String>,
 }
 
 impl ChatMessage {
@@ -571,7 +578,8 @@ mod tests {
             "inspect",
             vec![ImageSource {
                 media_type: "image/png".into(),
-                data: "aGVsbG8=".into(),
+                data: Some("aGVsbG8=".into()),
+                url: None,
             }],
         );
         assert_eq!(image.images.len(), 1);

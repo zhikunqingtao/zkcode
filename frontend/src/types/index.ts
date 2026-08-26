@@ -33,7 +33,7 @@ export type ContentBlock =
     | { type: 'thinking'; thinking: string }
     | { type: 'redacted_thinking' }
     | { type: 'server_tool_use'; toolUseId: string; toolName: string }
-    | { type: 'image'; mediaType: string; base64Data: string };
+    | { type: 'image'; mediaType: string; base64Data?: string; url?: string };
 
 /** Token 用量 — 对齐 §5.1 Java record Usage */
 export interface Usage {
@@ -463,7 +463,7 @@ export interface BridgeConfig {
 export interface Attachment {
     type: 'file' | 'image' | 'url';
     name: string;
-    base64Data: string;
+    base64Data?: string;
     mediaType?: string;
     path?: string;
     url?: string;

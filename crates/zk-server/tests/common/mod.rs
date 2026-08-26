@@ -50,6 +50,13 @@ fn request(uri: &str, method: Method, body: Option<String>, loopback: bool) -> R
         .method(method)
         .uri(uri)
         .extension(ConnectInfo(peer));
+    if loopback && builder.method_ref() == Some(&Method::GET) {
+        // Real same-origin browser GETs often omit Origin, but carry this
+        // browser-controlled fetch-metadata header.
+        builder = builder.header("sec-fetch-site", "same-origin");
+    } else if loopback {
+        builder = builder.header(header::ORIGIN, "http://127.0.0.1:5273");
+    }
     if body.is_some() {
         builder = builder.header(header::CONTENT_TYPE, "application/json");
     }
@@ -95,7 +102,8 @@ pub fn local_with_headers(
     let mut builder = Request::builder()
         .method(method)
         .uri(uri)
-        .extension(ConnectInfo(peer));
+        .extension(ConnectInfo(peer))
+        .header(header::ORIGIN, "http://127.0.0.1:5273");
     if body.is_some() {
         builder = builder.header(header::CONTENT_TYPE, "application/json");
     }

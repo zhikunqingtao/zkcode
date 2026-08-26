@@ -616,10 +616,10 @@ fn build_request_body(request: &ChatRequest) -> Value {
                 if !message.content.is_empty() {
                     content.push(json!({"type":"text", "text":message.content}));
                 }
-                content.extend(message.images.iter().map(|image| json!({
-                    "type":"image_url",
-                    "image_url": {"url": format!("data:{};base64,{}", image.media_type, image.data)}
-                })));
+                content.extend(message.images.iter().filter_map(|image| {
+                    resolve_image_url(image)
+                        .map(|url| json!({"type":"image_url", "image_url": {"url": url}}))
+                }));
                 messages.push(json!({"role":"user", "content":content}));
             }
             Role::Assistant if message.thinking.is_some() => {
@@ -640,17 +640,8 @@ fn build_request_body(request: &ChatRequest) -> Value {
     root.insert("stream".into(), json!(true));
     root.insert("stream_options".into(), json!({ "include_usage": true }));
 
-    // 4. 思考参数（旧 L258-271，模型族判定；deepseek/kimi 无条件、qwen 受配置）。
-    if request.model.starts_with("deepseek-v4-") {
-        root.insert("thinking".into(), json!({ "type": "enabled" }));
-        root.insert("reasoning_effort".into(), json!("max"));
-    } else if request.model == "kimi-k3" {
-        root.insert("reasoning_effort".into(), json!("max"));
-    } else if (request.model.starts_with("qwen3.7-") || request.model.starts_with("qwen3.6-"))
-        && request.thinking.requires_support()
-    {
-        root.insert("enable_thinking".into(), json!(true));
-    }
+    // 4. 思考参数（模型族判定，vision 兜底单列，见 insert_thinking_params）。
+    insert_thinking_params(&mut root, request);
 
     // 5. 工具定义（总是转 OpenAI function 格式，见 D-S6-8）。
     if !request.tools.is_empty() {
@@ -673,13 +664,43 @@ fn build_request_body(request: &ChatRequest) -> Value {
     Value::Object(root)
 }
 
-/// 判断思考模式参数是否会被下发（供请求构建单测与文档自证）。
+/// 思考参数（旧 L258-279，模型族判定；deepseek/kimi 无条件、qwen 受配置）。
+///
+/// vision 兜底模型单列——实测视觉请求在非思考模式下才稳定返回完整正文
+///（思考模式可能在较短 `max_tokens` 下只消耗推理预算而没有 content），
+/// 故 thinking 固定 disabled 且不发 `reasoning_effort`。
+fn insert_thinking_params(root: &mut serde_json::Map<String, Value>, request: &ChatRequest) {
+    if is_deepseek_vision_model(&request.model) {
+        root.insert("thinking".into(), json!({ "type": "disabled" }));
+    } else if request.model.starts_with("deepseek-v4-") {
+        root.insert("thinking".into(), json!({ "type": "enabled" }));
+        root.insert("reasoning_effort".into(), json!("max"));
+    } else if request.model == "kimi-k3" {
+        root.insert("reasoning_effort".into(), json!("max"));
+    } else if (request.model.starts_with("qwen3.7-") || request.model.starts_with("qwen3.6-"))
+        && request.thinking.requires_support()
+    {
+        root.insert("enable_thinking".into(), json!(true));
+    }
+}
+
+/// 判断思考模式**启用**参数是否会被下发（供请求构建单测与文档自证）。
+///
+/// `DeepSeek` 视觉兜底模型固定下发 `thinking: disabled`，不属于启用范畴，
+/// 返回 `false`（对照旧 `isDeepSeekV4Model` 排除 vision 的语义）。
 #[must_use]
 pub fn thinking_params_for(model: &str, mode: ThinkingMode) -> bool {
-    model.starts_with("deepseek-v4-")
+    (model.starts_with("deepseek-v4-") && !is_deepseek_vision_model(model))
         || model == "kimi-k3"
         || ((model.starts_with("qwen3.7-") || model.starts_with("qwen3.6-"))
             && mode.requires_support())
+}
+
+/// `DeepSeek` 图片理解兜底模型使用独立、稳定的非思考请求参数
+///（对照旧 `OpenAiCompatibleProvider.isDeepSeekVisionModel`）。
+#[must_use]
+pub fn is_deepseek_vision_model(model: &str) -> bool {
+    model == "deepseek-v4-flash-vision-exp"
 }
 
 /// 增量 SSE 行切分器。
@@ -718,6 +739,22 @@ impl LineSplitter {
             Some(String::from_utf8_lossy(&std::mem::take(&mut self.buf)).into_owned())
         }
     }
+}
+
+/// Resolve the `OpenAI` `image_url.url` value for one image (Java
+/// `appendImageUrlPart`): a non-blank trusted remote URL is forwarded
+/// verbatim, otherwise the base64 payload becomes a data URI, and images
+/// carrying neither are skipped.
+fn resolve_image_url(image: &crate::ImageSource) -> Option<String> {
+    if let Some(url) = image.url.as_deref()
+        && !url.trim().is_empty()
+    {
+        return Some(url.to_owned());
+    }
+    image
+        .data
+        .as_deref()
+        .map(|data| format!("data:{};base64,{}", image.media_type, data))
 }
 
 #[cfg(test)]
@@ -773,6 +810,10 @@ mod tests {
         let deepseek = build_request_body(&ChatRequest::new("deepseek-v4-flash"));
         assert_eq!(deepseek["thinking"]["type"], "enabled");
         assert_eq!(deepseek["reasoning_effort"], "max");
+        // deepseek 视觉兜底模型：thinking 固定 disabled 且不发 reasoning_effort。
+        let vision = build_request_body(&ChatRequest::new("deepseek-v4-flash-vision-exp"));
+        assert_eq!(vision["thinking"]["type"], "disabled");
+        assert!(vision.get("reasoning_effort").is_none());
         // kimi-k3：reasoning_effort=max；且 max_tokens 换名。
         let kimi = build_request_body(&ChatRequest::new("kimi-k3"));
         assert_eq!(kimi["reasoning_effort"], "max");
@@ -1189,6 +1230,13 @@ mod tests {
             "deepseek-v4-pro",
             ThinkingMode::Disabled
         ));
+        // 视觉兜底模型下发的是 disabled，不算思考启用参数。
+        assert!(!thinking_params_for(
+            "deepseek-v4-flash-vision-exp",
+            ThinkingMode::Enabled
+        ));
+        assert!(is_deepseek_vision_model("deepseek-v4-flash-vision-exp"));
+        assert!(!is_deepseek_vision_model("deepseek-v4-flash"));
         assert!(thinking_params_for("kimi-k3", ThinkingMode::Disabled));
         assert!(thinking_params_for("qwen3.7-max", ThinkingMode::Enabled));
         assert!(!thinking_params_for("qwen3.7-max", ThinkingMode::Disabled));
@@ -1201,7 +1249,8 @@ mod tests {
             "inspect",
             vec![crate::ImageSource {
                 media_type: "image/png".into(),
-                data: "aGVsbG8=".into(),
+                data: Some("aGVsbG8=".into()),
+                url: None,
             }],
         ));
         let body = build_request_body(&request);
@@ -1210,6 +1259,41 @@ mod tests {
         assert_eq!(
             body["messages"][0]["content"][1]["image_url"]["url"],
             "data:image/png;base64,aGVsbG8="
+        );
+    }
+
+    #[test]
+    fn openai_request_sends_trusted_remote_image_url_verbatim() {
+        // url 图片直发远程地址（旧 `appendImageUrlPart` url 分支）。
+        let request = ChatRequest::new("vision-model").with_message(ChatMessage::user_with_images(
+            "inspect",
+            vec![crate::ImageSource {
+                media_type: "image/png".into(),
+                data: None,
+                url: Some(
+                    "https://bkt.oss.example.com/zhikuncode-artifacts/clipboard/a.png".into(),
+                ),
+            }],
+        ));
+        let body = build_request_body(&request);
+        assert_eq!(body["messages"][0]["content"][1]["type"], "image_url");
+        assert_eq!(
+            body["messages"][0]["content"][1]["image_url"]["url"],
+            "https://bkt.oss.example.com/zhikuncode-artifacts/clipboard/a.png"
+        );
+        // 载荷与 url 皆无的图片按旧 return 语义整块跳过（只剩 text part）。
+        let empty = ChatRequest::new("vision-model").with_message(ChatMessage::user_with_images(
+            "inspect",
+            vec![crate::ImageSource {
+                media_type: "image/png".into(),
+                data: None,
+                url: None,
+            }],
+        ));
+        let body = build_request_body(&empty);
+        assert_eq!(
+            body["messages"][0]["content"].as_array().map(Vec::len),
+            Some(1)
         );
     }
 }

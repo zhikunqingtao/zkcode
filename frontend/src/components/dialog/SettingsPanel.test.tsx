@@ -1,5 +1,5 @@
-import { fireEvent, render, screen } from '@testing-library/react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SettingsPanel } from '@/components/dialog/SettingsPanel';
 import { useNotificationStore } from '@/store/notificationStore';
 import { usePermissionStore } from '@/store/permissionStore';
@@ -26,6 +26,32 @@ describe('SettingsPanel permission modes', () => {
         useSessionStore.setState({ sessionId: 'session-1' });
         usePermissionStore.setState({ permissionMode: 'default', pendingPermissions: [] });
         useNotificationStore.getState().clearAll();
+    });
+
+    afterEach(() => {
+        vi.unstubAllGlobals();
+    });
+
+    it('mounts the API key manager through the production settings dialog', async () => {
+        const fetchMock = vi.fn().mockResolvedValue(jsonResponse({
+            providers: [{
+                name: 'dashscope-token-plan',
+                label: 'DashScope Token Plan',
+                has_key: true,
+                masked_key: 'demo…key',
+            }],
+        }));
+        vi.stubGlobal('fetch', fetchMock);
+        render(<SettingsPanel onClose={vi.fn()} />);
+
+        fireEvent.click(screen.getByRole('tab', { name: 'API Keys' }));
+
+        expect(await screen.findByLabelText('DashScope Token Plan API 密钥')).toBeInTheDocument();
+        await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+            '/api/llm-keys',
+            expect.objectContaining({ signal: expect.any(AbortSignal) }),
+        ));
+        expect(screen.getByRole('tabpanel', { name: 'API Keys' })).toBeInTheDocument();
     });
 
     it('shows all five permission modes', () => {
@@ -71,3 +97,12 @@ describe('SettingsPanel permission modes', () => {
         expect(sendSetPermissionMode).not.toHaveBeenCalled();
     });
 });
+
+function jsonResponse(body: unknown, status = 200): Response {
+    return {
+        ok: status >= 200 && status < 300,
+        status,
+        headers: new Headers({ 'Content-Type': 'application/json' }),
+        json: async () => body,
+    } as Response;
+}

@@ -685,8 +685,8 @@ pub enum ServerMessage {
 
     // ═══════════ 字符串直推类型（无 record，§11.1b 补录） ═══════════
     /// 直推点 `handleUserMessage` 视觉模型自动路由（L673）：模型自动切换通知。
-    ///
-    /// **Phase 2+ 建模未激活**。
+    /// 当前由 `zk-engine` 在附件校验通过、构造请求前推送；只覆盖本次 Run，
+    /// 不修改持久 Session 模型。
     #[serde(rename_all = "camelCase")]
     ModelRouted {
         /// 原模型标识。

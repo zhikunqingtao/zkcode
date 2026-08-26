@@ -113,8 +113,8 @@
         "costPer1kOutput": 0.002
       },
       {
-        "id": "glm-5.2",
-        "displayName": "GLM-5.2",
+        "id": "glm-5.3",
+        "displayName": "GLM-5.3",
         "maxOutputTokens": 131072,
         "contextWindow": 1048576,
         "supportsStreaming": true,

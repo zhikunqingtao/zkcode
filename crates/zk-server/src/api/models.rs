@@ -193,7 +193,7 @@ fn catalog() -> Vec<ModelInfo> {
             0.002,
         ),
         caps(
-            "glm-5.2", "GLM-5.2", 131_072, 1_048_576, true, true, false, 0, true, 0.001, 0.001,
+            "glm-5.3", "GLM-5.3", 131_072, 1_048_576, true, true, false, 0, true, 0.001, 0.001,
         ),
         caps(
             "glm-5v-turbo",
@@ -297,7 +297,8 @@ fn info_for(id: &str) -> ModelInfo {
 /// 生成条目；注册表为空（Phase 1 单 provider 回退 / 未配任何 provider key）则
 /// 退化为声明式静态目录（15 条基线），保住既有响应契约。
 fn effective_models(state: &AppState) -> Vec<ModelInfo> {
-    let registry_models = state.providers.models();
+    let registry = state.providers.load();
+    let registry_models = registry.models();
     if registry_models.is_empty() {
         catalog()
     } else {

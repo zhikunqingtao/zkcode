@@ -34,6 +34,9 @@
 //!   归一路径）；
 //! - 落库时点：用户消息在 provider 调用**前**入库（失败 run 用户消息保留）；
 //!   助手/工具结果消息在各自终态后、`message_complete` 推送**前**入库。
+//! - 图片模型路由：当前 Session 模型不支持图片时，从已配置 provider 中选择
+//!   视觉模型，只覆盖本次 Run；附件数量按路由后能力校验，并在调用 provider
+//!   前推送 `model_routed`，Session 模型保持不变。
 //!
 //! 取消令牌三层树：session → run → `tool_call`（第三层由
 //! [`zk_tools::ToolExecutor`] 派生）；取消语义对齐 D-S6-5（清空积压、
@@ -55,7 +58,7 @@ use zk_db::run::{AGENT_TYPE_QUERY, EXIT_INTERNAL_ERROR, EXIT_USER_CANCELLED};
 use zk_db::{AcceptanceCriterionRecord, Db, WorkbenchBindingRecord};
 use zk_llm::{
     ChatMessage, ChatProvider, ChatRequest, FinishReason, ProviderError, ProviderEvent,
-    SystemPrompt, ThinkingMode, ToolCallRequest,
+    SystemPrompt, ThinkingMode, ToolCallRequest, VisionProviderView,
 };
 use zk_protocol::model::Usage;
 use zk_protocol::{Attachment, ClientMessage, Reference, ServerMessage, ToolResultContent};
@@ -179,6 +182,11 @@ impl Drop for ConversationOptionsGuard {
     }
 }
 
+/// 剪贴板图片 URL 信任校验端口（对照旧
+/// `OssPublishProperties.isTrustedClipboardImageUrl`；组合根注入，未注入
+/// 时 url 附件一律拒绝——fail-closed）。
+pub type TrustedImageUrlCheck = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
 /// 对话引擎（多轮工具循环；以 `Arc<Engine>` 共享给适配层与 run task）。
 pub struct Engine {
     db: Db,
@@ -220,6 +228,11 @@ pub struct Engine {
     hooks: Option<Arc<HookService>>,
     /// Best-effort operations telemetry, separate from Run recovery events.
     observability: Arc<dyn ObservabilityRecorder>,
+    /// 剪贴板图片 URL 信任校验（`None` = 未装配，url 附件一律拒绝）。
+    trusted_image_url: Option<TrustedImageUrlCheck>,
+    /// 当前已配置 provider/model 的只读视图。图片输入需要从此视图选择本次
+    /// 请求可调用的视觉模型；未装配时保持 fail-closed，不猜测 provider。
+    vision_providers: Option<Arc<dyn VisionProviderView>>,
 }
 
 /// run 前置装配结果（会话校验 + 用户消息落库 + 请求构建的产物）。
@@ -380,6 +393,8 @@ impl Engine {
             file_history: None,
             hooks: None,
             observability: Arc::new(NoopObservabilityRecorder),
+            trusted_image_url: None,
+            vision_providers: None,
         }
     }
 
@@ -430,6 +445,26 @@ impl Engine {
     #[must_use]
     pub fn with_observability(mut self, recorder: Arc<dyn ObservabilityRecorder>) -> Self {
         self.observability = recorder;
+        self
+    }
+
+    /// 注入剪贴板图片 URL 信任校验端口（组合根装配点）。
+    ///
+    /// 未调用时 url 附件一律拒绝（fail-closed，对齐旧 WS 入站
+    /// `isTrustedClipboardImageUrl` 强制校验——SSRF 红线）。
+    #[must_use]
+    pub fn with_trusted_image_url(mut self, check: TrustedImageUrlCheck) -> Self {
+        self.trusted_image_url = Some(check);
+        self
+    }
+
+    /// 注入视觉路由使用的已配置 provider/model 视图。
+    ///
+    /// 生产组装根传入与 [`ChatProvider`] 相同的热替换注册表代理，保证路由只会
+    /// 选择当前配置可调用的模型；测试可传入真实 [`zk_llm::ProviderRegistry`]。
+    #[must_use]
+    pub fn with_vision_provider_view(mut self, providers: Arc<dyn VisionProviderView>) -> Self {
+        self.vision_providers = Some(providers);
         self
     }
 
@@ -494,6 +529,8 @@ impl Engine {
             file_history: Some(file_history),
             hooks: Some(hooks),
             observability: Arc::new(NoopObservabilityRecorder),
+            trusted_image_url: None,
+            vision_providers: None,
         }
     }
 
@@ -2402,13 +2439,47 @@ impl Engine {
         let replace_after_message_id = detail.messages.last().map(|record| record.id.clone());
         let acceptance_sources = extract_acceptance_criteria(&input.text);
         let mut messages = history_to_chat_messages(&detail.messages);
-        let (stored_content, current_message) = match resolve_user_content(&detail, input) {
+        // 图片路由只覆盖本次 Run 的有效模型，不回写 `sessions.model`。候选必须
+        // 来自生产注入的已配置 provider 视图；无候选时保持原模型，让下方能力
+        // 校验稳定返回 ATTACHMENT_MODEL_UNSUPPORTED。
+        let routed_model = if !input.attachments.is_empty()
+            && !zk_llm::capabilities_for(&detail.model).supports_images
+        {
+            self.vision_providers
+                .as_deref()
+                .and_then(|providers| providers.resolve_vision_model(&detail.model))
+        } else {
+            None
+        };
+        let effective_model = routed_model.as_deref().unwrap_or(&detail.model).to_owned();
+        let (stored_content, current_message) = match resolve_user_content(
+            &detail,
+            &effective_model,
+            input,
+            self.trusted_image_url.as_ref(),
+        ) {
             Ok(content) => content,
             Err((code, message)) => {
                 self.push_error(session_id, code, message, false).await;
                 return None;
             }
         };
+        if let Some(routed_model) = routed_model {
+            let routed_model_name = zk_llm::capabilities_for(&routed_model)
+                .display_name
+                .to_string();
+            self.sink
+                .push(
+                    session_id,
+                    ServerMessage::ModelRouted {
+                        original_model: detail.model.clone(),
+                        routed_model: routed_model.clone(),
+                        routed_model_name: routed_model_name.clone(),
+                        reason: format!("当前模型不支持图片，已自动切换到 {routed_model_name}"),
+                    },
+                )
+                .await;
+        }
         messages.push(current_message);
         let user_message = NewMessage {
             role: MessageRole::User,
@@ -2442,7 +2513,7 @@ impl Engine {
         // `QueryConfig.getRecommendedMaxTokens` = min(模型输出上限, 65536)）：
         // 此前恒用 `ChatRequest::new` 的 8192 默认档，长思考模型（如 kimi-k3
         // 的 reasoning_effort=max）会在 thinking 阶段耗尽预算并返回空正文。
-        let max_tokens = recommended_max_tokens(&detail.model);
+        let max_tokens = recommended_max_tokens(&effective_model);
         // Run 落库（对照旧 `QueryEngine.executeQueryInternal` L284-307：
         // `runTracker.startRun(sessionId, parentRunId, agentType, config.model())`
         // → `currentRunId = run.id()` → 经 `withCurrentRunId` 传播至工具上下文）。
@@ -2465,7 +2536,7 @@ impl Engine {
                 session_id,
                 None,
                 Some(AGENT_TYPE_QUERY),
-                &detail.model,
+                &effective_model,
             )
             .await
         {
@@ -2557,7 +2628,7 @@ impl Engine {
         let flags = FeatureFlags::from_env();
         let urgent = self
             .summarizer
-            .should_inject_summarize_hint(&messages, context_window_for(&detail.model));
+            .should_inject_summarize_hint(&messages, context_window_for(&effective_model));
         let working_dir_hash = {
             use sha2::Digest as _;
             format!("{:x}", sha2::Sha256::digest(detail.working_dir.as_bytes()))
@@ -2577,12 +2648,12 @@ impl Engine {
             .with_urgent_summarize(urgent)
             .with_project_loader(&self.project_prompts)
             .with_durable_project_context(durable_project_context.as_deref());
-        let mut segmented = build_system_prompt_segmented(&detail.model, &dynamic);
+        let mut segmented = build_system_prompt_segmented(&effective_model, &dynamic);
         let append = conversation_options
             .append_system_prompt
             .as_deref()
             .filter(|text| !text.trim().is_empty());
-        let supports_thinking = zk_llm::capabilities_for(&detail.model).supports_thinking;
+        let supports_thinking = zk_llm::capabilities_for(&effective_model).supports_thinking;
         let thinking = match conversation_options.thinking {
             Some(requested) if requested.requires_support() && !supports_thinking => {
                 self.sink
@@ -2592,8 +2663,7 @@ impl Engine {
                             key: "thinking_mode_downgraded".into(),
                             level: "warning".into(),
                             message: format!(
-                                "Model {} does not support requested thinking; using disabled mode",
-                                detail.model
+                                "Model {effective_model} does not support requested thinking; using disabled mode"
                             ),
                             timeout: 6_000,
                         },
@@ -2605,7 +2675,7 @@ impl Engine {
             None if supports_thinking => ThinkingMode::Adaptive,
             None => ThinkingMode::Disabled,
         };
-        let mut request = ChatRequest::new(detail.model.clone())
+        let mut request = ChatRequest::new(effective_model)
             .with_tools(filtered_tool_specs(&self.tools, &conversation_options))
             .with_max_tokens(max_tokens)
             .with_thinking(thinking);
@@ -3083,9 +3153,12 @@ const MAX_ATTACHMENT_BYTES: u64 = 10 * 1024 * 1024;
 const MAX_ATTACHMENT_TOTAL_BYTES: u64 = 20 * 1024 * 1024;
 const MAX_IMAGE_PIXELS: u64 = 40_000_000;
 
+#[allow(clippy::too_many_lines)] // 引用/url/base64 附件三类准入是同一边界
 fn resolve_user_content(
     session: &zk_db::model::SessionDetail,
+    effective_model: &str,
     input: UserContentInput,
+    trusted_image_url: Option<&TrustedImageUrlCheck>,
 ) -> Result<(Vec<StoredBlock>, ChatMessage), (&'static str, String)> {
     let workspace = std::fs::canonicalize(&session.working_dir).map_err(|_| {
         (
@@ -3108,27 +3181,62 @@ fn resolve_user_content(
         stored.push(StoredBlock::Text { text: rendered });
     }
 
-    let capabilities = zk_llm::capabilities_for(&session.model);
+    // 图片数量和支持性必须按本次请求的有效模型裁定；视觉路由不会修改
+    // `session.model`，因此不能继续从持久会话读取能力。
+    let capabilities = zk_llm::capabilities_for(effective_model);
     if !input.attachments.is_empty() && !capabilities.supports_images {
         return Err((
             "ATTACHMENT_MODEL_UNSUPPORTED",
-            format!("Model {} does not support image attachments", session.model),
+            format!("Model {effective_model} does not support image attachments"),
         ));
     }
     let max_images = usize::try_from(capabilities.max_images).unwrap_or(usize::MAX);
     if input.attachments.len() > max_images {
         return Err((
             "ATTACHMENT_COUNT_EXCEEDED",
-            format!(
-                "Model {} accepts at most {max_images} images",
-                session.model
-            ),
+            format!("Model {effective_model} accepts at most {max_images} images"),
         ));
     }
     let upload_dir = zk_core::paths::user_config_dir().join("uploads");
     let mut images = Vec::with_capacity(input.attachments.len());
     let mut total_bytes = 0_u64;
     for attachment in input.attachments {
+        // url 附件：信任校验通过后直存 url 型图片块（旧 WS 入站 url 分支——
+        // 校验失败整条消息报错中止；无 base64 载荷，不计体积预算）。
+        if attachment.kind == "image"
+            && let Some(url) = attachment
+                .url
+                .as_deref()
+                .filter(|url| !url.trim().is_empty())
+        {
+            if !trusted_image_url.is_some_and(|check| check(url)) {
+                tracing::warn!("rejected untrusted clipboard image url attachment");
+                return Err((
+                    "image_url_untrusted",
+                    "图片地址不是当前服务生成的可信 OSS 地址".to_owned(),
+                ));
+            }
+            let media_type = attachment
+                .media_type
+                .clone()
+                .unwrap_or_else(|| "image/png".to_owned());
+            stored.push(StoredBlock::Image {
+                source: zk_db::model::ImageSource {
+                    kind: "url".into(),
+                    media_type: None,
+                    data: None,
+                    url: Some(url.to_owned()),
+                },
+                width: None,
+                height: None,
+            });
+            images.push(zk_llm::ImageSource {
+                media_type,
+                data: None,
+                url: Some(url.to_owned()),
+            });
+            continue;
+        }
         let image = resolve_uploaded_image(&upload_dir, &attachment)?;
         total_bytes = total_bytes.saturating_add(image.bytes.len() as u64);
         if total_bytes > MAX_ATTACHMENT_TOTAL_BYTES {
@@ -3141,15 +3249,17 @@ fn resolve_user_content(
         stored.push(StoredBlock::Image {
             source: zk_db::model::ImageSource {
                 kind: "base64".into(),
-                media_type: image.media_type.clone(),
-                data: data.clone(),
+                media_type: Some(image.media_type.clone()),
+                data: Some(data.clone()),
+                url: None,
             },
             width: Some(i64::from(image.width)),
             height: Some(i64::from(image.height)),
         });
         images.push(zk_llm::ImageSource {
             media_type: image.media_type,
-            data,
+            data: Some(data),
+            url: None,
         });
     }
     Ok((stored, ChatMessage::user_with_images(text, images)))
@@ -3441,6 +3551,64 @@ mod user_content_tests {
     }
 
     #[test]
+    fn url_attachments_require_trusted_validator_and_pass_through() {
+        let workspace =
+            std::env::temp_dir().join(format!("zk-engine-url-image-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let detail = zk_db::model::SessionDetail {
+            session_id: "s-1".into(),
+            model: "deepseek-v4-flash-vision-exp".into(),
+            working_dir: workspace.to_string_lossy().into_owned(),
+            title: None,
+            status: "active".into(),
+            messages: Vec::new(),
+            config: serde_json::Map::new(),
+            total_usage: Usage::default(),
+            total_cost_usd: 0.0,
+            summary: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let trusted = "https://bkt.oss.example.com/zhikuncode-artifacts/clipboard/a.png";
+        let input = || UserContentInput {
+            text: "inspect".into(),
+            attachments: vec![Attachment {
+                kind: "image".into(),
+                path: None,
+                media_type: None,
+                base64_data: None,
+                url: Some(trusted.into()),
+            }],
+            references: Vec::new(),
+        };
+        // 未装配校验端口：一律拒绝（fail-closed，SSRF 红线）。
+        let rejected =
+            resolve_user_content(&detail, &detail.model, input(), None).expect_err("no validator");
+        assert_eq!(rejected.0, "image_url_untrusted");
+        // 校验端口拒绝：同错误码。
+        let deny: TrustedImageUrlCheck = Arc::new(|_| false);
+        let rejected =
+            resolve_user_content(&detail, &detail.model, input(), Some(&deny)).expect_err("denied");
+        assert_eq!(rejected.0, "image_url_untrusted");
+        // 校验通过：url 型存储块 + provider 侧 url 图片，media_type 缺省 image/png。
+        let allow: TrustedImageUrlCheck = Arc::new(|_| true);
+        let (stored, message) =
+            resolve_user_content(&detail, &detail.model, input(), Some(&allow)).expect("trusted");
+        assert!(matches!(
+            &stored[1],
+            StoredBlock::Image { source, .. }
+                if source.kind == "url"
+                    && source.remote_url() == Some(trusted)
+                    && source.media_type.is_none()
+                    && source.data.is_none()
+        ));
+        assert_eq!(message.images[0].url.as_deref(), Some(trusted));
+        assert_eq!(message.images[0].media_type, "image/png");
+        assert_eq!(message.images[0].data, None);
+        std::fs::remove_dir_all(workspace).expect("cleanup");
+    }
+
+    #[test]
     fn references_are_workspace_scoped_and_line_bounded() {
         let workspace =
             std::env::temp_dir().join(format!("zk-engine-reference-{}", uuid::Uuid::new_v4()));
@@ -3579,8 +3747,9 @@ pub fn history_to_chat_messages(records: &[MessageRecord]) -> Vec<ChatMessage> {
                         .iter()
                         .filter_map(|block| match block {
                             StoredBlock::Image { source, .. } => Some(zk_llm::ImageSource {
-                                media_type: source.media_type.clone(),
+                                media_type: source.media_type_or_default().to_owned(),
                                 data: source.data.clone(),
+                                url: source.remote_url().map(str::to_owned),
                             }),
                             _ => None,
                         })
@@ -3814,8 +3983,9 @@ mod history_orphan_tests {
                     StoredBlock::Image {
                         source: zk_db::model::ImageSource {
                             kind: "base64".into(),
-                            media_type: "image/png".into(),
-                            data: "aGVsbG8=".into(),
+                            media_type: Some("image/png".into()),
+                            data: Some("aGVsbG8=".into()),
+                            url: None,
                         },
                         width: Some(1),
                         height: Some(1),

@@ -19,7 +19,7 @@ import urllib.request
 
 import websockets
 
-BASE = os.environ.get("ZK_E2E_BASE", "http://127.0.0.1:8081")
+BASE = os.environ.get("ZK_E2E_BASE", "http://127.0.0.1:8082")
 MODEL = os.environ.get("ZK_E2E_MODEL", "kimi-k3")
 WS_URL = BASE.replace("http://", "ws://") + "/ws"
 SCENARIO_TIMEOUT_SECONDS = 90

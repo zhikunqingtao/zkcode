@@ -6,7 +6,7 @@
 //! → `Engine::handle_client_message`（每 run 一 spawn，同步入口不阻塞
 //! WS 读循环）。
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use futures::future::BoxFuture;
 use zk_engine::admission::ToolAdmission;
@@ -30,8 +30,8 @@ use zk_tools::{
     SleepTool, SnipTool, StaticToolCatalog, SyntheticOutputTool, TaskCoordinatorPort,
     TaskCreateTool, TaskGetTool, TaskInvocation, TaskListTool, TaskOutputTool, TaskSnapshot,
     TaskStopTool, TaskUpdateTool, TerminalCaptureTool, TodoWriteTool, ToolDescriptor, ToolRegistry,
-    ToolSearchTool, UnavailableSearchBackend, VerifyPlanExecutionTool, VisualizationTool,
-    WebFetchTool, WebSearchTool, WorktreeTool, WriteFileTool,
+    ToolSearchTool, VerifyPlanExecutionTool, VisualizationTool, WebFetchTool, WebSearchTool,
+    WorktreeTool, WriteFileTool,
 };
 
 use crate::api::browser_replay::BrowserReplayStore;
@@ -39,6 +39,7 @@ use crate::authz::EngineAdmission;
 use crate::http_fetch::SafeHttpFetchPort;
 use crate::http_search::SearxngSearchBackend;
 use crate::interaction::DurableElicitationSink;
+use crate::mcp_search::McpSearchBackend;
 use crate::mcp_tools::{ListMcpResourcesTool, ReadMcpResourceTool};
 use crate::python::{
     BrowserVerifyJourneyTool, CodeIntelTool, GitEnhancedTool, PythonClient, WebBrowserTool,
@@ -77,12 +78,14 @@ impl EngineHook for EngineBridge {
 ///
 /// provider 注入 [`AppState::providers`]——即 2.7 的
 /// [`zk_llm::ProviderRegistry`]（自身实现 [`ChatProvider`]，承载 model →
-/// provider 路由、熔断与模型降级链）。引擎侧类型仍为
-/// `Arc<dyn ChatProvider>`，zk-engine 代码零改动。密钥未配置不在此报错——
-/// 请求期以 `query_error` 下行（行为可观察、进程仍可服务 REST）。
+/// provider 路由、熔断与模型降级链）。同一热替换代理还以
+/// [`zk_llm::VisionProviderView`] 注入引擎，确保图片路由只选择当前已配置模型。
+/// 密钥未配置不在此报错——请求期以 `query_error` 下行（行为可观察、进程仍可
+/// 服务 REST）。
 #[must_use]
 pub fn wire_engine(state: &AppState) -> Arc<Engine> {
     let provider: Arc<dyn ChatProvider> = state.providers.clone();
+    let vision_providers: Arc<dyn zk_llm::VisionProviderView> = state.providers.clone();
     // Batch 1 Step 1-5：注册表取自 `AppState` 的惰性单例——REST
     // `GET /api/tools` 与引擎/准入端口自此共用同一批工具实例。
     let tools = state.tools();
@@ -97,13 +100,23 @@ pub fn wire_engine(state: &AppState) -> Arc<Engine> {
     // 到 `AppState`——引擎写入与命令读取必须同源，否则 `/cost` 恒读到零。
     let cost_tracker = state.costs.clone();
     let lightweight_model = select_lightweight_model(
-        &state.providers,
+        &state.providers.load(),
         std::env::var("ZK_LIGHTWEIGHT_MODEL").ok().as_deref(),
     );
     let llm_summarizer = Arc::new(LlmSummarizer::new(Arc::clone(&provider), lightweight_model));
     let compact_summarizer: Arc<dyn zk_engine::context::compact::Summarizer> =
         llm_summarizer.clone();
     let tool_summarizer: Arc<dyn zk_engine::LightModelSummarizer> = llm_summarizer;
+    // Phase A7：剪贴板图片 URL 信任校验策略（旧 `OssPublishProperties.
+    // isTrustedClipboardImageUrl`）。OSS 未配置时策略恒拒绝——url 附件在
+    // 引擎入站即被整条拒绝（fail-closed，SSRF 红线）。
+    let image_url_policy = crate::oss_trust::TrustedImageUrlPolicy::from_settings(
+        state.config.oss_endpoint.as_deref(),
+        state.config.oss_bucket.as_deref(),
+        &state.config.oss_prefix,
+    );
+    let trusted_image_url: zk_engine::TrustedImageUrlCheck =
+        Arc::new(move |value: &str| image_url_policy.is_trusted_clipboard_image_url(value));
     let engine = Arc::new(
         Engine::with_admission(
             state.db.clone(),
@@ -123,7 +136,9 @@ pub fn wire_engine(state: &AppState) -> Arc<Engine> {
         // Batch 8B：Hook 服务端口注入。引擎触发点（工具前后 / run 起止）与
         // `AppState::hooks` 共用同一实例，配置从 `.zk/hooks.toml` 装配期加载。
         .with_hooks(state.hooks.clone())
-        .with_observability(Arc::clone(&state.observability)),
+        .with_observability(Arc::clone(&state.observability))
+        .with_trusted_image_url(trusted_image_url)
+        .with_vision_provider_view(vision_providers),
     );
     state.hub.set_engine(Arc::new(EngineBridge {
         engine: Arc::clone(&engine),
@@ -157,12 +172,12 @@ fn select_lightweight_model(
 /// zk-llm，故经端口反转，实现落本组合根。
 struct RegistryModelCatalog {
     /// 2.7 的 provider 注册表（`model_order` 即旧 `listAvailableModels()`）。
-    providers: Arc<zk_llm::ProviderRegistry>,
+    providers: Arc<zk_llm::SwappableProvider>,
 }
 
 impl ModelCatalog for RegistryModelCatalog {
     fn available_models(&self) -> Vec<String> {
-        self.providers.models().to_vec()
+        self.providers.load().models().to_vec()
     }
 }
 
@@ -175,7 +190,7 @@ impl ModelCatalog for RegistryModelCatalog {
 struct AgentBackendBridge {
     executor: Arc<SubAgentExecutor>,
     db: zk_db::Db,
-    providers: Arc<zk_llm::ProviderRegistry>,
+    providers: Arc<zk_llm::SwappableProvider>,
     background_agents: Arc<BackgroundAgentTracker>,
     worktree_enabled: bool,
 }
@@ -202,7 +217,7 @@ impl AgentToolBackend for AgentBackendBridge {
                 Err(message) => return ("failed".to_owned(), Some(message), None),
             };
             let model = match resolve_agent_model(
-                &self.providers,
+                &self.providers.load(),
                 invocation.model_override.as_deref(),
                 invocation.agent_type.as_deref(),
                 &inherited_model,
@@ -405,7 +420,7 @@ struct TaskCoordinatorBridge {
     coordinator: Arc<TaskCoordinator>,
     executor: Arc<SubAgentExecutor>,
     db: zk_db::Db,
-    providers: Arc<zk_llm::ProviderRegistry>,
+    providers: Arc<zk_llm::SwappableProvider>,
 }
 
 /// Single production Agent runtime shared by Agent tools, Task tools, and Swarm dispatch.
@@ -438,7 +453,7 @@ impl TaskCoordinatorPort for TaskCoordinatorBridge {
             };
             let inherited_model = validate_agent_invocation(&db, &validation).await?;
             let model = resolve_agent_model(
-                &providers,
+                &providers.load(),
                 None,
                 Some(&invocation.task_type),
                 &inherited_model,
@@ -592,8 +607,18 @@ fn task_snapshot(record: zk_db::TaskRecord) -> TaskSnapshot {
 ///
 /// 安全裁决（Bash 四层解析器 / 权限管线）归 2.4-2.5：本阶段 `Bash` 为
 /// 直通模式，只有进程树管理与超时/截断护栏。
-#[allow(clippy::too_many_lines)] // production composition root intentionally lists every tool
 pub(crate) fn build_tool_registry(state: &AppState) -> ToolRegistry {
+    let search_endpoint = std::env::var("ZK_WEB_SEARCH_ENDPOINT")
+        .ok()
+        .filter(|endpoint| !endpoint.trim().is_empty());
+    build_tool_registry_with_search_endpoint(state, search_endpoint.as_deref())
+}
+
+#[allow(clippy::too_many_lines)] // production composition root intentionally lists every tool
+fn build_tool_registry_with_search_endpoint(
+    state: &AppState,
+    search_endpoint: Option<&str>,
+) -> ToolRegistry {
     let snapshot_sink = Arc::new(DbSnapshotSink::new(state.db.clone()));
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(ReadFileTool));
@@ -625,7 +650,7 @@ pub(crate) fn build_tool_registry(state: &AppState) -> ToolRegistry {
     registry.register(Arc::new(SyntheticOutputTool::new()));
     let mcp_slot = state.mcp_slot();
     registry.register(Arc::new(ListMcpResourcesTool::new(Arc::clone(&mcp_slot))));
-    registry.register(Arc::new(ReadMcpResourceTool::new(mcp_slot)));
+    registry.register(Arc::new(ReadMcpResourceTool::new(Arc::clone(&mcp_slot))));
     // Batch 7: 计划模式 + Snip + CtxInspect + VerifyPlanExecution（5 件）。
     registry.register(Arc::new(EnterPlanModeTool));
     registry.register(Arc::new(ExitPlanModeTool));
@@ -643,19 +668,7 @@ pub(crate) fn build_tool_registry(state: &AppState) -> ToolRegistry {
     )));
     let safe_http: Arc<dyn zk_tools::WebFetchPort> = Arc::new(SafeHttpFetchPort::new());
     registry.register(Arc::new(WebFetchTool::new(Arc::clone(&safe_http))));
-    let search_backend: Arc<dyn zk_tools::SearchBackend> = std::env::var("ZK_WEB_SEARCH_ENDPOINT")
-        .ok()
-        .filter(|endpoint| !endpoint.trim().is_empty())
-        .and_then(
-            |endpoint| match SearxngSearchBackend::new(&endpoint, Arc::clone(&safe_http)) {
-                Ok(backend) => Some(Arc::new(backend) as Arc<dyn zk_tools::SearchBackend>),
-                Err(error) => {
-                    tracing::warn!(code = error.code, "configured web search endpoint rejected");
-                    None
-                }
-            },
-        )
-        .unwrap_or_else(|| Arc::new(UnavailableSearchBackend));
+    let search_backend = select_search_backend(search_endpoint, Arc::clone(&safe_http), mcp_slot);
     registry.register(Arc::new(WebSearchTool::new(search_backend)));
     let mut skill_fork_backend: Option<Arc<dyn AgentToolBackend>> = None;
     // 子代理与 Task 在安全冻结解除前不进入生产目录。启用 Agent 但尚未启用
@@ -683,7 +696,7 @@ pub(crate) fn build_tool_registry(state: &AppState) -> ToolRegistry {
         let child_llm_summarizer = Arc::new(LlmSummarizer::new(
             state.providers.clone(),
             select_lightweight_model(
-                &state.providers,
+                &state.providers.load(),
                 std::env::var("ZK_LIGHTWEIGHT_MODEL").ok().as_deref(),
             ),
         ));
@@ -802,6 +815,25 @@ pub(crate) fn build_tool_registry(state: &AppState) -> ToolRegistry {
     registry
 }
 
+fn select_search_backend(
+    search_endpoint: Option<&str>,
+    safe_http: Arc<dyn zk_tools::WebFetchPort>,
+    mcp_slot: Arc<OnceLock<Arc<zk_mcp::McpClientManager>>>,
+) -> Arc<dyn zk_tools::SearchBackend> {
+    if let Some(endpoint) = search_endpoint {
+        match SearxngSearchBackend::new(endpoint, safe_http) {
+            Ok(backend) => return Arc::new(backend),
+            Err(error) => {
+                tracing::warn!(
+                    code = error.code,
+                    "configured SearXNG endpoint rejected; falling back to MCP web search"
+                );
+            }
+        }
+    }
+    Arc::new(McpSearchBackend::new(mcp_slot))
+}
+
 /// 将 Python 桥接工具目录与最近一次能力快照同步。
 ///
 /// 只读缓存、无 UDS IO；调用者必须先完成 `refresh_capabilities`。动态变化后
@@ -875,16 +907,17 @@ fn refresh_tool_search_catalog(registry: &ToolRegistry) {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
-    use std::sync::Arc;
+    use std::sync::{Arc, OnceLock};
     use std::time::Duration;
 
     use super::{
-        SendMessageBackendBridge, build_tool_registry, resolve_agent_model,
-        sync_python_tool_registry,
+        SendMessageBackendBridge, build_tool_registry, build_tool_registry_with_search_endpoint,
+        resolve_agent_model, select_search_backend, sync_python_tool_registry,
     };
     use crate::config::Config;
     use crate::python::CapabilityStatus;
     use crate::state::AppState;
+    use futures::future::BoxFuture;
     use sha2::{Digest, Sha256};
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
@@ -895,7 +928,28 @@ mod tests {
         AgentTimeoutConfig, ChildExecutionContext, IsolationMode, SubAgentEngineFactory,
         SubAgentExecutor, SystemGitCommandRunner, WorktreeManager,
     };
-    use zk_tools::{SendMessageBackend, SendMessageInvocation};
+    use zk_tools::{
+        SearchRequest, SendMessageBackend, SendMessageInvocation, WebFetchError, WebFetchPort,
+        WebFetchRequest, WebFetchResponse,
+    };
+
+    struct SearchFixtureFetch;
+
+    impl WebFetchPort for SearchFixtureFetch {
+        fn fetch(
+            &self,
+            request: WebFetchRequest,
+        ) -> BoxFuture<'_, Result<WebFetchResponse, WebFetchError>> {
+            assert!(request.url.contains("q=rust+security"));
+            Box::pin(futures::future::ready(Ok(WebFetchResponse {
+                final_url: request.url,
+                status: 200,
+                content_type: "application/json".to_owned(),
+                body: br#"{"results":[{"title":"SearX","url":"https://example.com/search","content":"preferred","engine":"fixture"}]}"#.to_vec(),
+                truncated: false,
+            })))
+        }
+    }
 
     /// 安全冻结期组合根注册清单：33 件真实工具。Agent、五件 Task 工具和
     /// Worktree 在各自显式安全开关开启前不会进入模型目录。
@@ -955,6 +1009,47 @@ mod tests {
             assert_eq!(tool.name(), name.as_str());
             assert!(!tool.description().is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn production_registry_uses_shared_mcp_search_when_searxng_is_absent() {
+        let state = AppState::for_tests();
+        let slot = state.mcp_slot();
+        assert!(Arc::ptr_eq(&slot, &state.mcp_slot()));
+        let registry = build_tool_registry_with_search_endpoint(&state, None);
+        let tool = registry.get("WebSearch").expect("WebSearch");
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let output = tool
+            .execute(
+                serde_json::json!({"query": "rust", "limit": 1}),
+                zk_tools::ToolContext::new(CancellationToken::new(), tx),
+            )
+            .await;
+        assert!(output.is_error);
+        assert_eq!(
+            output.content,
+            "WEB_SEARCH_UNAVAILABLE: MCP web search is not initialized"
+        );
+        assert!(slot.get().is_none(), "tool construction must stay lazy");
+    }
+
+    #[tokio::test]
+    async fn configured_searxng_is_selected_before_the_mcp_backend() {
+        let backend = select_search_backend(
+            Some("https://search.example.com/search"),
+            Arc::new(SearchFixtureFetch),
+            Arc::new(OnceLock::new()),
+        );
+        let results = backend
+            .search(SearchRequest {
+                query: "rust security".to_owned(),
+                limit: 1,
+            })
+            .await
+            .expect("SearXNG result");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "SearX");
+        assert_eq!(results[0].snippet, "preferred");
     }
 
     /// Names alone cannot detect an accidentally weakened input schema. Freeze a

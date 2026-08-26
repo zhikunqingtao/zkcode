@@ -23,6 +23,7 @@ pub mod jsonrpc;
 pub mod manager;
 pub mod prompt_adapter;
 pub mod protocol;
+pub mod security;
 pub mod sse;
 pub mod stdio;
 pub mod streamable_http;
@@ -43,6 +44,10 @@ pub use prompt_adapter::McpPromptAdapter;
 pub use protocol::{
     ProgressTracker, PromptArgument, PromptDefinition, PromptMessage, ResourceDefinition,
     RootDescriptor, RootsProvider, ToolDefinition,
+};
+pub use security::{
+    CapabilitySecurityError, McpCredentialResolver, validate_capability_definition,
+    validate_capability_destination,
 };
 pub use sse::SseTransport;
 pub use stdio::StdioTransport;

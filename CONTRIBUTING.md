@@ -45,4 +45,4 @@ requests.
 ## License
 
 By contributing, you agree that your contribution is licensed under the
-[MIT License](LICENSE).
+[Apache License 2.0](LICENSE).

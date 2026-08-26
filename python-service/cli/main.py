@@ -219,7 +219,7 @@ def main(
         False, "--no-session", help="不持久化会话"),
     # 连接
     server: str = typer.Option(
-        "http://127.0.0.1:8081", "--server", "-s", help="后端地址"),
+        "http://127.0.0.1:8082", "--server", "-s", help="后端地址"),
     token: Optional[str] = typer.Option(
         None, "--token", help="认证 Token"),
     timeout: int = typer.Option(90, "--timeout", help="超时秒数"),

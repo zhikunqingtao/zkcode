@@ -46,8 +46,12 @@
 //! 3. **超时文案取生效值**：Java 用字段原值 `timeoutMs`，未配置（0）时会打印
 //!    `"timed out after 0ms"`；此处构造时即经 [`timeout_or_default`] 归一，文案
 //!    与实际生效的超时一致。
-//! 4. **无 `SchemaCompressor`**：Java 的 `compressedInputSchema` / `getFullSchema()`
-//!    双份 schema 在此收敛为单份原始 schema（压缩器属 P2，见不做项）。
+//! 4. **无 `SchemaCompressor` 体积压缩**：Java 的 `compressedInputSchema` /
+//!    `getFullSchema()` 双份 schema 在此收敛为单份 schema，但对齐 zhikuncode
+//!    `SchemaCompressor.normalizeTypeAliases` 在构造时做一次性 schema 清洗
+//!    （`bool` → `boolean` 类型别名、非字符串 `description` 强制字符串化、
+//!    `required` 剔除非字符串元素，见 [`normalize_schema_node`]）并缓存结果；
+//!    examples 移除 / description 截断 / enum 裁剪等体积压缩仍不做（P2）。
 
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -269,7 +273,7 @@ impl McpToolAdapter {
         let mut adapter = Self {
             name: name.into(),
             description: String::new(),
-            input_schema: normalize_schema(input_schema),
+            input_schema: normalize_schema(input_schema, &original_tool_name),
             connection,
             original_tool_name: original_tool_name.clone(),
             server_description,
@@ -652,12 +656,118 @@ fn spawn_cancel_watcher(
 }
 
 /// 入参 Schema 归一（缺失 / `null` → `{"type":"object"}`，对照 Java
-/// `compressedInputSchema != null ? … : Map.of("type", "object")`）。
-fn normalize_schema(schema: Option<Value>) -> Value {
+/// `compressedInputSchema != null ? … : Map.of("type", "object")`），并对
+/// 服务端透传的 schema 做一次性递归清洗（对齐 zhikuncode
+/// `SchemaCompressor.normalizeTypeAliases` 并扩展 description / required
+/// 防御，见 [`normalize_schema_node`]）——结果缓存进
+/// `McpToolAdapter::input_schema`，后续 `parameters()` 直接返回已清洗版本。
+fn normalize_schema(schema: Option<Value>, tool_name: &str) -> Value {
     match schema {
         Some(Value::Null) | None => json!({ "type": "object" }),
-        Some(schema) => schema,
+        Some(mut schema) => {
+            if normalize_schema_node(&mut schema) {
+                tracing::debug!(
+                    tool = %tool_name,
+                    "normalized non-standard fields in MCP tool input schema"
+                );
+            }
+            schema
+        }
     }
+}
+
+/// Python 风格类型名 → JSON Schema 标准名；非别名（含标准名本身）返回
+/// `None` 以保持幂等。
+fn canonical_type_name(alias: &str) -> Option<&'static str> {
+    match alias {
+        "bool" => Some("boolean"),
+        "int" | "long" => Some("integer"),
+        "float" | "double" => Some("number"),
+        "dict" | "map" => Some("object"),
+        "list" => Some("array"),
+        _ => None,
+    }
+}
+
+/// 递归规范化 schema 节点（真实线上形态触发 Moonshot 严格校验 400）：
+/// - `type` 别名替换（如智谱 MCP webSearchPro 的 `"type": "bool"`）：字符串
+///   与数组内各元素均替换（数组本身不塌缩，对齐 zhikuncode）；
+/// - `description` 强制字符串化（如 `DashScope` MCP 某工具 `address` 属性的
+///   `description: null`，Moonshot 报 `description must be a string`）：
+///   `null` → 移除；数字 / 布尔 → 字符串表示；对象 / 数组 → 紧凑 JSON
+///   字符串（保留信息优于丢弃）；
+/// - `required` 剔除非字符串元素（Moonshot 要求字符串数组）。
+///
+/// 递归面为 `properties` 各属性、`items`（对象或元组数组）、`anyOf` /
+/// `oneOf` / `allOf` 各分支。返回是否发生了实际修改（合法节点不改动，
+/// 幂等）。
+fn normalize_schema_node(node: &mut Value) -> bool {
+    let Some(obj) = node.as_object_mut() else {
+        return false;
+    };
+    let mut modified = false;
+    match obj.get_mut("type") {
+        Some(Value::String(single)) => {
+            if let Some(canonical) = canonical_type_name(single) {
+                *single = canonical.to_owned();
+                modified = true;
+            }
+        }
+        Some(Value::Array(types)) => {
+            for item in types {
+                if let Value::String(name) = item
+                    && let Some(canonical) = canonical_type_name(name)
+                {
+                    *name = canonical.to_owned();
+                    modified = true;
+                }
+            }
+        }
+        _ => {}
+    }
+    match obj.get("description") {
+        None | Some(Value::String(_)) => {}
+        Some(Value::Null) => {
+            obj.remove("description");
+            modified = true;
+        }
+        Some(non_string) => {
+            let text = match non_string {
+                Value::Number(number) => number.to_string(),
+                Value::Bool(flag) => flag.to_string(),
+                composite => composite.to_string(),
+            };
+            obj.insert("description".to_owned(), Value::String(text));
+            modified = true;
+        }
+    }
+    if let Some(required) = obj.get_mut("required").and_then(Value::as_array_mut) {
+        let before = required.len();
+        required.retain(Value::is_string);
+        modified |= required.len() != before;
+    }
+    if let Some(properties) = obj.get_mut("properties").and_then(Value::as_object_mut) {
+        for property in properties.values_mut() {
+            modified |= normalize_schema_node(property);
+        }
+    }
+    if let Some(items) = obj.get_mut("items") {
+        if let Value::Array(tuple_items) = items {
+            for item in tuple_items {
+                modified |= normalize_schema_node(item);
+            }
+        } else {
+            modified |= normalize_schema_node(items);
+        }
+    }
+    for union_key in ["anyOf", "oneOf", "allOf"] {
+        if let Some(branches) = obj.get_mut(union_key).and_then(Value::as_array_mut) {
+            for branch in branches {
+                modified |= normalize_schema_node(branch);
+            }
+        }
+    }
+    modified
 }
 
 /// 提取 MCP 响应文本（对照 Java `extractContent`）：有 `content` 键则遍历并只取
@@ -1257,5 +1367,222 @@ mod tests {
     #[test]
     fn shared_cache_is_process_wide_singleton() {
         assert!(Arc::ptr_eq(&shared_result_cache(), &shared_result_cache()));
+    }
+
+    #[test]
+    fn type_alias_bool_is_normalized_to_boolean() {
+        let mut schema = json!({ "type": "bool" });
+        assert!(normalize_schema_node(&mut schema));
+        assert_eq!(schema, json!({ "type": "boolean" }));
+    }
+
+    #[test]
+    fn type_alias_int_is_normalized_to_integer() {
+        let mut schema = json!({ "type": "int" });
+        assert!(normalize_schema_node(&mut schema));
+        assert_eq!(schema, json!({ "type": "integer" }));
+    }
+
+    #[test]
+    fn type_array_elements_are_replaced_without_collapsing() {
+        let mut schema = json!({ "type": ["bool", "null"] });
+        assert!(normalize_schema_node(&mut schema));
+        // 对齐 zhikuncode：只替换元素，不塌缩数组本身。
+        assert_eq!(schema, json!({ "type": ["boolean", "null"] }));
+    }
+
+    #[test]
+    fn nested_nodes_are_normalized_recursively() {
+        let mut schema = json!({
+            "type": "dict",
+            "properties": {
+                "flag": { "type": "bool" },
+                "nested": {
+                    "type": "object",
+                    "properties": { "count": { "type": "long" } }
+                },
+                "scores": { "type": "list", "items": { "type": "float" } },
+                "tuple": { "type": "array", "items": [{ "type": "int" }, { "type": "double" }] },
+                "choice": {
+                    "anyOf": [{ "type": "bool" }, { "type": "string" }],
+                    "oneOf": [{ "type": "map" }],
+                    "allOf": [{ "type": "list" }]
+                }
+            }
+        });
+        assert!(normalize_schema_node(&mut schema));
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["properties"]["flag"]["type"], "boolean");
+        assert_eq!(
+            schema["properties"]["nested"]["properties"]["count"]["type"],
+            "integer"
+        );
+        assert_eq!(schema["properties"]["scores"]["type"], "array");
+        assert_eq!(schema["properties"]["scores"]["items"]["type"], "number");
+        assert_eq!(schema["properties"]["tuple"]["items"][0]["type"], "integer");
+        assert_eq!(schema["properties"]["tuple"]["items"][1]["type"], "number");
+        assert_eq!(
+            schema["properties"]["choice"]["anyOf"][0]["type"],
+            "boolean"
+        );
+        assert_eq!(schema["properties"]["choice"]["anyOf"][1]["type"], "string");
+        assert_eq!(schema["properties"]["choice"]["oneOf"][0]["type"], "object");
+        assert_eq!(schema["properties"]["choice"]["allOf"][0]["type"], "array");
+    }
+
+    #[test]
+    fn zhipu_web_search_pro_prompt_extend_regression() {
+        // 复现智谱 MCP webSearchPro 触发 Moonshot 400 的真实字段形态；
+        // 经适配器构造后 parameters() 必须直接返回已清洗版本。
+        let connection = McpServerConnection::new(stdio_config("zhipu-websearch"));
+        let adapter = McpToolAdapter::new(
+            "mcp__zhipu-websearch__webSearchPro",
+            None,
+            Some(json!({
+                "type": "object",
+                "properties": {
+                    "prompt_extend": {
+                        "type": "bool",
+                        "description": "whether to extend the prompt"
+                    }
+                }
+            })),
+            connection,
+            "webSearchPro",
+        );
+        let parameters = adapter.parameters();
+        assert_eq!(parameters["properties"]["prompt_extend"]["type"], "boolean");
+        assert_eq!(
+            parameters["properties"]["prompt_extend"]["description"],
+            "whether to extend the prompt"
+        );
+    }
+
+    #[test]
+    fn standard_schema_is_untouched_and_idempotent() {
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "city": { "type": "string" },
+                "days": { "type": "integer" },
+                "optional": { "type": ["boolean", "null"] },
+                "tags": { "type": "array", "items": { "type": "string" } }
+            },
+            "required": ["city"]
+        });
+        let original = schema.clone();
+        assert!(!normalize_schema_node(&mut schema));
+        assert_eq!(schema, original);
+
+        // 清洗输出再过一遍零改动（幂等）。
+        let mut aliased = json!({ "type": "bool", "description": null });
+        assert!(normalize_schema_node(&mut aliased));
+        let first_pass = aliased.clone();
+        assert!(!normalize_schema_node(&mut aliased));
+        assert_eq!(aliased, first_pass);
+    }
+
+    #[test]
+    fn null_description_is_removed() {
+        let mut schema = json!({ "type": "string", "description": null });
+        assert!(normalize_schema_node(&mut schema));
+        assert_eq!(schema, json!({ "type": "string" }));
+    }
+
+    #[test]
+    fn numeric_and_boolean_descriptions_are_stringified() {
+        let mut schema = json!({ "type": "string", "description": 123 });
+        assert!(normalize_schema_node(&mut schema));
+        assert_eq!(schema["description"], json!("123"));
+
+        let mut schema = json!({ "type": "string", "description": true });
+        assert!(normalize_schema_node(&mut schema));
+        assert_eq!(schema["description"], json!("true"));
+    }
+
+    #[test]
+    fn composite_descriptions_are_serialized_to_compact_json() {
+        let mut schema = json!({ "type": "string", "description": { "foo": "bar" } });
+        assert!(normalize_schema_node(&mut schema));
+        assert_eq!(schema["description"], json!(r#"{"foo":"bar"}"#));
+
+        let mut schema = json!({ "type": "string", "description": ["a", 1] });
+        assert!(normalize_schema_node(&mut schema));
+        assert_eq!(schema["description"], json!(r#"["a",1]"#));
+    }
+
+    #[test]
+    fn nested_invalid_descriptions_are_normalized_recursively() {
+        let mut schema = json!({
+            "type": "object",
+            "description": null,
+            "properties": {
+                "outer": {
+                    "type": "object",
+                    "properties": { "inner": { "type": "string", "description": 42 } }
+                },
+                "list": { "type": "array", "items": { "type": "string", "description": null } },
+                "choice": { "anyOf": [{ "type": "string", "description": { "k": "v" } }] }
+            }
+        });
+        assert!(normalize_schema_node(&mut schema));
+        assert!(schema.get("description").is_none());
+        assert_eq!(
+            schema["properties"]["outer"]["properties"]["inner"]["description"],
+            json!("42")
+        );
+        assert!(
+            schema["properties"]["list"]["items"]
+                .get("description")
+                .is_none()
+        );
+        assert_eq!(
+            schema["properties"]["choice"]["anyOf"][0]["description"],
+            json!(r#"{"k":"v"}"#)
+        );
+    }
+
+    #[test]
+    fn required_drops_non_string_elements() {
+        let mut schema = json!({
+            "type": "object",
+            "properties": { "city": { "type": "string" } },
+            "required": ["city", null, 7, { "bad": true }]
+        });
+        assert!(normalize_schema_node(&mut schema));
+        assert_eq!(schema["required"], json!(["city"]));
+
+        // 合法字符串数组不算修改。
+        let mut clean = json!({ "type": "object", "required": ["city"] });
+        assert!(!normalize_schema_node(&mut clean));
+    }
+
+    #[test]
+    fn dashscope_null_address_description_regression() {
+        // 复现 DashScope MCP 触发 Moonshot 400（`At path
+        // 'properties.address.description': description must be a string`）的
+        // 真实字段形态；经适配器构造后 parameters() 必须不含非字符串
+        // description。
+        let connection = McpServerConnection::new(stdio_config("dashscope"));
+        let adapter = McpToolAdapter::new(
+            "mcp__dashscope__geocode",
+            None,
+            Some(json!({
+                "type": "object",
+                "properties": {
+                    "address": { "type": "string", "description": null }
+                }
+            })),
+            connection,
+            "geocode",
+        );
+        let parameters = adapter.parameters();
+        assert_eq!(
+            parameters,
+            json!({
+                "type": "object",
+                "properties": { "address": { "type": "string" } }
+            })
+        );
     }
 }

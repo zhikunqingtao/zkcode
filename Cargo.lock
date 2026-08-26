@@ -3116,6 +3116,7 @@ dependencies = [
 name = "zk-llm"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "bytes",
  "futures",
  "reqwest",
@@ -3144,6 +3145,7 @@ dependencies = [
  "tokio-tungstenite 0.28.0",
  "tokio-util",
  "tracing",
+ "url",
  "uuid",
  "zk-core",
  "zk-tools",
@@ -3162,6 +3164,7 @@ dependencies = [
 name = "zk-server"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "axum",
  "base64 0.22.1",
  "bytes",
@@ -3186,6 +3189,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "url",
  "utoipa",
  "uuid",
  "zk-authz",

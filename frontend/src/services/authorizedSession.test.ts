@@ -71,6 +71,18 @@ describe('requestAuthorizedSession', () => {
         expect(createSession).toHaveBeenCalledWith(project.id, 'qwen3.8-max');
     });
 
+    it('falls back to qwen3.8-max when no selected or configured model exists', async () => {
+        const requestSelection = vi.fn().mockResolvedValue(project);
+        const createSession = vi.fn().mockResolvedValue('session-created');
+        useConfigStore.setState({ defaultModel: null as unknown as string });
+        useProjectStore.setState({ requestSelection });
+        useSessionStore.setState({ model: null, createSession });
+
+        await expect(requestAuthorizedSession()).resolves.toBe('session-created');
+
+        expect(createSession).toHaveBeenCalledWith(project.id, 'qwen3.8-max');
+    });
+
     it('does not create a Session when folder selection is canceled', async () => {
         const requestSelection = vi.fn().mockResolvedValue(null);
         const createSession = vi.fn();

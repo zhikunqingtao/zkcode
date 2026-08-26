@@ -74,12 +74,21 @@ fn api_block(block: &StoredBlock) -> ApiBlock {
             source,
             width,
             height,
-        } => ApiBlock::Image {
-            media_type: source.media_type.clone(),
-            base64_data: source.data.clone(),
-            width: width.unwrap_or(0),
-            height: height.unwrap_or(0),
-        },
+        } => {
+            // url 图片只带 url（对齐 WS 出站：url 非空白只写 url 否则 base64Data）。
+            let url = source.remote_url().map(str::to_owned);
+            ApiBlock::Image {
+                media_type: source.media_type_or_default().to_owned(),
+                base64_data: if url.is_some() {
+                    None
+                } else {
+                    source.data.clone()
+                },
+                url,
+                width: width.unwrap_or(0),
+                height: height.unwrap_or(0),
+            }
+        }
         StoredBlock::RedactedThinking { data } => ApiBlock::RedactedThinking { data: data.clone() },
     }
 }
@@ -552,6 +561,43 @@ mod tests {
     fn image_chars_matches_legacy_formula() {
         assert_eq!(image_chars(100, 100), 49);
         assert_eq!(image_chars(0, 0), ceil_div(IMAGE_FALLBACK_TOKENS * 7, 2));
+    }
+
+    /// url 型图片块：REST 出站携带 url、无 base64Data；无尺寸 → 85 token 兜底。
+    #[test]
+    fn url_image_maps_to_api_block_with_fallback_budget() {
+        let block = StoredBlock::Image {
+            source: zk_db::model::ImageSource {
+                kind: "url".into(),
+                media_type: None,
+                data: None,
+                url: Some(
+                    "https://bkt.oss.example.com/zhikuncode-artifacts/clipboard/a.png".into(),
+                ),
+            },
+            width: None,
+            height: None,
+        };
+        let api = api_blocks(std::slice::from_ref(&block));
+        let ApiBlock::Image {
+            media_type,
+            base64_data,
+            url,
+            width,
+            height,
+        } = &api[0]
+        else {
+            panic!("expected image block");
+        };
+        assert_eq!(media_type, "image/png");
+        assert_eq!(base64_data.as_deref(), None);
+        assert_eq!(
+            url.as_deref(),
+            Some("https://bkt.oss.example.com/zhikuncode-artifacts/clipboard/a.png")
+        );
+        assert_eq!((*width, *height), (0, 0));
+        // 无尺寸兜底：85 token → ceil(85·3.5) = 298 等效字符。
+        assert_eq!(image_chars(*width, *height), 298);
     }
 
     /// 空会话与低消息数 → notNeeded(0,0)（对齐样例）。

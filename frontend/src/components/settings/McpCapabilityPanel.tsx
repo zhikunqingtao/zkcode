@@ -108,7 +108,7 @@ function CapabilityCard({
           <p className="text-xs text-gray-500 mt-1 line-clamp-2">{cap.briefDescription}</p>
           <div className="flex items-center gap-3 mt-2 text-xs text-gray-400">
             <span>超时: {(cap.timeoutMs / 1000).toFixed(0)}s</span>
-            <span>SSE</span>
+            <span>{cap.transportType ?? 'SSE'}</span>
             <span className="font-mono">{cap.toolName}</span>
           </div>
         </div>
@@ -156,8 +156,8 @@ function EditDialog({ capabilityId, onClose }: { capabilityId: string; onClose: 
             onChange={(v) => setFormData({ ...formData, description: v })} />
           <Field label="简要描述" value={formData.briefDescription}
             onChange={(v) => setFormData({ ...formData, briefDescription: v })} />
-          <Field label="SSE URL" value={formData.sseUrl}
-            onChange={(v) => setFormData({ ...formData, sseUrl: v })} />
+          <Field label="Server URL" value={formData.url}
+            onChange={(v) => setFormData({ ...formData, url: v })} />
           <Field label="超时 (ms)" value={String(formData.timeoutMs)}
             onChange={(v) => setFormData({ ...formData, timeoutMs: parseInt(v) || 30000 })} />
           <Field label="API Key Config" value={formData.apiKeyConfig}

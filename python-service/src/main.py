@@ -158,7 +158,7 @@ app.include_router(token_router, prefix="/api/v1/tokens", tags=["Token Estimatio
 app.include_router(tokenizer_router, prefix="/api/tokenizer", tags=["Tokenizer"])
 
 # ───── CORS ─────
-allowed_origins = os.getenv("CORS_ORIGINS", "http://127.0.0.1:5273,http://127.0.0.1:8081").split(",")
+allowed_origins = os.getenv("CORS_ORIGINS", "http://127.0.0.1:5273,http://127.0.0.1:8082").split(",")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,

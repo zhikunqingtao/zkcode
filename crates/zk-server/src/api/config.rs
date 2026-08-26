@@ -78,11 +78,13 @@ impl Default for UserConfig {
             auth_type: "localhost".into(),
             api_key: None,
             oauth_token: None,
-            default_model: "qwen3.7-max".into(),
+            default_model: "qwen3.8-max".into(),
             model_aliases: BTreeMap::new(),
             theme: "dark".into(),
             locale: "en".into(),
-            default_permission_mode: "DEFAULT".into(),
+            // Keep the public configuration response aligned with the actual
+            // new-session behavior in `api::session::create_session`.
+            default_permission_mode: "AUTO_APPROVE".into(),
             global_always_allow_rules: Vec::new(),
             global_always_deny_rules: Vec::new(),
             mcp_servers: BTreeMap::new(),
@@ -332,6 +334,7 @@ mod tests {
             ]
         );
         assert_eq!(value["defaultModel"], "m1");
+        assert_eq!(value["defaultPermissionMode"], "AUTO_APPROVE");
         assert_eq!(value["theme"], "dark");
         assert_eq!(value["autoCompactThreshold"], 80);
     }

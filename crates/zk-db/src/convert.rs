@@ -86,10 +86,16 @@ pub fn blocks_to_ws(blocks: Vec<StoredBlock>) -> Vec<ContentBlock> {
             },
             StoredBlock::Thinking { thinking } => ContentBlock::Thinking { thinking },
             // WS 转换层丢弃 width/height（zk-protocol model 模块文档丢弃清单）。
-            StoredBlock::Image { source, .. } => ContentBlock::Image {
-                media_type: source.media_type,
-                base64_data: source.data,
-            },
+            // url 图片只发 url（旧 WS 出站 url 非空白只写 url 否则 base64Data）。
+            StoredBlock::Image { source, .. } => {
+                let media_type = source.media_type_or_default().to_owned();
+                let url = source.remote_url().map(str::to_owned);
+                ContentBlock::Image {
+                    media_type,
+                    base64_data: if url.is_some() { None } else { source.data },
+                    url,
+                }
+            }
             // WS 形状无字段（data 被转换层丢弃）。
             StoredBlock::RedactedThinking { .. } => ContentBlock::RedactedThinking,
         })
