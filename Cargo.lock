@@ -3134,7 +3134,7 @@ name = "zk-mcp"
 version = "0.1.0"
 dependencies = [
  "futures",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "nix",
  "reqwest",
  "serde",
@@ -3169,7 +3169,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "futures",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "http-body-util",
  "hyper",
  "hyper-util",

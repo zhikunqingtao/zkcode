@@ -90,7 +90,7 @@ nix = { version = "0.31", features = ["signal", "feature", "net"] }
 # `getrandom(2)`），与 `SecureRandom` 同语义且无需自持 PRNG 状态。已在
 # Cargo.lock 中（uuid v4 的传递依赖），不新增外部供应链面；无 unsafe 暴露面，
 # 许可证 MIT OR Apache-2.0，在 deny.toml allow 列表内。
-getrandom = "0.3"
+getrandom = "0.4"
 # 2.6（Python 侧车）引入：HTTP over Unix Domain Socket 传输栈。
 # reqwest 0.12 无 UDS 支持（Client 不开放自定义 connector），故直接用 hyper 1
 # 的 http1 客户端握手 + hyper-util 的 TokioIo 适配 tokio::net::UnixStream；
