@@ -63,7 +63,7 @@ tower-http = { version = "0.6", features = ["catch-panic", "cors", "fs"] }
 metrics = "0.24"
 # S8（zk-server ws 集成测试）引入：tokio 异步 tungstenite WS 客户端
 #（打真实 Router 走随机端口；默认 features 不含 TLS，ws:// 足够）。
-tokio-tungstenite = "0.28"
+tokio-tungstenite = "0.29"
 # S7b（zk-server）引入：OpenAPI 3.1 文档生成（`#[utoipa::path]` 编译期注解
 # + `ApiDoc` 聚合），GET /api/openapi.json 暴露 Phase 1 全端点契约。
 utoipa = "5"
