@@ -543,8 +543,12 @@ async fn openapi_includes_project_paths() {
         "/api/sessions/{sessionId}/history/snapshots",
         "/api/sessions/{sessionId}/history/rewind",
         "/api/sessions/{sessionId}/history/diff",
+        "/api/asr/status",
+        "/api/asr/recognize",
+        "/api/tts/status",
+        "/api/tts/synthesize",
     ] {
         assert!(paths.contains_key(path), "missing {path}");
     }
-    assert_eq!(paths.len(), 58);
+    assert_eq!(paths.len(), 62);
 }

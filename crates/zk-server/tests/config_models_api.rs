@@ -13,7 +13,7 @@ use common::{app, assert_same_shape, call, json_body, local_get, local_put, samp
 
 // ───── GET /api/models ─────
 
-/// 形状逐键对齐样例；15 条目录、ID 集与样例逐一相同、defaultModel 来自配置。
+/// 形状逐键对齐样例；16 条目录、ID 集与样例逐一相同、defaultModel 来自配置。
 #[tokio::test]
 async fn models_shape_matches_sample() {
     let mut router = app();
@@ -32,7 +32,19 @@ async fn models_shape_matches_sample() {
     };
     // 目录与样例逐条同序同 ID（Phase 1 静态目录照抄样例）。
     assert_eq!(ids(&body), ids(&sample));
-    assert_eq!(body["models"].as_array().expect("array").len(), 15);
+    assert_eq!(body["models"].as_array().expect("array").len(), 16);
+    let max_images = |value: &serde_json::Value, id: &str| {
+        value["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .find(|model| model["id"] == id)
+            .expect("model entry")["maxImages"]
+            .as_i64()
+            .expect("maxImages integer")
+    };
+    assert_eq!(max_images(&body, "qwen3.8-flash"), 20);
+    assert_eq!(max_images(&sample, "qwen3.8-flash"), 20);
     // 测试配置的默认模型（Config::test_config）。
     assert_eq!(body["defaultModel"], "qwen3.8-max");
     // 每个条目 11 键齐全（assert_same_shape 只锁首元素，此处全量锁）。
@@ -50,7 +62,7 @@ async fn models_known_model_id_passes() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         json_body(&body)["models"].as_array().expect("arr").len(),
-        15
+        16
     );
 }
 

@@ -27,6 +27,7 @@ use crate::mcp::{
 };
 use crate::python::{PythonClient, PythonSidecar};
 use crate::skill::SkillRegistry;
+use crate::speech::{DashScopeSpeechService, SpeechService};
 use crate::tool_catalog::ToolSessionState;
 use crate::ws::{WsConfig, WsHub};
 
@@ -92,6 +93,9 @@ pub struct AppState {
     /// handlers from reading the same old key/provenance pair and losing one
     /// another's updates.
     pub(crate) llm_credential_update_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Lazily constructed `DashScope` ASR/TTS service. Its resolver reads the
+    /// same hot DB-backed credential mirror used by MCP.
+    speech: Arc<OnceLock<Arc<dyn SpeechService>>>,
     /// Python 侧车 HTTP 客户端（2.6；UDS 传输 + 能力缓存，恒存在——侧车未
     /// 启动时所有调用走能力域门控优雅降级，不 panic 不阻断核心对话）。
     pub python: Arc<PythonClient>,
@@ -333,6 +337,55 @@ impl AppState {
         Arc::clone(&self.llm_provider_keys)
     }
 
+    /// Shared speech service used by all ASR/TTS handlers.
+    #[must_use]
+    pub(crate) fn speech(&self) -> Arc<dyn SpeechService> {
+        Arc::clone(self.speech.get_or_init(|| {
+            let demo_catalog = if self.config.demo_credential_allowed {
+                None
+            } else {
+                match crate::demo_credentials::load_catalog(&self.config.demo_credentials_path) {
+                    Ok(catalog) => Some(catalog),
+                    Err(error) => {
+                        tracing::error!(
+                            error = %error,
+                            "public demo credential catalog is unavailable for speech filtering"
+                        );
+                        None
+                    }
+                }
+            };
+            // Speech deliberately accepts only the standard named provider:
+            // DB settings `dashscope` or LLM_PROVIDER_DASHSCOPE_API_KEY. Keep
+            // MCP's legacy DASHSCOPE_API_KEY fallback isolated to MCP.
+            let environment: Arc<dyn zk_mcp::McpCredentialResolver> = Arc::new(|provider: &str| {
+                if provider != zk_mcp::security::DASHSCOPE_PROVIDER {
+                    return None;
+                }
+                std::env::var("LLM_PROVIDER_DASHSCOPE_API_KEY")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+            });
+            let credentials = build_mcp_credential_resolver(
+                self.llm_provider_keys_handle(),
+                environment,
+                self.config.demo_credential_allowed,
+                demo_catalog,
+            );
+            Arc::new(DashScopeSpeechService::new(credentials)) as Arc<dyn SpeechService>
+        }))
+    }
+
+    /// Replace the speech port before router construction (unit-test seam).
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_speech_service(mut self, service: Arc<dyn SpeechService>) -> Self {
+        let slot = OnceLock::new();
+        let _ = slot.set(service);
+        self.speech = Arc::new(slot);
+        self
+    }
+
     /// 注入 Python 侧车进程管理器（main 启动序列：`spawn` 侧车后回填，
     /// 供 `/api/health` 读取进程状态与重启计数）。
     #[must_use]
@@ -408,6 +461,7 @@ impl AppState {
             providers: Arc::new(SwappableProvider::new(ProviderRegistry::new())),
             llm_provider_keys: Arc::new(RwLock::new(BTreeMap::new())),
             llm_credential_update_lock: Arc::new(tokio::sync::Mutex::new(())),
+            speech: Arc::new(OnceLock::new()),
             python,
             python_sidecar: None,
             authz,

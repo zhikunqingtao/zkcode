@@ -86,6 +86,7 @@ pub mod run_termination;
 pub mod session_access;
 pub mod skill;
 pub mod snapshot_sink;
+pub(crate) mod speech;
 pub mod state;
 pub mod tool_catalog;
 pub mod workspace;

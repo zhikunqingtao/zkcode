@@ -12,14 +12,16 @@
  * 并附加闪烁光标。完成后从 message.content 渲染最终内容。
  */
 
-import React from 'react';
+import React, { useMemo } from 'react';
 import { Bot } from 'lucide-react';
 import type { Message, ContentBlock, ToolCallState } from '@/types';
 import TextBlock from './TextBlock';
 import ThinkingBlock from './ThinkingBlock';
 import ToolCallBlock from './ToolCallBlock';
 import ImageBlock from './ImageBlock';
+import TtsPlayButton from './TtsPlayButton';
 import { useStreamingText } from '@/hooks/useStreamingText';
+import { useTtsAvailability } from '@/hooks/useTtsAvailability';
 
 interface AssistantMessageProps {
     message: Extract<Message, { type: 'assistant' }>;
@@ -40,6 +42,13 @@ const AssistantMessage: React.FC<AssistantMessageProps> = ({
     thinkingContent,
     activeToolCalls,
 }) => {
+    const ttsAvailable = useTtsAvailability();
+    const speakableText = useMemo(() => message.content
+        .filter((block): block is Extract<ContentBlock, { type: 'text' }> => block.type === 'text')
+        .map(block => block.text)
+        .join('\n')
+        .trim(), [message.content]);
+
     return (
         <div className="assistant-message flex gap-3 px-4 py-3">
             {/* Avatar */}
@@ -49,7 +58,12 @@ const AssistantMessage: React.FC<AssistantMessageProps> = ({
 
             {/* Content */}
             <div className="flex-1 min-w-0">
-                <div className="text-xs text-[var(--text-secondary)] mb-1 font-medium">Assistant</div>
+                <div className="flex items-center gap-1 text-xs text-[var(--text-secondary)] mb-1 font-medium">
+                    <span>Assistant</span>
+                    {ttsAvailable && !isStreaming && speakableText && (
+                        <TtsPlayButton messageId={message.uuid} text={speakableText} />
+                    )}
+                </div>
 
                 {isStreaming ? (
                     <StreamingContent

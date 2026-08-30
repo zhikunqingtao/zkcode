@@ -4,7 +4,9 @@
     "method": "GET",
     "status_code": 200,
     "content_type": "application/json",
-    "sampled_at": "2026-08-15T19:05+08:00"
+    "sampled_at": "2026-08-15T19:05+08:00",
+    "contract_updated_at": "2026-08-31",
+    "contract_note": "Model catalog updated for the qwen3.8-flash and glm-5.3-flash migration"
   },
   "response": {
     "models": [
@@ -46,6 +48,19 @@
         "supportsToolUse": true,
         "costPer1kInput": 0.009,
         "costPer1kOutput": 0.054
+      },
+      {
+        "id": "qwen3.8-flash",
+        "displayName": "Qwen 3.8 Flash（百炼）",
+        "maxOutputTokens": 131072,
+        "contextWindow": 1000000,
+        "supportsStreaming": true,
+        "supportsThinking": true,
+        "supportsImages": true,
+        "maxImages": 20,
+        "supportsToolUse": true,
+        "costPer1kInput": 0.0,
+        "costPer1kOutput": 0.0
       },
       {
         "id": "deepseek-v4-pro",
@@ -126,17 +141,17 @@
         "costPer1kOutput": 0.001
       },
       {
-        "id": "glm-5v-turbo",
-        "displayName": "GLM-5V-Turbo",
+        "id": "glm-5.3-flash",
+        "displayName": "GLM-5.3-Flash",
         "maxOutputTokens": 131072,
-        "contextWindow": 204800,
+        "contextWindow": 1048576,
         "supportsStreaming": true,
         "supportsThinking": true,
         "supportsImages": true,
-        "maxImages": 150,
+        "maxImages": 50,
         "supportsToolUse": true,
-        "costPer1kInput": 0.0012,
-        "costPer1kOutput": 0.004
+        "costPer1kInput": 0.00015,
+        "costPer1kOutput": 0.0005
       },
       {
         "id": "MiniMax-M3",

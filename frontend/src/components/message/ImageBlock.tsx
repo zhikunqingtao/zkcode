@@ -5,7 +5,7 @@
  * 支持 base64 和 URL 两种图片源，响应式展示 + 点击放大。
  */
 
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { ZoomIn, X } from 'lucide-react';
 
 interface ImageBlockProps {
@@ -30,6 +30,11 @@ const ImageBlock: React.FC<ImageBlockProps> = ({
     const imageSrc = base64Data
         ? `data:${mediaType};base64,${base64Data}`
         : src ?? '';
+
+    useEffect(() => {
+        setLoadError(false);
+        setZoomed(false);
+    }, [imageSrc]);
 
     const toggleZoom = useCallback(() => setZoomed(prev => !prev), []);
 
@@ -60,6 +65,7 @@ const ImageBlock: React.FC<ImageBlockProps> = ({
                     onClick={toggleZoom}
                     onError={() => setLoadError(true)}
                     loading="lazy"
+                    referrerPolicy="no-referrer"
                 />
                 <button
                     onClick={toggleZoom}
@@ -87,6 +93,7 @@ const ImageBlock: React.FC<ImageBlockProps> = ({
                         src={imageSrc}
                         alt={alt}
                         className="max-w-[90vw] max-h-[90vh] rounded-lg"
+                        referrerPolicy="no-referrer"
                         onClick={(e) => e.stopPropagation()}
                     />
                 </div>

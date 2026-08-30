@@ -3,7 +3,7 @@
 //! 建模来源（旧仓库只读权威规格，`main@581d407b`）：
 //! - `llm/ModelCapabilities.java`：能力记录字段序与保守默认值
 //!   （`DEFAULT` = unknown / 4096 输出 / 8192 窗口 / `tokenCharRatio` 3.5）；
-//! - `llm/ModelRegistry.java`：`BUILTIN_MODELS` 内置表（25 条，逐条数值对照）
+//! - `llm/ModelRegistry.java`：`BUILTIN_MODELS` 内置表（26 条，逐条数值对照）
 //!   与 `getCapabilities` 的查表顺序。
 //!
 //! - `llm/ModelCapabilitiesProperties.java`：`model.capabilities.<id>.*` 配置绑定
@@ -423,6 +423,19 @@ pub static BUILTIN_MODELS: &[ModelCapabilities] = &[
         0.054,
     ),
     ModelCapabilities::caps(
+        "qwen3.8-flash",
+        "Qwen 3.8 Flash（百炼）",
+        131_072,
+        1_000_000,
+        true,
+        true,
+        true,
+        20,
+        true,
+        0.0,
+        0.0,
+    ),
+    ModelCapabilities::caps(
         "qwen3.7-plus",
         "Qwen 3.7 Plus",
         8192,
@@ -439,17 +452,17 @@ pub static BUILTIN_MODELS: &[ModelCapabilities] = &[
         "glm-5.3", "GLM-5.3", 131_072, 1_048_576, true, true, false, 0, true, 0.001, 0.001,
     ),
     ModelCapabilities::caps(
-        "glm-5v-turbo",
-        "GLM-5V-Turbo",
+        "glm-5.3-flash",
+        "GLM-5.3-Flash",
         131_072,
-        204_800,
+        1_048_576,
         true,
         true,
         true,
-        150,
+        50,
         true,
-        0.0012,
-        0.004,
+        0.00015,
+        0.0005,
     ),
     // MiniMax
     ModelCapabilities::caps(
@@ -872,8 +885,8 @@ mod tests {
                 caps.model_id
             );
         }
-        // 表规模与旧 BUILTIN_MODELS 一致（25 条）。
-        assert_eq!(BUILTIN_MODELS.len(), 25);
+        // 8/28 模型迁移后：新增 qwen3.8-flash，GLM 视觉模型原位替换。
+        assert_eq!(BUILTIN_MODELS.len(), 26);
         // 键唯一。
         let mut ids: Vec<&str> = BUILTIN_MODELS
             .iter()
@@ -934,8 +947,7 @@ mod tests {
     }
 
     #[test]
-    fn glm_53_replaces_legacy_glm_entry() {
-        // 旧 ModelRegistry.java：GLM 文本模型条目升级为 glm-5.3（参数不变，仅 ID 与展示名）。
+    fn glm_53_family_matches_migrated_registry_entries() {
         let caps = capabilities_for("glm-5.3");
         assert_eq!(caps.display_name, "GLM-5.3");
         assert_eq!(caps.max_output_tokens, 131_072);
@@ -944,14 +956,43 @@ mod tests {
         assert!((caps.cost_per_1k_input - 0.001).abs() < f64::EPSILON);
         assert!((caps.cost_per_1k_output - 0.001).abs() < f64::EPSILON);
         assert!(is_known_model("glm-5.3"));
-        // 旧 ID 已从内置表移除：`glm-5.` 前缀条目仅剩 glm-5.3 一条。
+
+        let flash = capabilities_for("glm-5.3-flash");
+        assert_eq!(flash.display_name, "GLM-5.3-Flash");
+        assert_eq!(flash.max_output_tokens, 131_072);
+        assert_eq!(flash.context_window, 1_048_576);
+        assert!(flash.supports_streaming);
+        assert!(flash.supports_thinking);
+        assert!(flash.supports_images);
+        assert_eq!(flash.max_images, 50);
+        assert!(flash.supports_tool_use);
+        assert!((flash.cost_per_1k_input - 0.00015).abs() < f64::EPSILON);
+        assert!((flash.cost_per_1k_output - 0.0005).abs() < f64::EPSILON);
+        assert!(is_known_model("glm-5.3-flash"));
+
         assert_eq!(
             BUILTIN_MODELS
                 .iter()
                 .filter(|caps| caps.model_id.starts_with("glm-5."))
                 .count(),
-            1
+            2
         );
+    }
+
+    #[test]
+    fn qwen_38_flash_has_confirmed_zero_cost_capabilities() {
+        let caps = capabilities_for("qwen3.8-flash");
+        assert_eq!(caps.display_name, "Qwen 3.8 Flash（百炼）");
+        assert_eq!(caps.max_output_tokens, 131_072);
+        assert_eq!(caps.context_window, 1_000_000);
+        assert!(caps.supports_streaming);
+        assert!(caps.supports_thinking);
+        assert!(caps.supports_images);
+        assert_eq!(caps.max_images, 20);
+        assert!(caps.supports_tool_use);
+        assert!(caps.cost_per_1k_input.abs() < f64::EPSILON);
+        assert!(caps.cost_per_1k_output.abs() < f64::EPSILON);
+        assert!(is_known_model("qwen3.8-flash"));
     }
 
     /// 旧 `application.yml` 的 `model.capabilities` 节（L295+，8 个模型）一对一

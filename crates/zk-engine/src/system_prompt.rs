@@ -100,6 +100,8 @@ pub const SYSTEM_SECTION: &str = r#"# 系统
 
 ## 渲染
 你的输出将使用 CommonMark 规范以等宽字体渲染。在适当的地方使用 GitHub 风格的 markdown 进行格式化，包括带语言标识符的围栅代码块。
+当需要在回复中展示图片时，使用标准 Markdown 图片语法 `![描述](路径或URL)`。
+路径支持工作区内的绝对路径、相对路径或 http(s) URL。
 "#;
 
 /// 段落 3：任务执行指南（旧源 `DOING_TASKS_SECTION`，L482-584）。
@@ -528,11 +530,11 @@ pub fn build_system_prompt_segmented(
 mod tests {
     use super::*;
 
-    /// 内容互锁：除产品名称完成 zkcode 改名外，其余静态段保持基线长度。
+    /// 静态段内容长度互锁；`SYSTEM_SECTION` 包含后续追加的图片渲染指引。
     #[test]
     fn static_sections_match_java_runtime_char_counts() {
         assert_eq!(INTRO_SECTION.chars().count(), 619);
-        assert_eq!(SYSTEM_SECTION.chars().count(), 1258);
+        assert_eq!(SYSTEM_SECTION.chars().count(), 1340);
         assert_eq!(DOING_TASKS_SECTION.chars().count(), 2652);
         assert_eq!(ACTIONS_SECTION.chars().count(), 801);
         assert_eq!(USING_TOOLS_BASE.chars().count(), 952);
@@ -544,6 +546,10 @@ mod tests {
         assert!(INTRO_SECTION.ends_with("引导用户关注 zkcode 的功能\n"));
         assert!(SYSTEM_SECTION.starts_with("# 系统\n"));
         assert!(SYSTEM_SECTION.contains("\"[tool result cleared]\""));
+        assert!(SYSTEM_SECTION.ends_with(
+            "当需要在回复中展示图片时，使用标准 Markdown 图片语法 `![描述](路径或URL)`。\n\
+             路径支持工作区内的绝对路径、相对路径或 http(s) URL。\n"
+        ));
         assert!(DOING_TASKS_SECTION.starts_with("# 执行任务\n"));
         assert!(DOING_TASKS_SECTION.contains("## 避免过度工程"));
         assert!(ACTIONS_SECTION.starts_with("# 谨慎执行操作\n"));

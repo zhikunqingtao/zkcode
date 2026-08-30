@@ -64,6 +64,7 @@ use crate::api::run;
 use crate::api::session;
 use crate::api::session_snapshot;
 use crate::api::skill;
+use crate::api::speech;
 use crate::api::swarm;
 use crate::api::system;
 use crate::api::tool;
@@ -148,6 +149,15 @@ pub fn build_router(state: AppState) -> Router {
             "/api/llm-keys",
             get(llm_keys::get_llm_keys).put(llm_keys::put_llm_keys),
         )
+        // ── Speech 域（DashScope 标准通道；Token Plan 不支持 ASR/TTS）──
+        .route("/api/asr/status", get(speech::asr_status))
+        .route(
+            "/api/asr/recognize",
+            post(speech::recognize)
+                .layer(DefaultBodyLimit::max(crate::speech::MAX_MULTIPART_BYTES)),
+        )
+        .route("/api/tts/status", get(speech::tts_status))
+        .route("/api/tts/synthesize", post(speech::synthesize))
         // ── Projects 域（2.1，旧 ProjectController 5 端点）──
         .route(
             "/api/projects",

@@ -8,7 +8,7 @@
 //! [`CatalogEntry::protocol`]（`OpenAI` 兼容 vs `Anthropic` 原生，D-P2-3）与
 //! [`CatalogEntry::in_default_catalog`]（是否进入 `GET /api/models` 的声明式
 //! 聚合基线；`openai` 回退通道与 `anthropic` 原生通道均不进——两者的模型面
-//! 由环境变量给出，进目录会破坏 18 条基线契约）。
+//! 由环境变量给出，进目录会破坏 19 条基线契约）。
 //!
 //! # 环境变量约定（2.7 冻结）
 //!
@@ -181,14 +181,14 @@ pub struct CatalogEntry {
     pub models: &'static [&'static str],
     /// 线协议。
     pub protocol: ProviderProtocol,
-    /// 是否进入声明式模型聚合基线（`GET /api/models` 的 18 条契约来源）。
+    /// 是否进入声明式模型聚合基线（`GET /api/models` 的 19 条契约来源）。
     pub in_default_catalog: bool,
 }
 
 /// 8+1 家 provider 声明目录（顺序 = 方案 §13-3 表格顺序 = 模型聚合顺序）。
 ///
 /// 前 7 家 `in_default_catalog = true`，其 `models` 并集恰为
-/// `GET /api/models` 的 18 条基线（顺序一致）；`openai`（Phase 1 回退通道）
+/// `GET /api/models` 的 19 条基线（顺序一致）；`openai`（Phase 1 回退通道）
 /// 与 `anthropic`（原生协议通道）不进基线目录。
 pub const PROVIDER_CATALOG: &[CatalogEntry] = &[
     CatalogEntry {
@@ -205,6 +205,7 @@ pub const PROVIDER_CATALOG: &[CatalogEntry] = &[
         default_model: "qwen3.8-max",
         models: &[
             "qwen3.8-max",
+            "qwen3.8-flash",
             "deepseek-v4-pro-0813",
             "deepseek-v4-flash-0731",
         ],
@@ -235,7 +236,7 @@ pub const PROVIDER_CATALOG: &[CatalogEntry] = &[
         name: "zhipu",
         base_url: ZHIPU_BASE_URL,
         default_model: "glm-5.3",
-        models: &["glm-5.3", "glm-5v-turbo"],
+        models: &["glm-5.3", "glm-5.3-flash"],
         protocol: ProviderProtocol::OpenAiCompat,
         in_default_catalog: true,
     },
@@ -435,7 +436,7 @@ mod tests {
                 "dashscope-token-plan",
                 DASHSCOPE_TOKEN_PLAN_BASE_URL,
                 "qwen3.8-max",
-                3,
+                4,
             ),
             ("deepseek", DEEPSEEK_BASE_URL, "deepseek-v4-pro", 3),
             ("moonshot", MOONSHOT_BASE_URL, "kimi-k3", 3),
@@ -465,15 +466,16 @@ mod tests {
         }
     }
 
-    /// 声明式基线 = 前 7 家并集 = `GET /api/models` 的 18 条（顺序一致）。
+    /// 声明式基线 = 前 7 家并集 = `GET /api/models` 的 19 条（顺序一致）。
     #[test]
-    fn declared_models_match_eighteen_model_baseline() {
+    fn declared_models_match_nineteen_model_baseline() {
         assert_eq!(
             declared_models(),
             vec![
                 "qwen3.7-max",
                 "qwen3.7-plus",
                 "qwen3.8-max",
+                "qwen3.8-flash",
                 "deepseek-v4-pro-0813",
                 "deepseek-v4-flash-0731",
                 "deepseek-v4-pro",
@@ -483,7 +485,7 @@ mod tests {
                 "kimi-k2.7-code",
                 "moonshot-v1-128k",
                 "glm-5.3",
-                "glm-5v-turbo",
+                "glm-5.3-flash",
                 "MiniMax-M3",
                 "anthropic/claude-opus-4.8",
                 "anthropic/claude-fable-5",

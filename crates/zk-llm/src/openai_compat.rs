@@ -6,7 +6,8 @@
 //!   `messages`（system 前置；tool 结果 → `{role:"tool", tool_call_id,
 //!   content}`；assistant 携带 `tool_calls` 时 content 空 → `null`）、
 //!   `stream: true`、`stream_options: {include_usage: true}`、思考参数
-//!   （deepseek-v4-* / kimi-k3 / qwen3.7-* / qwen3.6-* 按模型族判定）、`tools`。
+//!   （deepseek-v4-* / kimi-k3 / GLM-5.3 / qwen3.8-* / qwen3.7-* / qwen3.6-*
+//!   按模型族判定）、`tools`。
 //! - SSE 解析（L198-222 / L607-723）：`data:` 行、`[DONE]` 终止、
 //!   `choices[].delta.reasoning_content` → `ThinkingDelta`、
 //!   `choices[].delta.content` → `TextDelta`、`choices[].delta.tool_calls`
@@ -664,7 +665,7 @@ fn build_request_body(request: &ChatRequest) -> Value {
     Value::Object(root)
 }
 
-/// 思考参数（旧 L258-279，模型族判定；deepseek/kimi 无条件、qwen 受配置）。
+/// 思考参数（模型族判定；deepseek/kimi/GLM 无条件、qwen 受配置）。
 ///
 /// vision 兜底模型单列——实测视觉请求在非思考模式下才稳定返回完整正文
 ///（思考模式可能在较短 `max_tokens` 下只消耗推理预算而没有 content），
@@ -677,11 +678,26 @@ fn insert_thinking_params(root: &mut serde_json::Map<String, Value>, request: &C
         root.insert("reasoning_effort".into(), json!("max"));
     } else if request.model == "kimi-k3" {
         root.insert("reasoning_effort".into(), json!("max"));
-    } else if (request.model.starts_with("qwen3.7-") || request.model.starts_with("qwen3.6-"))
+    } else if is_glm_forced_thinking_model(&request.model) {
+        root.insert(
+            "thinking".into(),
+            json!({ "type": "enabled", "clear_thinking": false }),
+        );
+        root.insert("reasoning_effort".into(), json!("max"));
+        root.insert("tool_stream".into(), json!(true));
+    } else if (request.model.starts_with("qwen3.8-")
+        || request.model.starts_with("qwen3.7-")
+        || request.model.starts_with("qwen3.6-"))
         && request.thinking.requires_support()
     {
         root.insert("enable_thinking".into(), json!(true));
     }
+}
+
+/// GLM-5.3 系列的官方接口不接受关闭思考；仅这两个内置 ID 强制下发参数，
+/// 不将规则泛化到用户自定义的其他 `glm-*` 模型。
+fn is_glm_forced_thinking_model(model: &str) -> bool {
+    matches!(model, "glm-5.3" | "glm-5.3-flash")
 }
 
 /// 判断思考模式**启用**参数是否会被下发（供请求构建单测与文档自证）。
@@ -692,7 +708,10 @@ fn insert_thinking_params(root: &mut serde_json::Map<String, Value>, request: &C
 pub fn thinking_params_for(model: &str, mode: ThinkingMode) -> bool {
     (model.starts_with("deepseek-v4-") && !is_deepseek_vision_model(model))
         || model == "kimi-k3"
-        || ((model.starts_with("qwen3.7-") || model.starts_with("qwen3.6-"))
+        || is_glm_forced_thinking_model(model)
+        || ((model.starts_with("qwen3.8-")
+            || model.starts_with("qwen3.7-")
+            || model.starts_with("qwen3.6-"))
             && mode.requires_support())
 }
 
@@ -819,6 +838,14 @@ mod tests {
         assert_eq!(kimi["reasoning_effort"], "max");
         assert!(kimi.get("max_tokens").is_none());
         assert_eq!(kimi["max_completion_tokens"], 8192);
+        // GLM-5.3 系列：即使请求关闭思考，仍固定下发官方要求的完整参数。
+        for model in ["glm-5.3", "glm-5.3-flash"] {
+            let glm = build_request_body(&ChatRequest::new(model));
+            assert_eq!(glm["thinking"]["type"], "enabled");
+            assert_eq!(glm["thinking"]["clear_thinking"], false);
+            assert_eq!(glm["reasoning_effort"], "max");
+            assert_eq!(glm["tool_stream"], true);
+        }
         // qwen3.7-*：仅 thinking 需要支持时下发 enable_thinking。
         let qwen_off = build_request_body(&qwen_request());
         assert!(qwen_off.get("enable_thinking").is_none());
@@ -831,6 +858,12 @@ mod tests {
             &ChatRequest::new("qwen3.6-max").with_thinking(ThinkingMode::Adaptive),
         );
         assert_eq!(qwen36["enable_thinking"], true);
+        let qwen38 = build_request_body(
+            &ChatRequest::new("qwen3.8-flash").with_thinking(ThinkingMode::Enabled),
+        );
+        assert_eq!(qwen38["enable_thinking"], true);
+        let qwen38_off = build_request_body(&ChatRequest::new("qwen3.8-max"));
+        assert!(qwen38_off.get("enable_thinking").is_none());
         let gpt = build_request_body(
             &ChatRequest::new("gpt-5.6-sol").with_thinking(ThinkingMode::Enabled),
         );
@@ -1238,6 +1271,14 @@ mod tests {
         assert!(is_deepseek_vision_model("deepseek-v4-flash-vision-exp"));
         assert!(!is_deepseek_vision_model("deepseek-v4-flash"));
         assert!(thinking_params_for("kimi-k3", ThinkingMode::Disabled));
+        assert!(thinking_params_for("glm-5.3", ThinkingMode::Disabled));
+        assert!(thinking_params_for("glm-5.3-flash", ThinkingMode::Disabled));
+        assert!(!thinking_params_for(
+            "glm-5.3-flash-preview",
+            ThinkingMode::Enabled
+        ));
+        assert!(thinking_params_for("qwen3.8-flash", ThinkingMode::Enabled));
+        assert!(!thinking_params_for("qwen3.8-max", ThinkingMode::Disabled));
         assert!(thinking_params_for("qwen3.7-max", ThinkingMode::Enabled));
         assert!(!thinking_params_for("qwen3.7-max", ThinkingMode::Disabled));
         assert!(!thinking_params_for("gpt-5.6-sol", ThinkingMode::Enabled));

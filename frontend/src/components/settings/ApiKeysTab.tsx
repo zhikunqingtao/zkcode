@@ -7,6 +7,7 @@
 
 import { useState, useEffect, useCallback, useId } from 'react';
 import { useNotificationStore } from '@/store/notificationStore';
+import { invalidateSpeechAvailability } from '@/store/speechAvailabilityStore';
 
 interface ProviderEntry {
   name: string;
@@ -90,6 +91,9 @@ export function ApiKeysTab() {
       const data = await parseProvidersResponse(resp);
       setProviders(data.providers ?? []);
       setRowStates({});
+      if (Object.prototype.hasOwnProperty.call(keys, 'dashscope')) {
+        void invalidateSpeechAvailability();
+      }
       addNotification({
         key: 'apikeys-save-success',
         level: 'success',

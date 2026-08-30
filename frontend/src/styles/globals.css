@@ -219,6 +219,16 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
+/* Voice recording indicator. */
+@keyframes soundwave {
+  0%, 100% { transform: scaleY(0.4); }
+  50% { transform: scaleY(1); }
+}
+
+.animate-soundwave {
+  animation: soundwave 1s ease-in-out infinite;
+}
+
 /* ===== §8.6a 无障碍 — Skip Link ===== */
 .skip-link {
   position: absolute;

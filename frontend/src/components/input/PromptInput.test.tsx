@@ -1,4 +1,5 @@
 import {
+    act,
     cleanup,
     fireEvent,
     render,
@@ -16,6 +17,19 @@ import {
 import PromptInput from './PromptInput';
 import type { Command } from '@/types';
 import { useWorkbenchViewStore } from '@/store/workbenchViewStore';
+import { useSpeechAvailabilityStore } from '@/store/speechAvailabilityStore';
+import { useSessionStore } from '@/store/sessionStore';
+
+const voiceButtonMock = vi.hoisted(() => ({
+    callbacks: [] as Array<(text: string) => void>,
+}));
+
+vi.mock('./VoiceInputButton', () => ({
+    default: ({ onTranscript }: { onTranscript: (text: string) => void }) => {
+        voiceButtonMock.callbacks.push(onTranscript);
+        return <button type="button" onClick={() => onTranscript('语音')}>模拟语音输入</button>;
+    },
+}));
 
 function renderInput(
     onSubmit: (event: unknown) => Promise<boolean>,
@@ -41,6 +55,8 @@ function renderInput(
 
 describe('PromptInput asynchronous submit', () => {
     beforeEach(() => {
+        voiceButtonMock.callbacks.length = 0;
+        useSessionStore.setState({ sessionId: 'session-a' });
         useWorkbenchViewStore.setState({
             enabled: true,
             activeSessionId: 'session-a',
@@ -50,6 +66,12 @@ describe('PromptInput asynchronous submit', () => {
         Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
             configurable: true,
             value: vi.fn(),
+        });
+        useSpeechAvailabilityStore.setState({
+            asrAvailable: false,
+            ttsAvailable: false,
+            checked: true,
+            checking: false,
         });
     });
 
@@ -108,6 +130,33 @@ describe('PromptInput asynchronous submit', () => {
         });
         expect(screen.getByRole('textbox', { name: '输入消息' }))
             .toHaveAttribute('placeholder', '描述你希望完成或继续修改的事情…');
+    });
+
+    it('inserts a voice transcript at the current selection', async () => {
+        useSpeechAvailabilityStore.setState({ asrAvailable: true });
+        renderInput(vi.fn().mockResolvedValue(true));
+        const input = screen.getByRole('textbox', { name: '输入消息' }) as HTMLTextAreaElement;
+        fireEvent.change(input, { target: { value: 'hello world' } });
+        input.setSelectionRange(6, 11);
+        fireEvent.select(input);
+        fireEvent.click(screen.getByRole('button', { name: '模拟语音输入' }));
+
+        await waitFor(() => {
+            expect(input).toHaveValue('hello 语音');
+            expect(input.selectionStart).toBe(8);
+        });
+    });
+
+    it('ignores a transcript captured by a previous session', () => {
+        useSpeechAvailabilityStore.setState({ asrAvailable: true });
+        renderInput(vi.fn().mockResolvedValue(true));
+        const staleTranscript = voiceButtonMock.callbacks.at(-1);
+        expect(staleTranscript).toBeDefined();
+
+        act(() => useSessionStore.setState({ sessionId: 'session-b' }));
+        act(() => staleTranscript?.('旧会话语音'));
+
+        expect(screen.getByRole('textbox', { name: '输入消息' })).toHaveValue('');
     });
 
     it('clears a slash command only after it was accepted', async () => {

@@ -1,0 +1,1900 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="dark">
+  <title>zkcode · 系统架构与能力全景</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b0d17;
+      --bg-raised: #0f1426;
+      --panel: #11182c;
+      --panel-strong: #151d35;
+      --ink: #e5f2fa;
+      --ink-soft: #b7c9d6;
+      --ink-muted: #8299aa;
+      --grid: rgba(54, 105, 145, 0.08);
+      --border: rgba(150, 178, 197, 0.22);
+      --cyan: #31d9f4;
+      --cyan-soft: rgba(49, 217, 244, 0.12);
+      --gold: #f7ca53;
+      --gold-soft: rgba(247, 202, 83, 0.12);
+      --purple: #b49af8;
+      --purple-soft: rgba(180, 154, 248, 0.12);
+      --green: #45d49b;
+      --green-soft: rgba(69, 212, 155, 0.12);
+      --red: #ff7285;
+      --red-soft: rgba(255, 114, 133, 0.12);
+      --blue: #75a7ff;
+      --blue-soft: rgba(117, 167, 255, 0.12);
+      --gray: #9eb1c0;
+      --gray-soft: rgba(158, 177, 192, 0.11);
+      --shadow: 0 18px 54px rgba(0, 0, 0, 0.34);
+      --radius-xl: 18px;
+      --radius-lg: 12px;
+      --radius-md: 8px;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+      background: var(--bg);
+    }
+
+    body {
+      margin: 0;
+      min-width: 320px;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 50% -10%, rgba(49, 217, 244, 0.08), transparent 32rem),
+        repeating-linear-gradient(0deg, transparent 0 47px, var(--grid) 48px 49px),
+        repeating-linear-gradient(90deg, transparent 0 47px, var(--grid) 48px 49px),
+        var(--bg);
+      font-family: "SFMono-Regular", "SF Mono", Menlo, Monaco, Consolas,
+        "PingFang SC", "Microsoft YaHei", monospace;
+      font-size: 13px;
+      line-height: 1.52;
+      -webkit-font-smoothing: antialiased;
+      text-rendering: optimizeLegibility;
+    }
+
+    strong {
+      color: var(--ink);
+      font-weight: 500;
+    }
+
+    a {
+      color: inherit;
+    }
+
+    code,
+    .mono {
+      color: #d8ecf7;
+      font-family: inherit;
+      font-size: 0.96em;
+      overflow-wrap: anywhere;
+    }
+
+    .blueprint {
+      width: min(1600px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 42px 0 64px;
+    }
+
+    .hero {
+      position: relative;
+      padding: 34px 24px 28px;
+      text-align: center;
+    }
+
+    .hero::after {
+      content: "";
+      display: block;
+      width: min(980px, 88%);
+      height: 2px;
+      margin: 28px auto 0;
+      background: linear-gradient(90deg, transparent, var(--cyan), var(--green), var(--gold), transparent);
+      opacity: 0.66;
+      animation: line-breathe 5s ease-in-out infinite;
+    }
+
+    .eyebrow {
+      margin: 0 0 10px;
+      color: var(--cyan);
+      font-size: 12px;
+      font-weight: 500;
+      letter-spacing: 0.22em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      margin: 0;
+      color: var(--cyan);
+      font-size: clamp(42px, 6vw, 72px);
+      font-weight: 500;
+      letter-spacing: -0.055em;
+      line-height: 1;
+      text-shadow: 0 0 26px rgba(49, 217, 244, 0.3);
+    }
+
+    .subtitle {
+      margin: 14px 0 0;
+      color: var(--ink-soft);
+      font-size: clamp(18px, 2.2vw, 26px);
+      font-weight: 500;
+      letter-spacing: 0.18em;
+    }
+
+    .hero-copy {
+      max-width: 1040px;
+      margin: 16px auto 0;
+      color: var(--ink-muted);
+      font-size: 13px;
+    }
+
+    .snapshot-bar {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 24px;
+      text-align: left;
+    }
+
+    .metric {
+      min-width: 0;
+      padding: 12px 14px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      background: linear-gradient(180deg, rgba(21, 29, 53, 0.84), rgba(15, 20, 38, 0.84));
+    }
+
+    .metric-label {
+      display: block;
+      color: var(--ink-muted);
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .metric-value {
+      display: block;
+      margin-top: 4px;
+      color: var(--ink);
+      font-size: 15px;
+      font-weight: 500;
+      font-variant-numeric: tabular-nums;
+      overflow-wrap: anywhere;
+    }
+
+    .metric--dirty .metric-value {
+      color: var(--gold);
+    }
+
+    .layer {
+      --layer-color: var(--gray);
+      --layer-soft: var(--gray-soft);
+      position: relative;
+      margin-top: 30px;
+      padding: 30px 24px 24px;
+      border: 1px solid color-mix(in srgb, var(--layer-color) 52%, transparent);
+      border-radius: var(--radius-xl);
+      background:
+        linear-gradient(180deg, color-mix(in srgb, var(--layer-soft) 52%, transparent), transparent 140px),
+        rgba(11, 15, 29, 0.88);
+      box-shadow: var(--shadow), inset 0 1px 0 rgba(255, 255, 255, 0.025);
+      break-inside: avoid;
+    }
+
+    .layer::before {
+      content: "";
+      position: absolute;
+      top: 22px;
+      bottom: 22px;
+      left: 0;
+      width: 3px;
+      border-radius: 3px;
+      background: linear-gradient(180deg, transparent, var(--layer-color) 8%, var(--layer-color) 92%, transparent);
+      opacity: 0.82;
+    }
+
+    .layer--cyan { --layer-color: var(--cyan); --layer-soft: var(--cyan-soft); }
+    .layer--gold { --layer-color: var(--gold); --layer-soft: var(--gold-soft); }
+    .layer--purple { --layer-color: var(--purple); --layer-soft: var(--purple-soft); }
+    .layer--green { --layer-color: var(--green); --layer-soft: var(--green-soft); }
+    .layer--red { --layer-color: var(--red); --layer-soft: var(--red-soft); }
+    .layer--blue { --layer-color: var(--blue); --layer-soft: var(--blue-soft); }
+    .layer--gray { --layer-color: var(--gray); --layer-soft: var(--gray-soft); }
+
+    .layer-heading {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 20px;
+      margin-bottom: 18px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid color-mix(in srgb, var(--layer-color) 34%, transparent);
+    }
+
+    .layer-index {
+      display: block;
+      margin-bottom: 4px;
+      color: var(--layer-color);
+      font-size: 11px;
+      font-weight: 500;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+    }
+
+    .layer h2 {
+      margin: 0;
+      color: var(--layer-color);
+      font-size: 19px;
+      font-weight: 500;
+      line-height: 1.25;
+    }
+
+    .layer-summary {
+      max-width: 760px;
+      margin: 0;
+      color: var(--ink-muted);
+      font-size: 11px;
+      text-align: right;
+    }
+
+    .section-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .section-grid--3 {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .section-grid--2 {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .panel {
+      min-width: 0;
+      padding: 15px;
+      border: 1px solid color-mix(in srgb, var(--layer-color) 36%, var(--border));
+      border-radius: var(--radius-lg);
+      background: linear-gradient(180deg, rgba(21, 29, 53, 0.9), rgba(14, 20, 38, 0.92));
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
+      break-inside: avoid;
+    }
+
+    .panel--wide {
+      grid-column: 1 / -1;
+    }
+
+    .panel--span-2 {
+      grid-column: span 2;
+    }
+
+    .panel h3,
+    .panel h4 {
+      margin: 0;
+      color: var(--layer-color);
+      font-size: 14px;
+      font-weight: 500;
+      line-height: 1.35;
+    }
+
+    .panel h4 {
+      margin-top: 12px;
+      color: var(--ink-soft);
+      font-size: 12px;
+    }
+
+    .panel p {
+      margin: 8px 0 0;
+      color: var(--ink-soft);
+      font-size: 12px;
+    }
+
+    .panel ul,
+    .panel ol {
+      margin: 9px 0 0;
+      padding-left: 18px;
+      color: var(--ink-soft);
+      font-size: 12px;
+    }
+
+    .panel li + li {
+      margin-top: 5px;
+    }
+
+    .panel li::marker {
+      color: var(--layer-color);
+    }
+
+    .panel-note {
+      margin-top: 10px;
+      padding-top: 9px;
+      border-top: 1px dashed color-mix(in srgb, var(--layer-color) 28%, transparent);
+      color: var(--ink-muted);
+      font-size: 11px;
+    }
+
+    .tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 10px;
+    }
+
+    .tag,
+    .status {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      padding: 3px 8px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      color: var(--ink-soft);
+      background: rgba(255, 255, 255, 0.025);
+      font-size: 11px;
+      line-height: 1.3;
+      white-space: normal;
+    }
+
+    .status::before {
+      content: "";
+      width: 7px;
+      height: 7px;
+      margin-right: 6px;
+      border-radius: 50%;
+      background: currentColor;
+      flex: 0 0 auto;
+    }
+
+    .status--default { color: var(--green); border-color: rgba(69, 212, 155, 0.45); }
+    .status--conditional { color: var(--gold); border-style: dashed; border-color: rgba(247, 202, 83, 0.5); }
+    .status--dynamic { color: var(--purple); border-style: dashed; border-color: rgba(180, 154, 248, 0.5); }
+    .status--hidden { color: var(--blue); border-style: dotted; border-color: rgba(117, 167, 255, 0.5); }
+    .status--off { color: var(--gray); border-style: dotted; border-color: rgba(158, 177, 192, 0.48); }
+
+    .legend-grid {
+      display: grid;
+      grid-template-columns: 1.1fr 1.6fr 1.3fr;
+      gap: 14px;
+    }
+
+    .legend-list {
+      display: grid;
+      gap: 8px;
+      margin-top: 10px;
+    }
+
+    .legend-line {
+      display: grid;
+      grid-template-columns: 78px 1fr;
+      align-items: center;
+      gap: 10px;
+      color: var(--ink-soft);
+      font-size: 11px;
+    }
+
+    .line-sample {
+      position: relative;
+      height: 12px;
+      color: var(--cyan);
+    }
+
+    .line-sample::before {
+      content: "";
+      position: absolute;
+      top: 5px;
+      right: 7px;
+      left: 0;
+      border-top: 2px solid currentColor;
+    }
+
+    .line-sample::after {
+      content: "";
+      position: absolute;
+      top: 2px;
+      right: 0;
+      border-width: 4px 0 4px 7px;
+      border-style: solid;
+      border-color: transparent transparent transparent currentColor;
+    }
+
+    .line-sample--event::before { border-top-style: dashed; }
+    .line-sample--uds { color: var(--purple); }
+    .line-sample--uds::before { border-top-style: dotted; border-top-width: 3px; }
+    .line-sample--data { color: var(--green); }
+    .line-sample--control { color: var(--gold); }
+    .line-sample--deny { color: var(--red); }
+    .line-sample--deny::before { border-top-style: dashed; }
+    .line-sample--observe { color: var(--gray); }
+    .line-sample--observe::before { border-top-width: 1px; }
+
+    .pipeline {
+      display: flex;
+      align-items: stretch;
+      gap: 24px;
+      margin-top: 14px;
+    }
+
+    .flow-step {
+      position: relative;
+      flex: 1 1 0;
+      min-width: 0;
+      padding: 12px;
+      border: 1px solid color-mix(in srgb, var(--layer-color) 42%, var(--border));
+      border-radius: var(--radius-md);
+      background: color-mix(in srgb, var(--layer-soft) 56%, rgba(15, 20, 38, 0.96));
+      color: var(--ink-soft);
+      font-size: 11px;
+      text-align: center;
+    }
+
+    .flow-step strong {
+      display: block;
+      margin-bottom: 4px;
+      color: var(--layer-color);
+      font-size: 12px;
+      font-weight: 500;
+    }
+
+    .flow-step:not(:last-child)::after {
+      content: "→";
+      position: absolute;
+      top: 50%;
+      right: -20px;
+      width: 16px;
+      color: var(--layer-color);
+      font-size: 18px;
+      line-height: 1;
+      transform: translateY(-50%);
+      text-shadow: 0 0 8px color-mix(in srgb, var(--layer-color) 54%, transparent);
+    }
+
+    .flow-step--deny {
+      border-color: rgba(255, 114, 133, 0.55);
+      background: var(--red-soft);
+    }
+
+    .flow-step--deny strong {
+      color: var(--red);
+    }
+
+    .protocol-band {
+      display: grid;
+      grid-template-columns: auto 1fr auto 1fr auto;
+      align-items: center;
+      gap: 12px;
+      margin: 14px 0;
+      padding: 12px 14px;
+      border: 1px solid color-mix(in srgb, var(--layer-color) 34%, var(--border));
+      border-radius: var(--radius-md);
+      background: rgba(7, 12, 25, 0.62);
+    }
+
+    .protocol-node {
+      color: var(--ink);
+      font-size: 12px;
+      font-weight: 500;
+      text-align: center;
+    }
+
+    .protocol-link {
+      position: relative;
+      height: 18px;
+      color: var(--layer-color);
+      text-align: center;
+    }
+
+    .protocol-link::before {
+      content: "";
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      left: 8px;
+      border-top: 2px dashed currentColor;
+      animation: signal 1.8s linear infinite;
+    }
+
+    .protocol-link::after {
+      content: "↔";
+      position: relative;
+      top: -5px;
+      padding: 0 5px;
+      background: var(--bg-raised);
+      color: currentColor;
+      font-size: 15px;
+    }
+
+    .protocol-label {
+      display: block;
+      margin-top: 3px;
+      color: var(--ink-muted);
+      font-size: 10px;
+      font-weight: 400;
+    }
+
+    .callout {
+      margin-top: 14px;
+      padding: 12px 14px;
+      border-left: 3px solid var(--layer-color);
+      background: color-mix(in srgb, var(--layer-soft) 48%, transparent);
+      color: var(--ink-soft);
+      font-size: 11px;
+    }
+
+    .callout--danger {
+      border-left-color: var(--red);
+      background: var(--red-soft);
+    }
+
+    .callout strong {
+      color: var(--layer-color);
+      font-weight: 500;
+    }
+
+    .callout--danger strong {
+      color: var(--red);
+    }
+
+    .dependency-map {
+      display: block;
+      width: 100%;
+      height: auto;
+      margin-top: 14px;
+      border: 1px solid rgba(247, 202, 83, 0.24);
+      border-radius: var(--radius-lg);
+      background: rgba(7, 12, 25, 0.72);
+    }
+
+    .dependency-map text {
+      fill: var(--ink-soft);
+      font-family: inherit;
+      font-size: 15px;
+    }
+
+    .dependency-map .dep-title {
+      fill: var(--gold);
+      font-size: 16px;
+      font-weight: 500;
+    }
+
+    .dependency-map .dep-note {
+      fill: var(--ink-muted);
+      font-size: 12px;
+    }
+
+    .dependency-map .dep-node {
+      fill: #121a31;
+      stroke: rgba(247, 202, 83, 0.64);
+      stroke-width: 1.5;
+    }
+
+    .dependency-map .dep-node--base { stroke: rgba(49, 217, 244, 0.7); }
+    .dependency-map .dep-node--port { stroke: rgba(180, 154, 248, 0.7); }
+    .dependency-map .dep-node--root { stroke: rgba(69, 212, 155, 0.8); }
+    .dependency-map .dep-edge {
+      fill: none;
+      stroke: rgba(183, 201, 214, 0.66);
+      stroke-width: 1.6;
+      marker-end: url(#dep-arrow);
+    }
+
+    .dependency-map .dep-edge--port {
+      stroke: rgba(180, 154, 248, 0.75);
+      stroke-dasharray: 7 5;
+    }
+
+    .dependency-fallback {
+      display: none;
+      margin-top: 12px;
+    }
+
+    .data-matrix {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    .matrix-cell {
+      min-width: 0;
+      padding: 10px;
+      border-left: 2px solid var(--layer-color);
+      background: rgba(255, 255, 255, 0.025);
+      color: var(--ink-soft);
+      font-size: 11px;
+    }
+
+    .matrix-cell strong {
+      display: block;
+      margin-bottom: 4px;
+      color: var(--layer-color);
+      font-size: 12px;
+      font-weight: 500;
+    }
+
+    .table-wrap {
+      width: 100%;
+      margin-top: 12px;
+      overflow-x: auto;
+      border: 1px solid color-mix(in srgb, var(--layer-color) 26%, var(--border));
+      border-radius: var(--radius-md);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      color: var(--ink-soft);
+      font-size: 11px;
+    }
+
+    th,
+    td {
+      padding: 9px 10px;
+      border-bottom: 1px solid rgba(158, 177, 192, 0.13);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      color: var(--layer-color);
+      background: rgba(255, 255, 255, 0.025);
+      font-weight: 500;
+    }
+
+    tr:last-child td {
+      border-bottom: 0;
+    }
+
+    .side-rail {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      align-items: center;
+      gap: 12px;
+      margin: 18px 0 2px;
+      color: var(--ink-muted);
+      font-size: 10px;
+      letter-spacing: 0.08em;
+      text-align: center;
+      text-transform: uppercase;
+    }
+
+    .side-rail::before,
+    .side-rail::after {
+      content: "";
+      height: 1px;
+      background: linear-gradient(90deg, transparent, var(--layer-color));
+      opacity: 0.5;
+    }
+
+    .side-rail::after {
+      background: linear-gradient(90deg, var(--layer-color), transparent);
+    }
+
+    .footer {
+      margin-top: 34px;
+      padding: 24px;
+      color: var(--ink-muted);
+      font-size: 11px;
+      text-align: center;
+    }
+
+    .footer strong {
+      color: var(--cyan);
+      font-weight: 500;
+    }
+
+    @keyframes signal {
+      from { opacity: 0.46; }
+      50% { opacity: 1; }
+      to { opacity: 0.46; }
+    }
+
+    @keyframes line-breathe {
+      0%, 100% { opacity: 0.42; transform: scaleX(0.96); }
+      50% { opacity: 0.78; transform: scaleX(1); }
+    }
+
+    @media (max-width: 1180px) {
+      .snapshot-bar {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+
+      .section-grid,
+      .section-grid--3,
+      .data-matrix {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .legend-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .legend-grid .panel:last-child {
+        grid-column: 1 / -1;
+      }
+
+      .pipeline {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .flow-step:not(:last-child)::after {
+        content: "↓";
+        top: auto;
+        right: 50%;
+        bottom: -22px;
+        transform: translateX(50%);
+      }
+    }
+
+    @media (max-width: 760px) {
+      body {
+        font-size: 13px;
+      }
+
+      .blueprint {
+        width: min(100% - 18px, 1600px);
+        padding-top: 18px;
+      }
+
+      .hero {
+        padding: 24px 10px 18px;
+      }
+
+      .subtitle {
+        letter-spacing: 0.08em;
+      }
+
+      .snapshot-bar,
+      .section-grid,
+      .section-grid--3,
+      .section-grid--2,
+      .legend-grid,
+      .data-matrix {
+        grid-template-columns: 1fr;
+      }
+
+      .legend-grid .panel:last-child,
+      .panel--span-2 {
+        grid-column: auto;
+      }
+
+      .layer {
+        padding: 24px 12px 14px;
+        border-radius: 12px;
+      }
+
+      .layer-heading {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      .layer-summary {
+        text-align: left;
+      }
+
+      .panel {
+        padding: 13px;
+      }
+
+      .pipeline {
+        grid-template-columns: 1fr;
+        gap: 24px;
+      }
+
+      .protocol-band {
+        grid-template-columns: 1fr;
+      }
+
+      .protocol-link {
+        height: 32px;
+      }
+
+      .protocol-link::before {
+        top: 2px;
+        bottom: 2px;
+        left: 50%;
+        width: 0;
+        border-top: 0;
+        border-left: 2px dashed currentColor;
+      }
+
+      .protocol-link::after {
+        content: "↕";
+        top: 3px;
+      }
+
+      .dependency-map {
+        display: none;
+      }
+
+      .dependency-fallback {
+        display: block;
+      }
+
+      .table-wrap {
+        overflow: visible;
+        border: 0;
+      }
+
+      table,
+      tbody,
+      tr,
+      td {
+        display: block;
+        width: 100%;
+      }
+
+      thead {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip: rect(0 0 0 0);
+      }
+
+      tr {
+        margin-bottom: 10px;
+        border: 1px solid color-mix(in srgb, var(--layer-color) 28%, var(--border));
+        border-radius: 8px;
+        background: rgba(255, 255, 255, 0.02);
+      }
+
+      td {
+        border-bottom: 1px solid rgba(158, 177, 192, 0.1);
+      }
+
+      td::before {
+        content: attr(data-label);
+        display: block;
+        margin-bottom: 3px;
+        color: var(--layer-color);
+        font-size: 10px;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html {
+        scroll-behavior: auto;
+      }
+
+      *,
+      *::before,
+      *::after {
+        animation: none !important;
+        transition: none !important;
+      }
+    }
+
+    @media print {
+      @page {
+        size: A3 portrait;
+        margin: 10mm;
+      }
+
+      html,
+      body {
+        background: var(--bg) !important;
+        print-color-adjust: exact;
+        -webkit-print-color-adjust: exact;
+      }
+
+      body {
+        font-size: 11px;
+      }
+
+      .blueprint {
+        width: 100%;
+        max-width: none;
+        padding: 0;
+      }
+
+      .hero::after,
+      .protocol-link::before {
+        animation: none !important;
+      }
+
+      .layer {
+        box-shadow: none;
+        break-inside: avoid-page;
+      }
+
+      .panel,
+      .pipeline,
+      .table-wrap,
+      .dependency-map {
+        break-inside: avoid;
+      }
+
+      .footer {
+        break-before: avoid;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="blueprint" aria-labelledby="page-title">
+    <header class="hero">
+      <p class="eyebrow">macOS-local · Rust-native · architecture snapshot</p>
+      <h1 id="page-title">zkcode</h1>
+      <p class="subtitle">系统架构与能力全景</p>
+      <p class="hero-copy">
+        从用户入口、协议与会话恢复，到 Rust 对话引擎、统一授权、工具与 Agent，
+        再到 MCP、Python Sidecar、LLM、持久化、验证和运维闭环的当前工作树工程视图。
+      </p>
+      <div class="snapshot-bar" aria-label="当前工作树统计快照">
+        <div class="metric metric--dirty">
+          <span class="metric-label">Source snapshot</span>
+          <span class="metric-value">0821965 · dirty</span>
+        </div>
+        <div class="metric">
+          <span class="metric-label">Worktree files</span>
+          <span class="metric-value">883</span>
+        </div>
+        <div class="metric">
+          <span class="metric-label">Code corpus</span>
+          <span class="metric-value">787 files · 236,529</span>
+        </div>
+        <div class="metric">
+          <span class="metric-label">Rust</span>
+          <span class="metric-value">407 files · 168,675</span>
+        </div>
+        <div class="metric">
+          <span class="metric-label">Frontend TS / TSX</span>
+          <span class="metric-value">247 files · 37,844</span>
+        </div>
+        <div class="metric">
+          <span class="metric-label">Python service</span>
+          <span class="metric-value">53 files · 11,097</span>
+        </div>
+      </div>
+    </header>
+
+    <section class="layer layer--gray" aria-labelledby="legend-title">
+      <div class="layer-heading">
+        <div>
+          <span class="layer-index">00 · Snapshot &amp; legend</span>
+          <h2 id="legend-title">事实快照与全图语义</h2>
+        </div>
+        <p class="layer-summary">当前工作树：36 个已跟踪文件变化 + 12 个未跟踪文件；统计不含本架构图自身。</p>
+      </div>
+      <div class="legend-grid">
+        <article class="panel">
+          <h3>能力状态</h3>
+          <div class="legend-list">
+            <span class="status status--default">默认启用 / 当前主路径</span>
+            <span class="status status--conditional">配置或 Feature Flag 门控</span>
+            <span class="status status--dynamic">运行时探测 / 动态注册</span>
+            <span class="status status--hidden">已实现，当前主 UI 未挂载</span>
+            <span class="status status--off">默认关闭 / 非发布主路径</span>
+          </div>
+        </article>
+        <article class="panel">
+          <h3>连接线语义</h3>
+          <div class="legend-list">
+            <div class="legend-line"><span class="line-sample"></span><span>实线箭头：同步调用 / 控制转移</span></div>
+            <div class="legend-line"><span class="line-sample line-sample--event"></span><span>虚线箭头：WebSocket / SSE / 异步事件</span></div>
+            <div class="legend-line"><span class="line-sample line-sample--uds"></span><span>紫色点线：Unix Domain Socket IPC</span></div>
+            <div class="legend-line"><span class="line-sample line-sample--data"></span><span>绿色实线：持久化读写 / 交付验证</span></div>
+            <div class="legend-line"><span class="line-sample line-sample--control"></span><span>金色实线：授权 / 调度 / 生命周期控制</span></div>
+            <div class="legend-line"><span class="line-sample line-sample--deny"></span><span>红色虚线：拒绝 / 失败 / 安全短路</span></div>
+            <div class="legend-line"><span class="line-sample line-sample--observe"></span><span>灰色细线：观测与审计旁路</span></div>
+          </div>
+        </article>
+        <article class="panel">
+          <h3>统计口径与边界</h3>
+          <ul>
+            <li><strong>文件：</strong><code>git ls-files -co --exclude-standard</code>，含当前未跟踪源码。</li>
+            <li><strong>代码语料：</strong>Rust、TS/TSX、Python、Shell、JS、CSS、HTML、SQL 与入口脚本，含测试。</li>
+            <li><strong>行数：</strong>物理行含空行与注释；排除 Markdown、数据、锁文件、忽略目录和构建产物。</li>
+            <li><strong>支持形态：</strong>Apple Silicon、macOS 15+、单用户、loopback-only。</li>
+            <li><strong>安全性质：</strong>应用级准入与审计；被允许的子进程仍继承当前 macOS 用户权限。</li>
+          </ul>
+        </article>
+      </div>
+    </section>
+
+    <section class="layer layer--cyan" aria-labelledby="runtime-title">
+      <div class="layer-heading">
+        <div>
+          <span class="layer-index">01 · Runtime topology</span>
+          <h2 id="runtime-title">本地运行拓扑与用户入口</h2>
+        </div>
+        <p class="layer-summary">三组件协作；Rust 是唯一业务网关和组合根，浏览器不直接连接 Python。</p>
+      </div>
+
+      <div class="protocol-band" aria-label="主运行拓扑">
+        <div class="protocol-node">Web UI<span class="protocol-label">React / Vite · 127.0.0.1:5273</span></div>
+        <div class="protocol-link" aria-hidden="true"></div>
+        <div class="protocol-node">zk-server<span class="protocol-label">Rust / Axum · 127.0.0.1:8082</span></div>
+        <div class="protocol-link" aria-hidden="true"></div>
+        <div class="protocol-node">Python Sidecar<span class="protocol-label">FastAPI / Uvicorn · HTTP/1 over UDS</span></div>
+      </div>
+
+      <div class="section-grid">
+        <article class="panel">
+          <h3>Web UI</h3>
+          <ul>
+            <li>原生 WebSocket <code>/ws</code>：实时对话、工具、权限、Agent 与恢复事件。</li>
+            <li>REST：项目、会话、Workbench、文件、设置、验证、MCP 与运维域。</li>
+            <li>开发态 Vite 将 <code>/api</code> 与 <code>/ws</code> 代理到 Rust。</li>
+          </ul>
+          <div class="tags"><span class="status status--default">主入口</span><span class="tag">浏览器安全上下文</span></div>
+        </article>
+        <article class="panel">
+          <h3>Python CLI</h3>
+          <ul>
+            <li><code>zkcode</code> 包入口，经 HTTPX 调用 Rust REST/SSE。</li>
+            <li>支持 text、json、stream-json 与 TTY Rich Markdown。</li>
+            <li>会话缓存位于 <code>~/.config/zkcode/cli-sessions.json</code>。</li>
+            <li><code>/api/query/stream</code> 当前返回结果与完成两个终态事件，不是逐 Token 流。</li>
+          </ul>
+        </article>
+        <article class="panel">
+          <h3>外部协议入口</h3>
+          <ul>
+            <li>REST：同步查询、SSE 终态、配置与资源控制。</li>
+            <li>Reverse MCP <code>POST /mcp</code>：外部客户端调用本地工具和资源。</li>
+            <li>OpenAPI <code>/api/openapi.json</code> 与 Prometheus <code>/metrics</code>。</li>
+          </ul>
+          <div class="tags"><span class="status status--default">REST / WS</span><span class="status status--conditional">Reverse MCP 上下文必需</span></div>
+        </article>
+        <article class="panel">
+          <h3>开发与紧急控制</h3>
+          <ul>
+            <li><code>./dev bootstrap|up|restart|stop|status|doctor|test|repair|logs</code>。</li>
+            <li><code>remote.html</code> 每 3 秒读取运行状态，可请求中断当前执行。</li>
+            <li><code>.runtime/</code> 保存开发态 PID、日志与 Sidecar Socket。</li>
+          </ul>
+          <div class="tags"><span class="status status--default">本机控制面</span><span class="tag">身份校验后停进程</span></div>
+        </article>
+      </div>
+
+      <div class="callout callout--danger">
+        <strong>部署与安全边界：</strong>配置拒绝非 loopback 监听；当前发布形态不是多用户服务。
+        Bash、MCP STDIO、Python 与 Playwright 在被准入后仍以启动 zkcode 的本机用户权限运行，应用控制不等价于操作系统隔离。
+      </div>
+    </section>
+
+    <section class="layer layer--cyan" aria-labelledby="frontend-title">
+      <div class="layer-heading">
+        <div>
+          <span class="layer-index">02 · Frontend architecture</span>
+          <h2 id="frontend-title">React 前端、状态投影与会话恢复</h2>
+        </div>
+        <p class="layer-summary">React 18 · TypeScript 5.6 · Vite 7 · 41 Store · 132 组件 TSX · 15 上行 / 57 下行消息。</p>
+      </div>
+
+      <div class="section-grid section-grid--3">
+        <article class="panel">
+          <h3>应用外壳与两种工作视图</h3>
+          <ul>
+            <li><code>ThemeProvider → App → AppLayout</code>。</li>
+            <li>Header、Sidebar / Mobile Drawer、Main、PromptInput、StatusBar、Global Dialogs。</li>
+            <li><strong>Simple Workbench：</strong>默认交付视图。</li>
+            <li><strong>Development View：</strong>消息、工具与技术执行视图。</li>
+            <li>会话级视图选择写入本机 LocalStorage。</li>
+          </ul>
+        </article>
+        <article class="panel">
+          <h3>消息与输入能力</h3>
+          <ul>
+            <li>文本、最多 20 张图片、<code>@</code> 文件搜索、Slash Command、Skill。</li>
+            <li>Thinking / Text 流、工具输入与结果、Diff、Bash、搜索分组。</li>
+            <li>GFM、代码高亮、Mermaid、可视化消息与工作区安全图片预览。</li>
+            <li>ASR 将录音转写插入 Prompt；TTS 播放助手可见正文。</li>
+          </ul>
+          <div class="tags"><span class="status status--default">当前工作树</span><span class="tag">DOMPurify</span><span class="tag">React Virtuoso</span></div>
+        </article>
+        <article class="panel">
+          <h3>侧边栏与 APOS</h3>
+          <ul>
+            <li>Sessions、Tasks、Files、Sequence、Agent DAG、Git。</li>
+            <li>Complexity、Change Impact、API Docs、Diagram、Code Path。</li>
+            <li>Activity L1/L2/L3、Risk Heatmap、Agent Pipeline、Anomaly。</li>
+            <li>桌面可调宽、移动抽屉、独立窗口；Simple 模式收敛为任务与会话。</li>
+          </ul>
+        </article>
+      </div>
+
+      <div class="side-rail">Zustand + Immer：服务端状态的前端投影，不是业务真源</div>
+
+      <div class="section-grid section-grid--3">
+        <article class="panel">
+          <h3>对话与执行控制</h3>
+          <p><code>session / message / permission / cost / run / task / plan / tool / command</code></p>
+          <p class="panel-note">消息不持久化到浏览器；重连后由服务器快照恢复。</p>
+        </article>
+        <article class="panel">
+          <h3>Workbench 与验证</h3>
+          <p><code>activity / insight / journeyVerify / evidence / anomaly</code></p>
+          <p class="panel-note">Workbench 5 秒轮询；任务分组 30 秒；Session 列表 60 秒并接受 WS 刷新。</p>
+        </article>
+        <article class="panel">
+          <h3>多 Agent 与协作</h3>
+          <p><code>coordinator / swarm / inbox</code></p>
+          <p class="panel-note">Workflow、Worker、Teammate、Swarm 事件从统一下行分发进入投影。</p>
+        </article>
+        <article class="panel">
+          <h3>集成与配置</h3>
+          <p><code>config / model / project / mcp / mcpCapability / bridge / speech / featureFlag</code></p>
+          <p class="panel-note">配置缓存支持 BroadcastChannel 跨标签同步；写失败回滚本地投影。</p>
+        </article>
+        <article class="panel">
+          <h3>代码理解与可视化</h3>
+          <p><code>fileTree / codeInsight / codePath / diagram / complexity / changeImpact / apiContract</code></p>
+          <p class="panel-note">分析请求先进入 Rust，再通过代理访问 Python 能力。</p>
+        </article>
+        <article class="panel">
+          <h3>UI 与视图状态</h3>
+          <p><code>appUi / dialog / notification / workbenchView</code></p>
+          <p class="panel-note">候选 Session ID 只暂存于 SessionStorage；激活仍以服务器恢复事件为准。</p>
+        </article>
+      </div>
+
+      <article class="panel panel--wide" style="margin-top:14px">
+        <h3>权威会话激活栅栏</h3>
+        <div class="pipeline">
+          <div class="flow-step"><strong>候选 Session</strong>创建或选择 sessionId</div>
+          <div class="flow-step"><strong>WS Ready</strong>等待连接可发送</div>
+          <div class="flow-step"><strong>bind_session v3</strong>bindRequestId + bindingEpoch</div>
+          <div class="flow-step"><strong>session_restored</strong>仅接受 ID 与 epoch 匹配事件</div>
+          <div class="flow-step"><strong>原子提交</strong>消息 / 工具 / Run / 模型 / 权限 / 成本</div>
+          <div class="flow-step"><strong>恢复交互</strong>拉取 pending 并重放暂存事件</div>
+        </div>
+        <p class="panel-note">心跳 10 秒；重连间隔 1/2/4/8/10 秒封顶，总窗口 10 分钟；旧 Session 或旧 binding epoch 事件被丢弃。</p>
+      </article>
+
+      <div class="section-grid section-grid--2" style="margin-top:14px">
+        <article class="panel">
+          <h3>15 类上行消息</h3>
+          <p><code>user_message · run_input · permission_response · interrupt · set_model · set_permission_mode · slash_command · mcp_operation · rewind_files · elicitation_response · ping · bind_session · interaction_ack · activity_save · activity_update</code></p>
+        </article>
+        <article class="panel">
+          <h3>57 类下行消息，按领域聚合</h3>
+          <p>文本/思考/消息完成 · 工具生命周期 · 错误/压缩/限流/Token · 权限/持久交互 · 成本 · Task/Agent/Swarm/Workflow · MCP · Session Restore/模型/模式/命令/Rewind · Visualization · Verification/Evidence · Notification/Inbox/Elicitation。</p>
+        </article>
+        <article class="panel">
+          <h3>持久权限交互</h3>
+          <p><code>interaction_created → interaction_ack → POST decision(expectedVersion) → CAS → interaction_updated / terminal</code></p>
+          <p class="panel-note"><code>ack</code> 只表示已展示，不代表授权；HTTP 409 时清除陈旧投影并重新读取 pending。</p>
+        </article>
+        <article class="panel">
+          <h3>已实现但当前主 UI 未挂载</h3>
+          <p>PluginManager · MCP Capability Panel · Prompts · Browser Replay · Swarm Status · Memory Editor · File Changes Dashboard · Command Panel。</p>
+          <div class="tags"><span class="status status--hidden">接口与组件存在</span><span class="tag">不可画成必然可达页面</span></div>
+        </article>
+      </div>
+    </section>
+
+    <section class="layer layer--gold" aria-labelledby="rust-title">
+      <div class="layer-heading">
+        <div>
+          <span class="layer-index">03 · Rust core &amp; protocols</span>
+          <h2 id="rust-title">九 Crate 核心、组合根与 API 边界</h2>
+        </div>
+        <p class="layer-summary">Edition 2024 · Rust 1.97 · Tokio · workspace 依赖单向流动 · <code>unsafe_code = forbid</code>。</p>
+      </div>
+
+      <svg class="dependency-map" viewBox="0 0 1280 510" role="img" aria-labelledby="dep-map-title dep-map-desc">
+        <title id="dep-map-title">zkcode Rust workspace 主要依赖方向</title>
+        <desc id="dep-map-desc">基础 crate 位于左侧，工具、数据、模型位于中间，Engine、授权与 MCP 通过端口解耦，zk-server 在右侧作为唯一组合根。</desc>
+        <defs>
+          <marker id="dep-arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
+            <path d="M0,0 L7,3.5 L0,7 Z" fill="rgba(183,201,214,0.8)"></path>
+          </marker>
+        </defs>
+        <text class="dep-title" x="34" y="36">依赖方向：底层能力 → 消费者；组合根只在 zk-server</text>
+        <text class="dep-note" x="34" y="58">紫色虚线表示宿主端口/适配关系；Engine 通过 MessageSink、ToolAdmission 等窄接口保持与 Server 解耦。</text>
+
+        <rect class="dep-node dep-node--base" x="46" y="98" width="190" height="72" rx="10"></rect>
+        <text x="68" y="126">zk-core</text><text class="dep-note" x="68" y="149">路径 · 迁移 · Feature Flags</text>
+        <rect class="dep-node dep-node--base" x="46" y="208" width="190" height="72" rx="10"></rect>
+        <text x="68" y="236">zk-protocol</text><text class="dep-note" x="68" y="259">15 ↑ / 57 ↓ · Envelope</text>
+
+        <rect class="dep-node" x="316" y="78" width="190" height="72" rx="10"></rect>
+        <text x="338" y="106">zk-tools</text><text class="dep-note" x="338" y="129">Tool · Registry · Executor</text>
+        <rect class="dep-node" x="316" y="188" width="190" height="72" rx="10"></rect>
+        <text x="338" y="216">zk-db</text><text class="dep-note" x="338" y="239">SQLite · Repository · Migration</text>
+        <rect class="dep-node" x="316" y="298" width="190" height="72" rx="10"></rect>
+        <text x="338" y="326">zk-llm</text><text class="dep-note" x="338" y="349">Provider · Retry · Breaker</text>
+
+        <rect class="dep-node dep-node--port" x="596" y="58" width="206" height="72" rx="10"></rect>
+        <text x="618" y="86">zk-mcp</text><text class="dep-note" x="618" y="109">Client · Transport · Tool Adapter</text>
+        <rect class="dep-node dep-node--port" x="596" y="188" width="206" height="72" rx="10"></rect>
+        <text x="618" y="216">zk-authz</text><text class="dep-note" x="618" y="239">Analyzer · Grant · Interaction</text>
+        <rect class="dep-node dep-node--port" x="596" y="318" width="206" height="72" rx="10"></rect>
+        <text x="618" y="346">zk-engine</text><text class="dep-note" x="618" y="369">Run · Context · Agent · Hook</text>
+
+        <rect class="dep-node dep-node--root" x="984" y="188" width="238" height="92" rx="12"></rect>
+        <text x="1008" y="220">zk-server</text><text class="dep-note" x="1008" y="244">Axum · AppState · EngineBridge</text>
+        <text class="dep-note" x="1008" y="263">唯一全量组装根</text>
+
+        <path class="dep-edge" d="M236 128 C270 128 282 114 316 114"></path>
+        <path class="dep-edge" d="M236 244 C270 244 282 224 316 224"></path>
+        <path class="dep-edge" d="M236 244 C270 244 282 334 316 334"></path>
+        <path class="dep-edge" d="M506 114 C548 114 554 94 596 94"></path>
+        <path class="dep-edge" d="M506 114 C548 114 554 346 596 354"></path>
+        <path class="dep-edge" d="M506 224 C548 224 554 224 596 224"></path>
+        <path class="dep-edge" d="M506 224 C548 224 554 348 596 354"></path>
+        <path class="dep-edge" d="M506 334 C548 334 554 354 596 354"></path>
+        <path class="dep-edge dep-edge--port" d="M802 94 C900 94 900 208 984 220"></path>
+        <path class="dep-edge dep-edge--port" d="M802 224 C888 224 906 232 984 232"></path>
+        <path class="dep-edge dep-edge--port" d="M802 354 C900 354 900 256 984 248"></path>
+        <path class="dep-edge" d="M236 134 C520 134 760 446 984 260"></path>
+        <path class="dep-edge" d="M236 250 C520 250 760 456 984 266"></path>
+
+        <text class="dep-note" x="46" y="456">core → tools / mcp / authz / engine / server</text>
+        <text class="dep-note" x="350" y="456">protocol → db / llm / authz / engine / server</text>
+        <text class="dep-note" x="732" y="456">tools + db + llm → engine → server</text>
+        <text class="dep-note" x="1000" y="456">mcp + authz → server</text>
+      </svg>
+
+      <div class="dependency-fallback panel" aria-label="窄屏 crate 依赖摘要">
+        <h3>窄屏依赖摘要</h3>
+        <ul>
+          <li><code>zk-core → tools / mcp / authz / engine / server</code></li>
+          <li><code>zk-protocol → db / llm / authz / engine / server</code></li>
+          <li><code>zk-tools + zk-db + zk-llm → zk-engine → zk-server</code></li>
+          <li><code>zk-mcp + zk-authz → zk-server</code></li>
+          <li><code>zk-server</code> 是唯一全量组合根；<code>zk-engine</code> 不依赖它。</li>
+        </ul>
+      </div>
+
+      <div class="section-grid section-grid--3" style="margin-top:14px">
+        <article class="panel">
+          <h3>底层事实与契约</h3>
+          <ul>
+            <li><code>zk-core</code>：路径常量、旧目录迁移、22 个出厂 Feature Flag。</li>
+            <li><code>zk-protocol</code>：WS 上下行、Envelope、共享 Usage 模型。</li>
+            <li><code>zk-db</code>：单 Writer + Reader 池、Refinery 内嵌迁移。</li>
+          </ul>
+        </article>
+        <article class="panel">
+          <h3>可替换能力</h3>
+          <ul>
+            <li><code>zk-llm</code>：ChatProvider、模型所有权、重试、熔断、热交换。</li>
+            <li><code>zk-tools</code>：与协议/数据库/模型平级，ToolSpec 自持。</li>
+            <li><code>zk-mcp</code>：依赖 core/tools，不反向依赖 server。</li>
+          </ul>
+        </article>
+        <article class="panel">
+          <h3>业务与组合</h3>
+          <ul>
+            <li><code>zk-engine</code>：对话循环、上下文、Agent、Hook、恢复与交付。</li>
+            <li><code>zk-authz</code>：冻结、分析、Grant、Interaction、执行前复验。</li>
+            <li><code>zk-server</code>：AppState、API、WS、Python/MCP 桥、生命周期。</li>
+          </ul>
+        </article>
+      </div>
+
+      <article class="panel panel--wide" style="margin-top:14px">
+        <h3>Axum 请求入口与中间件顺序</h3>
+        <div class="pipeline">
+          <div class="flow-step"><strong>CatchPanic</strong>最外层错误护栏</div>
+          <div class="flow-step"><strong>CORS</strong>loopback 来源与预检</div>
+          <div class="flow-step"><strong>access_guard</strong>本机 / Token / Cookie</div>
+          <div class="flow-step"><strong>Mutation Guard</strong>MCP / CSRF / Origin</div>
+          <div class="flow-step"><strong>observe</strong>request-id / metrics / MatchedPath</div>
+          <div class="flow-step"><strong>Handler</strong>REST / WS / Reverse MCP / Static</div>
+        </div>
+      </article>
+
+      <div class="data-matrix">
+        <div class="matrix-cell"><strong>会话与执行</strong>sessions · messages · runs · interactions · grants · snapshots · history</div>
+        <div class="matrix-cell"><strong>能力目录</strong>models · tools · skills · commands · MCP · plugins · feature flags</div>
+        <div class="matrix-cell"><strong>交付与验证</strong>workbench · evidence · artifacts · verify · activities · browser replay</div>
+        <div class="matrix-cell"><strong>系统与分析</strong>health · doctor · config · projects · files · OpenAPI · metrics · speech</div>
+      </div>
+      <div class="callout">
+        <strong>Python 代理前缀：</strong><code>/api/tokenizer/*</code>、<code>/api/code-quality/*</code>、
+        <code>/api/files/analysis/*</code>、<code>/api/files/tree</code>、<code>/api/analysis/*</code>、<code>/api/git/*</code>。
+        它们与其他 API 共用 Rust 中间件栈。
+      </div>
+    </section>
+
+    <section class="layer layer--gold" aria-labelledby="engine-title">
+      <div class="layer-heading">
+        <div>
+          <span class="layer-index">04 · Conversation engine</span>
+          <h2 id="engine-title">对话引擎、上下文与恢复主循环</h2>
+        </div>
+        <p class="layer-summary">REST / SSE / WS / CLI 最终复用同一 ConversationService 与 Engine；用户消息先落库再访问外部 Provider。</p>
+      </div>
+
+      <article class="panel panel--wide">
+        <h3>多轮执行主链</h3>
+        <div class="pipeline">
+          <div class="flow-step"><strong>Prepare Run</strong>Session / Workspace 校验</div>
+          <div class="flow-step"><strong>Persist</strong>用户消息 + Run + Workbench</div>
+          <div class="flow-step"><strong>Build Context</strong>历史 / 附件 / Prompt / Tools</div>
+          <div class="flow-step"><strong>Provider SSE</strong>文本 / 思考 / tool_use</div>
+          <div class="flow-step"><strong>Admission</strong>Hook + 授权 + 动态复验</div>
+          <div class="flow-step"><strong>ToolExecutor</strong>并发执行 + 进度事件</div>
+          <div class="flow-step"><strong>Rehydrate</strong>按模型声明序回填结果</div>
+          <div class="flow-step"><strong>Terminate</strong>end_turn / cancel / error / ceiling</div>
+        </div>
+        <p class="panel-note">单 Session 同时只允许一个活跃 Run；第二个普通查询直接得到 busy，不在内部排队。运行中用户输入走 <code>run_input</code>。</p>
+      </article>
+
+      <div class="section-grid section-grid--3" style="margin-top:14px">
+        <article class="panel">
+          <h3>Run 与取消树</h3>
+          <ul>
+            <li>默认对话循环上限：<strong>1024 turns</strong>。</li>
+            <li><code>Session → Run → Tool Call</code> 三层 CancellationToken。</li>
+            <li>工具进度与完成按到达顺序推送，下一轮模型输入保持原调用声明顺序。</li>
+            <li>Run / Task / Swarm 遗留状态在进程启动时恢复或标记 interrupted。</li>
+          </ul>
+        </article>
+        <article class="panel">
+          <h3>System Prompt 组成</h3>
+          <ul>
+            <li>固定身份、安全约束、工具规范、环境信息。</li>
+            <li>项目根 <code>zhikun.md</code> 与 <code>zhikun.local.md</code>，5 秒级热重载。</li>
+            <li>Feature Flag 动态段、Scratchpad、Token Budget、工具目录。</li>
+            <li>用户级 <code>MEMORY.md</code> 不会自动作为 project memory 注入。</li>
+          </ul>
+        </article>
+        <article class="panel">
+          <h3>上下文级联</h3>
+          <ul>
+            <li>Token 精确计数或模型比例估算。</li>
+            <li>工具结果 Snip、Micro Compact、Incremental Collapse、完整摘要。</li>
+            <li>图片 / Base64 预算守卫，必要时缩放和替换。</li>
+            <li>保持 tool_use / tool_result 成对完整，压缩失败有确定性兜底。</li>
+          </ul>
+        </article>
+        <article class="panel">
+          <h3>错误与 413 恢复</h3>
+          <ul>
+            <li>上下文超限时缩小消息集并重试当前轮。</li>
+            <li>同 Provider 指数退避并尊重 Retry-After。</li>
+            <li>跨 Provider 只在尚未输出内容且错误可安全重试时发生。</li>
+            <li>终止原因与错误摘要写入 Run Envelope 和事件日志。</li>
+          </ul>
+        </article>
+        <article class="panel">
+          <h3>WebSocket 顺序与恢复</h3>
+          <ul>
+            <li>MessageSink 将 Engine 与 Server 解耦；HubSink 顺序等待发送。</li>
+            <li>每连接 mpsc 容量 256；关键事件发送失败进入 Session pending。</li>
+            <li>重连绑定后恢复消息、活动工具、运行态与持久交互。</li>
+            <li>应用层 ping/pong 负责连接活性。</li>
+          </ul>
+        </article>
+        <article class="panel">
+          <h3>费用、观测与快照</h3>
+          <ul>
+            <li>Provider Usage 汇总到会话与全局 AtomicCostTracker。</li>
+            <li>文件写前 SnapshotSink 记录原状态，支持 Rewind 与 Diff。</li>
+            <li>Run 事件、结构化观测和前端 Activity 分层记录。</li>
+            <li>Workbench 将请求、结果、验收标准与证据绑定。</li>
+          </ul>
+        </article>
+      </div>
+
+      <div class="side-rail">五条端到端使用路径</div>
+      <div class="section-grid section-grid--3">
+        <article class="panel">
+          <h3>项目授权与新会话</h3>
+          <p><code>GET projects → 目录浏览/原生选择 → POST project → POST session → bind_session → session_restored</code></p>
+          <p class="panel-note">Project 路径同时形成 canonical workspace root 与后续授权信任边界。</p>
+        </article>
+        <article class="panel">
+          <h3>普通聊天</h3>
+          <p><code>PromptInput → ensureAuthorizedSession → WS user_message → Engine → Provider/Tools → WS deltas → message_complete</code></p>
+        </article>
+        <article class="panel">
+          <h3>运行中追加输入</h3>
+          <p><code>active Run → WS run_input → queued/applied/rejected → 下一安全边界注入</code></p>
+          <p class="panel-note">运行中附件输入被禁止，避免改变已经冻结的上下文与授权事实。</p>
+        </article>
+        <article class="panel">
+          <h3>断线恢复</h3>
+          <p><code>reconnect → bind current session → authoritative restore → pending interactions → replay buffered events</code></p>
+        </article>
+        <article class="panel">
+          <h3>CLI 查询</h3>
+          <p><code>stdin/prompt ≤1 MiB → Bearer → REST/SSE → ConversationService → terminal result</code></p>
+          <p class="panel-note">后端约束：maxTurns 1–4、budget ≤ US$1、timeout ≤ 90 秒。</p>
+        </article>
+        <article class="panel">
+          <h3>中断</h3>
+          <p><code>WS interrupt / remote interrupt → RunTermination → cancellation tree → tool process group cleanup → interrupt_ack</code></p>
+        </article>
+      </div>
+    </section>
+
+    <section class="layer layer--red" aria-labelledby="authz-title">
+      <div class="layer-heading">
+        <div>
+          <span class="layer-index">05 · Authorization &amp; tools</span>
+          <h2 id="authz-title">统一授权准入与工具执行系统</h2>
+        </div>
+        <p class="layer-summary">所有内建、Python、MCP、Skill 与 Agent 工具共享冻结、分析、Grant、复验和审计主链。</p>
+      </div>
+
+      <article class="panel panel--wide">
+        <h3>工具执行准入流水线</h3>
+        <div class="pipeline">
+          <div class="flow-step"><strong>PRE Hook</strong>允许 / 拒绝 / 改写</div>
+          <div class="flow-step"><strong>Freeze</strong>规范化输入 + SHA-256</div>
+          <div class="flow-step"><strong>Analyze</strong>File / Bash / Network / MCP</div>
+          <div class="flow-step"><strong>Policy</strong>Mode + Risk + Grant</div>
+          <div class="flow-step"><strong>Interaction</strong>持久请求 + CAS 决策</div>
+          <div class="flow-step"><strong>Revalidate</strong>执行时路径 / 环境 / Hash</div>
+          <div class="flow-step"><strong>Commit</strong>最终 Grant + tool_started</div>
+          <div class="flow-step"><strong>Execute &amp; Audit</strong>结果 / 拒绝 / 失败回喂</div>
+        </div>
+        <p class="panel-note">Hook 改写输入后必须重新分析。准入拒绝与准入故障是不同结局；前者产生权限拒绝事件，后者作为工具失败回喂模型。ToolExecutor 全局并发 16，默认超时 120 秒、硬上限 600 秒，单结果上限 1 MiB。</p>
+      </article>
+
+      <div class="section-grid section-grid--3" style="margin-top:14px">
+        <article class="panel">
+          <h3>五种权限模式</h3>
+          <div class="tags">
+            <span class="tag">default</span><span class="tag">plan</span><span class="tag">accept_edits</span>
+            <span class="tag">dont_ask</span><span class="tag">auto_approve</span>
+          </div>
+          <p>模式只改变人工确认策略；路径安全、敏感数据、Hook、主体绑定和执行前复验始终生效。</p>
+        </article>
+        <article class="panel">
+          <h3>授权主体与复用</h3>
+          <ul>
+            <li>绑定 root Session / Run、current Run、workspaceKey 与 authorizationRoot。</li>
+            <li>Grant 可按 once / run / session / workspace 等受限范围匹配。</li>
+            <li>高风险操作通常不能复用长期 Grant。</li>
+            <li>最终复验与 <code>tool_started</code> 事件在同一写事务。</li>
+          </ul>
+        </article>
+        <article class="panel">
+          <h3>持久 Interaction</h3>
+          <ul>
+            <li>请求、版本、deadline、delivery generation 与 operationHash 落库。</li>
+            <li>用户决策通过 REST CAS，陈旧版本返回冲突。</li>
+            <li>进程重启与 WS 重连后继续投递未决请求。</li>
+            <li>UI 展示确认不能替代用户授权决策。</li>
+          </ul>
+        </article>
+      </div>
+
+      <div class="side-rail">33 个基础工具 + 8 个默认 Agent 工具 + 动态扩展</div>
+      <div class="section-grid">
+        <article class="panel">
+          <h3>文件与搜索 · 9</h3>
+          <p><code>Read · Write · Edit · ListDir · Glob · Grep · NotebookEdit · Snip · CtxInspect</code></p>
+          <p class="panel-note">Write / Edit / Notebook 写前快照；Edit 带 SHA-256 冲突检测与 unified diff。</p>
+        </article>
+        <article class="panel">
+          <h3>进程与 Git · 7</h3>
+          <p><code>Bash · GitDiff · GitLog · GitStatus · REPL · TerminalCapture · Sleep</code></p>
+          <p class="panel-note">进程组可取消，Bash 具词法/AST/路径/黑名单/环境与命令类别分析。</p>
+        </article>
+        <article class="panel">
+          <h3>计划、状态与交互 · 9</h3>
+          <p><code>EnterPlanMode · ExitPlanMode · VerifyPlanExecution · TodoWrite · AskUserQuestion · Config · Memory · SyntheticOutput · Monitor</code></p>
+        </article>
+        <article class="panel">
+          <h3>Web、验证与能力发现 · 8</h3>
+          <p><code>WebFetch · WebSearch · VerifyJourney · Visualization · ListMcpResources · ReadMcpResource · Skill · ToolSearch</code></p>
+        </article>
+      </div>
+
+      <div class="section-grid section-grid--3" style="margin-top:14px">
+        <article class="panel">
+          <h3>默认 Agent 扩展 · 8</h3>
+          <p><code>SendMessage · Agent · TaskCreate · TaskUpdate · TaskList · TaskGet · TaskOutput · TaskStop</code></p>
+          <div class="tags"><span class="status status--default">ZK_AGENT_ENABLED=true</span></div>
+        </article>
+        <article class="panel">
+          <h3>Python 动态工具</h3>
+          <p><code>CodeIntel · WebBrowser · Git</code> 根据 Sidecar 能力快照注册或摘除；ToolSearch 同步刷新目录。</p>
+          <div class="tags"><span class="status status--dynamic">能力探测</span></div>
+        </article>
+        <article class="panel">
+          <h3>MCP 与定时触发</h3>
+          <p>远程 MCP 工具连接成功后按前缀动态注册；CronCreate/List/Delete 仅在 <code>AGENT_TRIGGERS</code> 启用时进入目录。</p>
+          <div class="tags"><span class="status status--dynamic">MCP</span><span class="status status--conditional">Cron ×3</span></div>
+        </article>
+      </div>
+
+      <div class="section-grid section-grid--2" style="margin-top:14px">
+        <article class="panel">
+          <h3>Bash / File / Network 信任边界</h3>
+          <ul>
+            <li>canonical workspace、路径穿越、符号链接、受保护目录与工作区外资源检查。</li>
+            <li>命令解析、危险类别、继承环境、端点、敏感数据与动态文件状态复验。</li>
+            <li>Safe HTTP 解析后钉定 IP、禁重定向并限制本地/保留地址，降低 SSRF 风险。</li>
+          </ul>
+        </article>
+        <article class="panel">
+          <h3>Reverse MCP 的不可交互模式</h3>
+          <ul>
+            <li><code>tools/call</code> 必须携带合法 Session / Run / Workspace 上下文。</li>
+            <li>采用 <code>dont_ask</code>：不弹 Web UI，但仍执行完整安全分析与 Hook。</li>
+            <li>不能自动批准的操作直接拒绝；最大请求体 1 MiB、并发 16。</li>
+          </ul>
+        </article>
+      </div>
+
+      <div class="callout callout--danger">
+        <strong>宿主权限风险：</strong>允许执行不等于隔离执行。命令、MCP STDIO、Sidecar 与浏览器子进程都可能访问当前 macOS 用户可访问的资源；
+        安全保证来自最小准入、可见交互、执行时复验、取消和持久审计。
+      </div>
+    </section>
+
+    <section class="layer layer--purple" aria-labelledby="ecosystem-title">
+      <div class="layer-heading">
+        <div>
+          <span class="layer-index">06 · Agent, LLM, MCP &amp; extensions</span>
+          <h2 id="ecosystem-title">Agent 协作、模型路由与扩展生态</h2>
+        </div>
+        <p class="layer-summary">子 Agent 继承同一数据库、授权、Hook、费用、快照、摘要与取消树；外部能力统一适配为 Tool。</p>
+      </div>
+
+      <div class="section-grid section-grid--3">
+        <article class="panel">
+          <h3>Agent / Task</h3>
+          <ul>
+            <li>子 Agent 创建独立 child Session 与 Run，并保留 parentRun 关联。</li>
+            <li>前台 / 后台执行、Mailbox 双向消息、Checkpoint 与 Task 状态。</li>
+            <li>全局并发 30、单 Session 10、嵌套深度 3。</li>
+            <li>子 Agent 默认 50 turns；结果上限 100,000 字符。</li>
+            <li>默认超时 5 分钟、最大 30 分钟、优雅停止 30 秒。</li>
+          </ul>
+        </article>
+        <article class="panel">
+          <h3>Coordinator / Team / Swarm</h3>
+          <ul>
+            <li>唯一生产 Coordinator 持 Team、Swarm 运行态、取消表与事件总线。</li>
+            <li>Workflow Phase、Worker 状态与 Teammate 消息通过 WS 投影。</li>
+            <li>Swarm durable projection 复用 Activity，调度运行态留在进程内。</li>
+            <li>Agent/Task/Swarm 共用真实子代理执行器。</li>
+          </ul>
+          <div class="tags"><span class="status status--conditional">顶层模式还需 ZHIKUN_COORDINATOR_MODE</span></div>
+        </article>
+        <article class="panel">
+          <h3>Worktree 隔离</h3>
+          <p>代码具备 WorktreeManager 与 WorktreeTool，但发布配置默认关闭；子 Agent 主路径仍使用共享工作区与授权根。</p>
+          <div class="tags"><span class="status status--off">ZK_WORKTREE_ENABLED=false</span><span class="tag">不宣称已发布隔离</span></div>
+        </article>
+      </div>
+
+      <div class="side-rail">九个声明 Provider · 两种线协议 · 运行时按密钥注册 0–9 个</div>
+      <div class="section-grid section-grid--3">
+        <article class="panel">
+          <h3>OpenAI-compatible · 8</h3>
+          <p><code>DashScope · DashScope Token Plan · DeepSeek · Moonshot · Zhipu · MiniMax · ZenMux · OpenAI</code></p>
+          <p class="panel-note">Chat Completions + SSE；每 Provider 可配置多把 Key 轮换与自定义 Base URL / Models。</p>
+          <div class="tags"><span class="status status--conditional">非空密钥才注册</span></div>
+        </article>
+        <article class="panel">
+          <h3>Anthropic Native · 1</h3>
+          <p><code>Anthropic Messages API</code>，独立请求与流解析，但实现同一 ChatProvider 契约。</p>
+          <div class="tags"><span class="status status--conditional">有密钥才注册</span></div>
+        </article>
+        <article class="panel">
+          <h3>路由、重试与熔断</h3>
+          <ul>
+            <li>模型优先按所有者路由；未知模型回落默认 Provider，再回落首个可用 Provider。</li>
+            <li>Fallback Chain 最多形成 3 个候选模型。</li>
+            <li>同 Provider 标准重试最多 10 次调用，再按安全条件跨 Provider。</li>
+            <li>连续 3 次 5xx 后熔断约 30 秒；全部 degraded 时 fail-open。</li>
+            <li>SQLite 保存的密钥更新后热替换 Registry。</li>
+          </ul>
+        </article>
+      </div>
+
+      <div class="section-grid section-grid--3" style="margin-top:14px">
+        <article class="panel">
+          <h3>MCP Client</h3>
+          <ul>
+            <li>配置优先级：环境 → <code>~/.zk/mcp.json</code> → workspace <code>.zk/mcp.json</code>。</li>
+            <li>STDIO、SSE、Streamable HTTP、WebSocket 四类传输。</li>
+            <li>发现 tools / resources / prompts 并动态适配到 ToolRegistry。</li>
+            <li>首次连接最多 4 次尝试；掉线后指数退避、抖动、最多 5 次、并发重连 2。</li>
+            <li>30 秒健康检查，连续 2 次 ping 失败进入异常处理。</li>
+          </ul>
+        </article>
+        <article class="panel">
+          <h3>Reverse MCP Server</h3>
+          <p><code>initialize · ping · tools/list · tools/call · resources/list · resources/read</code></p>
+          <p class="panel-note">复用本地 ToolRegistry、Hook、Admission 和审计；对外暴露的是受控能力，不是绕过网关的直通层。</p>
+        </article>
+        <article class="panel">
+          <h3>Skill 与 Plugin</h3>
+          <ul>
+            <li>Skill：内建与磁盘多级来源、参数替换、约 500 ms 文件观察和热重载。</li>
+            <li>Skill 执行仍只获得当前可用工具的交集。</li>
+            <li>Plugin：扫描 <code>.zk/plugins/{name}/manifest.toml</code>，支持 install/uninstall/reload。</li>
+            <li>Plugin 当前是本地 manifest 管理，不是原生代码动态装载或远程市场。</li>
+          </ul>
+        </article>
+      </div>
+
+      <div class="section-grid section-grid--2" style="margin-top:14px">
+        <article class="panel">
+          <h3>语音输入 · ASR</h3>
+          <p><code>getUserMedia / MediaRecorder → ≤120s 音频 → multipart /api/asr/recognize → DashScope → 文本插入 Prompt</code></p>
+          <p class="panel-note">原始音频 ≤7.5 MiB、完整 multipart ≤9 MiB；前端 65 秒、上游 60 秒超时；切换 Session 后丢弃旧识别结果。</p>
+          <div class="tags"><span class="status status--default">当前工作树</span><span class="tag">普通 DashScope Key</span></div>
+        </article>
+        <article class="panel">
+          <h3>助手朗读 · TTS</h3>
+          <p><code>可见正文 → /api/tts/synthesize → qwen3-tts-flash / Cherry → 签名 audioUrl → 浏览器播放</code></p>
+          <p class="panel-note">服务端最多取 500 个 UTF-16 code units 且不切断字符；仅接受标准端口 HTTPS 的 aliyuncs.com 签名 URL。</p>
+          <div class="tags"><span class="status status--default">当前工作树</span><span class="tag">第三方音频 URL</span></div>
+        </article>
+      </div>
+      <div class="callout">
+        <strong>外部数据边界：</strong>模型输入、联网工具、远程 MCP、ASR/TTS 音频与文本、远程 Markdown 图片可能离开本机；
+        密钥来自受保护配置或 SQLite 镜像，不进入响应与日志。
+      </div>
+    </section>
+
+    <section class="layer layer--purple" aria-labelledby="python-title">
+      <div class="layer-heading">
+        <div>
+          <span class="layer-index">07 · Python capability sidecar</span>
+          <h2 id="python-title">Python Sidecar、动态能力域与优雅降级</h2>
+        </div>
+        <p class="layer-summary">Python 3.11/3.12 · FastAPI · Uvicorn · tree-sitter · GitPython · Playwright · Rust 托管生命周期。</p>
+      </div>
+
+      <article class="panel panel--wide">
+        <h3>进程与 IPC 生命周期</h3>
+        <div class="pipeline">
+          <div class="flow-step"><strong>Validate Socket</strong>拒绝符号链接 / 异常类型 / 活跃占用</div>
+          <div class="flow-step"><strong>Spawn</strong><code>uvicorn src.main:app --uds</code></div>
+          <div class="flow-step"><strong>Protect</strong>Socket 权限 0600</div>
+          <div class="flow-step"><strong>Probe</strong>30s 启动预算 + 30s 健康检查</div>
+          <div class="flow-step"><strong>Serve</strong>Hyper HTTP/1 短连接 over UDS</div>
+          <div class="flow-step"><strong>Recover</strong>最多重启 3 次，间隔 5s</div>
+          <div class="flow-step"><strong>Shutdown</strong>SIGTERM 10s → SIGKILL</div>
+        </div>
+        <p class="panel-note">Sidecar 关闭或不可用时 Rust 主服务仍能启动；对应动态工具被摘除，代理接口按能力域返回降级结果或 503。</p>
+      </article>
+
+      <div class="side-rail">四层探测：包导入 → 版本 → 系统二进制 → 冒烟测试</div>
+      <div class="section-grid">
+        <article class="panel">
+          <h3>CODE_INTEL</h3>
+          <p>tree-sitter · rope · jedi；Parse、Symbols、Dependencies、Code Map。</p>
+          <div class="tags"><span class="status status--dynamic">可选 Router</span></div>
+        </article>
+        <article class="panel">
+          <h3>GIT_ENHANCED</h3>
+          <p>GitPython；Diff、Log、Blame 与增强 Git 可视化数据。</p>
+          <div class="tags"><span class="status status--dynamic">可选 Router</span></div>
+        </article>
+        <article class="panel">
+          <h3>FILE_PROCESSING</h3>
+          <p>目录树、编码检测、MIME、Safe Read 与文件 Watch。</p>
+          <div class="tags"><span class="status status--dynamic">可选 Router</span></div>
+        </article>
+        <article class="panel">
+          <h3>BROWSER_AUTOMATION</h3>
+          <p>Playwright：navigate、screenshot、click、type、evaluate、semantic snapshot、journey。</p>
+          <div class="tags"><span class="status status--dynamic">可选 Router</span></div>
+        </article>
+        <article class="panel">
+          <h3>CODE_QUALITY</h3>
+          <p>radon / pygount；Complexity、代码度量与健康检查。</p>
+          <div class="tags"><span class="status status--dynamic">可选 Router</span></div>
+        </article>
+        <article class="panel">
+          <h3>ANALYSIS</h3>
+          <p>libcst / networkx；Diagram、Change Impact、API Endpoints、Code Path、OpenAPI 合并。</p>
+          <div class="tags"><span class="status status--dynamic">可选 Router</span></div>
+        </article>
+        <article class="panel">
+          <h3>HTTP_API</h3>
+          <p>jsonpath-ng / HTTPX；HTTP API Journey 与结果验证。</p>
+          <div class="tags"><span class="status status--dynamic">可选 Router</span></div>
+        </article>
+        <article class="panel">
+          <h3>始终注册</h3>
+          <p>Health · Capability Snapshot · Token Estimation · Tokenizer。</p>
+          <div class="tags"><span class="status status--default">核心 Router</span></div>
+        </article>
+      </div>
+
+      <div class="callout">
+        <strong>边界不变量：</strong>浏览器或 CLI 不直接连接 Sidecar。所有代理请求先经过 Rust 的 access guard、观测与路由，
+        Python 只承担可降级能力，不拥有 Session、Run、授权或核心业务数据库。
+      </div>
+    </section>
+
+    <section class="layer layer--green" aria-labelledby="data-title">
+      <div class="layer-heading">
+        <div>
+          <span class="layer-index">08 · Data, delivery &amp; verification</span>
+          <h2 id="data-title">持久化、证据与可验证交付闭环</h2>
+        </div>
+        <p class="layer-summary">SQLite 是核心事务业务库，但 Snapshot、Blob、配置、记忆、附件、Hook、Replay 与观测仍使用受控文件存储。</p>
+      </div>
+
+      <div class="section-grid section-grid--3">
+        <article class="panel">
+          <h3>SQLite 运行模型</h3>
+          <ul>
+            <li>默认 <code>.zk/data.db</code>，bundled SQLite + Refinery。</li>
+            <li>单 Writer Mutex 串行写；Reader 数按 CPU 核数轮转。</li>
+            <li>同步访问经 <code>spawn_blocking</code>；WAL、foreign keys、5 秒 busy timeout。</li>
+            <li>目录通常 0700；DB/WAL/SHM 通常 0600。</li>
+            <li>25 张业务表；物理可见表另含 <code>refinery_schema_history</code> 与 <code>sqlite_sequence</code>，合计 27。</li>
+          </ul>
+        </article>
+        <article class="panel">
+          <h3>25 张业务表 · 会话/执行</h3>
+          <p><code>sessions · messages · run_envelopes · run_event_log · tasks · agent_checkpoints · file_snapshots · activities · anomaly_events</code></p>
+        </article>
+        <article class="panel">
+          <h3>25 张业务表 · 配置/授权</h3>
+          <p><code>config · project_config · projects · project_context · interaction_requests · permission_grants · websocket_session_binding · auth_tokens · memories</code></p>
+        </article>
+        <article class="panel">
+          <h3>25 张业务表 · 交付/证据</h3>
+          <p><code>run_workbench_bindings · run_acceptance_criteria · evidence_bundles · evidence_items · regression_scripts · artifact_manifests · artifact_entries</code></p>
+        </article>
+        <article class="panel">
+          <h3>数据库一致性边界</h3>
+          <ul>
+            <li>Run、Interaction、Grant 与事件使用事务与 CAS 保持权威。</li>
+            <li>Web、REST、CLI 与工具共享同一 Db 句柄和 Repository。</li>
+            <li>Swarm durable projection 复用 <code>activities</code>，没有独立 Swarm 表。</li>
+          </ul>
+        </article>
+        <article class="panel">
+          <h3>进程内易失状态</h3>
+          <p>Run 映射 · CancellationToken · WS Clients / pending · bounded queues · Agent scheduler · Dialog pending · REPL sessions · MCP/Python process handles。</p>
+          <p class="panel-note">重启后从数据库恢复可恢复投影，或将遗留活动状态标记为 interrupted。</p>
+        </article>
+      </div>
+
+      <div class="side-rail">文件持久化：核心数据库之外的明确边界</div>
+      <div class="data-matrix">
+        <div class="matrix-cell"><strong>用户级</strong><code>~/.zk/MEMORY.md</code><br><code>snapshots/{session}.json</code><br><code>uploads/</code><br><code>access-token</code></div>
+        <div class="matrix-cell"><strong>工作区级</strong><code>.zk/blobs/{sha256}</code><br><code>todos.md</code><br><code>hooks.toml</code><br><code>browser-replay/</code></div>
+        <div class="matrix-cell"><strong>MCP / 调度</strong><code>~/.zk/mcp.json</code><br><code>.zk/mcp.json</code><br><code>mcp-trusted.json</code><br><code>scheduled_tasks.json</code></div>
+        <div class="matrix-cell"><strong>提示 / 观测</strong><code>zhikun.md</code><br><code>zhikun.local.md</code><br><code>observability-events.jsonl</code><br><code>.runtime/*.log</code></div>
+      </div>
+
+      <article class="panel panel--wide" style="margin-top:14px">
+        <h3>可验证交付闭环</h3>
+        <div class="pipeline">
+          <div class="flow-step"><strong>Workbench</strong>任务、结果与交付摘要</div>
+          <div class="flow-step"><strong>Acceptance Criteria</strong>业务 / 技术验收条件</div>
+          <div class="flow-step"><strong>Verification</strong>命令、Journey、回归检查</div>
+          <div class="flow-step"><strong>Evidence Bundle</strong>信号、结果、Blob 与脚本</div>
+          <div class="flow-step"><strong>Artifact Manifest</strong>文件清单、SHA-256、完整性复验</div>
+        </div>
+      </article>
+
+      <div class="section-grid section-grid--3" style="margin-top:14px">
+        <article class="panel">
+          <h3>Simple Workbench</h3>
+          <ul>
+            <li>Task Overview、Milestone Strip、结构化结论、完成项、问题、下一步。</li>
+            <li>Deliverables、验收标准、Pending Actions、Activity Technical Record。</li>
+            <li>当前执行失败时可展示上一次可用交付。</li>
+          </ul>
+        </article>
+        <article class="panel">
+          <h3>APOS Activity</h3>
+          <ul>
+            <li>工具完成后推断 operation、summary、changed files 与 diff。</li>
+            <li>只读安全操作可直接形成 approved 投影；写操作进入检查。</li>
+            <li>Verification signal、risk、status 回写并驱动 Activity Stream。</li>
+          </ul>
+        </article>
+        <article class="panel">
+          <h3>Evidence 与 Artifact</h3>
+          <ul>
+            <li>Evidence 元数据落 SQLite，内容 Blob 落工作区哈希目录。</li>
+            <li>Artifact Manifest 将 Run、交付路径、大小与 SHA-256 绑定。</li>
+            <li>服务端可重新读取本地文件并复验完整性。</li>
+          </ul>
+        </article>
+      </div>
+    </section>
+
+    <section class="layer layer--blue" aria-labelledby="ops-title">
+      <div class="layer-heading">
+        <div>
+          <span class="layer-index">09 · Observability, privacy &amp; operations</span>
+          <h2 id="ops-title">观测、隐私、启动恢复与工程门禁</h2>
+        </div>
+        <p class="layer-summary">结构化日志、指标、Run 事件与工作区 JSONL 分层记录；开发生命周期由 <code>./dev</code> 统一编排。</p>
+      </div>
+
+      <div class="section-grid">
+        <article class="panel">
+          <h3>结构化观测</h3>
+          <ul>
+            <li>Rust tracing JSON，级别由 <code>ZK_LOG / RUST_LOG</code> 控制。</li>
+            <li>进程内 bounded observability recorder + workspace JSONL sink。</li>
+            <li>Run Event Log 负责恢复事实，Activity 负责用户可见技术记录。</li>
+            <li><code>/metrics</code> 暴露轻量 Prometheus 文本。</li>
+          </ul>
+        </article>
+        <article class="panel">
+          <h3>健康与诊断</h3>
+          <ul>
+            <li><code>/api/health</code>、live、ready、auth status、doctor。</li>
+            <li>Python、MCP、Provider、数据库与工作区能力分开报告。</li>
+            <li><code>./dev doctor --deep</code> 验证工具链、端口、Socket 与 Headless Browser。</li>
+          </ul>
+        </article>
+        <article class="panel">
+          <h3>数据与隐私</h3>
+          <ul>
+            <li><code>.env</code>、<code>.zk/data.db</code>、<code>~/.zk</code> 与日志均可能含密钥或项目数据。</li>
+            <li>模型、联网工具、远程 MCP、语音和远程图片会形成外部传输。</li>
+            <li>共享演示凭据不是私人秘密，不用于敏感内容。</li>
+            <li>同一用户权限下的其他进程仍可能读取本地文件。</li>
+          </ul>
+        </article>
+        <article class="panel">
+          <h3>CI 与供应链</h3>
+          <ul>
+            <li>macOS 15：Rust fmt / clippy / test / release。</li>
+            <li>Frontend lint / Vitest / build / audit。</li>
+            <li>Python pytest + branch coverage，门槛 70%。</li>
+            <li>Contract checks、cargo-deny、gitleaks、bootstrap / doctor。</li>
+          </ul>
+        </article>
+      </div>
+
+      <article class="panel panel--wide" style="margin-top:14px">
+        <h3>进程启动、恢复与关闭顺序</h3>
+        <div class="pipeline">
+          <div class="flow-step"><strong>Config</strong>严格解析与 loopback 校验</div>
+          <div class="flow-step"><strong>Runtime</strong>tracing / metrics / 路径迁移</div>
+          <div class="flow-step"><strong>Data</strong>SQLite + Migration + Key 合并</div>
+          <div class="flow-step"><strong>Recover</strong>Task / Swarm / Run 遗留状态</div>
+          <div class="flow-step"><strong>Compose</strong>Tools / Authz / Engine / Agent</div>
+          <div class="flow-step"><strong>Sidecars</strong>Python + MCP + watchers</div>
+          <div class="flow-step"><strong>Serve</strong>Axum 127.0.0.1:8082</div>
+          <div class="flow-step"><strong>Shutdown</strong>取消后台任务 → MCP → Python</div>
+        </div>
+      </article>
+
+      <div class="section-grid section-grid--3" style="margin-top:14px">
+        <article class="panel">
+          <h3>锁定工具链</h3>
+          <p>Rust 1.97.1 · Node 22 / npm 10 · Python 3.11；Cargo.lock、package-lock、requirements.lock 由 bootstrap 严格消费。</p>
+        </article>
+        <article class="panel">
+          <h3>开发生命周期</h3>
+          <p><code>bootstrap → up → status / doctor → test → restart / logs → stop</code></p>
+          <p class="panel-note">进程停止前核对 PID、命令与 Socket 身份，避免误杀其他项目进程。</p>
+        </article>
+        <article class="panel">
+          <h3>当前发布限制</h3>
+          <p>Apple Silicon macOS 15+ · 本地源码开发 Beta · 单用户 · Worktree 默认关闭 · API 仍可能变化。</p>
+        </article>
+      </div>
+    </section>
+
+    <footer class="footer">
+      <strong>zkcode system architecture &amp; capability overview</strong><br>
+      Working tree snapshot · 0821965 + local changes · 2026-08-31 · Asia/Shanghai<br>
+      事实来源：当前源码、配置、迁移、协议枚举、测试与项目文档；本图不改变任何运行时接口或行为。
+    </footer>
+  </main>
+</body>
+</html>

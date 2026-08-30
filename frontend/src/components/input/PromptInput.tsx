@@ -17,7 +17,10 @@ import type { Command, LocalAttachment, SubmitEvent, Message, Attachment } from 
 import { useNotificationStore } from '@/store/notificationStore';
 import CommandPalette from './CommandPalette';
 import FileUpload from './FileUpload';
+import VoiceInputButton from './VoiceInputButton';
 import { FileAutoComplete } from './FileAutoComplete';
+import { useAsrAvailability } from '@/hooks/useAsrAvailability';
+import { useSessionStore } from '@/store/sessionStore';
 import { generateUUID } from '@/utils/uuid';
 
 /** 单张图片附件大小上限：5MB */
@@ -83,6 +86,9 @@ const PromptInput: React.FC<PromptInputProps> = ({
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const historyRef = useRef<string[]>([]);
     const submissionRef = useRef(false);
+    const selectionRef = useRef({ start: 0, end: 0 });
+    const asrAvailable = useAsrAvailability();
+    const sessionId = useSessionStore(state => state.sessionId);
 
     // 图片上传按钮始终可用：后端的智能视觉路由会处理模型适配，
     // 前端不再基于 supportsImages 进行前置禁用，仅保留通用数量上限。
@@ -92,6 +98,39 @@ const PromptInput: React.FC<PromptInputProps> = ({
         () => attachments.filter(a => a.type.startsWith('image/')).length,
         [attachments]
     );
+
+    const captureSelection = useCallback(() => {
+        const textarea = textareaRef.current;
+        if (!textarea) return;
+        selectionRef.current = {
+            start: textarea.selectionStart ?? input.length,
+            end: textarea.selectionEnd ?? textarea.selectionStart ?? input.length,
+        };
+    }, [input.length]);
+
+    const handleTranscript = useCallback((transcript: string) => {
+        setInput(previous => {
+            const start = Math.min(selectionRef.current.start, previous.length);
+            const end = Math.max(start, Math.min(selectionRef.current.end, previous.length));
+            const nextCursor = start + transcript.length;
+            selectionRef.current = { start: nextCursor, end: nextCursor };
+            const next = previous.slice(0, start) + transcript + previous.slice(end);
+            const restoreCursor = () => {
+                const textarea = textareaRef.current;
+                if (!textarea) return;
+                textarea.focus();
+                textarea.setSelectionRange(nextCursor, nextCursor);
+            };
+            if (typeof requestAnimationFrame === 'function') requestAnimationFrame(restoreCursor);
+            else setTimeout(restoreCursor, 0);
+            return next;
+        });
+    }, []);
+
+    const handleSessionTranscript = useCallback((transcript: string) => {
+        if (useSessionStore.getState().sessionId !== sessionId) return;
+        handleTranscript(transcript);
+    }, [handleTranscript, sessionId]);
 
     // Auto-resize textarea height
     useEffect(() => {
@@ -518,6 +557,10 @@ const PromptInput: React.FC<PromptInputProps> = ({
                     onChange={e => {
                         const text = e.target.value;
                         const cursor = e.target.selectionStart || 0;
+                        selectionRef.current = {
+                            start: e.target.selectionStart ?? text.length,
+                            end: e.target.selectionEnd ?? e.target.selectionStart ?? text.length,
+                        };
                         setInput(text);
 
                         // 检测 @ 触发
@@ -535,6 +578,8 @@ const PromptInput: React.FC<PromptInputProps> = ({
                         else setShowCommands(false);
                     }}
                     onKeyDown={handleKeyDown}
+                    onSelect={captureSelection}
+                    onBlur={captureSelection}
                     placeholder={
                         compacting
                             ? '正在压缩上下文，请稍候…'
@@ -562,6 +607,13 @@ const PromptInput: React.FC<PromptInputProps> = ({
                         accept="image/*"
                         disabled={disabled || isSubmitting}
                         title={`上传图片（不支持图片的模型将由视觉模型自动处理，上限 ${maxImages} 张）`}
+                    />
+                )}
+                {asrAvailable && !runActive && !compacting && (
+                    <VoiceInputButton
+                        key={sessionId ?? 'no-session'}
+                        onTranscript={handleSessionTranscript}
+                        disabled={disabled || isSubmitting}
                     />
                 )}
                 <button

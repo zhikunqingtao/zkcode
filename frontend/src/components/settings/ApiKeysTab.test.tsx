@@ -3,6 +3,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiKeysTab } from './ApiKeysTab';
 import { useNotificationStore } from '@/store/notificationStore';
 
+const speechMocks = vi.hoisted(() => ({ invalidate: vi.fn().mockResolvedValue(undefined) }));
+vi.mock('@/store/speechAvailabilityStore', () => ({
+  invalidateSpeechAvailability: speechMocks.invalidate,
+}));
+
 const provider = {
   name: 'dashscope-token-plan',
   label: 'DashScope Token Plan',
@@ -13,6 +18,7 @@ const provider = {
 describe('ApiKeysTab', () => {
   beforeEach(() => {
     useNotificationStore.getState().clearAll();
+    speechMocks.invalidate.mockClear();
   });
 
   afterEach(() => {
@@ -85,6 +91,22 @@ describe('ApiKeysTab', () => {
 
     expect(await screen.findByLabelText('DashScope Token Plan API 密钥')).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('refreshes speech availability after the regular DashScope key changes', async () => {
+    const dashscope = { ...provider, name: 'dashscope', label: 'DashScope' };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ providers: [dashscope] }))
+      .mockResolvedValueOnce(jsonResponse({ providers: [dashscope] }));
+    vi.stubGlobal('fetch', fetchMock);
+    render(<ApiKeysTab />);
+
+    fireEvent.change(await screen.findByLabelText('DashScope API 密钥'), {
+      target: { value: 'new-dashscope-key' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '保存' }));
+
+    await waitFor(() => expect(speechMocks.invalidate).toHaveBeenCalledOnce());
   });
 });
 

@@ -50,6 +50,11 @@ DashScope；只有用户显式设置 `LLM_PROVIDER_OPENAI_BASE_URL` 才会改写
 如果没有配置任何 `LLM_PROVIDER_*_API_KEY`，服务会回退到旧的单 provider
 变量 `ZK_LLM_API_KEY`、`ZK_LLM_BASE_URL` 和 `ZK_DEFAULT_MODEL`。
 
+语音输入与朗读只使用普通 DashScope 凭据（设置项 `dashscope` 或
+`LLM_PROVIDER_DASHSCOPE_API_KEY`），不使用 Token Plan 或旧单 provider 凭据。
+TTS 固定使用 `qwen3-tts-flash` 的 `Cherry` 音色；麦克风录音需要 HTTPS 或 localhost
+安全上下文。
+
 ## 服务与工作区
 
 | 变量 | 支持配置中的默认值 | 说明 |

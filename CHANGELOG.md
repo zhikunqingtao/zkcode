@@ -10,6 +10,8 @@
 
 - 增加全新 Apple Silicon Mac 的一键安装命令：安装受支持工具链与锁定依赖、处理
   本机版本冲突、限时启动全部服务并自动打开浏览器。
+- 增加 GFM 与工作区 Markdown 图片渲染、DashScope ASR/TTS 语音交互。
+- 增加 `qwen3.8-flash`，并将内置 GLM 视觉模型升级为 `glm-5.3-flash`。
 
 ### 变更
 

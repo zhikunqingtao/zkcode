@@ -5,6 +5,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 MODULE_PATH = Path(__file__).parents[1] / "state.py"
@@ -110,6 +111,33 @@ class StateTests(unittest.TestCase):
                 STATE.verify_npm_lock(root),
                 (False, "node_modules/example has a different version"),
             )
+
+    def test_npm_lock_verification_ignores_other_platform_optional_packages(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            STATE.platform, "system", return_value="Darwin"
+        ), mock.patch.object(STATE.platform, "machine", return_value="arm64"):
+            root = Path(directory)
+            current = {"version": "1.0.0", "os": ["darwin"], "cpu": ["arm64"]}
+            source = {
+                "packages": {
+                    "": {},
+                    "node_modules/current": current,
+                    "node_modules/other": {
+                        "version": "1.0.0",
+                        "optional": True,
+                        "os": ["aix"],
+                        "cpu": ["ppc64"],
+                    },
+                }
+            }
+            installed = {"packages": {"node_modules/current": current}}
+            source_path = root / "frontend/package-lock.json"
+            installed_path = root / "frontend/node_modules/.package-lock.json"
+            installed_path.parent.mkdir(parents=True)
+            source_path.write_text(json.dumps(source), encoding="utf-8")
+            installed_path.write_text(json.dumps(installed), encoding="utf-8")
+
+            self.assertEqual(STATE.verify_npm_lock(root), (True, "1 locked packages match"))
 
 
 if __name__ == "__main__":

@@ -15,7 +15,23 @@
 - 多 Agent 协作：子 Agent、Team、只读 Swarm
 - MCP Client/Server、Python UDS sidecar、Playwright 浏览器回放
 - 多 LLM Provider：DashScope、DeepSeek、Moonshot、Zhipu、MiniMax、Anthropic、OpenAI 等
-- 默认模型：`qwen3.8-max`（百炼订阅）
+- 默认模型：`qwen3.8-max`（百炼订阅），内置 `qwen3.8-flash` 和 `glm-5.3-flash`
+- GFM/工作区图片渲染，以及基于 DashScope 的语音输入和助手消息朗读
+
+## 模型、Markdown 与语音
+
+- 聊天正文和 Memory 预览支持 GFM 表格、任务列表、删除线等语法。
+- Markdown 图片可以使用 HTTP(S)、安全的 raster `data:image`、Blob URL，以及工作区内的
+  绝对或相对路径。本地路径通过 Session 文件预览接口读取，不会直接暴露给浏览器。
+- `qwen3.8-flash` 支持思考、图片和工具调用；内置 GLM 视觉模型已更新为
+  `glm-5.3-flash`。旧的 `glm-5v-turbo` ID 不提供兼容别名，升级后的旧 Session 需要手动选择新模型。
+- 语音输入使用 `qwen3-asr-flash`，录音最长 120 秒；助手消息完成后可使用
+  `qwen3-tts-flash`、`Cherry` 音色朗读可见正文。
+- ASR/TTS 只使用普通 DashScope 密钥（设置项 `dashscope` 或
+  `LLM_PROVIDER_DASHSCOPE_API_KEY`），不使用 Token Plan 或旧 `ZK_LLM_API_KEY`。在
+  **设置 → API Keys** 保存或删除密钥后，语音按钮会立即刷新。
+- 麦克风要求 localhost 或 HTTPS 安全上下文。远程 Markdown 图片和经校验的 DashScope
+  HTTPS 音频由浏览器直连第三方，相关隐私边界见 [数据与隐私](docs/data-and-privacy.md)。
 
 ## 技术栈
 

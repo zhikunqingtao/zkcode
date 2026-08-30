@@ -92,7 +92,32 @@ def verify_npm_lock(root: Path) -> tuple[bool, str]:
     installed_packages = installed.get("packages")
     if not isinstance(source_packages, dict) or not isinstance(installed_packages, dict):
         return False, "npm lock is missing a packages object"
-    expected_names = set(source_packages) - {""}
+
+    current_os = {"windows": "win32"}.get(platform.system().lower(), platform.system().lower())
+    current_cpu = {
+        "aarch64": "arm64",
+        "amd64": "x64",
+        "x86_64": "x64",
+        "i386": "ia32",
+        "i686": "ia32",
+    }.get(platform.machine().lower(), platform.machine().lower())
+
+    def matches_platform(values: object, current: str) -> bool:
+        if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
+            return True
+        allowed = [value for value in values if not value.startswith("!")]
+        return f"!{current}" not in values and (not allowed or current in allowed)
+
+    expected_names: set[str] = set()
+    for package, metadata in source_packages.items():
+        if package == "":
+            continue
+        if not isinstance(metadata, dict):
+            return False, f"invalid npm package entry: {package}"
+        if matches_platform(metadata.get("os"), current_os) and matches_platform(
+            metadata.get("cpu"), current_cpu
+        ):
+            expected_names.add(package)
     installed_names = set(installed_packages)
     if expected_names != installed_names:
         missing = sorted(expected_names - installed_names)

@@ -231,7 +231,7 @@ fn engine_with_vision_registry(
 }
 
 #[tokio::test]
-async fn image_request_routes_glm_5_3_to_configured_glm_5v_for_this_run() {
+async fn image_request_routes_glm_5_3_to_configured_glm_5_3_flash_for_this_run() {
     let db = Db::open_in_memory().expect("in-memory db");
     let session = db
         .create_session("glm-5.3", "/tmp")
@@ -245,13 +245,13 @@ async fn image_request_routes_glm_5_3_to_configured_glm_5v_for_this_run() {
     ])]));
     let sink = Arc::new(RecordingSink::default());
     let engine =
-        engine_with_vision_registry(db.clone(), &provider, &sink, &["glm-5.3", "glm-5v-turbo"]);
+        engine_with_vision_registry(db.clone(), &provider, &sink, &["glm-5.3", "glm-5.3-flash"]);
 
     run_with_url_images(&engine, &sink, &session.id, 1, "session_list_updated").await;
 
     assert_eq!(provider.request_count(), 1);
     let request = provider.request_at(0);
-    assert_eq!(request.model, "glm-5v-turbo");
+    assert_eq!(request.model, "glm-5.3-flash");
     assert_eq!(
         request.messages.last().expect("user message").images.len(),
         1
@@ -260,16 +260,16 @@ async fn image_request_routes_glm_5_3_to_configured_glm_5v_for_this_run() {
         request
             .system_text()
             .expect("system prompt")
-            .contains("你由模型 glm-5v-turbo 驱动")
+            .contains("你由模型 glm-5.3-flash 驱动")
     );
     assert_eq!(sink.kinds().first(), Some(&"model_routed"));
     let routed = sink.json_at(0);
     assert_eq!(routed["originalModel"], "glm-5.3");
-    assert_eq!(routed["routedModel"], "glm-5v-turbo");
-    assert_eq!(routed["routedModelName"], "GLM-5V-Turbo");
+    assert_eq!(routed["routedModel"], "glm-5.3-flash");
+    assert_eq!(routed["routedModelName"], "GLM-5.3-Flash");
     assert_eq!(
         routed["reason"],
-        "当前模型不支持图片，已自动切换到 GLM-5V-Turbo"
+        "当前模型不支持图片，已自动切换到 GLM-5.3-Flash"
     );
     let persisted = db
         .get_session(&session.id)
@@ -322,7 +322,7 @@ async fn image_request_without_configured_vision_model_fails_before_provider() {
 async fn native_vision_model_keeps_model_and_emits_no_route_event() {
     let db = Db::open_in_memory().expect("in-memory db");
     let session = db
-        .create_session("glm-5v-turbo", "/tmp")
+        .create_session("glm-5.3-flash", "/tmp")
         .await
         .expect("create session");
     let provider = Arc::new(MockProvider::new(vec![events(vec![
@@ -332,12 +332,65 @@ async fn native_vision_model_keeps_model_and_emits_no_route_event() {
         },
     ])]));
     let sink = Arc::new(RecordingSink::default());
-    let engine = engine_with_vision_registry(db, &provider, &sink, &["glm-5v-turbo"]);
+    let engine = engine_with_vision_registry(db, &provider, &sink, &["glm-5.3-flash"]);
 
     run_with_url_images(&engine, &sink, &session.id, 1, "session_list_updated").await;
 
-    assert_eq!(provider.request_at(0).model, "glm-5v-turbo");
+    assert_eq!(provider.request_at(0).model, "glm-5.3-flash");
     assert!(!sink.kinds().contains(&"model_routed"));
+}
+
+#[tokio::test]
+async fn qwen_38_flash_accepts_the_frontend_twenty_image_limit() {
+    let db = Db::open_in_memory().expect("in-memory db");
+    let session = db
+        .create_session("qwen3.8-flash", "/tmp")
+        .await
+        .expect("create session");
+    let provider = Arc::new(MockProvider::new(vec![events(vec![
+        ProviderEvent::Finish {
+            finish_reason: FinishReason::EndTurn,
+            usage: None,
+        },
+    ])]));
+    let sink = Arc::new(RecordingSink::default());
+    let engine = engine_with_vision_registry(db, &provider, &sink, &["qwen3.8-flash"]);
+
+    run_with_url_images(&engine, &sink, &session.id, 20, "session_list_updated").await;
+
+    assert_eq!(provider.request_count(), 1);
+    assert_eq!(
+        provider
+            .request_at(0)
+            .messages
+            .last()
+            .expect("user message")
+            .images
+            .len(),
+        20
+    );
+}
+
+#[tokio::test]
+async fn qwen_38_flash_rejects_the_twenty_first_image_before_provider_call() {
+    let db = Db::open_in_memory().expect("in-memory db");
+    let session = db
+        .create_session("qwen3.8-flash", "/tmp")
+        .await
+        .expect("create session");
+    let provider = Arc::new(MockProvider::new(Vec::new()));
+    let sink = Arc::new(RecordingSink::default());
+    let engine = engine_with_vision_registry(db, &provider, &sink, &["qwen3.8-flash"]);
+
+    run_with_url_images(&engine, &sink, &session.id, 21, "error").await;
+
+    assert_eq!(provider.request_count(), 0);
+    assert_eq!(sink.kinds(), vec!["error"]);
+    assert_eq!(sink.json_at(0)["code"], "ATTACHMENT_COUNT_EXCEEDED");
+    assert_eq!(
+        sink.json_at(0)["message"],
+        "Model qwen3.8-flash accepts at most 20 images"
+    );
 }
 
 #[tokio::test]
@@ -349,17 +402,17 @@ async fn routed_model_image_limit_is_enforced_before_event_or_provider_call() {
         .expect("create session");
     let provider = Arc::new(MockProvider::new(Vec::new()));
     let sink = Arc::new(RecordingSink::default());
-    let engine = engine_with_vision_registry(db, &provider, &sink, &["glm-5.3", "glm-5v-turbo"]);
+    let engine = engine_with_vision_registry(db, &provider, &sink, &["glm-5.3", "glm-5.3-flash"]);
 
-    // GLM-5.3 自身 max_images=0；路由后的 GLM-5V-Turbo max_images=150。
-    run_with_url_images(&engine, &sink, &session.id, 151, "error").await;
+    // GLM-5.3 自身 max_images=0；路由后的 GLM-5.3-Flash max_images=50。
+    run_with_url_images(&engine, &sink, &session.id, 51, "error").await;
 
     assert_eq!(provider.request_count(), 0);
     assert_eq!(sink.kinds(), vec!["error"]);
     assert_eq!(sink.json_at(0)["code"], "ATTACHMENT_COUNT_EXCEEDED");
     assert_eq!(
         sink.json_at(0)["message"],
-        "Model glm-5v-turbo accepts at most 150 images"
+        "Model glm-5.3-flash accepts at most 50 images"
     );
 }
 

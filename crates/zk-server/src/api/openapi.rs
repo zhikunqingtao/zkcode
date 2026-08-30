@@ -12,7 +12,7 @@ use utoipa::OpenApi;
 
 use crate::api::{
     activity, attachment, config, doctor, file, grant, history, interaction, mcp, mcp_capability,
-    memory, models, project, run, session, skill, system, tool,
+    memory, models, project, run, session, skill, speech, system, tool,
 };
 
 /// Phase 1 端点聚合文档（title/version 取 crate 元数据）。
@@ -65,6 +65,10 @@ use crate::api::{
         activity::get_activities,
         attachment::upload,
         attachment::download,
+        speech::asr_status,
+        speech::recognize,
+        speech::tts_status,
+        speech::synthesize,
         mcp::list_servers,
         mcp::add_server,
         mcp::delete_server,
@@ -107,7 +111,7 @@ pub(crate) async fn openapi_json() -> Json<utoipa::openapi::OpenApi> {
 mod tests {
     use super::*;
 
-    /// 聚合文档含全部 27 条业务路径（逐路径互锁在集成测试，
+    /// 聚合文档含全部 62 条业务路径（逐路径互锁在集成测试，
     /// 此处锁 paths 非空与关键八域在位）。
     #[test]
     fn api_doc_aggregates_paths() {
@@ -141,6 +145,10 @@ mod tests {
         assert!(paths.contains_key("/api/sessions/{sessionId}/history/snapshots"));
         assert!(paths.contains_key("/api/sessions/{sessionId}/history/rewind"));
         assert!(paths.contains_key("/api/sessions/{sessionId}/history/diff"));
-        assert_eq!(paths.len(), 58);
+        assert!(paths.contains_key("/api/asr/status"));
+        assert!(paths.contains_key("/api/asr/recognize"));
+        assert!(paths.contains_key("/api/tts/status"));
+        assert!(paths.contains_key("/api/tts/synthesize"));
+        assert_eq!(paths.len(), 62);
     }
 }

@@ -213,8 +213,8 @@ pub(crate) async fn access_guard(
     ApiError::unauthorized().into_response()
 }
 
-/// CSRF/content-type boundary for state-changing MCP routes and the WebSocket
-/// upgrade endpoint.
+/// CSRF/content-type boundary for state-changing network-backed routes and the
+/// WebSocket upgrade endpoint.
 ///
 /// Loopback alone is not sufficient here: a hostile web page can send a
 /// browser request to `127.0.0.1`.  Every MCP mutation and WebSocket upgrade
@@ -253,15 +253,25 @@ pub(crate) async fn mcp_mutation_guard(
                 .and_then(|value| value.to_str().ok())
                 .is_some_and(|value| value == "same-origin");
     if !trusted_origin && !trusted_token && !trusted_same_origin_fetch {
+        let speech_request = is_speech_mutation(request.method(), request.uri().path());
         tracing::warn!(
             path = request.uri().path(),
-            "MCP request rejected: trusted Origin or Bearer token required"
+            "network-backed request rejected: trusted Origin or Bearer token required"
         );
         return ApiError {
             status: StatusCode::FORBIDDEN,
-            code: "MCP_REQUEST_ORIGIN_DENIED".to_owned(),
-            message: "MCP network operations require a trusted local Origin or Bearer access token"
-                .to_owned(),
+            code: if speech_request {
+                "SPEECH_REQUEST_ORIGIN_DENIED"
+            } else {
+                "MCP_REQUEST_ORIGIN_DENIED"
+            }
+            .to_owned(),
+            message: if speech_request {
+                "Speech operations require a trusted local Origin or Bearer access token"
+            } else {
+                "MCP network operations require a trusted local Origin or Bearer access token"
+            }
+            .to_owned(),
         }
         .into_response();
     }
@@ -274,10 +284,21 @@ pub(crate) async fn mcp_mutation_guard(
         && mcp_route_requires_json(request.method(), request.uri().path())
         && !has_json_content_type(request.headers())
     {
+        let speech_request = is_speech_mutation(request.method(), request.uri().path());
         return ApiError {
             status: StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            code: "MCP_CONTENT_TYPE_UNSUPPORTED".to_owned(),
-            message: "MCP request Content-Type must be application/json".to_owned(),
+            code: if speech_request {
+                "SPEECH_CONTENT_TYPE_UNSUPPORTED"
+            } else {
+                "MCP_CONTENT_TYPE_UNSUPPORTED"
+            }
+            .to_owned(),
+            message: if speech_request {
+                "Speech request Content-Type must be application/json"
+            } else {
+                "MCP request Content-Type must be application/json"
+            }
+            .to_owned(),
         }
         .into_response();
     }
@@ -287,6 +308,7 @@ pub(crate) async fn mcp_mutation_guard(
 fn is_mcp_protected_request(method: &Method, path: &str) -> bool {
     (path == "/ws" && *method == Method::GET)
         || (path == "/api/llm-keys" && *method == Method::PUT)
+        || is_speech_mutation(method, path)
         || path == "/mcp"
         || is_network_backed_mcp_get(method, path)
         || (path.starts_with("/api/mcp/")
@@ -294,6 +316,10 @@ fn is_mcp_protected_request(method: &Method, path: &str) -> bool {
                 || method == Method::PUT
                 || method == Method::PATCH
                 || method == Method::DELETE))
+}
+
+fn is_speech_mutation(method: &Method, path: &str) -> bool {
+    *method == Method::POST && matches!(path, "/api/asr/recognize" | "/api/tts/synthesize")
 }
 
 fn is_network_backed_mcp_get(method: &Method, path: &str) -> bool {
@@ -306,6 +332,7 @@ fn is_network_backed_mcp_get(method: &Method, path: &str) -> bool {
 
 fn mcp_route_requires_json(method: &Method, path: &str) -> bool {
     (path == "/api/llm-keys" && *method == Method::PUT)
+        || (path == "/api/tts/synthesize" && *method == Method::POST)
         || path == "/mcp"
         || (*method == Method::POST
             && matches!(

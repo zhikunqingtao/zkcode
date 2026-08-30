@@ -1,5 +1,8 @@
 # Phase 0 基线（旧系统实采）
 
+> `samples/GET_api-models.json` 在保留原采样元数据的同时，已按 2026-08-31
+> 模型迁移更新为当前声明式契约；其余文件仍是原始实采证据。
+
 ## 采样信息
 
 - **采样时间**：2026-08-15 19:05–19:08（UTC+8）
@@ -25,7 +28,7 @@
 | /api/doctor | GET | 200 | GET_api-doctor.json |
 | /api/auth/status | GET | 200 | GET_api-auth-status.json |
 | /api/auth/token | GET | 404 | GET_api-auth-token.json（localhost 模式预期） |
-| /api/models | GET | 200 | GET_api-models.json（15 模型，default=qwen3.7-max） |
+| /api/models | GET | 200 | GET_api-models.json（迁移后契约：16 模型；原采样 default=qwen3.7-max） |
 | /api/config | GET | 200 | GET_api-config.json |
 | /api/config | PUT | 200 | PUT_api-config.json（原值幂等写回） |
 | /api/config/project | GET | 200 | GET_api-config-project.json |

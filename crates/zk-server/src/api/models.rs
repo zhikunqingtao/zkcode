@@ -8,7 +8,7 @@
 //! 动态聚合——注册表非空时按其 model → provider 索引序生成条目（命中静态目录
 //! 取权威能力值，未收录的新模型走 [`dynamic_info`] 兜底元数据）；注册表为空
 //!（Phase 1 单 provider 回退 / 未配任何 `LLM_PROVIDER_*` key）时退化为声明式
-//! 静态目录（样例 15 模型逐条照抄，能力值与旧 `ModelRegistry.BUILTIN_MODELS`
+//! 静态目录（样例 16 模型逐条照抄，能力值与 `ModelRegistry.BUILTIN_MODELS`
 //! 交叉核实一致），保住既有响应契约。`defaultModel` 恒取运行配置
 //! `ZK_DEFAULT_MODEL`（与创建会话共用同一配置源，对齐旧
 //! `providerRegistry.getDefaultModel()` 语义）。响应形状（models 数组 +
@@ -93,7 +93,7 @@ fn caps(
     }
 }
 
-/// Phase 1 静态模型目录（`GET_api-models.json` 样例 15 条逐值照抄，顺序同；
+/// Phase 1 静态模型目录（`GET_api-models.json` 样例 16 条逐值照抄，顺序同；
 /// 数据表函数，行数上限豁免）。
 #[allow(clippy::too_many_lines)]
 fn catalog() -> Vec<ModelInfo> {
@@ -136,6 +136,19 @@ fn catalog() -> Vec<ModelInfo> {
             true,
             0.009,
             0.054,
+        ),
+        caps(
+            "qwen3.8-flash",
+            "Qwen 3.8 Flash（百炼）",
+            131_072,
+            1_000_000,
+            true,
+            true,
+            true,
+            20,
+            true,
+            0.0,
+            0.0,
         ),
         caps(
             "deepseek-v4-pro",
@@ -196,17 +209,17 @@ fn catalog() -> Vec<ModelInfo> {
             "glm-5.3", "GLM-5.3", 131_072, 1_048_576, true, true, false, 0, true, 0.001, 0.001,
         ),
         caps(
-            "glm-5v-turbo",
-            "GLM-5V-Turbo",
+            "glm-5.3-flash",
+            "GLM-5.3-Flash",
             131_072,
-            204_800,
+            1_048_576,
             true,
             true,
             true,
-            150,
+            50,
             true,
-            0.0012,
-            0.004,
+            0.00015,
+            0.0005,
         ),
         caps(
             "MiniMax-M3",
@@ -295,7 +308,7 @@ fn info_for(id: &str) -> ModelInfo {
 
 /// `GET /api/models` 的有效模型清单（2.7）：注册表非空则按其聚合模型序动态
 /// 生成条目；注册表为空（Phase 1 单 provider 回退 / 未配任何 provider key）则
-/// 退化为声明式静态目录（15 条基线），保住既有响应契约。
+/// 退化为声明式静态目录（16 条基线），保住既有响应契约。
 fn effective_models(state: &AppState) -> Vec<ModelInfo> {
     let registry = state.providers.load();
     let registry_models = registry.models();
@@ -344,13 +357,21 @@ pub(crate) async fn list_models(
 mod tests {
     use super::*;
 
-    /// 目录 15 条、ID 唯一、序列化键形状（camelCase `costPer1kInput`）。
+    /// 目录 16 条、ID 唯一、序列化键形状（camelCase `costPer1kInput`）。
     #[test]
     fn catalog_size_and_wire_shape() {
         let models = catalog();
-        assert_eq!(models.len(), 15);
+        assert_eq!(models.len(), 16);
         let ids: std::collections::HashSet<&str> = models.iter().map(|m| m.id.as_str()).collect();
-        assert_eq!(ids.len(), 15);
+        assert_eq!(ids.len(), 16);
+        assert_eq!(
+            models
+                .iter()
+                .find(|model| model.id == "qwen3.8-flash")
+                .expect("qwen3.8-flash catalog entry")
+                .max_images,
+            20
+        );
         let first = serde_json::to_value(&models[0]).expect("json");
         let mut keys: Vec<&str> = first
             .as_object()

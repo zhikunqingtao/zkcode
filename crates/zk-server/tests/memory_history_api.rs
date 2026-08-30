@@ -492,7 +492,7 @@ async fn memory_and_history_reject_remote_peer() {
 }
 
 /// `OpenAPI` 文档收录记忆 3 路径与文件历史 3 路径（与 `api::openapi` 单测的
-/// 58 条计数互锁）。
+/// 62 条计数互锁）。
 #[tokio::test]
 async fn openapi_document_lists_memory_and_history_paths() {
     let (mut router, _db) = app_with_db();
