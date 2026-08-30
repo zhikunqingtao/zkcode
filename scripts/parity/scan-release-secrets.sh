@@ -31,5 +31,8 @@ mkdir -p "$SCAN_DIR/configuration/bootstrap"
 cp -p "$ROOT_DIR/configuration/bootstrap/demo-credentials.db" \
   "$SCAN_DIR/configuration/bootstrap/demo-credentials.db"
 
-cd "$ROOT_DIR"
-gitleaks dir "$SCAN_DIR" --redact --config "$ROOT_DIR/.gitleaks-local.toml"
+# Scan from inside the candidate so allowlist rules match publication-relative
+# paths. This also keeps a caller-provided TMPDIR under `.runtime/` from making
+# every candidate path look runtime-only and therefore allowlisted.
+cd "$SCAN_DIR"
+gitleaks dir . --redact --config "$ROOT_DIR/.gitleaks-local.toml"

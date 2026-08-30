@@ -1,0 +1,5 @@
+# Build dependencies for the editable zkcode-python-service installation.
+# Keep this file version-pinned and install it before using
+# `pip --no-build-isolation -e .`.
+setuptools==79.0.1
+wheel==0.48.0

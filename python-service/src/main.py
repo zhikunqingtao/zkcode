@@ -2,7 +2,7 @@
 zkcode — Python capability service
 FastAPI 应用 + 动态能力域路由注册
 
-v1.15.0: 能力域动态探测 + 按需加载路由
+能力域动态探测 + 按需加载路由；服务版本从包元数据读取。
 """
 
 import asyncio
@@ -13,6 +13,7 @@ import re
 import time
 import uuid
 from contextlib import asynccontextmanager
+from importlib.metadata import PackageNotFoundError, version as package_version
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -25,6 +26,12 @@ from capabilities import (
 
 logger = logging.getLogger(__name__)
 _SAFE_REQUEST_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+try:
+    SERVICE_VERSION = package_version("zkcode-python-service")
+except PackageNotFoundError:
+    # Source-only import before editable installation. Keep this aligned with
+    # pyproject.toml; the supported ./dev flow installs metadata first.
+    SERVICE_VERSION = "0.1.0"
 
 # 路由模块 → (prefix, tags) 映射
 ROUTER_PREFIX_MAP = {
@@ -175,7 +182,7 @@ async def health():
     return {
         "status": "ok",
         "service": "zkcode-python",
-        "version": "1.15.0",
+        "version": SERVICE_VERSION,
     }
 
 

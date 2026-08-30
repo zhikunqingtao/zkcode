@@ -6,4 +6,5 @@ ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 zk_use_macos_toolchain
 
 cd "$ROOT_DIR/frontend"
-exec "$ROOT_DIR/frontend/node_modules/.bin/vite" --host 127.0.0.1 --port 5273
+export VITE_API_URL=${ZK_DEV_BACKEND_URL:-http://127.0.0.1:8082}
+exec "$ROOT_DIR/frontend/node_modules/.bin/vite" --host 127.0.0.1 --port 5273 --strictPort

@@ -17,9 +17,11 @@ zk_use_macos_toolchain() {
 
     # Apple Silicon is the supported platform. The /usr/local fallbacks make
     # diagnostics clearer on older Homebrew layouts without changing support.
-    zk_prepend_path "/usr/local/opt/python@3.11/bin"
-    zk_prepend_path "/opt/homebrew/opt/python@3.11/bin"
-    zk_prepend_path "/usr/local/opt/node@22/bin"
-    zk_prepend_path "/opt/homebrew/opt/node@22/bin"
+    ZK_ENV_PYTHON_FORMULA=${ZK_DEV_PYTHON_FORMULA:-python@3.11}
+    ZK_ENV_NODE_FORMULA=${ZK_DEV_NODE_FORMULA:-node@22}
+    zk_prepend_path "/usr/local/opt/$ZK_ENV_PYTHON_FORMULA/bin"
+    zk_prepend_path "/opt/homebrew/opt/$ZK_ENV_PYTHON_FORMULA/bin"
+    zk_prepend_path "/usr/local/opt/$ZK_ENV_NODE_FORMULA/bin"
+    zk_prepend_path "/opt/homebrew/opt/$ZK_ENV_NODE_FORMULA/bin"
     export PATH
 }

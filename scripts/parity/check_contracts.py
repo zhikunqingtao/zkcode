@@ -65,6 +65,33 @@ def toml_section_version(path: Path, section: str) -> str:
     return version_match.group(1)
 
 
+def flat_toml_values(path: Path) -> dict[str, str | int]:
+    values: dict[str, str | int] = {}
+    for line_number, raw_line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        match = re.fullmatch(r'([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:"([^"]*)"|(\d+))', line)
+        if match is None:
+            fail(f"unsupported flat TOML line in {path.relative_to(ROOT)}:{line_number}")
+        key, string_value, integer_value = match.groups()
+        if key in values:
+            fail(f"duplicate TOML key in {path.relative_to(ROOT)}: {key}")
+        values[key] = string_value if string_value is not None else int(integer_value)
+    return values
+
+
+def toml_quoted_value(path: Path, key: str) -> str:
+    matches = re.findall(
+        rf'^{re.escape(key)}\s*=\s*"([^"]+)"\s*$',
+        path.read_text(encoding="utf-8"),
+        re.MULTILINE,
+    )
+    if len(matches) != 1:
+        fail(f"expected one quoted {key} in {path.relative_to(ROOT)}")
+    return matches[0]
+
+
 def check_release_metadata() -> None:
     cargo_version = toml_section_version(ROOT / "Cargo.toml", "workspace.package")
     frontend = json.loads((ROOT / "frontend" / "package.json").read_text(encoding="utf-8"))
@@ -92,6 +119,8 @@ def check_supported_env() -> None:
         "ZK_AUTH_MODE": "localhost",
         "ZK_LOCAL_PICKER_ENABLED": "true",
         "ZK_PYTHON_ENABLED": "true",
+        "ZK_PYTHON_UDS": ".runtime/python.sock",
+        "ZK_DEV_ALLOW_DEMO_CREDENTIAL": "0",
         "ZK_AGENT_ENABLED": "true",
         "ZK_AGENT_WRITE_ENABLED": "true",
         "ZK_SWARM_ENABLED": "true",
@@ -114,46 +143,153 @@ def check_supported_env() -> None:
     if not registry.is_file():
         fail(f"MCP registry is missing: {registry.relative_to(ROOT)}")
 
-    setup_script = (ROOT / "scripts" / "setup-python-macos.sh").read_text(encoding="utf-8")
-    if '"$VENV_PYTHON" -m playwright install chromium' not in setup_script:
-        fail("macOS setup does not install Playwright Chromium")
+    sync_script = (ROOT / "scripts" / "dev" / "sync.sh").read_text(encoding="utf-8")
+    if "playwright install --only-shell chromium" not in sync_script:
+        fail("source bootstrap does not install the locked Playwright Headless Shell")
     ci_workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-    if "python -m playwright install chromium" not in ci_workflow:
-        fail("macOS CI does not install Playwright Chromium")
+    if "python -m playwright install --only-shell chromium" not in ci_workflow:
+        fail("macOS CI does not install the locked Playwright Headless Shell")
 
     installer_path = ROOT / "install-zkcode.command"
     if not installer_path.is_file() or not os.access(installer_path, os.X_OK):
         fail("executable macOS one-command installer is missing")
     installer = installer_path.read_text(encoding="utf-8")
     required_installer_markers = {
-        "official Homebrew installer": "https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh",
-        "official rustup installer": "https://sh.rustup.rs",
-        "bounded execution": "run_bounded",
-        "network connection timeout": "--connect-timeout",
-        "locked project setup": '"$ROOT_DIR/scripts/setup-macos.sh"',
-        "service startup": '"$ROOT_DIR/start.sh"',
-        "browser opening": '/usr/bin/open "$FRONTEND_URL"',
-        "bounded administrator authorization": 'run_bounded 300 "administrator authorization"',
-        "native Apple Silicon Homebrew": '[ -x /opt/homebrew/bin/brew ]',
+        "unified source bootstrap": '"$ROOT_DIR/dev" bootstrap --start',
     }
     missing_installer_markers = [
         label for label, marker in required_installer_markers.items() if marker not in installer
     ]
     if missing_installer_markers:
         fail(f"macOS one-command installer is incomplete: {missing_installer_markers}")
+    dev_path = ROOT / "dev"
+    if not dev_path.is_file() or not os.access(dev_path, os.X_OK):
+        fail("executable ./dev source bootstrap is missing")
+    toolchains = (ROOT / "scripts" / "dev" / "toolchains-macos.sh").read_text(
+        encoding="utf-8"
+    )
+    for marker in (
+        "https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh",
+        "https://sh.rustup.rs",
+        "dev_load_toolchain_config",
+        "ZK_DEV_NODE_FORMULA",
+        "ZK_DEV_PYTHON_FORMULA",
+        "dev_run_bounded",
+        "dev_homebrew_authorize_sudo",
+        "dev_sudo -n -l mkdir",
+        'dev_run_bounded 300 "sudo authorization"',
+        "NONINTERACTIVE=1",
+        "DEV_HOMEBREW_CREATED_SUDO_TICKET",
+    ):
+        if marker not in toolchains:
+            fail(f"source toolchain resolver is missing marker: {marker}")
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    if "./install-zkcode.command" not in readme:
-        fail("README does not document the macOS one-command installer")
-    if "./stop.sh\n./start.sh" not in readme:
-        fail("README does not explain how to reload newly configured LLM credentials")
+    for marker, message in (
+        (
+            "git clone https://github.com/zhikunqingtao/zkcode.git",
+            "README does not document Git acquisition",
+        ),
+        ("Download ZIP", "README does not document the no-Git ZIP fallback"),
+        ("./dev bootstrap --start", "README does not document the source bootstrap"),
+        ("./dev doctor --deep", "README does not document deep first-run verification"),
+        ("sudo ./dev", "README does not warn against running the project as root"),
+        ("./dev restart", "README does not explain how to reload newly configured LLM credentials"),
+        ("docs/troubleshooting.md", "README does not link first-run troubleshooting"),
+    ):
+        if marker not in readme:
+            fail(message)
+    backend_launcher = (ROOT / "scripts" / "run-backend-macos.sh").read_text(
+        encoding="utf-8"
+    )
+    if (
+        "--canonical-zero-one ZK_DEV_ALLOW_DEMO_CREDENTIAL=0"
+        not in backend_launcher
+    ):
+        fail("backend launcher does not enforce a canonical demo-credential gate")
+    if "demo-credential-disabled" in backend_launcher:
+        fail("backend launcher still bypasses demo credentials with a fake seed path")
+    server_config = (ROOT / "crates" / "zk-server" / "src" / "config.rs").read_text(
+        encoding="utf-8"
+    )
+    if 'parse_zero_one_env("ZK_DEV_ALLOW_DEMO_CREDENTIAL")' not in server_config:
+        fail("server does not enforce the canonical 0/1 demo-credential gate")
     start_script = (ROOT / "start.sh").read_text(encoding="utf-8")
-    if "scripts/spawn-detached.py" not in start_script:
-        fail("macOS services are not detached from the installation terminal")
+    if '"$ROOT_DIR/dev" up --no-open' not in start_script:
+        fail("legacy start.sh does not forward to ./dev")
+    lifecycle = (ROOT / "scripts" / "dev" / "lifecycle.sh").read_text(encoding="utf-8")
+    if "scripts/spawn-detached.py" not in lifecycle:
+        fail("source lifecycle does not detach services from the terminal")
     detached_spawner = (ROOT / "scripts" / "spawn-detached.py").read_text(encoding="utf-8")
     if "start_new_session=True" not in detached_spawner or "subprocess.Popen" not in detached_spawner:
         fail("macOS service spawner does not create an independent process session")
-    if 'subsystems"]["python"]["status"] == "UP"' not in start_script:
-        fail("macOS startup does not require a healthy Python sidecar")
+    for marker, message in (
+        ("DEV_HEALTH_EXPECTED_PYTHON_STATUS=UP", "enabled Python must require UP"),
+        (
+            "DEV_HEALTH_EXPECTED_PYTHON_STATUS=DISABLED",
+            "disabled Python must require DISABLED",
+        ),
+        (
+            'data["subsystems"]["python"]["status"] == sys.argv[1]',
+            "Python subsystem health must be parsed from JSON",
+        ),
+    ):
+        if marker not in lifecycle:
+            fail(f"source lifecycle contract is incomplete: {message}")
+
+
+def check_source_toolchain_policy() -> None:
+    policy_path = ROOT / "configuration" / "dev-toolchain.toml"
+    policy = flat_toml_values(policy_path)
+    required = {
+        "schema_version",
+        "platform",
+        "arch",
+        "minimum_macos",
+        "rust",
+        "node",
+        "npm",
+        "python",
+    }
+    if policy.get("schema_version") != 1 or not required.issubset(policy):
+        fail("source toolchain policy is missing required schema 1 fields")
+
+    if toml_quoted_value(ROOT / "rust-toolchain.toml", "channel") != policy["rust"]:
+        fail("Rust differs between dev-toolchain.toml and rust-toolchain.toml")
+
+    def lower_major(constraint: str) -> str:
+        match = re.fullmatch(r">=(\d+)(?:\.\d+){1,2},<\d+(?:\.\d+){1,2}", constraint)
+        if match is None:
+            fail(f"unsupported toolchain range: {constraint}")
+        return match.group(1)
+
+    python_match = re.fullmatch(
+        r">=(\d+\.\d+)\.\d+,<\d+\.\d+\.\d+", policy["python"]
+    )
+    if python_match is None:
+        fail(f"unsupported Python toolchain range: {policy['python']}")
+
+    ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    expected_ci_markers = (
+        f"dtolnay/rust-toolchain@{policy['rust']}",
+        f"node-version: '{lower_major(policy['node'])}'",
+        f"python-version: '{python_match.group(1)}'",
+        "run: ./dev sync --build",
+        "run: ./dev doctor --deep --json",
+        "PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.runtime/playwright",
+    )
+    for marker in expected_ci_markers:
+        if marker not in ci:
+            fail(f"CI is not aligned with source toolchain policy: missing {marker}")
+    real_smoke = (ROOT / ".github/workflows/real-smoke.yml").read_text(encoding="utf-8")
+    if f"dtolnay/rust-toolchain@{policy['rust']}" not in real_smoke:
+        fail("real-smoke Rust toolchain differs from source toolchain policy")
+
+    inspect_script = (ROOT / "scripts/dev/inspect.py").read_text(encoding="utf-8")
+    if "load_toolchain_policy(root)" not in inspect_script:
+        fail("doctor does not load configuration/dev-toolchain.toml")
+    main_script = (ROOT / "scripts/dev/main.sh").read_text(encoding="utf-8")
+    if 'PLAYWRIGHT_BROWSERS_PATH="$ROOT_DIR/.runtime/playwright"' not in main_script:
+        fail("source tests do not use the repository-local Playwright runtime")
 
 
 def check_local_markdown_links() -> None:
@@ -188,6 +324,7 @@ def check_local_markdown_links() -> None:
 def main() -> None:
     check_release_metadata()
     check_supported_env()
+    check_source_toolchain_policy()
     check_local_markdown_links()
 
     rest = load("rest-contract.json")

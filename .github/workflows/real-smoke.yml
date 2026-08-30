@@ -19,7 +19,7 @@ jobs:
     environment: real-model-smoke
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
       - name: Real provider stream
         env:
           LLM_PROVIDER_MOONSHOT_API_KEY: ${{ secrets.MOONSHOT_API_KEY }}

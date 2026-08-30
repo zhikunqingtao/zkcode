@@ -51,6 +51,40 @@ impl crate::Db {
         })
         .await
     }
+
+    /// Atomically upsert a related set of configuration values.
+    ///
+    /// Credential state uses this to commit the public key map and its
+    /// provenance companion row in one `SQLite` transaction, so a failed write
+    /// cannot leave only one row updated.
+    ///
+    /// # Errors
+    /// The complete transaction is rolled back when any `SQLite` operation fails.
+    pub async fn put_config_values_atomically(
+        &self,
+        values: &[(&str, &str)],
+    ) -> Result<(), DbError> {
+        let values: Vec<(String, String)> = values
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .collect();
+        self.with_writer(move |conn| {
+            let tx = conn.transaction()?;
+            let updated_at = format_rfc3339_micros(now_millis());
+            {
+                let mut statement = tx.prepare(
+                    "INSERT INTO config (key, value, updated_at) VALUES (?1, ?2, ?3)
+                     ON CONFLICT(key) DO UPDATE SET value = ?2, updated_at = ?3",
+                )?;
+                for (key, value) in values {
+                    statement.execute(params![key, value, updated_at])?;
+                }
+            }
+            tx.commit()?;
+            Ok(())
+        })
+        .await
+    }
 }
 
 #[cfg(test)]
@@ -94,5 +128,77 @@ mod tests {
         );
         drop(db);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Related config rows are committed together and remain independently
+    /// readable through the existing single-value API.
+    #[tokio::test]
+    async fn related_config_values_are_upserted_atomically() {
+        let db = crate::Db::open_in_memory().expect("boot");
+        db.put_config_values_atomically(&[
+            ("first_config", r#"{"value":1}"#),
+            ("second_config", r#"{"value":2}"#),
+        ])
+        .await
+        .expect("pair insert");
+
+        assert_eq!(
+            db.get_config_value("first_config").await.expect("first"),
+            Some(r#"{"value":1}"#.to_owned())
+        );
+        assert_eq!(
+            db.get_config_value("second_config").await.expect("second"),
+            Some(r#"{"value":2}"#.to_owned())
+        );
+
+        db.put_config_values_atomically(&[
+            ("first_config", r#"{"value":3}"#),
+            ("second_config", r#"{"value":4}"#),
+        ])
+        .await
+        .expect("pair update");
+        assert_eq!(
+            db.get_config_value("first_config").await.expect("first"),
+            Some(r#"{"value":3}"#.to_owned())
+        );
+        assert_eq!(
+            db.get_config_value("second_config").await.expect("second"),
+            Some(r#"{"value":4}"#.to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn atomic_config_upsert_rolls_back_when_the_second_write_fails() {
+        let db = crate::Db::open_in_memory().expect("boot");
+        db.with_writer(|connection| {
+            connection.execute_batch(
+                "CREATE TRIGGER reject_second_config
+                 BEFORE INSERT ON config
+                 WHEN NEW.key = 'second_config'
+                 BEGIN
+                   SELECT RAISE(ABORT, 'injected config write failure');
+                 END;",
+            )?;
+            Ok(())
+        })
+        .await
+        .expect("failure trigger");
+
+        assert!(
+            db.put_config_values_atomically(&[
+                ("first_config", r#"{"value":1}"#),
+                ("second_config", r#"{"value":2}"#),
+            ])
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            db.get_config_value("first_config").await.expect("first"),
+            None
+        );
+        assert_eq!(
+            db.get_config_value("second_config").await.expect("second"),
+            None
+        );
     }
 }

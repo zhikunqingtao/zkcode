@@ -1,27 +1,36 @@
 # Contributing to zkcode
 
-Thank you for contributing. zkcode is currently a macOS-local Beta, so changes
-should preserve its loopback-only deployment and explicit authorization model.
+Thank you for contributing. zkcode's source-development entry is currently a
+macOS-local Beta, so changes should preserve its loopback-only deployment and
+explicit authorization model.
 
 ## Development setup
 
-The currently verified environment is Apple Silicon macOS 26.5.2 with Rust
-1.97.1, Node.js 22.14, npm 10.9, and Python 3.11.15. Other Mac configurations
-may work but are not yet claimed as supported.
+Supported toolchain ranges are declared in
+[`configuration/dev-toolchain.toml`](configuration/dev-toolchain.toml) and
+verified by `./dev doctor`. Clean machines without Command Line Tools,
+Homebrew, or language runtimes remain a separate release acceptance case.
 
 ```bash
 git clone https://github.com/zhikunqingtao/zkcode.git
 cd zkcode
-./scripts/setup-macos.sh
+./dev bootstrap --start
 # Edit the generated .env and configure at least one provider.
-./start.sh
+./dev restart
 ```
 
-Run `./scripts/doctor.sh` for diagnostics and `./stop.sh` to stop services.
-The setup script also installs the locked Playwright Chromium runtime. Do not
+Run `./dev doctor --deep` for diagnostics and `./dev stop` to stop services.
+The bootstrap installs the locked Playwright Headless Shell runtime. Do not
 skip or replace a failed dependency download; fix the installation condition
 and rerun the script. Configuration details are in
 [docs/configuration.md](docs/configuration.md).
+
+When Homebrew is missing, a normal bootstrap requests administrator
+authorization through `sudo` in the current Terminal. `--yes` never prompts for
+a sudo password and therefore requires Homebrew or administrator-provisioned
+non-interactive authorization. Never run the project itself with `sudo`; see
+[docs/troubleshooting.md](docs/troubleshooting.md) for the supported recovery
+path.
 
 ## Pull requests
 

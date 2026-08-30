@@ -2,6 +2,7 @@
 set -eu
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+export PLAYWRIGHT_BROWSERS_PATH=${PLAYWRIGHT_BROWSERS_PATH:-$ROOT_DIR/.runtime/playwright}
 for COMMAND in cargo-deny gitleaks; do
   if ! command -v "$COMMAND" >/dev/null 2>&1; then
     echo "missing required release tool: $COMMAND" >&2

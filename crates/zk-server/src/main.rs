@@ -89,7 +89,11 @@ async fn main() {
     let mut state = AppState::new(db, config.clone()).with_providers(providers);
     // Task 4 Step 6：启动时合并 DB 保存的 LLM 密钥——若 DB 有密钥则重建
     // registry 并热替换；无 DB 密钥时保留环境变量 / Phase 1 初始 registry。
-    state.merge_db_llm_keys().await;
+    if let Err(error) = state.merge_db_llm_keys().await {
+        tracing::error!(%error, "LLM credential startup migration failed");
+        eprintln!("zk-server: LLM credential startup migration failed");
+        std::process::exit(1);
+    }
     match state.db.interrupt_active_tasks().await {
         Ok(count) if count > 0 => {
             tracing::warn!(count, "marked tasks interrupted by process restart");

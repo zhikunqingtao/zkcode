@@ -94,7 +94,7 @@ async fn lifecycle_matches_baseline_samples() {
     // 观测中间件：响应携带 request-id。
     assert!(headers.get("x-request-id").is_some(), "x-request-id header");
     let session_id = created["sessionId"].as_str().expect("sessionId").to_owned();
-    assert_eq!(created["model"], "qwen3.7-max");
+    assert_eq!(created["model"], "qwen3.8-max");
     // 新建会话默认完全访问权限（登记入 PermissionModeRegistry 后回传生效值）。
     assert_eq!(created["permissionMode"], "AUTO_APPROVE");
     assert_eq!(created["webSocketUrl"], format!("/ws/session/{session_id}"));

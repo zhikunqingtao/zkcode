@@ -5,6 +5,7 @@ import path from 'path';
 
 export default defineConfig(({ mode }) => {
     const env = loadEnv(mode, process.cwd(), '');
+    const apiUrl = process.env.VITE_API_URL || env.VITE_API_URL || 'http://127.0.0.1:8082';
 
     return {
         plugins: [react()],
@@ -39,17 +40,17 @@ export default defineConfig(({ mode }) => {
                 // Keep the more specific session-aware route before the
                 // Python file-processing prefix below.
                 '/api/files/search': {
-                    target: env.VITE_API_URL || 'http://127.0.0.1:8082',
+                    target: apiUrl,
                     changeOrigin: true,
                     secure: false,
                 },
                 '/api/sessions': {
-                    target: env.VITE_API_URL || 'http://127.0.0.1:8082',
+                    target: apiUrl,
                     changeOrigin: true,
                     secure: false,
                 },
                 '/api/workbench': {
-                    target: env.VITE_API_URL || 'http://127.0.0.1:8082',
+                    target: apiUrl,
                     changeOrigin: true,
                     secure: false,
                 },
@@ -60,32 +61,32 @@ export default defineConfig(({ mode }) => {
                 // zk-server reverse-proxies these prefixes over that socket
                 // and answers 503 when the sidecar is down.
                 '/api/git': {
-                    target: env.VITE_API_URL || 'http://127.0.0.1:8082',
+                    target: apiUrl,
                     changeOrigin: true,
                     secure: false,
                 },
                 '/api/files': {
-                    target: env.VITE_API_URL || 'http://127.0.0.1:8082',
+                    target: apiUrl,
                     changeOrigin: true,
                     secure: false,
                 },
                 '/api/code-quality': {
-                    target: env.VITE_API_URL || 'http://127.0.0.1:8082',
+                    target: apiUrl,
                     changeOrigin: true,
                     secure: false,
                 },
                 '/api/analysis': {
-                    target: env.VITE_API_URL || 'http://127.0.0.1:8082',
+                    target: apiUrl,
                     changeOrigin: true,
                     secure: false,
                 },
                 '/api': {
-                    target: env.VITE_API_URL || 'http://127.0.0.1:8082',
+                    target: apiUrl,
                     changeOrigin: true,
                     secure: false,
                 },
                 '/ws': {
-                    target: env.VITE_API_URL || 'http://127.0.0.1:8082',
+                    target: apiUrl,
                     changeOrigin: true,
                     secure: false,
                     ws: true,  // 启用 WebSocket 升级代理，原生 WS /ws 需要

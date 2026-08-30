@@ -34,7 +34,7 @@ async fn models_shape_matches_sample() {
     assert_eq!(ids(&body), ids(&sample));
     assert_eq!(body["models"].as_array().expect("array").len(), 15);
     // 测试配置的默认模型（Config::test_config）。
-    assert_eq!(body["defaultModel"], "qwen3.7-max");
+    assert_eq!(body["defaultModel"], "qwen3.8-max");
     // 每个条目 11 键齐全（assert_same_shape 只锁首元素，此处全量锁）。
     for model in body["models"].as_array().expect("array") {
         assert_eq!(model.as_object().expect("obj").len(), 11, "model: {model}");
@@ -79,7 +79,7 @@ async fn config_get_default_shape_matches_sample() {
     assert_same_shape(&sample("GET_api-config.json"), &body, "config");
     assert_eq!(body["authType"], "localhost");
     assert_eq!(body["theme"], "dark");
-    assert_eq!(body["defaultModel"], "qwen3.7-max");
+    assert_eq!(body["defaultModel"], "qwen3.8-max");
     assert_eq!(body["autoCompactThreshold"], 80);
 }
 

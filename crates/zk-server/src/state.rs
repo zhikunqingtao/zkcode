@@ -30,6 +30,34 @@ use crate::skill::SkillRegistry;
 use crate::tool_catalog::ToolSessionState;
 use crate::ws::{WsConfig, WsHub};
 
+fn build_mcp_credential_resolver(
+    provider_keys: Arc<RwLock<BTreeMap<String, String>>>,
+    environment_fallback: Arc<dyn zk_mcp::McpCredentialResolver>,
+    demo_credential_allowed: bool,
+    demo_catalog: Option<crate::demo_credentials::Catalog>,
+) -> Arc<dyn zk_mcp::McpCredentialResolver> {
+    Arc::new(move |provider: &str| {
+        let apply_policy = |value: String| {
+            if demo_credential_allowed {
+                Some(value)
+            } else {
+                demo_catalog
+                    .as_ref()
+                    .and_then(|catalog| catalog.retain_values_not_public_for_any_provider(&value))
+            }
+        };
+        let db_key = match provider_keys.read() {
+            Ok(keys) => keys.get(provider).cloned(),
+            Err(poisoned) => poisoned.into_inner().get(provider).cloned(),
+        };
+        db_key.and_then(&apply_policy).or_else(|| {
+            environment_fallback
+                .resolve(provider)
+                .and_then(apply_policy)
+        })
+    })
+}
+
 /// 组装根装配的共享应用状态。
 ///
 /// `Db` 内部已 `Arc<Mutex<Connection>>`（D6 单连接模型），克隆即共享，
@@ -59,6 +87,11 @@ pub struct AppState {
     /// never serialized into responses or logs; updates happen only after the
     /// corresponding runtime DB write and provider hot-swap have succeeded.
     llm_provider_keys: Arc<RwLock<BTreeMap<String, String>>>,
+    /// Serialize the complete LLM credential read-modify-write and live-registry
+    /// replacement sequence. The DB writer lock alone cannot prevent two PUT
+    /// handlers from reading the same old key/provenance pair and losing one
+    /// another's updates.
+    pub(crate) llm_credential_update_lock: Arc<tokio::sync::Mutex<()>>,
     /// Python 侧车 HTTP 客户端（2.6；UDS 传输 + 能力缓存，恒存在——侧车未
     /// 启动时所有调用走能力域门控优雅降级，不 panic 不阻断核心对话）。
     pub python: Arc<PythonClient>,
@@ -194,89 +227,95 @@ impl AppState {
         self
     }
 
-    /// 从 DB 读取 LLM 密钥并热替换 provider 注册表（启动时合并 DB 密钥）。
+    /// Reconcile durable LLM credentials and hot-swap the provider registry.
     ///
-    /// 读取 `config` 表 `llm_provider_keys` 行，解析为 `BTreeMap<String, String>`。
-    /// 若运行时 DB、provider 环境变量和 Phase 1 环境变量都没有密钥（首次
-    /// 启动），从仓库随附的、只读且可公开提取的 demo 种子库复制凭据到私有
-    /// 运行时 DB。此后合并环境变量密钥后重建 registry 并 `swap`。种子读取
-    /// 失败只记日志，不伪造或回退到源码常量。
+    /// The existing `llm_provider_keys` JSON shape is preserved. A private
+    /// companion row records proof only for public demo values. On opt-out,
+    /// exact current/historical public values are removed atomically with their
+    /// markers; user values are preserved and stale markers are cleared alone.
     ///
     /// 共享合并逻辑见 [`crate::api::llm_keys::build_merged_provider_configs`]。
-    pub async fn merge_db_llm_keys(&self) {
-        let stored = match self.db.get_config_value("llm_provider_keys").await {
-            Ok(value) => value,
-            Err(err) => {
-                tracing::warn!(
-                    error = %err,
-                    "failed to read llm_provider_keys; keeping env-based providers"
-                );
-                return;
-            }
-        };
-        let mut db_keys: BTreeMap<String, String> = match stored {
-            Some(json) => match serde_json::from_str(&json) {
-                Ok(keys) => keys,
-                Err(err) => {
-                    tracing::warn!(
-                        error = %err,
-                        "stored llm provider keys are invalid; preserving current providers"
-                    );
-                    return;
-                }
-            },
-            None => BTreeMap::new(),
-        };
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the durable rows or public catalog are invalid,
+    /// registry construction fails, or the atomic migration cannot be stored.
+    pub async fn merge_db_llm_keys(&self) -> Result<(), String> {
+        let stored_keys = self
+            .db
+            .get_config_value(crate::demo_credentials::KEYS_DB_KEY)
+            .await
+            .map_err(|error| format!("cannot read stored LLM provider keys: {error}"))?;
+        let mut db_keys: BTreeMap<String, String> = stored_keys
+            .map(|json| {
+                serde_json::from_str(&json)
+                    .map_err(|_| "stored LLM provider keys are invalid".to_owned())
+            })
+            .transpose()?
+            .unwrap_or_default();
+        let stored_provenance = self
+            .db
+            .get_config_value(crate::demo_credentials::PROVENANCE_DB_KEY)
+            .await
+            .map_err(|error| format!("cannot read stored LLM key provenance: {error}"))?;
+        let mut provenance: crate::demo_credentials::ProvenanceMap = stored_provenance
+            .map(|json| {
+                serde_json::from_str(&json)
+                    .map_err(|_| "stored LLM key provenance is invalid".to_owned())
+            })
+            .transpose()?
+            .unwrap_or_default();
+        let catalog = crate::demo_credentials::load_catalog(&self.config.demo_credentials_path)
+            .map_err(|error| format!("cannot load public demo credential catalog: {error}"))?;
+        let outcome = catalog.reconcile(
+            &mut db_keys,
+            &mut provenance,
+            self.config.demo_credential_allowed,
+        );
+        let mut durable_changed = outcome.changed;
+        let mut imported_public_demo = false;
         let env_configs = zk_llm::provider_configs_from_env();
         let legacy_key_configured = !self.config.llm_api_key.is_empty();
-        if db_keys.is_empty() && env_configs.is_empty() && !legacy_key_configured {
-            match crate::demo_credentials::load(&self.config.demo_credentials_path) {
-                Ok(seed) => match serde_json::to_string(&seed) {
-                    Ok(json) => {
-                        if let Err(err) = self.db.put_config_value("llm_provider_keys", &json).await
-                        {
-                            tracing::warn!(error = %err, "failed to copy public demo credential into the runtime DB");
-                        } else {
-                            tracing::info!(
-                                provider = "dashscope-token-plan",
-                                "copied public first-run demo credential into the private runtime DB"
-                            );
-                            db_keys = seed;
-                        }
-                    }
-                    Err(err) => {
-                        tracing::warn!(error = %err, "failed to serialize public demo credential");
-                    }
-                },
-                Err(err) => {
-                    tracing::warn!(
-                        error = %err,
-                        path = %self.config.demo_credentials_path.display(),
-                        "public demo credential database is unavailable; continuing without it"
-                    );
-                }
-            }
+        if self.config.demo_credential_allowed
+            && db_keys.is_empty()
+            && env_configs.is_empty()
+            && !legacy_key_configured
+        {
+            catalog.copy_current_seed_into(&mut db_keys, &mut provenance);
+            durable_changed = true;
+            imported_public_demo = true;
         }
-        match crate::api::llm_keys::build_provider_registry(&self.config, &db_keys) {
-            Ok(registry) => {
-                let provider_count = registry.len();
-                let model_count = registry.models().len();
-                self.replace_llm_provider_keys(db_keys.clone());
-                self.providers.swap(registry);
-                tracing::info!(
-                    db_key_count = db_keys.len(),
-                    provider_count,
-                    model_count,
-                    "merged DB LLM keys into provider registry"
-                );
-            }
-            Err(err) => {
-                tracing::error!(
-                    error = %err,
-                    "failed to rebuild provider registry from DB keys"
-                );
-            }
+        let registry =
+            crate::api::llm_keys::build_provider_registry(&self.config, &catalog, &db_keys)
+                .map_err(|_| "cannot rebuild provider registry from stored keys".to_owned())?;
+
+        if durable_changed {
+            let keys_json = serde_json::to_string(&db_keys)
+                .map_err(|_| "cannot serialize LLM provider keys".to_owned())?;
+            let provenance_json = serde_json::to_string(&provenance)
+                .map_err(|_| "cannot serialize LLM key provenance".to_owned())?;
+            self.db
+                .put_config_values_atomically(&[
+                    (crate::demo_credentials::KEYS_DB_KEY, &keys_json),
+                    (crate::demo_credentials::PROVENANCE_DB_KEY, &provenance_json),
+                ])
+                .await
+                .map_err(|error| format!("cannot persist reconciled LLM key state: {error}"))?;
         }
+        let provider_count = registry.len();
+        let model_count = registry.models().len();
+        self.replace_llm_provider_keys(db_keys.clone());
+        self.providers.swap(registry);
+        tracing::info!(
+            db_key_count = db_keys.len(),
+            provider_count,
+            model_count,
+            removed_public_demo_count = outcome.removed_public,
+            cleared_stale_provenance_count = outcome.cleared_stale_markers,
+            imported_public_demo,
+            "reconciled DB LLM keys and provider registry"
+        );
+        Ok(())
     }
 
     /// Replace the DB-backed credential mirror after a successful durable
@@ -368,6 +407,7 @@ impl AppState {
             hub,
             providers: Arc::new(SwappableProvider::new(ProviderRegistry::new())),
             llm_provider_keys: Arc::new(RwLock::new(BTreeMap::new())),
+            llm_credential_update_lock: Arc::new(tokio::sync::Mutex::new(())),
             python,
             python_sidecar: None,
             authz,
@@ -453,16 +493,30 @@ impl AppState {
                 self.hub.clone(),
                 Arc::clone(&self.mcp),
             ));
-            let provider_keys = self.llm_provider_keys_handle();
-            let environment_fallback = zk_mcp::security::default_credential_resolver();
-            let credential_resolver: Arc<dyn zk_mcp::McpCredentialResolver> =
-                Arc::new(move |provider: &str| {
-                    let db_key = match provider_keys.read() {
-                        Ok(keys) => keys.get(provider).cloned(),
-                        Err(poisoned) => poisoned.into_inner().get(provider).cloned(),
-                    };
-                    db_key.or_else(|| environment_fallback.resolve(provider))
-                });
+            // The startup migration has already validated this catalog before
+            // main binds the listener. Reloading here protects the independently
+            // lazy MCP composition path as well: a missing/corrupt catalog fails
+            // closed instead of exposing an unfiltered credential.
+            let demo_catalog = if self.config.demo_credential_allowed {
+                None
+            } else {
+                match crate::demo_credentials::load_catalog(&self.config.demo_credentials_path) {
+                    Ok(catalog) => Some(catalog),
+                    Err(error) => {
+                        tracing::error!(
+                            error = %error,
+                            "public demo credential catalog is unavailable for MCP filtering"
+                        );
+                        None
+                    }
+                }
+            };
+            let credential_resolver = build_mcp_credential_resolver(
+                self.llm_provider_keys_handle(),
+                zk_mcp::security::default_credential_resolver(),
+                self.config.demo_credential_allowed,
+                demo_catalog,
+            );
             McpClientManager::builder(Arc::clone(&self.mcp_approval), tool_sink)
                     .resolver(zk_mcp::McpConfigurationResolver::new(Some(
                         std::path::PathBuf::from(&self.config.workspace_default_root),
@@ -496,13 +550,14 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::path::Path;
-    use std::sync::Arc;
+    use std::sync::{Arc, RwLock};
 
     use zk_core::FlagValue;
     use zk_core::feature_flags;
 
-    use super::AppState;
+    use super::{AppState, build_mcp_credential_resolver};
 
     /// `AppState` 与 `Config` 共享同一张 flag 表——旧实现是单例 Bean，若此处各持
     /// 一份，`/config` 域的运行时改写就只能改到其中一条路径。
@@ -538,6 +593,52 @@ mod tests {
         assert!(!first.is_empty(), "组合根注册清单非空");
     }
 
+    #[test]
+    fn opted_out_mcp_resolver_filters_public_values_across_provider_labels() {
+        let config = crate::config::Config::test_config();
+        let catalog = crate::demo_credentials::load_catalog(&config.demo_credentials_path)
+            .expect("tracked public demo catalog");
+        let public_key = catalog
+            .credentials()
+            .get("dashscope-token-plan")
+            .expect("public key")
+            .clone();
+        let provider_keys = Arc::new(RwLock::new(BTreeMap::from([(
+            "dashscope".to_owned(),
+            public_key.clone(),
+        )])));
+        let environment: Arc<dyn zk_mcp::McpCredentialResolver> = Arc::new(|provider: &str| {
+            (provider == "dashscope").then(|| "user-environment-key".to_owned())
+        });
+        let resolver = build_mcp_credential_resolver(
+            Arc::clone(&provider_keys),
+            environment,
+            false,
+            Some(catalog),
+        );
+
+        assert_eq!(
+            resolver.resolve("dashscope").as_deref(),
+            Some("user-environment-key"),
+            "a relabelled public DB value is filtered before the safe environment fallback"
+        );
+
+        let catalog = crate::demo_credentials::load_catalog(&config.demo_credentials_path)
+            .expect("tracked public demo catalog");
+        let environment_public = public_key.clone();
+        let environment: Arc<dyn zk_mcp::McpCredentialResolver> =
+            Arc::new(move |provider: &str| {
+                (provider == "dashscope").then(|| environment_public.clone())
+            });
+        let resolver = build_mcp_credential_resolver(
+            Arc::new(RwLock::new(BTreeMap::new())),
+            environment,
+            false,
+            Some(catalog),
+        );
+        assert!(resolver.resolve("dashscope").is_none());
+    }
+
     #[tokio::test]
     async fn first_run_copies_the_tracked_seed_into_the_runtime_database() {
         if !zk_llm::provider_configs_from_env().is_empty() {
@@ -548,12 +649,16 @@ mod tests {
         let mut config = crate::config::Config::test_config();
         config.demo_credentials_path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../configuration/bootstrap/demo-credentials.db");
+        config.demo_credential_allowed = true;
         let state = AppState::new(
             zk_db::Db::open_in_memory().expect("runtime SQLite opens"),
             config,
         );
 
-        state.merge_db_llm_keys().await;
+        state
+            .merge_db_llm_keys()
+            .await
+            .expect("credential migration succeeds");
 
         let stored = state
             .db
@@ -565,6 +670,15 @@ mod tests {
             serde_json::from_str(&stored).expect("runtime credential map is valid JSON");
         assert_eq!(stored.len(), 1);
         assert!(stored.contains_key("dashscope-token-plan"));
+        let provenance = state
+            .db
+            .get_config_value(crate::demo_credentials::PROVENANCE_DB_KEY)
+            .await
+            .expect("runtime SQLite read succeeds")
+            .expect("public seed provenance was persisted");
+        let provenance: crate::demo_credentials::ProvenanceMap =
+            serde_json::from_str(&provenance).expect("provenance JSON");
+        assert!(provenance.contains_key("dashscope-token-plan"));
         let provider_keys = state.llm_provider_keys_handle();
         let has_seed_key = match provider_keys.read() {
             Ok(keys) => keys.contains_key("dashscope-token-plan"),
@@ -574,6 +688,293 @@ mod tests {
         assert_eq!(
             state.providers.load().resolve_provider("qwen3.8-max"),
             Some("dashscope-token-plan")
+        );
+    }
+
+    #[tokio::test]
+    async fn opt_out_removes_a_legacy_public_seed_but_preserves_user_keys() {
+        let mut config = crate::config::Config::test_config();
+        config.demo_credentials_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../configuration/bootstrap/demo-credentials.db");
+        config.demo_credential_allowed = false;
+        let db = zk_db::Db::open_in_memory().expect("runtime SQLite opens");
+        let catalog = crate::demo_credentials::load_catalog(&config.demo_credentials_path)
+            .expect("tracked catalog");
+        let mut keys = catalog.credentials().clone();
+        keys.insert("moonshot".to_owned(), "user-owned-key".to_owned());
+        db.put_config_value(
+            crate::demo_credentials::KEYS_DB_KEY,
+            &serde_json::to_string(&keys).expect("keys JSON"),
+        )
+        .await
+        .expect("legacy keys persist");
+        let state = AppState::new(db, config);
+
+        state
+            .merge_db_llm_keys()
+            .await
+            .expect("credential migration succeeds");
+
+        let stored = state
+            .db
+            .get_config_value(crate::demo_credentials::KEYS_DB_KEY)
+            .await
+            .expect("read")
+            .expect("key map");
+        let stored: std::collections::BTreeMap<String, String> =
+            serde_json::from_str(&stored).expect("keys JSON");
+        assert!(!stored.contains_key("dashscope-token-plan"));
+        assert_eq!(
+            stored.get("moonshot").map(String::as_str),
+            Some("user-owned-key")
+        );
+        let provenance = state
+            .db
+            .get_config_value(crate::demo_credentials::PROVENANCE_DB_KEY)
+            .await
+            .expect("read")
+            .expect("companion row");
+        let provenance: crate::demo_credentials::ProvenanceMap =
+            serde_json::from_str(&provenance).expect("provenance JSON");
+        assert!(provenance.is_empty());
+    }
+
+    #[tokio::test]
+    async fn opt_out_migration_filters_public_key_ring_members_and_persists_user_members() {
+        let mut config = crate::config::Config::test_config();
+        config.demo_credentials_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../configuration/bootstrap/demo-credentials.db");
+        config.demo_credential_allowed = false;
+        let db = zk_db::Db::open_in_memory().expect("runtime SQLite opens");
+        let catalog = crate::demo_credentials::load_catalog(&config.demo_credentials_path)
+            .expect("tracked catalog");
+        let public_key = catalog
+            .credentials()
+            .get("dashscope-token-plan")
+            .expect("public key");
+        let keys = std::collections::BTreeMap::from([(
+            "dashscope-token-plan".to_owned(),
+            format!(" {public_key},, user-ring-key, {public_key}, "),
+        )]);
+        db.put_config_value(
+            crate::demo_credentials::KEYS_DB_KEY,
+            &serde_json::to_string(&keys).expect("keys JSON"),
+        )
+        .await
+        .expect("legacy key ring persists");
+        let state = AppState::new(db, config);
+
+        state
+            .merge_db_llm_keys()
+            .await
+            .expect("credential migration succeeds");
+
+        let stored = state
+            .db
+            .get_config_value(crate::demo_credentials::KEYS_DB_KEY)
+            .await
+            .expect("read")
+            .expect("key map");
+        let stored: std::collections::BTreeMap<String, String> =
+            serde_json::from_str(&stored).expect("keys JSON");
+        assert_eq!(
+            stored.get("dashscope-token-plan").map(String::as_str),
+            Some("user-ring-key")
+        );
+        let provenance = state
+            .db
+            .get_config_value(crate::demo_credentials::PROVENANCE_DB_KEY)
+            .await
+            .expect("read")
+            .expect("companion row");
+        let provenance: crate::demo_credentials::ProvenanceMap =
+            serde_json::from_str(&provenance).expect("provenance JSON");
+        assert!(provenance.is_empty());
+    }
+
+    #[tokio::test]
+    async fn opt_out_clears_a_stale_marker_without_deleting_the_replaced_key() {
+        let mut config = crate::config::Config::test_config();
+        config.demo_credentials_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../configuration/bootstrap/demo-credentials.db");
+        config.demo_credential_allowed = false;
+        let db = zk_db::Db::open_in_memory().expect("runtime SQLite opens");
+        let catalog = crate::demo_credentials::load_catalog(&config.demo_credentials_path)
+            .expect("tracked catalog");
+        let public_key = catalog
+            .credentials()
+            .get("dashscope-token-plan")
+            .expect("public key");
+        let marker = catalog
+            .marker_for("dashscope-token-plan", public_key)
+            .expect("public marker");
+        let keys = std::collections::BTreeMap::from([(
+            "dashscope-token-plan".to_owned(),
+            "user-replacement-key".to_owned(),
+        )]);
+        let provenance = crate::demo_credentials::ProvenanceMap::from([(
+            "dashscope-token-plan".to_owned(),
+            marker,
+        )]);
+        let keys_json = serde_json::to_string(&keys).expect("keys JSON");
+        let provenance_json = serde_json::to_string(&provenance).expect("provenance JSON");
+        db.put_config_values_atomically(&[
+            (crate::demo_credentials::KEYS_DB_KEY, &keys_json),
+            (crate::demo_credentials::PROVENANCE_DB_KEY, &provenance_json),
+        ])
+        .await
+        .expect("stale pair persists");
+        let state = AppState::new(db, config);
+
+        state
+            .merge_db_llm_keys()
+            .await
+            .expect("credential migration succeeds");
+
+        let stored = state
+            .db
+            .get_config_value(crate::demo_credentials::KEYS_DB_KEY)
+            .await
+            .expect("read")
+            .expect("key map");
+        let stored: std::collections::BTreeMap<String, String> =
+            serde_json::from_str(&stored).expect("keys JSON");
+        assert_eq!(
+            stored.get("dashscope-token-plan").map(String::as_str),
+            Some("user-replacement-key")
+        );
+        let provenance = state
+            .db
+            .get_config_value(crate::demo_credentials::PROVENANCE_DB_KEY)
+            .await
+            .expect("read")
+            .expect("companion row");
+        let provenance: crate::demo_credentials::ProvenanceMap =
+            serde_json::from_str(&provenance).expect("provenance JSON");
+        assert!(provenance.is_empty());
+    }
+
+    #[tokio::test]
+    async fn opt_out_migration_is_idempotent_and_never_reimports_the_seed() {
+        if !zk_llm::provider_configs_from_env().is_empty() {
+            return;
+        }
+        let mut config = crate::config::Config::test_config();
+        config.demo_credentials_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../configuration/bootstrap/demo-credentials.db");
+        config.demo_credential_allowed = false;
+        let db = zk_db::Db::open_in_memory().expect("runtime SQLite opens");
+        let catalog = crate::demo_credentials::load_catalog(&config.demo_credentials_path)
+            .expect("tracked catalog");
+        db.put_config_value(
+            crate::demo_credentials::KEYS_DB_KEY,
+            &serde_json::to_string(catalog.credentials()).expect("keys JSON"),
+        )
+        .await
+        .expect("legacy key persists");
+        let state = AppState::new(db, config);
+
+        state
+            .merge_db_llm_keys()
+            .await
+            .expect("first migration succeeds");
+        let first_keys = state
+            .db
+            .get_config_value(crate::demo_credentials::KEYS_DB_KEY)
+            .await
+            .expect("read")
+            .expect("key map");
+        let first_provenance = state
+            .db
+            .get_config_value(crate::demo_credentials::PROVENANCE_DB_KEY)
+            .await
+            .expect("read")
+            .expect("provenance map");
+        let first_provider_count = state.providers.load().len();
+
+        state
+            .merge_db_llm_keys()
+            .await
+            .expect("second migration succeeds");
+
+        assert_eq!(
+            state
+                .db
+                .get_config_value(crate::demo_credentials::KEYS_DB_KEY)
+                .await
+                .expect("read")
+                .as_deref(),
+            Some(first_keys.as_str())
+        );
+        assert_eq!(
+            state
+                .db
+                .get_config_value(crate::demo_credentials::PROVENANCE_DB_KEY)
+                .await
+                .expect("read")
+                .as_deref(),
+            Some(first_provenance.as_str())
+        );
+        assert_eq!(state.providers.load().len(), first_provider_count);
+        assert_eq!(first_provider_count, 0);
+        assert!(
+            state
+                .providers
+                .load()
+                .resolve_provider("qwen3.8-max")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn migration_persistence_failure_leaves_registry_and_memory_unchanged() {
+        if !zk_llm::provider_configs_from_env().is_empty() {
+            return;
+        }
+        let mut config = crate::config::Config::test_config();
+        config.demo_credentials_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../configuration/bootstrap/demo-credentials.db");
+        config.demo_credential_allowed = true;
+        let db = zk_db::Db::open_in_memory().expect("runtime SQLite opens");
+        db.with_writer(|connection| {
+            connection.execute_batch(
+                "CREATE TRIGGER reject_llm_provenance
+                 BEFORE INSERT ON config
+                 WHEN NEW.key = 'llm_provider_key_provenance'
+                 BEGIN
+                   SELECT RAISE(ABORT, 'injected credential migration failure');
+                 END;",
+            )?;
+            Ok(())
+        })
+        .await
+        .expect("failure trigger");
+        let state = AppState::new(db, config);
+
+        assert!(state.merge_db_llm_keys().await.is_err());
+        assert_eq!(state.providers.load().len(), 0);
+        let provider_keys = state.llm_provider_keys_handle();
+        let memory_is_empty = match provider_keys.read() {
+            Ok(keys) => keys.is_empty(),
+            Err(poisoned) => poisoned.into_inner().is_empty(),
+        };
+        assert!(memory_is_empty);
+        assert!(
+            state
+                .db
+                .get_config_value(crate::demo_credentials::KEYS_DB_KEY)
+                .await
+                .expect("read")
+                .is_none(),
+            "first transaction row must roll back"
+        );
+        assert!(
+            state
+                .db
+                .get_config_value(crate::demo_credentials::PROVENANCE_DB_KEY)
+                .await
+                .expect("read")
+                .is_none()
         );
     }
 

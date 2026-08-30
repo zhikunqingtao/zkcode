@@ -11,7 +11,7 @@ from httpx import AsyncClient, ASGITransport
 # 将 src 目录加入 sys.path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from main import app
+from main import SERVICE_VERSION, app
 
 
 @pytest.mark.asyncio
@@ -23,7 +23,7 @@ async def test_health_returns_ok():
     data = resp.json()
     assert data["status"] == "ok"
     assert data["service"] == "zkcode-python"
-    assert "version" in data
+    assert data["version"] == SERVICE_VERSION
 
 
 @pytest.mark.asyncio

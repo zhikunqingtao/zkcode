@@ -76,5 +76,7 @@ venv/
 .hypothesis/
 .coverage*
 htmlcov/
+/python-service/workspace/
 
 docs/local
+/docs/case-studies/

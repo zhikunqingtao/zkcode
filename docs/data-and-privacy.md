@@ -14,7 +14,7 @@ zkcode 是本地运行的软件，但“本地运行”不等于“所有数据�
 | 仓库根 `.runtime/` | PID、后端/前端日志 | 报障前检查并脱敏 |
 | 工作区 `.zk/` | 项目提示、规则、Hook、scratchpad、浏览器回放、Todo 与本地观测事件 | 按项目数据处理；需要时自行决定是否提交其中的规则文件 |
 | `~/.zk/` | 本地访问令牌、快照、上传、产物、记忆和 MCP 信任记录 | 视为跨项目私密数据 |
-| `~/.zkcode/python.sock` | 运行中的 Python UDS | 临时 IPC 文件，不应复制或共享 |
+| 仓库根 `.runtime/python.sock` | 运行中的 Python UDS | 临时 IPC 文件，不应复制或共享 |
 
 运行时数据库及 SQLite WAL/SHM、访问令牌文件和 sidecar socket 会限制为当前
 macOS 用户访问。它们不能阻止同一用户权限下的恶意进程读取数据，因此 zkcode
@@ -41,7 +41,7 @@ zkcode 0.1.x 没有内置向项目维护者发送的产品遥测。可观测性�
 从密钥管理器重新配置。
 
 ```bash
-./stop.sh
+./dev stop
 cp -R .zk "../zkcode-data-backup-$(date +%Y%m%d)"
 cp -R "$HOME/.zk" "$HOME/zkcode-user-backup-$(date +%Y%m%d)"
 ```
@@ -54,7 +54,7 @@ cp -R "$HOME/.zk" "$HOME/zkcode-user-backup-$(date +%Y%m%d)"
 清理会话数据前先停止服务并保留可恢复副本：
 
 ```bash
-./stop.sh
+./dev stop
 mv .zk "../zkcode-data-before-reset-$(date +%Y%m%d-%H%M%S)"
 mv "$HOME/.zk" "$HOME/zkcode-user-before-reset-$(date +%Y%m%d-%H%M%S)"
 ```

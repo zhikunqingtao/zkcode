@@ -8,6 +8,7 @@
 //! | `ZK_HOST` | `127.0.0.1` | 监听地址（macOS 本地 Beta 仅接受 loopback IP） |
 //! | `ZK_DB_PATH` | `.zk/data.db` | `SQLite` 库路径（D6，相对启动目录） |
 //! | `ZK_DEMO_CREDENTIAL_DB` | `configuration/bootstrap/demo-credentials.db` | 公开、只读的首次启动凭据种子；不是用户运行库 |
+//! | `ZK_DEV_ALLOW_DEMO_CREDENTIAL` | `0` | 是否允许导入公开 demo 凭据；仅接受 `0` / `1` |
 //! | `ZK_DEFAULT_MODEL` | `qwen3.8-max` | 创建会话缺省模型 |
 //! | `ZK_AUTH_MODE` | `localhost` | 鉴权模式（`localhost` / `lan_token`，对齐旧 `auth.mode`；只影响 `/api/auth/*` 上报与 token 下发，准入判定恒走 `access_guard`） |
 //! | `ZK_STATIC_DIR` | 自动探测 `resources/static` | 静态资源根（`remote.html`；旧 `src/main/resources/static`） |
@@ -89,6 +90,8 @@ pub struct Config {
     pub db_path: PathBuf,
     /// 仓库随附的只读公共 demo 凭据种子库。它只用于清洁首次启动，绝不是用户库。
     pub demo_credentials_path: PathBuf,
+    /// 是否允许导入公开 demo 凭据。源码开发默认关闭，且环境变量仅接受 0/1。
+    pub demo_credential_allowed: bool,
     /// 会话快照目录。测试装配为 `None`，由 `AppState` 分配独占临时目录。
     pub snapshot_dir: Option<PathBuf>,
     /// 创建会话的缺省模型。
@@ -211,6 +214,7 @@ impl Config {
                 "ZK_DEMO_CREDENTIAL_DB",
                 "configuration/bootstrap/demo-credentials.db",
             )),
+            demo_credential_allowed: parse_zero_one_env("ZK_DEV_ALLOW_DEMO_CREDENTIAL")?,
             snapshot_dir: Some(PathBuf::from(env_or(
                 "ZK_SNAPSHOT_DIR",
                 &zk_core::paths::user_config_dir()
@@ -299,7 +303,9 @@ impl Config {
             host: "127.0.0.1".into(),
             port: DEFAULT_PORT,
             db_path: PathBuf::from(":memory:"),
-            demo_credentials_path: PathBuf::from("configuration/bootstrap/demo-credentials.db"),
+            demo_credentials_path: Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../configuration/bootstrap/demo-credentials.db"),
+            demo_credential_allowed: false,
             snapshot_dir: None,
             default_model: "qwen3.8-max".into(),
             auth_mode: AUTH_MODE_LOCALHOST.into(),
@@ -424,6 +430,26 @@ fn parse_bool_env(key: &str, default: bool) -> Result<bool, String> {
     }
 }
 
+/// Parse a security-sensitive opt-in flag. Absence means disabled; every
+/// explicit value other than the canonical `0` or `1` is rejected.
+fn parse_zero_one_env(key: &str) -> Result<bool, String> {
+    match std::env::var(key) {
+        Err(std::env::VarError::NotPresent) => Ok(false),
+        Ok(raw) => parse_zero_one(key, &raw),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            Err(format!("invalid {key} value (expected 0 or 1)"))
+        }
+    }
+}
+
+fn parse_zero_one(key: &str, raw: &str) -> Result<bool, String> {
+    match raw {
+        "0" => Ok(false),
+        "1" => Ok(true),
+        _ => Err(format!("invalid {key} value (expected 0 or 1)")),
+    }
+}
+
 /// 解析 u64 环境变量：缺省/空串取默认，非法值 fail-fast。
 fn parse_u64_env(key: &str, default: u64) -> Result<u64, String> {
     match std::env::var(key) {
@@ -442,4 +468,21 @@ fn env_or(key: &str, default: &str) -> String {
         .ok()
         .filter(|v| !v.trim().is_empty())
         .unwrap_or_else(|| default.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_zero_one;
+
+    #[test]
+    fn demo_credential_opt_in_accepts_only_canonical_zero_or_one() {
+        assert_eq!(parse_zero_one("FLAG", "0"), Ok(false));
+        assert_eq!(parse_zero_one("FLAG", "1"), Ok(true));
+        for invalid in ["", "true", "false", " 1", "1 ", "01", "2"] {
+            assert!(
+                parse_zero_one("FLAG", invalid).is_err(),
+                "accepted {invalid:?}"
+            );
+        }
+    }
 }

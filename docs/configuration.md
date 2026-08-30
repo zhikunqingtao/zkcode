@@ -1,21 +1,24 @@
 # 配置参考
 
-zkcode 0.1.x 仅支持 macOS Apple Silicon 本地运行。`start.sh` 会读取仓库根目录
-中已被忽略提交的 `.env`，并强制后端绑定 `127.0.0.1`。修改配置后需要执行
-`./stop.sh` 和 `./start.sh` 才会生效。
+zkcode 0.1.x 仅支持 macOS Apple Silicon 本地运行。`./dev` 会把仓库根目录中被忽略
+提交的 `.env` 按数据解析，并强制后端绑定 `127.0.0.1`；不会用 shell 执行配置内容。
+修改配置后执行 `./dev restart` 生效。
 
 ## 配置文件规则
 
-首次执行 `./scripts/setup-macos.sh` 会从 [`.env.example`](../.env.example)
-创建 `.env`，已有文件不会被覆盖。`.env` 是 shell 格式：每行使用 `KEY=VALUE`，
-不要在等号两侧加空格；包含空格或 shell 特殊字符的值应使用单引号。不要提交、
-截图或粘贴真实密钥。
+首次执行 `./dev bootstrap --start` 会从 [`.env.example`](../.env.example)
+创建 `.env`，已有文件不会被覆盖。正式语法只允许空行、`#` 注释和 `KEY=VALUE`；值可
+不加引号、使用单引号或双引号。不支持 `export`、变量插值、命令替换、多行 shell、重定向
+或续行。配置始终作为字符串传给子进程，不会执行。不要提交、截图或粘贴真实密钥。
 
 ## 模型与首次启动凭据
 
-清洁首次启动时，服务会验证仓库中受版本控制的公开引导数据库，并将其中限额
-DashScope Token Plan 演示凭据复制到私有运行库。引导库不是用户运行库，凭据对
-所有下载者可提取、可共享且可能随时失效，不能当作秘密或用于敏感内容。
+仓库包含用于发行体验的公开引导数据库。`ZK_DEV_ALLOW_DEMO_CREDENTIAL`
+只接受 `0` 或 `1`，源码开发默认为 `0`：不导入公开凭据，并在重启时从运行库中
+持久移除能通过来源标记或当前/历史公开 seed 指纹精确证明的旧 demo key。相同 provider 下
+值不同的用户密钥会保留。只有维护者显式设置 `ZK_DEV_ALLOW_DEMO_CREDENTIAL=1`
+时，源码入口才允许验证发行体验。公开凭据对所有下载者可提取且可能随时失效，
+不能当作秘密或用于敏感内容。
 
 建议启动后在 **设置 → API Keys** 替换为自己的凭据；也可以在 `.env` 配置。
 以 DashScope Token Plan 和 `qwen3.8-max` 为例：
@@ -51,11 +54,12 @@ DashScope；只有用户显式设置 `LLM_PROVIDER_OPENAI_BASE_URL` 才会改写
 
 | 变量 | 支持配置中的默认值 | 说明 |
 |---|---|---|
-| `ZK_HOST` | `127.0.0.1` | 只允许 loopback；`start.sh` 会强制覆盖 |
+| `ZK_HOST` | `127.0.0.1` | 只允许 loopback；`./dev` 启动器会强制覆盖 |
 | `ZK_PORT` | `8082` | 本地后端端口 |
 | `ZK_AUTH_MODE` | `localhost` | 当前唯一支持的鉴权模式；启动时强制覆盖 |
 | `ZK_DB_PATH` | `.zk/data.db` | 单库 SQLite 路径，相对仓库根目录 |
 | `ZK_DEMO_CREDENTIAL_DB` | `configuration/bootstrap/demo-credentials.db` | 公开、只读的首次启动种子库；不应指向用户运行库 |
+| `ZK_DEV_ALLOW_DEMO_CREDENTIAL` | `0` | 源码开发公开 demo 门控；仅接受 `0/1`，修改后需重启 |
 | `ZK_SNAPSHOT_DIR` | `~/.zk/snapshots` | Session 快照目录 |
 | `ZK_WORKSPACE_DEFAULT_ROOT` | 当前启动目录 | 目录选择器的初始根 |
 | `ZK_WORKSPACE_ALLOWED_ROOTS` | 空 | 可选的逗号分隔绝对路径白名单 |
@@ -72,15 +76,16 @@ DashScope；只有用户显式设置 `LLM_PROVIDER_OPENAI_BASE_URL` 才会改写
 | 变量 | 默认值 | 说明 |
 |---|---|---|
 | `ZK_PYTHON_ENABLED` | `true` | 启动 Python sidecar 并注册动态能力 |
-| `ZK_PYTHON_UDS` | `~/.zkcode/python.sock` | 权限为 `0600` 的本地 Unix socket |
-| `ZK_PYTHON_SERVICE_DIR` | `python-service` | sidecar 源目录；`start.sh` 会设为绝对路径 |
-| `ZK_PYTHON_CMD` | 自动探测 | `start.sh` 会固定使用项目 `.venv` |
+| `ZK_PYTHON_UDS` | `.runtime/python.sock` | 权限为 `0600` 的仓库本地 Unix socket |
+| `ZK_PYTHON_SERVICE_DIR` | `python-service` | sidecar 源目录；`./dev` 会设为绝对路径 |
+| `ZK_PYTHON_CMD` | 自动探测 | `./dev` 会固定使用项目 `.venv` |
 | `ZK_PYTHON_HEALTH_CHECK_INTERVAL_MS` | `30000` | 健康检查间隔 |
 | `BROWSER_TYPE` | `chromium` | Playwright 浏览器类型 |
 | `BROWSER_CHANNEL` | 空 | 空值使用锁定的 Playwright Chromium；`chrome` 使用系统 Chrome |
 
-`./scripts/setup-macos.sh` 会执行锁定依赖安装和
-`python -m playwright install chromium`。浏览器下载失败会让安装失败，不会伪装成
+`./dev sync` 会执行锁定依赖安装和
+`python -m playwright install --only-shell chromium`，并把 Headless Shell 与 FFmpeg
+放在 `.runtime/playwright`。浏览器下载或真实启动冒烟失败都会让同步失败，不会伪装成
 浏览器能力可用。
 
 ## 生产能力门

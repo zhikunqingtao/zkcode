@@ -17,6 +17,15 @@
   文本，上游 ZhikunCode 的 MIT 声明完整保留于 THIRD_PARTY_NOTICES.md，
   贡献条款（CONTRIBUTING.md）同步更新。
 
+### 修复
+
+- 缺少 Homebrew 时在运行官方非交互安装器前安全完成 sudo 授权，
+  并为 `--yes` 保留严格的无人值守语义。
+- `./dev up` 不再复用 Python sidecar 已失效的后端，而会安全重启
+  backend/sidecar 并重新验证 readiness。
+- 源码开发禁用公开 demo 凭据时，持久移除旧版本已导入且来源可证明的
+  demo key，同时保留用户自己的 provider 密钥。
+
 ### 安全
 
 - 所有一键安装网络步骤使用有限重试、连接/总超时和失败关闭；不执行无限循环，
