@@ -312,11 +312,23 @@ fn info_for(id: &str) -> ModelInfo {
 fn effective_models(state: &AppState) -> Vec<ModelInfo> {
     let registry = state.providers.load();
     let registry_models = registry.models();
-    if registry_models.is_empty() {
+    let mut models = if registry_models.is_empty() {
         catalog()
     } else {
         registry_models.iter().map(|id| info_for(id)).collect()
+    };
+    for model in &mut models {
+        let capabilities = zk_llm::capabilities_for(&model.id);
+        model.supports_images = capabilities.supports_images;
+        model.max_images = if capabilities.supports_images {
+            i64::from(capabilities.max_images)
+        } else {
+            zk_llm::resolve_vision_model(registry.as_ref(), &model.id).map_or(0, |routed| {
+                i64::from(zk_llm::capabilities_for(&routed).max_images)
+            })
+        };
     }
+    models
 }
 
 /// `GET /api/models`——动态聚合注册表模型 + 默认模型；`?modelId=` 非空时校验存在性
@@ -356,6 +368,27 @@ pub(crate) async fn list_models(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use futures::stream::BoxStream;
+    use tokio_util::sync::CancellationToken;
+    use zk_llm::{ChatProvider, ChatRequest, ProviderError, ProviderEvent, ProviderRegistry};
+
+    struct StubProvider;
+
+    impl ChatProvider for StubProvider {
+        fn provider_name(&self) -> &'static str {
+            "stub"
+        }
+
+        fn chat_stream(
+            &self,
+            _request: ChatRequest,
+            _cancel: CancellationToken,
+        ) -> Result<BoxStream<'static, ProviderEvent>, ProviderError> {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+    }
 
     /// 目录 16 条、ID 唯一、序列化键形状（camelCase `costPer1kInput`）。
     #[test]
@@ -396,5 +429,34 @@ mod tests {
                 "supportsToolUse"
             ]
         );
+    }
+
+    #[test]
+    fn effective_image_limits_match_the_configured_vision_route() {
+        let mut providers = ProviderRegistry::new();
+        providers.register(
+            "dashscope",
+            Arc::new(StubProvider),
+            vec![
+                "qwen3.7-max".into(),
+                "qwen3.8-max".into(),
+                "qwen3.8-flash".into(),
+            ],
+        );
+        let state = AppState::for_tests().with_providers(providers);
+        let models = effective_models(&state);
+        let max_images = |id: &str| {
+            models
+                .iter()
+                .find(|model| model.id == id)
+                .expect("model entry")
+                .max_images
+        };
+
+        // The non-vision model routes to the first configured vision model,
+        // so the advertised input limit must match the engine's chosen target.
+        assert_eq!(max_images("qwen3.7-max"), 4);
+        assert_eq!(max_images("qwen3.8-max"), 4);
+        assert_eq!(max_images("qwen3.8-flash"), 20);
     }
 }

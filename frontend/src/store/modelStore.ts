@@ -20,7 +20,10 @@ export interface ModelInfo {
     supportsThinking?: boolean;
     /** 是否支持图片输入 */
     supportsImages: boolean;
-    /** 单次请求允许的图片数量上限（supportsImages=false 时无意义，约定为 0） */
+    /**
+     * 当前配置下单次请求允许的图片数量上限。原生视觉模型取自身上限，
+     * 非视觉模型取后端实际视觉路由目标上限，无可用路由时为 0。
+     */
     maxImages: number;
     supportsToolUse?: boolean;
     costPer1kInput?: number;

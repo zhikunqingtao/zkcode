@@ -127,27 +127,38 @@ dev_command_matches_all() {
     done
 }
 
+dev_sidecar_command_matches() {
+    DEV_SIDECAR_COMMAND=$1
+    DEV_SIDECAR_EXPECTED_PYTHON=$2
+    DEV_SIDECAR_EXPECTED_SOCKET=$3
+    printf '%s\n' "$DEV_SIDECAR_COMMAND" | "$DEV_SIDECAR_EXPECTED_PYTHON" \
+        "$ROOT_DIR/scripts/dev/python-process-identity.py" match-sidecar \
+        --expected-python "$DEV_SIDECAR_EXPECTED_PYTHON" \
+        --socket "$DEV_SIDECAR_EXPECTED_SOCKET" >/dev/null 2>&1
+}
+
 dev_sidecar_command_matches_socket() {
     DEV_SIDECAR_COMMAND=$1
     DEV_SIDECAR_SOCKET=$2
-    printf '%s\n' "$DEV_SIDECAR_COMMAND" | "$ROOT_DIR/python-service/.venv/bin/python" -c '
-import shlex
-import sys
+    DEV_SIDECAR_EXPECTED_PYTHON="$ROOT_DIR/python-service/.venv/bin/python"
+    dev_sidecar_command_matches "$DEV_SIDECAR_COMMAND" \
+        "$DEV_SIDECAR_EXPECTED_PYTHON" "$DEV_SIDECAR_SOCKET"
+}
 
-expected_python, expected_socket = sys.argv[1:]
-try:
-    argv = shlex.split(sys.stdin.read())
-except ValueError:
-    raise SystemExit(1)
-
-if not argv or argv[0] != expected_python or "src.main:app" not in argv:
-    raise SystemExit(1)
-try:
-    uds_index = argv.index("--uds")
-except ValueError:
-    raise SystemExit(1)
-raise SystemExit(0 if uds_index + 1 < len(argv) and argv[uds_index + 1] == expected_socket else 1)
-' "$ROOT_DIR/python-service/.venv/bin/python" "$DEV_SIDECAR_SOCKET" >/dev/null 2>&1
+dev_stop_command_matches() {
+    DEV_STOP_MATCH_NAME=$1
+    DEV_STOP_MATCH_COMMAND=$2
+    shift 2
+    if [ "$DEV_STOP_MATCH_NAME" = python-sidecar ]; then
+        [ "$#" -eq 3 ] || return 1
+        DEV_STOP_MATCH_PYTHON=$1
+        [ "$2" = src.main:app ] && [ "$3" = --uds ] || return 1
+        DEV_STOP_MATCH_SOCKET=$(dev_python_socket) || return 1
+        dev_sidecar_command_matches "$DEV_STOP_MATCH_COMMAND" \
+            "$DEV_STOP_MATCH_PYTHON" "$DEV_STOP_MATCH_SOCKET"
+        return
+    fi
+    dev_command_matches_all "$DEV_STOP_MATCH_COMMAND" "$@"
 }
 
 dev_stop_sidecar_owner() {
@@ -209,7 +220,7 @@ dev_stop_one() {
         return 0
     fi
     DEV_STOP_COMMAND=$(ps -p "$DEV_STOP_PID" -o command= 2>/dev/null || true)
-    if ! dev_command_matches_all "$DEV_STOP_COMMAND" "$@"; then
+    if ! dev_stop_command_matches "$DEV_STOP_NAME" "$DEV_STOP_COMMAND" "$@"; then
         dev_warn "refusing to stop PID $DEV_STOP_PID: command does not match the expected $DEV_STOP_NAME identity"
         return 1
     fi
@@ -221,7 +232,7 @@ dev_stop_one() {
     done
     if kill -0 "$DEV_STOP_PID" 2>/dev/null; then
         DEV_STOP_COMMAND=$(ps -p "$DEV_STOP_PID" -o command= 2>/dev/null || true)
-        if dev_command_matches_all "$DEV_STOP_COMMAND" "$@"; then
+        if dev_stop_command_matches "$DEV_STOP_NAME" "$DEV_STOP_COMMAND" "$@"; then
             kill -KILL "$DEV_STOP_PID"
         else
             dev_warn "refusing SIGKILL for PID $DEV_STOP_PID after its command identity changed"

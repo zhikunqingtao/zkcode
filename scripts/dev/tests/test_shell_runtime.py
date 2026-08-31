@@ -16,6 +16,7 @@ LIFECYCLE = REPOSITORY / "scripts/dev/lifecycle.sh"
 SYNC = REPOSITORY / "scripts/dev/sync.sh"
 TOOLCHAINS = REPOSITORY / "scripts/dev/toolchains-macos.sh"
 DOCTOR = REPOSITORY / "scripts/dev/doctor.sh"
+PYTHON_PROCESS_IDENTITY = REPOSITORY / "scripts/dev/python-process-identity.py"
 
 
 def run_shell(script: str, *arguments: str) -> subprocess.CompletedProcess[str]:
@@ -26,6 +27,20 @@ def run_shell(script: str, *arguments: str) -> subprocess.CompletedProcess[str]:
         text=True,
         timeout=15,
     )
+
+
+def link_python_process_identity(root: Path) -> None:
+    helper = root / "scripts/dev/python-process-identity.py"
+    helper.parent.mkdir(parents=True, exist_ok=True)
+    helper.symlink_to(PYTHON_PROCESS_IDENTITY)
+
+
+def install_fake_project_python(root: Path) -> Path:
+    python = root / "python-service/.venv/bin/python"
+    python.parent.mkdir(parents=True, exist_ok=True)
+    python.symlink_to(sys.executable)
+    link_python_process_identity(root)
+    return python
 
 
 class ShellRuntimeTests(unittest.TestCase):
@@ -294,11 +309,9 @@ def sync_playwright():
             root = Path(directory)
             runtime = root / ".runtime"
             runtime.mkdir()
-            fake_python = root / "python-service/.venv/bin/python"
-            fake_python.parent.mkdir(parents=True)
-            fake_python.symlink_to(sys.executable)
+            fake_python = install_fake_project_python(root)
             fake_launcher = root / "scripts/spawn-detached.py"
-            fake_launcher.parent.mkdir(parents=True)
+            fake_launcher.parent.mkdir(parents=True, exist_ok=True)
             fake_launcher.write_text("print(456)\n", encoding="utf-8")
             health_marker = root / "python-health-checked"
             result = run_shell(
@@ -482,11 +495,9 @@ def sync_playwright():
             runtime = root / ".runtime"
             runtime.mkdir()
             (runtime / "backend.pid").write_text("123\n", encoding="utf-8")
-            fake_python = root / "python-service/.venv/bin/python"
-            fake_python.parent.mkdir(parents=True)
-            fake_python.symlink_to(sys.executable)
+            fake_python = install_fake_project_python(root)
             fake_launcher = root / "scripts/spawn-detached.py"
-            fake_launcher.parent.mkdir(parents=True)
+            fake_launcher.parent.mkdir(parents=True, exist_ok=True)
             fake_launcher.write_text("print(456)\n", encoding="utf-8")
             stopped_marker = root / "stopped"
             result = run_shell(
@@ -585,9 +596,7 @@ def sync_playwright():
             runtime.mkdir()
             (runtime / "backend.pid").write_text("123\n", encoding="utf-8")
             (runtime / "python.pid").write_text("999\n", encoding="utf-8")
-            python_path = root / "python-service/.venv/bin/python"
-            python_path.parent.mkdir(parents=True)
-            python_path.symlink_to(sys.executable)
+            python_path = install_fake_project_python(root)
             marker = root / "stopped"
             result = run_shell(
                 f"""
@@ -633,9 +642,7 @@ def sync_playwright():
             runtime.mkdir()
             (runtime / "backend.pid").write_text("123\n", encoding="utf-8")
             (runtime / "python.pid").write_text("999\n", encoding="utf-8")
-            python_path = root / "python-service/.venv/bin/python"
-            python_path.parent.mkdir(parents=True)
-            python_path.symlink_to(sys.executable)
+            python_path = install_fake_project_python(root)
             marker = root / "signals"
             result = run_shell(
                 f"""
@@ -696,9 +703,87 @@ def sync_playwright():
             )
             self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_normal_sidecar_stop_uses_token_aware_identity_check(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            python = install_fake_project_python(root)
+            pid_file = root / ".runtime/python.pid"
+            pid_file.parent.mkdir(parents=True)
+            pid_file.write_text("456\n", encoding="utf-8")
+            marker = root / "signals"
+            result = run_shell(
+                f"""
+                set -eu
+                ROOT_DIR=$1
+                DEV_TEST_MARKER=$2
+                DEV_TEST_PYTHON=$3
+                DEV_TEST_LIVE=1
+                . {COMMON!s}
+                . {LIFECYCLE!s}
+                dev_python_socket() {{ printf '%s\n' "$ROOT_DIR/.runtime/python.sock"; }}
+                kill() {{
+                    case "$1" in
+                        -0) [ "$DEV_TEST_LIVE" -eq 1 ] ;;
+                        -TERM)
+                            printf '%s\n' "$*" >>"$DEV_TEST_MARKER"
+                            DEV_TEST_LIVE=0
+                            ;;
+                        *) exit 8 ;;
+                    esac
+                }}
+                ps() {{
+                    printf '%s\n' "$DEV_TEST_PYTHON -m uvicorn src.main:app --uds $ROOT_DIR/.runtime/python.sock"
+                }}
+                dev_stop_one python-sidecar "$ROOT_DIR/.runtime/python.pid" "$DEV_TEST_PYTHON" src.main:app --uds
+                test ! -e "$ROOT_DIR/.runtime/python.pid"
+                """,
+                str(root),
+                str(marker),
+                str(python),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(marker.read_text(encoding="utf-8"), "-TERM 456\n")
+
+    def test_normal_sidecar_stop_rejects_a_different_socket(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            python = install_fake_project_python(root)
+            pid_file = root / ".runtime/python.pid"
+            pid_file.parent.mkdir(parents=True)
+            pid_file.write_text("456\n", encoding="utf-8")
+            marker = root / "signals"
+            result = run_shell(
+                f"""
+                set -eu
+                ROOT_DIR=$1
+                DEV_TEST_MARKER=$2
+                DEV_TEST_PYTHON=$3
+                . {COMMON!s}
+                . {LIFECYCLE!s}
+                dev_python_socket() {{ printf '%s\n' "$ROOT_DIR/.runtime/python.sock"; }}
+                kill() {{
+                    [ "$1" = -0 ] && return 0
+                    printf '%s\n' "$*" >>"$DEV_TEST_MARKER"
+                }}
+                ps() {{
+                    printf '%s\n' "$DEV_TEST_PYTHON -m uvicorn src.main:app --uds $ROOT_DIR/.runtime/other.sock"
+                }}
+                if dev_stop_one python-sidecar "$ROOT_DIR/.runtime/python.pid" "$DEV_TEST_PYTHON" src.main:app --uds; then
+                    exit 9
+                fi
+                test ! -e "$DEV_TEST_MARKER"
+                test -e "$ROOT_DIR/.runtime/python.pid"
+                """,
+                str(root),
+                str(marker),
+                str(python),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_sidecar_stop_rejects_an_unrelated_venv_python_process(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            link_python_process_identity(root)
             pid_file = root / ".runtime/python.pid"
             pid_file.parent.mkdir(parents=True)
             process = subprocess.Popen(
@@ -714,6 +799,7 @@ def sync_playwright():
                     ROOT_DIR=$1
                     . {COMMON!s}
                     . {LIFECYCLE!s}
+                    dev_python_socket() {{ printf '%s\n' "$ROOT_DIR/.runtime/python.sock"; }}
                     if dev_stop_one python-sidecar "$ROOT_DIR/.runtime/python.pid" "$2" src.main:app --uds; then
                         exit 9
                     fi

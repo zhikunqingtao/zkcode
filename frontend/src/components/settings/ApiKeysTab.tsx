@@ -8,6 +8,7 @@
 import { useState, useEffect, useCallback, useId } from 'react';
 import { useNotificationStore } from '@/store/notificationStore';
 import { invalidateSpeechAvailability } from '@/store/speechAvailabilityStore';
+import { useModelStore } from '@/store/modelStore';
 
 interface ProviderEntry {
   name: string;
@@ -91,6 +92,7 @@ export function ApiKeysTab() {
       const data = await parseProvidersResponse(resp);
       setProviders(data.providers ?? []);
       setRowStates({});
+      await useModelStore.getState().fetchModels();
       if (Object.prototype.hasOwnProperty.call(keys, 'dashscope')) {
         void invalidateSpeechAvailability();
       }

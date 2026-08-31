@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiKeysTab } from './ApiKeysTab';
 import { useNotificationStore } from '@/store/notificationStore';
+import { useModelStore } from '@/store/modelStore';
 
 const speechMocks = vi.hoisted(() => ({ invalidate: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('@/store/speechAvailabilityStore', () => ({
@@ -19,6 +20,9 @@ describe('ApiKeysTab', () => {
   beforeEach(() => {
     useNotificationStore.getState().clearAll();
     speechMocks.invalidate.mockClear();
+    useModelStore.setState({
+      fetchModels: vi.fn().mockResolvedValue(undefined),
+    });
   });
 
   afterEach(() => {
@@ -44,6 +48,7 @@ describe('ApiKeysTab', () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ keys: { 'dashscope-token-plan': 'new-test-key' } }),
     });
+    expect(useModelStore.getState().fetchModels).toHaveBeenCalledOnce();
     expect(useNotificationStore.getState().notifications).toEqual(
       expect.arrayContaining([expect.objectContaining({
         key: 'apikeys-save-success',

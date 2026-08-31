@@ -19,6 +19,7 @@ import type { Command } from '@/types';
 import { useWorkbenchViewStore } from '@/store/workbenchViewStore';
 import { useSpeechAvailabilityStore } from '@/store/speechAvailabilityStore';
 import { useSessionStore } from '@/store/sessionStore';
+import { useModelStore } from '@/store/modelStore';
 
 const voiceButtonMock = vi.hoisted(() => ({
     callbacks: [] as Array<(text: string) => void>,
@@ -56,7 +57,28 @@ function renderInput(
 describe('PromptInput asynchronous submit', () => {
     beforeEach(() => {
         voiceButtonMock.callbacks.length = 0;
-        useSessionStore.setState({ sessionId: 'session-a' });
+        useSessionStore.setState({ sessionId: 'session-a', model: 'qwen3.8-max' });
+        useModelStore.setState({
+            models: [{
+                id: 'qwen3.8-max',
+                displayName: 'Qwen 3.8 Max',
+                supportsImages: true,
+                maxImages: 4,
+            }, {
+                id: 'qwen3.8-flash',
+                displayName: 'Qwen 3.8 Flash',
+                supportsImages: true,
+                maxImages: 20,
+            }, {
+                id: 'no-vision-route',
+                displayName: 'No Vision Route',
+                supportsImages: false,
+                maxImages: 0,
+            }],
+            defaultModel: 'qwen3.8-max',
+            loaded: true,
+            loading: false,
+        });
         useWorkbenchViewStore.setState({
             enabled: true,
             activeSessionId: 'session-a',
@@ -251,5 +273,21 @@ describe('PromptInput asynchronous submit', () => {
         expect(screen.getByRole('button', { name: '发送消息' })).toBeDisabled();
         fireEvent.keyDown(window, { key: 'k', ctrlKey: true });
         expect(onSlashCommand).not.toHaveBeenCalled();
+    });
+
+    it('uses the backend effective image limit for the selected model', () => {
+        renderInput(vi.fn().mockResolvedValue(true));
+
+        expect(screen.getByTitle('上传图片（当前模型有效上限 4 张）')).toBeEnabled();
+
+        act(() => useSessionStore.setState({ model: 'qwen3.8-flash' }));
+        expect(screen.getByTitle('上传图片（当前模型有效上限 20 张）')).toBeEnabled();
+    });
+
+    it('disables image upload when the backend reports no usable vision route', () => {
+        useSessionStore.setState({ model: 'no-vision-route' });
+        renderInput(vi.fn().mockResolvedValue(true));
+
+        expect(screen.getByTitle('当前模型没有可用的图片处理能力')).toBeDisabled();
     });
 });

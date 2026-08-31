@@ -17,7 +17,12 @@ from pathlib import Path
 from typing import Any
 
 
-def run(command: list[str], cwd: Path | None = None, timeout: int = 30) -> tuple[bool, str]:
+def run(
+    command: list[str],
+    cwd: Path | None = None,
+    timeout: int = 30,
+    input_text: str | None = None,
+) -> tuple[bool, str]:
     try:
         result = subprocess.run(
             command,
@@ -26,6 +31,7 @@ def run(command: list[str], cwd: Path | None = None, timeout: int = 30) -> tuple
             capture_output=True,
             text=True,
             timeout=timeout,
+            input=input_text,
         )
     except (OSError, subprocess.SubprocessError) as error:
         return False, str(error)
@@ -75,17 +81,24 @@ def semver_in_range(value: str, constraint: str) -> bool:
     return lower is not None and upper is not None and lower <= actual < upper
 
 
-def process(pid_file: Path, expected: str) -> dict[str, Any]:
+def process(
+    pid_file: Path,
+    expected: str,
+    identity_command: list[str] | None = None,
+) -> dict[str, Any]:
     try:
         pid = int(pid_file.read_text(encoding="utf-8").splitlines()[0])
     except (FileNotFoundError, OSError, ValueError, IndexError):
         return {"running": False, "pid": None, "recorded": False}
     ok, command = run(["ps", "-p", str(pid), "-o", "command="], timeout=5)
+    matches = ok and expected in command
+    if ok and identity_command is not None:
+        matches, _ = run(identity_command, timeout=5, input_text=command)
     return {
-        "running": ok and expected in command,
+        "running": matches,
         "pid": pid,
         "recorded": True,
-        "commandMatches": ok and expected in command,
+        "commandMatches": matches,
     }
 
 
@@ -123,8 +136,32 @@ def load_state_module(root: Path):
     return module
 
 
+def python_socket(root: Path) -> Path:
+    value = ".runtime/python.sock"
+    try:
+        parser = load_env_parser(root)
+        values, _ = parser.parse_env(root / ".env")
+        value = values.get("ZK_PYTHON_UDS", value)
+    except (OSError, RuntimeError, ValueError):
+        pass
+    if value.startswith("~/"):
+        return Path.home() / value[2:]
+    path = Path(value)
+    return path if path.is_absolute() else root / path
+
+
 def service_status(root: Path, port: int) -> dict[str, Any]:
     runtime = root / ".runtime"
+    python = root / "python-service/.venv/bin/python"
+    python_identity = [
+        str(python),
+        str(root / "scripts/dev/python-process-identity.py"),
+        "match-sidecar",
+        "--expected-python",
+        str(python),
+        "--socket",
+        str(python_socket(root)),
+    ]
     health = http_json(f"http://127.0.0.1:{port}/api/health")
     python_status = None
     if health:
@@ -141,7 +178,7 @@ def service_status(root: Path, port: int) -> dict[str, Any]:
             "url": "http://127.0.0.1:5273",
         },
         "python": {
-            **process(runtime / "python.pid", str(root / "python-service/.venv/bin/python")),
+            **process(runtime / "python.pid", str(python), python_identity),
             "healthStatus": python_status,
         },
     }
