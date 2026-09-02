@@ -673,6 +673,8 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
 // 该模块的实现，避免同一降级语义在本 crate 内出现两份）。
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
 
     fn sample() -> McpCapabilityDefinition {
@@ -691,6 +693,95 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("zk-mcp-registry-{tag}-{unique}"));
         std::fs::create_dir_all(&dir).expect("create temp dir");
         dir
+    }
+
+    fn assert_bundled_server(
+        definitions: &[McpCapabilityDefinition],
+        server_key: &str,
+        expected_count: usize,
+        transport: McpTransportType,
+    ) {
+        let selected: Vec<&McpCapabilityDefinition> = definitions
+            .iter()
+            .filter(|definition| definition.extract_server_key() == server_key)
+            .collect();
+        assert_eq!(selected.len(), expected_count, "server {server_key}");
+        assert!(selected.iter().all(|definition| definition.enabled));
+        assert!(
+            selected
+                .iter()
+                .all(|definition| definition.resolved_transport_type() == transport)
+        );
+    }
+
+    #[test]
+    fn bundled_registry_contains_all_selected_bailian_services() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../configuration/mcp/mcp_capability_registry.json");
+        let registry = McpCapabilityRegistry::new(path);
+        registry.load();
+
+        let definitions = registry.list_all();
+        assert_eq!(definitions.len(), 83);
+        assert_eq!(registry.enabled_count(), 83);
+        assert_eq!(
+            definitions
+                .iter()
+                .map(|definition| definition.id.as_str())
+                .collect::<BTreeSet<_>>()
+                .len(),
+            definitions.len()
+        );
+
+        assert_bundled_server(
+            &definitions,
+            "market-cmgjmcp00074946",
+            11,
+            McpTransportType::Http,
+        );
+        assert_bundled_server(
+            &definitions,
+            "market-cmgjmcp00074975",
+            1,
+            McpTransportType::Http,
+        );
+        assert_bundled_server(
+            &definitions,
+            "market-cmgjmcp00075341",
+            2,
+            McpTransportType::Http,
+        );
+        assert_bundled_server(&definitions, "arxiv_paper", 4, McpTransportType::Sse);
+        assert_bundled_server(
+            &definitions,
+            "market-cmgjmcp00075018",
+            1,
+            McpTransportType::Http,
+        );
+        assert_bundled_server(
+            &definitions,
+            "market-cmgjmcp00074959",
+            2,
+            McpTransportType::Sse,
+        );
+        assert_bundled_server(
+            &definitions,
+            "market-cmgjmcp00075146",
+            6,
+            McpTransportType::Http,
+        );
+        assert_bundled_server(
+            &definitions,
+            "market-cmgjmcp00075054",
+            8,
+            McpTransportType::Http,
+        );
+        assert_bundled_server(
+            &definitions,
+            "market-cmgjmcp00075060",
+            10,
+            McpTransportType::Http,
+        );
     }
 
     #[test]
