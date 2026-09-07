@@ -685,6 +685,18 @@ fn insert_thinking_params(root: &mut serde_json::Map<String, Value>, request: &C
         );
         root.insert("reasoning_effort".into(), json!("max"));
         root.insert("tool_stream".into(), json!(true));
+    } else if is_openai_max_reasoning_model(&request.model) {
+        if request.thinking.requires_support() {
+            root.insert("reasoning_effort".into(), json!("max"));
+        } else if request.model.starts_with("openai/") {
+            root.insert("reasoning".into(), json!({ "enabled": false }));
+        }
+    } else if is_high_reasoning_model(&request.model) {
+        if request.thinking.requires_support() {
+            root.insert("reasoning_effort".into(), json!("high"));
+        } else {
+            root.insert("reasoning".into(), json!({ "enabled": false }));
+        }
     } else if (request.model.starts_with("qwen3.8-")
         || request.model.starts_with("qwen3.7-")
         || request.model.starts_with("qwen3.6-"))
@@ -700,6 +712,19 @@ fn is_glm_forced_thinking_model(model: &str) -> bool {
     matches!(model, "glm-5.3" | "glm-5.3-flash")
 }
 
+/// `OpenAI` Sol / Astra 在直连与 `ZenMux` 路由下启用思考时使用最高推理档位。
+fn is_openai_max_reasoning_model(model: &str) -> bool {
+    matches!(
+        model,
+        "gpt-5.6-sol" | "openai/gpt-5.6-sol" | "gpt-6-astra" | "openai/gpt-6-astra"
+    )
+}
+
+/// Gemini 3.8 Flash / Grok 4.6 启用思考时的最高合法档位是 `high`（不是 `max`）。
+fn is_high_reasoning_model(model: &str) -> bool {
+    matches!(model, "google/gemini-3.8-flash" | "x-ai/grok-4.6")
+}
+
 /// 判断思考模式**启用**参数是否会被下发（供请求构建单测与文档自证）。
 ///
 /// `DeepSeek` 视觉兜底模型固定下发 `thinking: disabled`，不属于启用范畴，
@@ -709,6 +734,8 @@ pub fn thinking_params_for(model: &str, mode: ThinkingMode) -> bool {
     (model.starts_with("deepseek-v4-") && !is_deepseek_vision_model(model))
         || model == "kimi-k3"
         || is_glm_forced_thinking_model(model)
+        || ((is_openai_max_reasoning_model(model) || is_high_reasoning_model(model))
+            && mode.requires_support())
         || ((model.starts_with("qwen3.8-")
             || model.starts_with("qwen3.7-")
             || model.starts_with("qwen3.6-"))
@@ -853,7 +880,7 @@ mod tests {
             &ChatRequest::new("qwen3.7-plus").with_thinking(ThinkingMode::Enabled),
         );
         assert_eq!(qwen_on["enable_thinking"], true);
-        // qwen3.6-* 同族；openai 模型无任何思考参数。
+        // qwen3.6-* 同族。
         let qwen36 = build_request_body(
             &ChatRequest::new("qwen3.6-max").with_thinking(ThinkingMode::Adaptive),
         );
@@ -864,11 +891,44 @@ mod tests {
         assert_eq!(qwen38["enable_thinking"], true);
         let qwen38_off = build_request_body(&ChatRequest::new("qwen3.8-max"));
         assert!(qwen38_off.get("enable_thinking").is_none());
-        let gpt = build_request_body(
-            &ChatRequest::new("gpt-5.6-sol").with_thinking(ThinkingMode::Enabled),
+        // OpenAI Sol / Astra：ZenMux ID 显式关闭；启用时直连与 ZenMux 均使用 max。
+        for model in [
+            "gpt-5.6-sol",
+            "openai/gpt-5.6-sol",
+            "gpt-6-astra",
+            "openai/gpt-6-astra",
+        ] {
+            let disabled = build_request_body(&ChatRequest::new(model));
+            assert!(disabled.get("reasoning_effort").is_none());
+            if model.starts_with("openai/") {
+                assert_eq!(disabled["reasoning"]["enabled"], false);
+            } else {
+                assert!(disabled.get("reasoning").is_none());
+            }
+            let enabled =
+                build_request_body(&ChatRequest::new(model).with_thinking(ThinkingMode::Enabled));
+            assert_eq!(enabled["reasoning_effort"], "max");
+        }
+        // Gemini / Grok：ZenMux 下显式关闭，启用时使用最高合法档位 high。
+        let gemini = build_request_body(
+            &ChatRequest::new("google/gemini-3.8-flash").with_thinking(ThinkingMode::Enabled),
         );
-        assert!(gpt.get("enable_thinking").is_none());
-        assert!(gpt.get("reasoning_effort").is_none());
+        assert_eq!(gemini["max_tokens"], 8192);
+        assert_eq!(gemini["stream"], true);
+        assert_eq!(gemini["stream_options"]["include_usage"], true);
+        assert_eq!(gemini["reasoning_effort"], "high");
+        let grok = build_request_body(
+            &ChatRequest::new("x-ai/grok-4.6").with_thinking(ThinkingMode::Enabled),
+        );
+        assert_eq!(grok["max_tokens"], 8192);
+        assert_eq!(grok["stream"], true);
+        assert_eq!(grok["stream_options"]["include_usage"], true);
+        assert_eq!(grok["reasoning_effort"], "high");
+        for model in ["google/gemini-3.8-flash", "x-ai/grok-4.6"] {
+            let disabled = build_request_body(&ChatRequest::new(model));
+            assert!(disabled.get("reasoning_effort").is_none());
+            assert_eq!(disabled["reasoning"]["enabled"], false);
+        }
     }
 
     #[test]
@@ -1281,7 +1341,28 @@ mod tests {
         assert!(!thinking_params_for("qwen3.8-max", ThinkingMode::Disabled));
         assert!(thinking_params_for("qwen3.7-max", ThinkingMode::Enabled));
         assert!(!thinking_params_for("qwen3.7-max", ThinkingMode::Disabled));
-        assert!(!thinking_params_for("gpt-5.6-sol", ThinkingMode::Enabled));
+        for model in [
+            "gpt-5.6-sol",
+            "openai/gpt-5.6-sol",
+            "gpt-6-astra",
+            "openai/gpt-6-astra",
+        ] {
+            assert!(!thinking_params_for(model, ThinkingMode::Disabled));
+            assert!(thinking_params_for(model, ThinkingMode::Enabled));
+        }
+        assert!(!thinking_params_for(
+            "google/gemini-3.8-flash",
+            ThinkingMode::Disabled
+        ));
+        assert!(thinking_params_for(
+            "google/gemini-3.8-flash",
+            ThinkingMode::Adaptive
+        ));
+        assert!(!thinking_params_for(
+            "x-ai/grok-4.6",
+            ThinkingMode::Disabled
+        ));
+        assert!(thinking_params_for("x-ai/grok-4.6", ThinkingMode::Enabled));
     }
 
     #[test]

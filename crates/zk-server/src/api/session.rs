@@ -14,6 +14,7 @@ use axum::http::{StatusCode, header};
 use axum::response::Response;
 use serde_json::Value;
 use zk_authz::model::PermissionMode;
+use zk_db::SessionDetail;
 use zk_db::model::SessionPage;
 
 use crate::api::dto::{
@@ -38,7 +39,7 @@ const MESSAGES_DEFAULT_LIMIT: u32 = 50;
     tag = "sessions",
     responses(
         (status = 201, description = "创建成功（POST_api-sessions.json 样例形状）"),
-        (status = 400, description = "体非法、workingDirectory 非空或 permissionMode 非法"),
+        (status = 400, description = "体非法、模型/workingDirectory/permissionMode 非法"),
         (status = 404, description = "projectId 未知（PROJECT_NOT_FOUND）")
     )
 )]
@@ -66,12 +67,10 @@ pub(crate) async fn create_session(
             ));
         }
     }
-    let model = request
-        .as_ref()
-        .and_then(|req| req.model.as_deref())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map_or_else(|| state.config.default_model.clone(), str::to_owned);
+    let model = resolve_model(
+        &state,
+        request.as_ref().and_then(|req| req.model.as_deref()),
+    )?;
     // 新建会话默认授予完全访问权限（免首轮逐次工具确认）；请求显式携带
     // permissionMode 时以请求为准，非法值按 query 端同规则 400。
     let permission_mode = request
@@ -139,6 +138,62 @@ pub(crate) async fn create_session(
             permission_mode: permission_mode.as_str().to_owned(),
         }),
     ))
+}
+
+pub(super) fn resolve_model(state: &AppState, requested: Option<&str>) -> Result<String, ApiError> {
+    let providers = state.providers.load();
+    let requested = requested.map(str::trim).filter(|model| !model.is_empty());
+    let resolved = match requested {
+        None | Some("premium" | "default" | "inherit") => providers.effective_default_model(),
+        Some(model) => model,
+    };
+    if !providers.supports_model(resolved) {
+        return Err(ApiError::validation_with_code(
+            "INVALID_MODEL",
+            &format!("Unsupported model: {}", requested.unwrap_or_default()),
+        ));
+    }
+    Ok(resolved.to_owned())
+}
+
+/// 以 compare-and-set 恢复已下线模型；并发模型选择获胜时采用其最新值。
+pub(crate) async fn recover_retired_session_model(
+    state: &AppState,
+    detail: &mut SessionDetail,
+) -> Result<(), ApiError> {
+    let replacement = {
+        let providers = state.providers.load();
+        (!providers.supports_model(&detail.model))
+            .then(|| providers.effective_default_model().to_owned())
+    };
+    let Some(replacement) = replacement else {
+        return Ok(());
+    };
+    let previous = detail.model.clone();
+    if state
+        .db
+        .update_session_model_if_current(&detail.session_id, &previous, &replacement)
+        .await?
+    {
+        detail.model = replacement;
+        return Ok(());
+    }
+
+    let current = state
+        .db
+        .get_session(&detail.session_id)
+        .await?
+        .ok_or_else(|| ApiError::session_not_found(&detail.session_id))?;
+    if state.providers.load().supports_model(&current.model) {
+        *detail = current;
+        return Ok(());
+    }
+    tracing::error!(
+        session_id = %detail.session_id,
+        model = %current.model,
+        "session model recovery compare-and-set lost without a valid replacement"
+    );
+    Err(ApiError::internal())
 }
 
 /// WebSocket 通道 URL（Phase 1 骨架值，S8 接线真实端点）。
@@ -385,6 +440,33 @@ fn parse_limit(raw: Option<&str>, default: u32) -> Result<u32, ApiError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use futures::stream::BoxStream;
+    use tokio_util::sync::CancellationToken;
+    use zk_llm::{ChatProvider, ChatRequest, ProviderError, ProviderEvent, ProviderRegistry};
+
+    struct StubProvider;
+
+    impl ChatProvider for StubProvider {
+        fn provider_name(&self) -> &'static str {
+            "stub"
+        }
+
+        fn chat_stream(
+            &self,
+            _request: ChatRequest,
+            _cancel: CancellationToken,
+        ) -> Result<BoxStream<'static, ProviderEvent>, ProviderError> {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+    }
+
+    fn state_with_models(models: Vec<String>, default_model: &str) -> AppState {
+        let mut providers = ProviderRegistry::new();
+        providers.register("stub", Arc::new(StubProvider), models);
+        AppState::for_tests().with_providers(providers.with_default_model(default_model))
+    }
 
     #[test]
     fn limit_parsing_defaults_and_errors() {
@@ -401,5 +483,55 @@ mod tests {
     #[test]
     fn ws_url_shape() {
         assert_eq!(ws_url("abc"), "/ws/session/abc");
+    }
+
+    #[tokio::test]
+    async fn unsupported_model_is_rejected_with_stable_code() {
+        let state = state_with_models(vec!["current-model".into()], "current-model");
+        let error = create_session(
+            State(state),
+            Bytes::from(serde_json::json!({"model": "retired-model"}).to_string()),
+        )
+        .await
+        .expect_err("unknown model must be rejected");
+
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error.code, "INVALID_MODEL");
+    }
+
+    #[tokio::test]
+    async fn omitted_model_uses_effective_registered_default() {
+        let state = state_with_models(vec!["current-model".into()], "retired-model");
+        let (_, Json(response)) = create_session(State(state), Bytes::new())
+            .await
+            .expect("create session");
+
+        assert_eq!(response.model, "current-model");
+    }
+
+    #[tokio::test]
+    async fn default_alias_uses_effective_registered_default() {
+        let state = state_with_models(vec!["current-model".into()], "retired-model");
+        let (_, Json(response)) = create_session(
+            State(state),
+            Bytes::from(serde_json::json!({"model": "default"}).to_string()),
+        )
+        .await
+        .expect("create session");
+
+        assert_eq!(response.model, "current-model");
+    }
+
+    #[tokio::test]
+    async fn phase_one_empty_catalog_accepts_custom_model() {
+        let state = state_with_models(Vec::new(), "company/default-model");
+        let (_, Json(response)) = create_session(
+            State(state),
+            Bytes::from(serde_json::json!({"model": "company/custom-model"}).to_string()),
+        )
+        .await
+        .expect("custom Phase 1 model");
+
+        assert_eq!(response.model, "company/custom-model");
     }
 }

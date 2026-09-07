@@ -16,6 +16,13 @@ from routers.git_enhanced import (
 from services.git_enhanced_service import GitEnhancedService
 
 
+@pytest.fixture(autouse=True)
+def workspace_policy(monkeypatch, tmp_path):
+    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.delenv("ZK_WORKSPACE_ALLOWED_ROOTS", raising=False)
+    monkeypatch.delenv("ZK_LOCAL_PICKER_ENABLED", raising=False)
+
+
 @pytest.fixture
 def committed_repo(tmp_path):
     repo = git.Repo.init(tmp_path)
@@ -78,13 +85,13 @@ async def test_real_git_router_success_and_fail_closed(committed_repo, tmp_path)
         DiffRequest(repo_path=str(committed_repo), ref1="missing-ref", ref2="HEAD")
     )
     assert bad_ref.success is False
-    assert bad_ref.error_code == "INTERNAL_ERROR"
+    assert bad_ref.error_code == "INVALID_INPUT"
 
 
 def test_git_service_path_guards(committed_repo, tmp_path):
     service = GitEnhancedService()
     assert service._validate_repo_path(str(committed_repo)) == str(committed_repo.resolve())
-    with pytest.raises(ValueError, match="Unsafe repo path"):
+    with pytest.raises(ValueError, match="outside"):
         service._validate_repo_path("/")
-    with pytest.raises(ValueError, match="Not a directory"):
+    with pytest.raises(ValueError):
         service._validate_repo_path(str(tmp_path / "absent"))

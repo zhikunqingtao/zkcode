@@ -45,6 +45,7 @@ use zk_protocol::{ClientEnvelope, ClientMessage, McpToolInfo, ServerMessage};
 use super::metrics as ws_metrics;
 use super::restore;
 use super::{BindError, WS_PROTOCOL_VERSION};
+use crate::api::session::recover_retired_session_model;
 use crate::command::{CommandContext, CommandResult, CommandType};
 use crate::interaction::DurableInteractionService;
 use crate::iso::now_millis;
@@ -701,42 +702,17 @@ async fn handle_bind(
     binding_epoch: i64,
     protocol_version: i64,
 ) {
-    // 1. 协议版本过旧（旧 `< WS_PROTOCOL_VERSION` 判定；更高版本照常处理）。
-    if protocol_version < WS_PROTOCOL_VERSION {
-        reply_protocol_error(
-            state,
-            conn_id,
-            "UPGRADE_REQUIRED".to_owned(),
-            Some(bind_request_id.to_owned()),
-            None,
-        );
+    let Some(client_epoch) = validate_bind_request(
+        state,
+        conn_id,
+        bind_request_id,
+        binding_epoch,
+        protocol_version,
+    ) else {
         return;
-    }
-    // 2. bindRequestId 缺失。
-    if bind_request_id.trim().is_empty() {
-        reply_protocol_error(
-            state,
-            conn_id,
-            "BIND_REQUEST_ID_REQUIRED".to_owned(),
-            None,
-            None,
-        );
-        return;
-    }
-    // 3. bindingEpoch 必须 >= 1。
-    if binding_epoch < 1 {
-        reply_protocol_error(
-            state,
-            conn_id,
-            "BINDING_EPOCH_REQUIRED".to_owned(),
-            Some(bind_request_id.to_owned()),
-            None,
-        );
-        return;
-    }
-    let client_epoch = u64::try_from(binding_epoch).unwrap_or(1);
+    };
     // 4. 会话存在性（DB 读失败 → BIND_RECOVERY_FAILED，对齐旧 catch 路径）。
-    let detail = match state.db.get_session(session_id).await {
+    let mut detail = match state.db.get_session(session_id).await {
         Ok(Some(detail)) => detail,
         Ok(None) => {
             reply_protocol_error(
@@ -760,7 +736,23 @@ async fn handle_bind(
             return;
         }
     };
-    // 5. epoch 单调校验（旧 STALE_BINDING_EPOCH；回显当前 epoch 供前端递增重试）。
+    // 5. 在任何恢复写入前拒绝陈旧 epoch，避免无效 bind 修改会话。
+    if reject_stale_bind(state, conn_id, bind_request_id, client_epoch) {
+        return;
+    }
+    // 6. 存量会话若引用已下线模型，恢复到当前有效默认模型并持久化。
+    if let Err(err) = recover_retired_session_model(state, &mut detail).await {
+        tracing::error!(conn_id, session_id, error = %err, "bind session model recovery failed");
+        reply_protocol_error(
+            state,
+            conn_id,
+            "BIND_RECOVERY_FAILED".to_owned(),
+            Some(bind_request_id.to_owned()),
+            None,
+        );
+        return;
+    }
+    // 7. epoch 单调校验（旧 STALE_BINDING_EPOCH；回显当前 epoch 供前端递增重试）。
     let epoch = match state.hub.bind(conn_id, session_id, client_epoch) {
         Ok(epoch) => epoch,
         Err(BindError::StaleEpoch) => {
@@ -778,12 +770,11 @@ async fn handle_bind(
             return;
         }
         Err(BindError::NotRegistered) => {
-            // 升级注册与 disconnect 的竞态残留：连接已不在，无处可答。
             tracing::debug!(conn_id, "bind on unregistered connection");
             return;
         }
     };
-    // 6. 成功：session_restored 直发（pushToPrincipal 语义，不带路由字段）
+    // 8. 成功：session_restored 直发（pushToPrincipal 语义，不带路由字段）
     //    + pending critical 按序重放（对齐旧 getPrincipalsForSession 语义）。
     let restored = restore::build_session_restored(
         detail,
@@ -801,10 +792,74 @@ async fn handle_bind(
             "ws pending replayed after bind"
         );
     }
-    // 7. 重放全部 pending interaction（旧 L1703-1718）。`session_restored` 已带
+    // 9. 重放全部 pending interaction（旧 L1703-1718）。`session_restored` 已带
     //    权威权限模式，故此处**不**补发 `permission_mode_changed`（旧源同注释：
     //    会触发虚假「已切换」通知）。
     replay_pending_interactions(state, conn_id, session_id).await;
+}
+
+/// 校验 bind 的协议版本、请求 ID 与 epoch 基本形状。
+fn validate_bind_request(
+    state: &AppState,
+    conn_id: &str,
+    bind_request_id: &str,
+    binding_epoch: i64,
+    protocol_version: i64,
+) -> Option<u64> {
+    if protocol_version < WS_PROTOCOL_VERSION {
+        reply_protocol_error(
+            state,
+            conn_id,
+            "UPGRADE_REQUIRED".to_owned(),
+            Some(bind_request_id.to_owned()),
+            None,
+        );
+        return None;
+    }
+    if bind_request_id.trim().is_empty() {
+        reply_protocol_error(
+            state,
+            conn_id,
+            "BIND_REQUEST_ID_REQUIRED".to_owned(),
+            None,
+            None,
+        );
+        return None;
+    }
+    if binding_epoch < 1 {
+        reply_protocol_error(
+            state,
+            conn_id,
+            "BINDING_EPOCH_REQUIRED".to_owned(),
+            Some(bind_request_id.to_owned()),
+            None,
+        );
+        return None;
+    }
+    u64::try_from(binding_epoch).ok()
+}
+
+/// 在恢复写入前执行与 [`super::WsHub::bind`] 相同的单连接 epoch 判定。
+fn reject_stale_bind(
+    state: &AppState,
+    conn_id: &str,
+    bind_request_id: &str,
+    client_epoch: u64,
+) -> bool {
+    let Some((_, current_epoch)) = state.hub.bound_session(conn_id) else {
+        return false;
+    };
+    if client_epoch > current_epoch {
+        return false;
+    }
+    reply_protocol_error(
+        state,
+        conn_id,
+        "STALE_BINDING_EPOCH".to_owned(),
+        Some(bind_request_id.to_owned()),
+        Some(i64::try_from(current_epoch).unwrap_or(i64::MAX)),
+    );
+    true
 }
 
 /// bind 成功后的 pending interaction 恢复重投（旧 L1703-1718 +
@@ -1019,21 +1074,15 @@ async fn handle_set_permission_mode(state: &AppState, conn_id: &str, mode: &str)
 /// `set_model` 上行处理（旧 `handleSetModel` L1285-1304 语义 + 2.7 多提供商校验）。
 ///
 /// - 未绑定会话：debug 丢弃（旧 `principalSession==null` 直接 return）。
-/// - 模型校验：`model` 空白 → `INVALID_MODEL`；`ProviderRegistry` 已注册模型清单
-///   非空且不含该模型 → `INVALID_MODEL`；注册表为空（Phase 1 单 provider 回退）
-///   放行任意模型（旧行为不校验能力表外的模型）。
-/// - 有效：落库 `sessions.model`（失败仅告警不阻断，对齐旧「更新失败仍确认」的
-///   宽松路径）+ 推送下行 `model_changed`。
+/// - 模型必须存在于当前有效目录。
+/// - 仅落库成功后推送 `model_changed`；失败时推送错误，避免 UI 与 Engine 分叉。
 async fn handle_set_model(state: &AppState, conn_id: &str, model: &str) {
     let Some((session_id, _epoch)) = state.hub.bound_session(conn_id) else {
         tracing::debug!(conn_id, "set_model dropped (session not bound)");
         return;
     };
-    let trimmed = model.trim();
-    let providers = state.providers.load();
-    let known = providers.models();
-    let supported = !trimmed.is_empty() && (known.is_empty() || known.iter().any(|m| m == trimmed));
-    if !supported {
+    let model = model.trim();
+    if !state.providers.load().supports_model(model) {
         state
             .hub
             .push(
@@ -1047,15 +1096,33 @@ async fn handle_set_model(state: &AppState, conn_id: &str, model: &str) {
             .await;
         return;
     }
-    if let Err(err) = state.db.update_session_model(&session_id, trimmed).await {
-        tracing::warn!(session_id, error = %err, "persist session model failed");
+    let persisted = match state.db.update_session_model(&session_id, model).await {
+        Ok(persisted) => persisted,
+        Err(err) => {
+            tracing::warn!(session_id, error = %err, "persist session model failed");
+            false
+        }
+    };
+    if !persisted {
+        state
+            .hub
+            .push(
+                &session_id,
+                ServerMessage::Error {
+                    code: "MODEL_UPDATE_FAILED".to_owned(),
+                    message: "Failed to persist model selection".to_owned(),
+                    retryable: true,
+                },
+            )
+            .await;
+        return;
     }
     state
         .hub
         .push(
             &session_id,
             ServerMessage::ModelChanged {
-                model: trimmed.to_owned(),
+                model: model.to_owned(),
             },
         )
         .await;
@@ -1082,7 +1149,180 @@ fn reply_protocol_error(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use futures::stream::BoxStream;
+    use tokio_util::sync::CancellationToken;
+    use zk_llm::{ChatProvider, ChatRequest, ProviderError, ProviderEvent, ProviderRegistry};
+
     use super::*;
+
+    struct StubProvider;
+
+    impl ChatProvider for StubProvider {
+        fn provider_name(&self) -> &'static str {
+            "stub"
+        }
+
+        fn chat_stream(
+            &self,
+            _request: ChatRequest,
+            _cancel: CancellationToken,
+        ) -> Result<BoxStream<'static, ProviderEvent>, ProviderError> {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+    }
+
+    fn strict_state() -> AppState {
+        let mut providers = ProviderRegistry::new();
+        providers.register("stub", Arc::new(StubProvider), vec!["current-model".into()]);
+        AppState::for_tests().with_providers(providers.with_default_model("retired-default"))
+    }
+
+    fn register_test_connection(
+        state: &AppState,
+        conn_id: &str,
+    ) -> tokio::sync::mpsc::Receiver<crate::ws::hub::OutboundFrame> {
+        let (sender, receiver) = tokio::sync::mpsc::channel(8);
+        state.hub.register(conn_id, sender);
+        receiver
+    }
+
+    #[tokio::test]
+    async fn bind_replaces_and_persists_a_retired_session_model() {
+        let state = strict_state();
+        let session = state
+            .db
+            .create_session("retired-model", "/tmp")
+            .await
+            .expect("session");
+        let mut receiver = register_test_connection(&state, "conn-model-recovery");
+
+        handle_bind(
+            &state,
+            "conn-model-recovery",
+            &session.id,
+            "bind-1",
+            1,
+            WS_PROTOCOL_VERSION,
+        )
+        .await;
+
+        assert_eq!(
+            state.hub.bound_session("conn-model-recovery"),
+            Some((session.id.clone(), 1))
+        );
+        assert_eq!(
+            state
+                .db
+                .get_session(&session.id)
+                .await
+                .expect("read session")
+                .expect("session exists")
+                .model,
+            "current-model"
+        );
+        let crate::ws::hub::OutboundFrame::Text(restored) =
+            receiver.recv().await.expect("session_restored frame")
+        else {
+            panic!("expected text frame");
+        };
+        let restored: serde_json::Value = serde_json::from_str(&restored).expect("restore json");
+        assert_eq!(restored["type"], "session_restored");
+        assert_eq!(restored["metadata"]["model"], "current-model");
+    }
+
+    #[tokio::test]
+    async fn stale_bind_does_not_repair_the_session_model() {
+        let state = strict_state();
+        let session = state
+            .db
+            .create_session("current-model", "/tmp")
+            .await
+            .expect("session");
+        let mut receiver = register_test_connection(&state, "conn-stale-recovery");
+        handle_bind(
+            &state,
+            "conn-stale-recovery",
+            &session.id,
+            "bind-1",
+            2,
+            WS_PROTOCOL_VERSION,
+        )
+        .await;
+        receiver.recv().await.expect("initial restore");
+        state
+            .db
+            .update_session_model(&session.id, "retired-model")
+            .await
+            .expect("seed retired model");
+
+        handle_bind(
+            &state,
+            "conn-stale-recovery",
+            &session.id,
+            "bind-2",
+            2,
+            WS_PROTOCOL_VERSION,
+        )
+        .await;
+
+        assert_eq!(
+            state
+                .db
+                .get_session(&session.id)
+                .await
+                .expect("read session")
+                .expect("session exists")
+                .model,
+            "retired-model"
+        );
+        let crate::ws::hub::OutboundFrame::Text(error) =
+            receiver.recv().await.expect("protocol error")
+        else {
+            panic!("expected text frame");
+        };
+        let error: serde_json::Value = serde_json::from_str(&error).expect("error json");
+        assert_eq!(error["type"], "protocol_error");
+        assert_eq!(error["code"], "STALE_BINDING_EPOCH");
+    }
+
+    #[tokio::test]
+    async fn recovery_preserves_a_concurrent_valid_model_selection() {
+        let state = strict_state();
+        let session = state
+            .db
+            .create_session("retired-model", "/tmp")
+            .await
+            .expect("session");
+        let mut stale_detail = state
+            .db
+            .get_session(&session.id)
+            .await
+            .expect("read session")
+            .expect("session exists");
+        state
+            .db
+            .update_session_model(&session.id, "current-model")
+            .await
+            .expect("concurrent selection");
+
+        recover_retired_session_model(&state, &mut stale_detail)
+            .await
+            .expect("recover without overwrite");
+
+        assert_eq!(stale_detail.model, "current-model");
+        assert_eq!(
+            state
+                .db
+                .get_session(&session.id)
+                .await
+                .expect("read session")
+                .expect("session exists")
+                .model,
+            "current-model"
+        );
+    }
 
     /// `KNOWN_CLIENT_TYPES` 与 `ClientMessage` 16 variant 的 kind 输出域互锁
     ///（新增 variant 忘记登记时此处失败，避免已知消息被误判未知）。

@@ -13,6 +13,7 @@ use serde_json::Value;
 use zk_authz::model::PermissionMode;
 use zk_engine::{ConversationOutcome, ConversationRunOptions};
 
+use crate::api::session::{recover_retired_session_model, resolve_model};
 use crate::error::ApiError;
 use crate::state::AppState;
 
@@ -114,7 +115,7 @@ async fn execute(
         })?;
     state.authz.modes.set_mode(&session_id, mode).await;
     if let Some(model) = request.model.as_deref() {
-        let resolved = resolve_model(state, model)?;
+        let resolved = resolve_model(state, Some(model))?;
         state
             .db
             .update_session_model(&session_id, &resolved)
@@ -235,7 +236,7 @@ async fn resolve_session(
     require_existing: bool,
 ) -> Result<String, ApiError> {
     if let Some(session_id) = request.session_id.as_deref() {
-        let session = state
+        let mut session = state
             .db
             .get_session(session_id)
             .await?
@@ -252,6 +253,9 @@ async fn resolve_session(
                     "Project and Session resolve to different workspaces",
                 ));
             }
+        }
+        if request.model.is_none() {
+            recover_retired_session_model(state, &mut session).await?;
         }
         return Ok(session_id.to_owned());
     }
@@ -272,12 +276,7 @@ async fn resolve_session(
         .get_project(project_id)
         .await?
         .ok_or_else(|| ApiError::not_found("PROJECT_NOT_FOUND", "Project not found"))?;
-    let model = request
-        .model
-        .as_deref()
-        .map(|model| resolve_model(state, model))
-        .transpose()?
-        .unwrap_or_else(|| state.config.default_model.clone());
+    let model = resolve_model(state, request.model.as_deref())?;
     Ok(state
         .db
         .create_session(&model, &project.workspace_root)
@@ -285,21 +284,66 @@ async fn resolve_session(
         .id)
 }
 
-fn resolve_model(state: &AppState, requested: &str) -> Result<String, ApiError> {
-    let requested = requested.trim();
-    let providers = state.providers.load();
-    let resolved = if matches!(requested, "premium" | "default" | "inherit") {
-        providers.default_model()
-    } else {
-        requested
-    };
-    let models = providers.models();
-    if resolved.is_empty() || (!models.is_empty() && !models.iter().any(|model| model == resolved))
-    {
-        return Err(ApiError::validation_with_code(
-            "INVALID_MODEL",
-            &format!("Unsupported model: {requested}"),
-        ));
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use futures::stream::BoxStream;
+    use tokio_util::sync::CancellationToken;
+    use zk_llm::{ChatProvider, ChatRequest, ProviderError, ProviderEvent, ProviderRegistry};
+
+    use super::*;
+
+    struct StubProvider;
+
+    impl ChatProvider for StubProvider {
+        fn provider_name(&self) -> &'static str {
+            "stub"
+        }
+
+        fn chat_stream(
+            &self,
+            _request: ChatRequest,
+            _cancel: CancellationToken,
+        ) -> Result<BoxStream<'static, ProviderEvent>, ProviderError> {
+            Ok(Box::pin(futures::stream::empty()))
+        }
     }
-    Ok(resolved.to_owned())
+
+    fn strict_state() -> AppState {
+        let mut providers = ProviderRegistry::new();
+        providers.register("stub", Arc::new(StubProvider), vec!["current-model".into()]);
+        AppState::for_tests().with_providers(providers.with_default_model("retired-default"))
+    }
+
+    #[tokio::test]
+    async fn existing_rest_session_without_model_recovers_retired_model() {
+        let state = strict_state();
+        let session = state
+            .db
+            .create_session("retired-model", "/tmp")
+            .await
+            .expect("session");
+        let request: QueryRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "hello",
+            "sessionId": session.id,
+        }))
+        .expect("query request");
+
+        let resolved = resolve_session(&state, &request, true)
+            .await
+            .expect("resolve existing session");
+
+        assert_eq!(resolved, session.id);
+        assert_eq!(
+            state
+                .db
+                .get_session(&session.id)
+                .await
+                .expect("read session")
+                .expect("session exists")
+                .model,
+            "current-model"
+        );
+    }
 }

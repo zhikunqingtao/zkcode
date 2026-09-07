@@ -180,7 +180,7 @@ pub(crate) async fn put_config(
         // 旧 `@RequestBody Map<String,Object>`：缺失/非法 JSON/非对象体 → 400。
         return Err(ApiError::invalid_request_body());
     };
-    let current = load_user_config(&state).await?;
+    let current = load_stored_user_config(&state).await?;
     // 旧 `updateUserConfig` 的 putAll 合并：当前配置序列化为 JSON 对象后
     // 顶层键覆盖（未知键随合并进入但不落形状——serde 忽略未知字段）。
     let mut merged = serde_json::to_value(&current).map_err(|err| {
@@ -205,13 +205,20 @@ pub(crate) async fn put_config(
     state.db.put_config_value(USER_CONFIG_KEY, &json).await?;
     Ok(Json(UpdateConfigResponse {
         success: true,
-        config: next,
+        config: with_effective_default_model(&state, next),
     }))
 }
 
 /// 存量行加载 + 默认值兜底（GET / PUT 与 `/config` 斜杠命令共用；对齐旧 `getUserConfig` 的
 /// 「解析失败回默认」宽容语义——存量损坏不阻断服务）。
 pub(crate) async fn load_user_config(state: &AppState) -> Result<UserConfig, ApiError> {
+    Ok(with_effective_default_model(
+        state,
+        load_stored_user_config(state).await?,
+    ))
+}
+
+async fn load_stored_user_config(state: &AppState) -> Result<UserConfig, ApiError> {
     let stored = state.db.get_config_value(USER_CONFIG_KEY).await?;
     Ok(stored
         .and_then(|json| {
@@ -221,7 +228,19 @@ pub(crate) async fn load_user_config(state: &AppState) -> Result<UserConfig, Api
                 })
                 .ok()
         })
-        .unwrap_or_else(|| UserConfig::default_with_model(&state.config.default_model)))
+        .unwrap_or_else(|| {
+            UserConfig::default_with_model(state.providers.load().effective_default_model())
+        }))
+}
+
+fn with_effective_default_model(state: &AppState, mut config: UserConfig) -> UserConfig {
+    let providers = state.providers.load();
+    if !providers.supports_model(&config.default_model) {
+        providers
+            .effective_default_model()
+            .clone_into(&mut config.default_model);
+    }
+    config
 }
 
 /// `GET /api/config/project`——项目级配置（无存量行时返回默认值）。
@@ -304,6 +323,33 @@ async fn load_project_config(state: &AppState) -> Result<ProjectConfig, ApiError
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use futures::stream::BoxStream;
+    use tokio_util::sync::CancellationToken;
+    use zk_llm::{ChatProvider, ChatRequest, ProviderError, ProviderEvent, ProviderRegistry};
+
+    struct StubProvider;
+
+    impl ChatProvider for StubProvider {
+        fn provider_name(&self) -> &'static str {
+            "stub"
+        }
+
+        fn chat_stream(
+            &self,
+            _request: ChatRequest,
+            _cancel: CancellationToken,
+        ) -> Result<BoxStream<'static, ProviderEvent>, ProviderError> {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+    }
+
+    fn state_with_models(models: Vec<String>, default_model: &str) -> AppState {
+        let mut providers = ProviderRegistry::new();
+        providers.register("stub", Arc::new(StubProvider), models);
+        AppState::for_tests().with_providers(providers.with_default_model(default_model))
+    }
 
     /// 默认配置序列化键集与样例 12 键一致（null 可选键剥离）。
     #[test]
@@ -361,5 +407,40 @@ mod tests {
             ]
         );
         assert_eq!(value["lastCost"], 0.0);
+    }
+
+    #[tokio::test]
+    async fn get_and_put_return_effective_defaults_without_overwriting_the_stored_choice() {
+        let state = state_with_models(vec!["current-model".into()], "retired-model");
+        let stale_config = UserConfig::default_with_model("another-retired-model");
+        state
+            .db
+            .put_config_value(
+                USER_CONFIG_KEY,
+                &serde_json::to_string(&stale_config).expect("serialize config"),
+            )
+            .await
+            .expect("seed config");
+
+        assert_eq!(
+            load_user_config(&state).await.expect("load").default_model,
+            "current-model"
+        );
+
+        let Json(response) = put_config(
+            State(state.clone()),
+            Bytes::from(serde_json::json!({"defaultModel": "still-retired"}).to_string()),
+        )
+        .await
+        .expect("put config");
+        assert_eq!(response.config.default_model, "current-model");
+        let persisted = state
+            .db
+            .get_config_value(USER_CONFIG_KEY)
+            .await
+            .expect("read config")
+            .expect("stored config");
+        let persisted: UserConfig = serde_json::from_str(&persisted).expect("parse config");
+        assert_eq!(persisted.default_model, "still-retired");
     }
 }

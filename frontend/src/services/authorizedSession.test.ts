@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useConfigStore } from '@/store/configStore';
 import { useProjectStore, type Project } from '@/store/projectStore';
 import { useSessionStore } from '@/store/sessionStore';
+import { useModelStore } from '@/store/modelStore';
 import { requestAuthorizedSession } from './authorizedSession';
 
 const project: Project = {
@@ -14,6 +15,7 @@ const project: Project = {
 const originalRequestSelection =
     useProjectStore.getState().requestSelection;
 const originalCreateSession = useSessionStore.getState().createSession;
+const originalFetchModels = useModelStore.getState().fetchModels;
 
 describe('requestAuthorizedSession', () => {
     beforeEach(() => {
@@ -26,6 +28,14 @@ describe('requestAuthorizedSession', () => {
             model: null,
             createSession: originalCreateSession,
         });
+        useModelStore.setState({
+            models: [model('model-default')],
+            defaultModel: 'model-default',
+            loaded: true,
+            loading: false,
+            error: null,
+            fetchModels: originalFetchModels,
+        });
     });
 
     afterEach(() => {
@@ -37,6 +47,8 @@ describe('requestAuthorizedSession', () => {
             model: null,
             createSession: originalCreateSession,
         });
+        useModelStore.setState({ fetchModels: originalFetchModels });
+        vi.unstubAllGlobals();
         vi.restoreAllMocks();
     });
 
@@ -57,30 +69,89 @@ describe('requestAuthorizedSession', () => {
         );
     });
 
-    it('prefers the model selected in Settings over the configured default', async () => {
+    it('replaces stale local choices with the backend catalog default', async () => {
         const requestSelection = vi.fn().mockResolvedValue(project);
         const createSession = vi.fn().mockResolvedValue('session-created');
+        useConfigStore.setState({ defaultModel: 'retired-config-model' });
         useProjectStore.setState({ requestSelection });
-        useSessionStore.setState({
-            model: 'qwen3.8-max',
-            createSession,
+        useSessionStore.setState({ model: 'retired-session-model', createSession });
+        useModelStore.setState({
+            models: [model('backend-current-model'), model('qwen3.8-max')],
+            defaultModel: 'backend-current-model',
+            loaded: true,
         });
 
         await expect(requestAuthorizedSession()).resolves.toBe('session-created');
 
-        expect(createSession).toHaveBeenCalledWith(project.id, 'qwen3.8-max');
+        expect(createSession).toHaveBeenCalledWith(project.id, 'backend-current-model');
     });
 
-    it('falls back to qwen3.8-max when no selected or configured model exists', async () => {
+    it('loads the catalog on a cold start before validating a stale model', async () => {
+        const fetchMock = vi.fn((input: RequestInfo | URL) => {
+            const url = String(input);
+            if (url === '/api/projects') {
+                return Promise.resolve({ ok: true, status: 200 } as Response);
+            }
+            if (url === '/api/models') {
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({
+                        models: [model('cold-start-default')],
+                        defaultModel: 'cold-start-default',
+                    }),
+                } as Response);
+            }
+            throw new Error(`unexpected fetch: ${url}`);
+        });
+        vi.stubGlobal('fetch', fetchMock);
         const requestSelection = vi.fn().mockResolvedValue(project);
         const createSession = vi.fn().mockResolvedValue('session-created');
-        useConfigStore.setState({ defaultModel: null as unknown as string });
         useProjectStore.setState({ requestSelection });
-        useSessionStore.setState({ model: null, createSession });
+        useSessionStore.setState({ model: 'retired-model', createSession });
+        useModelStore.setState({
+            models: [],
+            defaultModel: null,
+            loaded: false,
+            loading: false,
+            error: null,
+        });
 
         await expect(requestAuthorizedSession()).resolves.toBe('session-created');
 
-        expect(createSession).toHaveBeenCalledWith(project.id, 'qwen3.8-max');
+        expect(fetchMock).toHaveBeenCalledWith('/api/models');
+        expect(createSession).toHaveBeenCalledWith(project.id, 'cold-start-default');
+    });
+
+    it('fails closed when refreshing a stale cached catalog still fails', async () => {
+        const fetchMock = vi.fn((input: RequestInfo | URL) => {
+            const url = String(input);
+            if (url === '/api/projects') {
+                return Promise.resolve({ ok: true, status: 200 } as Response);
+            }
+            if (url === '/api/models') {
+                return Promise.resolve({ ok: false, status: 503 } as Response);
+            }
+            throw new Error(`unexpected fetch: ${url}`);
+        });
+        vi.stubGlobal('fetch', fetchMock);
+        const requestSelection = vi.fn().mockResolvedValue(project);
+        const createSession = vi.fn().mockResolvedValue('session-created');
+        useProjectStore.setState({ requestSelection });
+        useSessionStore.setState({ model: 'old-model', createSession });
+        useModelStore.setState({
+            models: [model('old-model')],
+            defaultModel: 'old-model',
+            loaded: true,
+            loading: false,
+            error: 'previous refresh failed',
+            fetchModels: originalFetchModels,
+        });
+
+        await expect(requestAuthorizedSession()).resolves.toBe('session-created');
+
+        expect(createSession).toHaveBeenCalledWith(project.id, null);
+        expect(useModelStore.getState().models).toEqual([]);
     });
 
     it('does not create a Session when folder selection is canceled', async () => {
@@ -144,3 +215,12 @@ describe('requestAuthorizedSession', () => {
         vi.unstubAllGlobals();
     });
 });
+
+function model(id: string) {
+    return {
+        id,
+        displayName: id,
+        supportsImages: false,
+        maxImages: 0,
+    };
+}

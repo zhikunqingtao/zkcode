@@ -8,7 +8,7 @@
 //! [`CatalogEntry::protocol`]（`OpenAI` 兼容 vs `Anthropic` 原生，D-P2-3）与
 //! [`CatalogEntry::in_default_catalog`]（是否进入 `GET /api/models` 的声明式
 //! 聚合基线；`openai` 回退通道与 `anthropic` 原生通道均不进——两者的模型面
-//! 由环境变量给出，进目录会破坏 19 条基线契约）。
+//! 由环境变量给出，进目录会破坏 21 条基线契约）。
 //!
 //! # 环境变量约定（2.7 冻结）
 //!
@@ -181,14 +181,14 @@ pub struct CatalogEntry {
     pub models: &'static [&'static str],
     /// 线协议。
     pub protocol: ProviderProtocol,
-    /// 是否进入声明式模型聚合基线（`GET /api/models` 的 19 条契约来源）。
+    /// 是否进入声明式模型聚合基线（`GET /api/models` 的 21 条契约来源）。
     pub in_default_catalog: bool,
 }
 
 /// 8+1 家 provider 声明目录（顺序 = 方案 §13-3 表格顺序 = 模型聚合顺序）。
 ///
 /// 前 7 家 `in_default_catalog = true`，其 `models` 并集恰为
-/// `GET /api/models` 的 19 条基线（顺序一致）；`openai`（Phase 1 回退通道）
+/// `GET /api/models` 的 21 条基线（顺序一致）；`openai`（Phase 1 回退通道）
 /// 与 `anthropic`（原生协议通道）不进基线目录。
 pub const PROVIDER_CATALOG: &[CatalogEntry] = &[
     CatalogEntry {
@@ -256,7 +256,9 @@ pub const PROVIDER_CATALOG: &[CatalogEntry] = &[
             "anthropic/claude-opus-4.8",
             "anthropic/claude-fable-5",
             "openai/gpt-5.6-sol",
-            "google/gemini-3.5-flash",
+            "openai/gpt-6-astra",
+            "google/gemini-3.8-flash",
+            "x-ai/grok-4.6",
         ],
         protocol: ProviderProtocol::OpenAiCompat,
         in_default_catalog: true,
@@ -442,7 +444,7 @@ mod tests {
             ("moonshot", MOONSHOT_BASE_URL, "kimi-k3", 3),
             ("zhipu", ZHIPU_BASE_URL, "glm-5.3", 2),
             ("minimax", MINIMAX_BASE_URL, "MiniMax-M3", 1),
-            ("zenmux", ZENMUX_BASE_URL, "anthropic/claude-opus-4.8", 4),
+            ("zenmux", ZENMUX_BASE_URL, "anthropic/claude-opus-4.8", 6),
             ("anthropic", ANTHROPIC_BASE_URL, "claude-sonnet-4-6", 3),
             ("openai", OPENAI_BASE_URL, "gpt-4o", 2),
         ];
@@ -466,9 +468,9 @@ mod tests {
         }
     }
 
-    /// 声明式基线 = 前 7 家并集 = `GET /api/models` 的 19 条（顺序一致）。
+    /// 声明式基线 = 前 7 家并集 = `GET /api/models` 的 21 条（顺序一致）。
     #[test]
-    fn declared_models_match_nineteen_model_baseline() {
+    fn declared_models_match_twenty_one_model_baseline() {
         assert_eq!(
             declared_models(),
             vec![
@@ -490,7 +492,9 @@ mod tests {
                 "anthropic/claude-opus-4.8",
                 "anthropic/claude-fable-5",
                 "openai/gpt-5.6-sol",
-                "google/gemini-3.5-flash",
+                "openai/gpt-6-astra",
+                "google/gemini-3.8-flash",
+                "x-ai/grok-4.6",
             ]
         );
     }

@@ -266,26 +266,53 @@ pub static BUILTIN_MODELS: &[ModelCapabilities] = &[
         128_000,
         1_050_000,
         true,
-        false,
+        true,
         true,
         4,
         true,
         0.030,
         0.180,
     ),
+    ModelCapabilities::caps(
+        "openai/gpt-6-astra",
+        "OpenAI GPT-6 Astra",
+        128_000,
+        1_050_000,
+        true,
+        true,
+        true,
+        4,
+        true,
+        0.010,
+        0.050,
+    ),
     // Google via ZenMux（google/ 前缀 = zenmux 中转）
     ModelCapabilities::caps(
-        "google/gemini-3.5-flash",
-        "Google Gemini 3.5 Flash",
-        65530,
-        1_050_000,
-        false,
-        false,
+        "google/gemini-3.8-flash",
+        "Google Gemini 3.8 Flash",
+        65_536,
+        1_048_576,
+        true,
+        true,
         true,
         4,
         true,
         0.0015,
-        0.009,
+        0.0075,
+    ),
+    // xAI via ZenMux（x-ai/ 前缀 = zenmux 中转）
+    ModelCapabilities::caps(
+        "x-ai/grok-4.6",
+        "xAI Grok 4.6",
+        65_536,
+        500_000,
+        true,
+        true,
+        true,
+        4,
+        true,
+        0.004,
+        0.012,
     ),
     // 国产大模型
     ModelCapabilities::caps(
@@ -885,8 +912,8 @@ mod tests {
                 caps.model_id
             );
         }
-        // 8/28 模型迁移后：新增 qwen3.8-flash，GLM 视觉模型原位替换。
-        assert_eq!(BUILTIN_MODELS.len(), 26);
+        // 当前内置能力表包含 ZenMux GPT-6 Astra。
+        assert_eq!(BUILTIN_MODELS.len(), 28);
         // 键唯一。
         let mut ids: Vec<&str> = BUILTIN_MODELS
             .iter()
@@ -908,6 +935,49 @@ mod tests {
             384_000
         );
         assert_eq!(max_output_tokens_for("nope"), 4096);
+    }
+
+    #[test]
+    fn zenmux_openai_models_use_full_context_and_thinking() {
+        for model in ["openai/gpt-5.6-sol", "openai/gpt-6-astra"] {
+            let caps = capabilities_for(model);
+            assert_eq!(caps.context_window, 1_050_000, "{model}");
+            assert_eq!(caps.max_output_tokens, 128_000, "{model}");
+            assert!(caps.supports_streaming, "{model}");
+            assert!(caps.supports_thinking, "{model}");
+            assert!(caps.supports_images, "{model}");
+            assert!(caps.supports_tool_use, "{model}");
+            assert!(is_known_model(model), "{model}");
+        }
+    }
+
+    #[test]
+    fn zenmux_gemini_38_flash_matches_verified_limits() {
+        let caps = capabilities_for("google/gemini-3.8-flash");
+        assert_eq!(caps.display_name, "Google Gemini 3.8 Flash");
+        assert_eq!(caps.context_window, 1_048_576);
+        assert_eq!(caps.max_output_tokens, 65_536);
+        assert!(caps.supports_streaming);
+        assert!(caps.supports_thinking);
+        assert!(caps.supports_images);
+        assert_eq!(caps.max_images, 4);
+        assert!(caps.supports_tool_use);
+        assert!(is_known_model("google/gemini-3.8-flash"));
+        assert!(!is_known_model("google/gemini-3.5-flash"));
+    }
+
+    #[test]
+    fn zenmux_grok_46_uses_full_context_and_bounded_output() {
+        let caps = capabilities_for("x-ai/grok-4.6");
+        assert_eq!(caps.display_name, "xAI Grok 4.6");
+        assert_eq!(caps.context_window, 500_000);
+        assert_eq!(caps.max_output_tokens, 65_536);
+        assert!(caps.supports_streaming);
+        assert!(caps.supports_thinking);
+        assert!(caps.supports_images);
+        assert_eq!(caps.max_images, 4);
+        assert!(caps.supports_tool_use);
+        assert!(is_known_model("x-ai/grok-4.6"));
     }
 
     #[test]

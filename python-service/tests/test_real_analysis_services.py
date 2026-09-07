@@ -28,7 +28,10 @@ from services.complexity_analyzer import ComplexityAnalyzer, cc_to_risk, count_l
 
 
 @pytest.fixture
-def real_project(tmp_path):
+def real_project(tmp_path, monkeypatch):
+    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.delenv("ZK_WORKSPACE_ALLOWED_ROOTS", raising=False)
+    monkeypatch.delenv("ZK_LOCAL_PICKER_ENABLED", raising=False)
     (tmp_path / "api.py").write_text(
         '''
 from fastapi import APIRouter

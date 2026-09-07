@@ -1,6 +1,7 @@
-import { DEFAULT_MODEL, useConfigStore } from '@/store/configStore';
+import { useConfigStore } from '@/store/configStore';
 import { useProjectStore } from '@/store/projectStore';
 import { useSessionStore } from '@/store/sessionStore';
+import { useModelStore } from '@/store/modelStore';
 
 let pendingCreation: Promise<string | null> | null = null;
 
@@ -27,6 +28,23 @@ async function projectDomainMissing(): Promise<boolean> {
     }
 }
 
+async function selectAvailableModel(): Promise<string | null> {
+    let catalog = useModelStore.getState();
+    if (!catalog.loaded || catalog.loading || catalog.error) {
+        await catalog.fetchModels();
+        catalog = useModelStore.getState();
+    }
+    if (!catalog.loaded || catalog.error) {
+        // 目录不可用时省略 model，让服务端裁定有效默认，避免发送本地陈旧值。
+        return null;
+    }
+
+    const configuredDefault = useConfigStore.getState().defaultModel;
+    return catalog.models.some(model => model.id === configuredDefault)
+        ? configuredDefault
+        : catalog.defaultModel;
+}
+
 /**
  * Opens the persistent Project authorization chooser and creates one Session
  * bound to the selected authorization. Concurrent callers share the same
@@ -44,10 +62,8 @@ export function requestAuthorizedSession(): Promise<string | null> {
         const project = await useProjectStore.getState().requestSelection();
         if (!project) return null;
 
+        const selectedModel = await selectAvailableModel();
         const sessionState = useSessionStore.getState();
-        const selectedModel = sessionState.model
-            ?? useConfigStore.getState().defaultModel
-            ?? DEFAULT_MODEL;
         return sessionState.createSession(
             project.id,
             selectedModel,

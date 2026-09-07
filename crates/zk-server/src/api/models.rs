@@ -8,11 +8,12 @@
 //! 动态聚合——注册表非空时按其 model → provider 索引序生成条目（命中静态目录
 //! 取权威能力值，未收录的新模型走 [`dynamic_info`] 兜底元数据）；注册表为空
 //!（Phase 1 单 provider 回退 / 未配任何 `LLM_PROVIDER_*` key）时退化为声明式
-//! 静态目录（样例 16 模型逐条照抄，能力值与 `ModelRegistry.BUILTIN_MODELS`
-//! 交叉核实一致），保住既有响应契约。`defaultModel` 恒取运行配置
-//! `ZK_DEFAULT_MODEL`（与创建会话共用同一配置源，对齐旧
-//! `providerRegistry.getDefaultModel()` 语义）。响应形状（models 数组 +
-//! defaultModel，每条 11 键 camelCase）不变。
+//! 静态目录（在样例 16 模型基线上追加已验证的新模型，能力值与
+//! `ModelRegistry.BUILTIN_MODELS` 交叉核实一致），保住既有响应契约。
+//! `defaultModel` 取注册表的有效默认：配置模型已下线时回退到首个已注册模型；
+//! Phase 1 自定义默认若不在静态目录中，会以动态能力条目追加，保证默认值始终
+//! 可由同一响应的 `models` 选择。响应形状（models 数组 + defaultModel，每条
+//! 11 键 camelCase）不变。
 
 use std::collections::HashMap;
 
@@ -93,8 +94,8 @@ fn caps(
     }
 }
 
-/// Phase 1 静态模型目录（`GET_api-models.json` 样例 16 条逐值照抄，顺序同；
-/// 数据表函数，行数上限豁免）。
+/// Phase 1 静态模型目录（`GET_api-models.json` 样例 16 条为基线，随后追加
+/// 已验证模型；数据表函数，行数上限豁免）。
 #[allow(clippy::too_many_lines)]
 fn catalog() -> Vec<ModelInfo> {
     vec![
@@ -266,7 +267,7 @@ fn catalog() -> Vec<ModelInfo> {
             128_000,
             1_050_000,
             true,
-            false,
+            true,
             true,
             4,
             true,
@@ -274,17 +275,43 @@ fn catalog() -> Vec<ModelInfo> {
             0.180,
         ),
         caps(
-            "google/gemini-3.5-flash",
-            "Google Gemini 3.5 Flash",
-            65530,
+            "openai/gpt-6-astra",
+            "OpenAI GPT-6 Astra",
+            128_000,
             1_050_000,
-            false,
-            false,
+            true,
+            true,
+            true,
+            4,
+            true,
+            0.010,
+            0.050,
+        ),
+        caps(
+            "google/gemini-3.8-flash",
+            "Google Gemini 3.8 Flash",
+            65_536,
+            1_048_576,
+            true,
+            true,
             true,
             4,
             true,
             0.0015,
-            0.009,
+            0.0075,
+        ),
+        caps(
+            "x-ai/grok-4.6",
+            "xAI Grok 4.6",
+            65_536,
+            500_000,
+            true,
+            true,
+            true,
+            4,
+            true,
+            0.004,
+            0.012,
         ),
     ]
 }
@@ -308,22 +335,31 @@ fn info_for(id: &str) -> ModelInfo {
 
 /// `GET /api/models` 的有效模型清单（2.7）：注册表非空则按其聚合模型序动态
 /// 生成条目；注册表为空（Phase 1 单 provider 回退 / 未配任何 provider key）则
-/// 退化为声明式静态目录（16 条基线），保住既有响应契约。
+/// 退化为声明式静态目录（16 条样例基线 + 已验证新增模型），保住既有响应契约。
+#[cfg(test)]
 fn effective_models(state: &AppState) -> Vec<ModelInfo> {
     let registry = state.providers.load();
+    effective_models_for(&registry)
+}
+
+fn effective_models_for(registry: &zk_llm::ProviderRegistry) -> Vec<ModelInfo> {
     let registry_models = registry.models();
+    let effective_default = registry.effective_default_model();
     let mut models = if registry_models.is_empty() {
         catalog()
     } else {
         registry_models.iter().map(|id| info_for(id)).collect()
     };
+    if !models.iter().any(|model| model.id == effective_default) {
+        models.push(info_for(effective_default));
+    }
     for model in &mut models {
         let capabilities = zk_llm::capabilities_for(&model.id);
         model.supports_images = capabilities.supports_images;
         model.max_images = if capabilities.supports_images {
             i64::from(capabilities.max_images)
         } else {
-            zk_llm::resolve_vision_model(registry.as_ref(), &model.id).map_or(0, |routed| {
+            zk_llm::resolve_vision_model(registry, &model.id).map_or(0, |routed| {
                 i64::from(zk_llm::capabilities_for(&routed).max_images)
             })
         };
@@ -347,7 +383,9 @@ pub(crate) async fn list_models(
     State(state): State<AppState>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Result<Json<ModelListResponse>, ApiError> {
-    let models = effective_models(&state);
+    let registry = state.providers.load();
+    let models = effective_models_for(&registry);
+    let default_model = registry.effective_default_model().to_owned();
     if let Some(model_id) = query
         .get("modelId")
         .map(String::as_str)
@@ -361,7 +399,7 @@ pub(crate) async fn list_models(
     }
     Ok(Json(ModelListResponse {
         models,
-        default_model: state.config.default_model.clone(),
+        default_model,
     }))
 }
 
@@ -390,13 +428,41 @@ mod tests {
         }
     }
 
-    /// 目录 16 条、ID 唯一、序列化键形状（camelCase `costPer1kInput`）。
+    /// 目录 18 条、ID 唯一、序列化键形状（camelCase `costPer1kInput`）。
     #[test]
     fn catalog_size_and_wire_shape() {
         let models = catalog();
-        assert_eq!(models.len(), 16);
+        assert_eq!(models.len(), 18);
         let ids: std::collections::HashSet<&str> = models.iter().map(|m| m.id.as_str()).collect();
-        assert_eq!(ids.len(), 16);
+        assert_eq!(ids.len(), 18);
+        let astra = models
+            .iter()
+            .find(|model| model.id == "openai/gpt-6-astra")
+            .expect("gpt-6-astra catalog entry");
+        assert_eq!(astra.context_window, 1_050_000);
+        assert_eq!(astra.max_output_tokens, 128_000);
+        assert!(astra.supports_thinking);
+        let gemini = models
+            .iter()
+            .find(|model| model.id == "google/gemini-3.8-flash")
+            .expect("gemini-3.8-flash catalog entry");
+        assert_eq!(gemini.context_window, 1_048_576);
+        assert_eq!(gemini.max_output_tokens, 65_536);
+        assert!(gemini.supports_streaming);
+        assert!(gemini.supports_thinking);
+        let grok = models
+            .iter()
+            .find(|model| model.id == "x-ai/grok-4.6")
+            .expect("grok-4.6 catalog entry");
+        assert_eq!(grok.context_window, 500_000);
+        assert_eq!(grok.max_output_tokens, 65_536);
+        assert!(grok.supports_streaming);
+        assert!(grok.supports_thinking);
+        assert!(
+            !models
+                .iter()
+                .any(|model| model.id == "google/gemini-3.5-flash")
+        );
         assert_eq!(
             models
                 .iter()
@@ -458,5 +524,47 @@ mod tests {
         assert_eq!(max_images("qwen3.7-max"), 4);
         assert_eq!(max_images("qwen3.8-max"), 4);
         assert_eq!(max_images("qwen3.8-flash"), 20);
+    }
+
+    #[tokio::test]
+    async fn response_uses_registered_fallback_when_configured_default_is_stale() {
+        let mut providers = ProviderRegistry::new();
+        providers.register(
+            "stub",
+            Arc::new(StubProvider),
+            vec!["current-model".into(), "other-model".into()],
+        );
+        let state =
+            AppState::for_tests().with_providers(providers.with_default_model("retired-model"));
+
+        let Json(response) = list_models(State(state), Query(HashMap::new()))
+            .await
+            .expect("models response");
+        assert_eq!(response.default_model, "current-model");
+        assert!(
+            response
+                .models
+                .iter()
+                .any(|model| model.id == response.default_model)
+        );
+    }
+
+    #[tokio::test]
+    async fn phase_one_custom_default_is_appended_to_static_catalog() {
+        let mut providers = ProviderRegistry::new();
+        providers.register("stub", Arc::new(StubProvider), Vec::new());
+        let state = AppState::for_tests()
+            .with_providers(providers.with_default_model("company/custom-model"));
+
+        let Json(response) = list_models(State(state), Query(HashMap::new()))
+            .await
+            .expect("models response");
+        assert_eq!(response.default_model, "company/custom-model");
+        assert!(
+            response
+                .models
+                .iter()
+                .any(|model| model.id == "company/custom-model")
+        );
     }
 }

@@ -92,6 +92,7 @@ mod tests {
         // 低于上限的模型原值透传（不再被 8192 默认档压低/抬高）。
         assert_eq!(recommended_max_tokens("claude-sonnet-4-6"), 16384);
         assert_eq!(recommended_max_tokens("moonshot-v1-128k"), 8192);
+        assert_eq!(recommended_max_tokens("x-ai/grok-4.6"), 65536);
     }
 
     #[test]

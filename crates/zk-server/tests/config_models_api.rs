@@ -13,7 +13,7 @@ use common::{app, assert_same_shape, call, json_body, local_get, local_put, samp
 
 // ───── GET /api/models ─────
 
-/// 形状逐键对齐样例；16 条目录、ID 集与样例逐一相同、defaultModel 来自配置。
+/// 形状逐键对齐样例；目录包含当前已验证模型且 defaultModel 可被目录选择。
 #[tokio::test]
 async fn models_shape_matches_sample() {
     let mut router = app();
@@ -30,9 +30,22 @@ async fn models_shape_matches_sample() {
             .map(|model| model["id"].as_str().expect("id str").to_owned())
             .collect()
     };
-    // 目录与样例逐条同序同 ID（Phase 1 静态目录照抄样例）。
-    assert_eq!(ids(&body), ids(&sample));
-    assert_eq!(body["models"].as_array().expect("array").len(), 16);
+    let ids = ids(&body);
+    assert_eq!(ids.len(), 18);
+    assert_eq!(
+        ids.iter().collect::<std::collections::HashSet<_>>().len(),
+        ids.len(),
+        "model ids stay unique"
+    );
+    for expected in [
+        "openai/gpt-5.6-sol",
+        "openai/gpt-6-astra",
+        "google/gemini-3.8-flash",
+        "x-ai/grok-4.6",
+    ] {
+        assert!(ids.iter().any(|id| id == expected), "missing {expected}");
+    }
+    assert!(!ids.iter().any(|id| id == "google/gemini-3.5-flash"));
     let max_images = |value: &serde_json::Value, id: &str| {
         value["models"]
             .as_array()
@@ -47,6 +60,10 @@ async fn models_shape_matches_sample() {
     assert_eq!(max_images(&sample, "qwen3.8-flash"), 20);
     // 测试配置的默认模型（Config::test_config）。
     assert_eq!(body["defaultModel"], "qwen3.8-max");
+    assert!(
+        ids.iter()
+            .any(|id| id == body["defaultModel"].as_str().expect("default model"))
+    );
     // 每个条目 11 键齐全（assert_same_shape 只锁首元素，此处全量锁）。
     for model in body["models"].as_array().expect("array") {
         assert_eq!(model.as_object().expect("obj").len(), 11, "model: {model}");
@@ -62,7 +79,7 @@ async fn models_known_model_id_passes() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         json_body(&body)["models"].as_array().expect("arr").len(),
-        16
+        18
     );
 }
 

@@ -11,7 +11,7 @@ describe('SessionStore', () => {
             model: null,
             status: 'idle',
             turnCount: 0,
-            effortValue: 3,
+            effortValue: 5,
             isAborted: false,
         });
     });
@@ -25,6 +25,7 @@ describe('SessionStore', () => {
         expect(state.status).toBe('idle');
         expect(state.sessionId).toBeNull();
         expect(state.model).toBeNull();
+        expect(state.effortValue).toBe(5);
     });
 
     it('setModel updates model', () => {

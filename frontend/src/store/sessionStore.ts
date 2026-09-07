@@ -62,7 +62,7 @@ export const useSessionStore = create<SessionStoreState>()(
         model: null,
         status: 'idle' as const,
         turnCount: 0,
-        effortValue: 3,
+        effortValue: 5,
         isAborted: false,
 
         // Actions

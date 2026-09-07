@@ -230,10 +230,41 @@ impl ProviderRegistry {
         &self.retry_policy
     }
 
-    /// 默认模型。
+    /// 当前实际可用的默认模型。
+    ///
+    /// 保持既有调用点也不会取得已下线的配置值；新代码可使用语义更明确的
+    /// [`Self::effective_default_model`]。
     #[must_use]
     pub fn default_model(&self) -> &str {
-        &self.default_model
+        self.effective_default_model()
+    }
+
+    /// 模型是否可被当前注册表接受。
+    ///
+    /// 一旦 provider 声明了模型清单便严格按清单校验；模型清单为空时保留
+    /// Phase 1 单 provider 的自定义模型兼容（仅拒绝空白模型）。
+    #[must_use]
+    pub fn supports_model(&self, model: &str) -> bool {
+        !model.trim().is_empty()
+            && (self.model_order.is_empty() || self.model_index.contains_key(model))
+    }
+
+    /// 当前实际可用的默认模型。
+    ///
+    /// 配置默认值仍在已注册清单中时原样返回；配置已过期/下线时回退到注册序
+    /// 首个模型。模型清单为空时保留 Phase 1 自定义默认模型。
+    #[must_use]
+    pub fn effective_default_model(&self) -> &str {
+        if self.model_order.is_empty() && self.default_model.trim().is_empty() {
+            DEFAULT_MODEL
+        } else if self.model_order.is_empty() || self.model_index.contains_key(&self.default_model)
+        {
+            &self.default_model
+        } else {
+            self.model_order
+                .first()
+                .map_or(DEFAULT_MODEL, String::as_str)
+        }
     }
 
     /// 模型降级链（配置原序）。
@@ -286,7 +317,7 @@ impl ProviderRegistry {
         if let Some(name) = self.model_owner(model) {
             return Some(name);
         }
-        self.model_owner(&self.default_model)
+        self.model_owner(self.effective_default_model())
             .or_else(|| self.order.first().map(String::as_str))
     }
 
@@ -723,6 +754,41 @@ mod tests {
         assert_eq!(registry.model_owner("unknown-model"), None);
         assert!(registry.get("moonshot").is_some());
         assert!(registry.get("zhipu").is_none());
+    }
+
+    #[test]
+    fn model_support_is_strict_once_a_catalog_exists_and_stale_default_falls_back() {
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "moonshot",
+            Arc::new(ScriptedProvider::new("moonshot", Vec::new())),
+            vec!["kimi-k3".into(), "moonshot-v1-128k".into()],
+        );
+        let registry = registry.with_default_model("retired-model");
+
+        assert!(registry.supports_model("kimi-k3"));
+        assert!(!registry.supports_model("retired-model"));
+        assert!(!registry.supports_model("  "));
+        assert_eq!(registry.effective_default_model(), "kimi-k3");
+    }
+
+    #[test]
+    fn empty_model_catalog_preserves_phase_one_custom_models() {
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "openai-compat",
+            Arc::new(ScriptedProvider::new("openai-compat", Vec::new())),
+            Vec::new(),
+        );
+        let registry = registry.with_default_model("company/custom-model");
+
+        assert!(registry.supports_model("another/custom-model"));
+        assert!(!registry.supports_model(""));
+        assert_eq!(registry.effective_default_model(), "company/custom-model");
+        assert_eq!(
+            ProviderRegistry::default().effective_default_model(),
+            DEFAULT_MODEL
+        );
     }
 
     #[test]

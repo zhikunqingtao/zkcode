@@ -4,31 +4,57 @@ import { SettingsPanel } from '@/components/dialog/SettingsPanel';
 import { useNotificationStore } from '@/store/notificationStore';
 import { usePermissionStore } from '@/store/permissionStore';
 import { useSessionStore } from '@/store/sessionStore';
+import { useModelStore } from '@/store/modelStore';
+import { useConfigStore } from '@/store/configStore';
 
-const { binding, sendSetPermissionMode } = vi.hoisted(() => ({
+const { binding, sendSetModel, sendSetPermissionMode } = vi.hoisted(() => ({
     binding: { bound: true },
+    sendSetModel: vi.fn(),
     sendSetPermissionMode: vi.fn(() => true),
 }));
+
+const originalSaveConfig = useConfigStore.getState().saveConfig;
+const saveConfig = vi.fn(async () => {});
 
 vi.mock('@/api/dispatch', () => ({
     isSessionBound: () => binding.bound,
 }));
 
 vi.mock('@/api/stompClient', () => ({
+    sendSetModel,
     sendSetPermissionMode,
 }));
 
 describe('SettingsPanel permission modes', () => {
     beforeEach(() => {
+        saveConfig.mockClear();
+        sendSetModel.mockClear();
         sendSetPermissionMode.mockClear();
         sendSetPermissionMode.mockReturnValue(true);
         binding.bound = true;
-        useSessionStore.setState({ sessionId: 'session-1' });
+        useConfigStore.setState({
+            defaultModel: 'current-model',
+            saveConfig,
+        });
+        useSessionStore.setState({ sessionId: 'session-1', model: 'current-model' });
+        useModelStore.setState({
+            models: [{
+                id: 'current-model',
+                displayName: 'Current Model',
+                supportsImages: false,
+                maxImages: 0,
+            }],
+            defaultModel: 'current-model',
+            loaded: true,
+            loading: false,
+            error: null,
+        });
         usePermissionStore.setState({ permissionMode: 'default', pendingPermissions: [] });
         useNotificationStore.getState().clearAll();
     });
 
     afterEach(() => {
+        useConfigStore.setState({ saveConfig: originalSaveConfig });
         vi.unstubAllGlobals();
     });
 
@@ -62,6 +88,38 @@ describe('SettingsPanel permission modes', () => {
         expect(screen.getByText('接受编辑')).toBeInTheDocument();
         expect(screen.getByText('无需询问')).toBeInTheDocument();
         expect(screen.getByText('完全访问权限')).toBeInTheDocument();
+    });
+
+    it('applies an advertised model to the current and future sessions', () => {
+        useModelStore.setState({
+            models: [
+                {
+                    id: 'current-model',
+                    displayName: 'Current Model',
+                    supportsImages: false,
+                    maxImages: 0,
+                },
+                {
+                    id: 'new-model',
+                    displayName: 'New Provider Model',
+                    supportsImages: true,
+                    maxImages: 2,
+                },
+            ],
+            loaded: true,
+        });
+
+        render(<SettingsPanel onClose={vi.fn()} />);
+
+        const modelOption = screen.getByRole('option', { name: 'New Provider Model' });
+        expect(modelOption).toBeInTheDocument();
+        expect(screen.queryByRole('option', { name: 'Qwen 3.7 Max' })).not.toBeInTheDocument();
+        const modelSelect = modelOption.closest('select');
+        expect(modelSelect).not.toBeNull();
+        if (modelSelect) fireEvent.change(modelSelect, { target: { value: 'new-model' } });
+        expect(useSessionStore.getState().model).toBe('new-model');
+        expect(saveConfig).toHaveBeenCalledWith({ defaultModel: 'new-model' });
+        expect(sendSetModel).toHaveBeenCalledWith('new-model');
     });
 
     it('requests AUTO_APPROVE without optimistically changing local state', () => {

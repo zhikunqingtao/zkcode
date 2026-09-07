@@ -258,6 +258,32 @@ impl crate::Db {
             .await
     }
 
+    /// 仅当会话仍使用预期模型时更新模型，避免恢复流程覆盖并发选择。
+    ///
+    /// # Errors
+    ///
+    /// 底层 `SQLite` 写入失败时返回 [`DbError::Sqlite`]。
+    pub async fn update_session_model_if_current(
+        &self,
+        session_id: &str,
+        expected_model: &str,
+        model: &str,
+    ) -> Result<bool, DbError> {
+        let session_id = session_id.to_owned();
+        let expected_model = expected_model.to_owned();
+        let model = model.to_owned();
+        self.with_writer(move |conn| {
+            let now_iso = format_rfc3339_micros(now_millis());
+            let rows = conn.execute(
+                "UPDATE sessions SET model = ?1, updated_at = ?2
+                 WHERE id = ?3 AND model = ?4",
+                params![model, now_iso, session_id, expected_model],
+            )?;
+            Ok(rows > 0)
+        })
+        .await
+    }
+
     /// 更新会话状态（`active` / `closed`…小写存储；对齐
     /// `SessionRepository.updateStatus`）。返回是否存在。
     ///
