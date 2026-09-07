@@ -88,7 +88,7 @@ mod tests {
         // kimi-k3 能力表 131072 → min(131072, 65536) = 65536（旧同值）。
         assert_eq!(recommended_max_tokens("kimi-k3"), ESCALATED_MAX_TOKENS);
         // 恰好等于上限的模型原值透传。
-        assert_eq!(recommended_max_tokens("qwen3.7-max"), 65536);
+        assert_eq!(recommended_max_tokens("qwen3.8-max-0902"), 65536);
         // 低于上限的模型原值透传（不再被 8192 默认档压低/抬高）。
         assert_eq!(recommended_max_tokens("claude-sonnet-4-6"), 16384);
         assert_eq!(recommended_max_tokens("moonshot-v1-128k"), 8192);

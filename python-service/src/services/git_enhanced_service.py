@@ -17,7 +17,7 @@ class GitEnhancedService:
 
     @staticmethod
     def _open_repo(repo_path: str) -> git.Repo:
-        """Open a repository whose worktree and metadata stay in workspace."""
+        """Open a repository whose paths satisfy the configured path policy."""
         if os.environ.get("GIT_ALTERNATE_OBJECT_DIRECTORIES", ""):
             raise ValueError("Git object alternates are not allowed")
 
@@ -64,7 +64,7 @@ class GitEnhancedService:
         return repo
 
     def _validate_repo_path(self, repo_path: str) -> str:
-        """Resolve a repository strictly inside the configured workspace."""
+        """Resolve a repository under the configured local path policy."""
         return str(self._open_repo(repo_path).working_tree_dir)
 
     @staticmethod

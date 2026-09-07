@@ -88,7 +88,8 @@ async def test_real_git_router_success_and_fail_closed(committed_repo, tmp_path)
     assert bad_ref.error_code == "INVALID_INPUT"
 
 
-def test_git_service_path_guards(committed_repo, tmp_path):
+def test_git_service_path_guards(committed_repo, tmp_path, monkeypatch):
+    monkeypatch.setenv("ZK_WORKSPACE_ALLOWED_ROOTS", str(tmp_path))
     service = GitEnhancedService()
     assert service._validate_repo_path(str(committed_repo)) == str(committed_repo.resolve())
     with pytest.raises(ValueError, match="outside"):

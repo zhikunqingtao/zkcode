@@ -42,7 +42,7 @@ async fn spawn_server() -> (SocketAddr, String) {
     // `WORKSPACE_REBOUND`。
     let workspace = std::fs::canonicalize(std::env::temp_dir()).expect("canonical temp dir");
     let session_id = db
-        .create_session("qwen3.7-max", &workspace.to_string_lossy())
+        .create_session("qwen3.8-max-0902", &workspace.to_string_lossy())
         .await
         .expect("seed session")
         .id;

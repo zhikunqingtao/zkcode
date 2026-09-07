@@ -235,7 +235,8 @@ pub fn build_router(state: AppState) -> Router {
             get(workbench::get_current_workbench),
         )
         .route("/api/verify/run-checks", post(verify::run_checks))
-        // ── File 域（Batch 2 Step 2-4，旧 FileController 3 端点）──
+        // ── File 域（旧 FileController 3 端点 + 本地文件选择器）──
+        .route("/api/files/pick", post(file::pick_local_file))
         .route("/api/files/search", get(file::search_files))
         .route("/api/sessions/{id}/files/preview", get(file::preview))
         .route("/api/sessions/{id}/files/reveal", post(file::reveal))

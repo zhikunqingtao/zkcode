@@ -49,7 +49,7 @@ describe('ConfigStore', () => {
     });
 
     it('default model is set', () => {
-        expect(DEFAULT_MODEL).toBe('qwen3.8-max');
+        expect(DEFAULT_MODEL).toBe('qwen3.8-max-0902');
         expect(useConfigStore.getState().defaultModel).toBe(DEFAULT_MODEL);
     });
 

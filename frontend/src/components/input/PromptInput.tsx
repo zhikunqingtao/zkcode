@@ -12,7 +12,7 @@
  */
 
 import React, { useState, useRef, useCallback, useEffect, useMemo, type KeyboardEvent } from 'react';
-import { Send, Square, X } from 'lucide-react';
+import { FilePlus2, Send, Square, X } from 'lucide-react';
 import type { Command, LocalAttachment, SubmitEvent, Message, Attachment } from '@/types';
 import { useNotificationStore } from '@/store/notificationStore';
 import CommandPalette from './CommandPalette';
@@ -26,6 +26,40 @@ import { generateUUID } from '@/utils/uuid';
 
 /** 单张图片附件大小上限：5MB */
 const MAX_IMAGE_SIZE = 5 * 1024 * 1024;
+
+interface LocalFilePath {
+    id: string;
+    path: string;
+    name: string;
+    size: number;
+}
+
+interface LocalFilePickerResponse {
+    files: Array<Omit<LocalFilePath, 'id'>>;
+}
+
+function isLocalFilePickerResponse(value: unknown): value is LocalFilePickerResponse {
+    if (!value || typeof value !== 'object') return false;
+    const files = (value as { files?: unknown }).files;
+    return Array.isArray(files) && files.every(file => {
+        if (!file || typeof file !== 'object') return false;
+        const candidate = file as Record<string, unknown>;
+        return typeof candidate.path === 'string'
+            && candidate.path.length > 0
+            && typeof candidate.name === 'string'
+            && typeof candidate.size === 'number'
+            && Number.isFinite(candidate.size)
+            && candidate.size >= 0;
+    });
+}
+
+function appendLocalFilePaths(text: string, files: LocalFilePath[]): string {
+    if (files.length === 0) return text;
+    const paths = files
+        .map(file => `本地文件路径：${JSON.stringify(file.path)}`)
+        .join('\n');
+    return text ? `${text}\n\n${paths}` : paths;
+}
 
 /**
  * 将 File 读取为纯 base64 字符串（去除 data:mime;base64, 前缀）。
@@ -69,12 +103,14 @@ const PromptInput: React.FC<PromptInputProps> = ({
 }) => {
     const [input, setInput] = useState('');
     const [attachments, setAttachments] = useState<LocalAttachment[]>([]);
+    const [localFilePaths, setLocalFilePaths] = useState<LocalFilePath[]>([]);
     const [showCommands, setShowCommands] = useState(false);
     const [showGlobalPalette, setShowGlobalPalette] = useState(false);
     const [showFileComplete, setShowFileComplete] = useState(false);
     const [fileQuery, setFileQuery] = useState('');
     const [historyIndex, setHistoryIndex] = useState(-1);
     const [isSubmitting, setIsSubmitting] = useState(false);
+    const [isPickingLocalFiles, setIsPickingLocalFiles] = useState(false);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const historyRef = useRef<string[]>([]);
     const submissionRef = useRef(false);
@@ -87,6 +123,11 @@ const PromptInput: React.FC<PromptInputProps> = ({
         const modelId = selectedModel ?? state.defaultModel;
         return state.models.find(candidate => candidate.id === modelId) ?? null;
     });
+
+    useEffect(() => {
+        setLocalFilePaths([]);
+    }, [sessionId]);
+
     // `/api/models.maxImages` 已按后端实际视觉路由折算；原生视觉模型取自身
     // 上限，非视觉模型取当前已配置路由目标上限，无可用路由时为 0。
     const maxImages = modelInfo?.maxImages ?? 0;
@@ -187,8 +228,8 @@ const PromptInput: React.FC<PromptInputProps> = ({
 
     const handleSubmit = useCallback(async () => {
         const trimmed = input.trim();
-        if ((!trimmed && attachments.length === 0)
-                || submissionRef.current) return;
+        if ((!trimmed && attachments.length === 0 && localFilePaths.length === 0)
+                || submissionRef.current || isPickingLocalFiles) return;
 
         if (compacting) return;
 
@@ -201,7 +242,7 @@ const PromptInput: React.FC<PromptInputProps> = ({
             });
             return;
         }
-        if (runActive && !trimmed) return;
+        if (runActive && !trimmed && localFilePaths.length === 0) return;
 
         if (imageCount > 0 && (!imageUploadAvailable || imageLimitExceeded)) {
             useNotificationStore.getState().addNotification({
@@ -229,7 +270,7 @@ const PromptInput: React.FC<PromptInputProps> = ({
         setIsSubmitting(true);
         try {
             const sent = await onSubmit({
-                text: trimmed,
+                text: appendLocalFilePaths(trimmed, localFilePaths),
                 attachments: submitAttachments,
                 references: new Map(),
                 isFastMode: false,
@@ -243,6 +284,7 @@ const PromptInput: React.FC<PromptInputProps> = ({
             });
             setInput('');
             setAttachments([]);
+            setLocalFilePaths([]);
         } finally {
             submissionRef.current = false;
             setIsSubmitting(false);
@@ -250,6 +292,8 @@ const PromptInput: React.FC<PromptInputProps> = ({
     }, [
         input,
         attachments,
+        localFilePaths,
+        isPickingLocalFiles,
         onSubmit,
         submitSlashCommand,
         runActive,
@@ -277,7 +321,7 @@ const PromptInput: React.FC<PromptInputProps> = ({
         // Enter (no Shift) → submit
         if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey) {
             e.preventDefault();
-            if (input.trim() || attachments.length > 0) {
+            if (input.trim() || attachments.length > 0 || localFilePaths.length > 0) {
                 void handleSubmit();
             }
             return;
@@ -319,7 +363,44 @@ const PromptInput: React.FC<PromptInputProps> = ({
         if (e.key === 'Tab' && showCommands) {
             e.preventDefault();
         }
-    }, [input, attachments.length, runActive, compacting, showCommands, showGlobalPalette, historyIndex, onInterrupt, handleSubmit]);
+    }, [input, attachments.length, localFilePaths.length, runActive, compacting, showCommands, showGlobalPalette, historyIndex, onInterrupt, handleSubmit]);
+
+    const pickLocalFilePaths = useCallback(async () => {
+        if (runActive || compacting || isPickingLocalFiles) return;
+        const pickerSessionId = sessionId;
+        setIsPickingLocalFiles(true);
+        try {
+            const response = await fetch('/api/files/pick', {
+                method: 'POST',
+                headers: { 'X-Zhikun-Native-Picker': '1' },
+            });
+            if (response.status === 204) return;
+            if (!response.ok) {
+                throw new Error(`请求失败 (${response.status})`);
+            }
+            const payload: unknown = await response.json();
+            if (!isLocalFilePickerResponse(payload)) {
+                throw new Error('服务返回了无效的文件路径');
+            }
+            if (useSessionStore.getState().sessionId !== pickerSessionId) return;
+            setLocalFilePaths(previous => {
+                const knownPaths = new Set(previous.map(file => file.path));
+                const additions = payload.files
+                    .filter(file => !knownPaths.has(file.path))
+                    .map(file => ({ ...file, id: generateUUID() }));
+                return [...previous, ...additions];
+            });
+        } catch (error) {
+            useNotificationStore.getState().addNotification({
+                key: `pick-local-file-failed-${generateUUID()}`,
+                level: 'error',
+                message: `选择本地文件失败：${error instanceof Error ? error.message : '未知错误'}`,
+                timeout: 5000,
+            });
+        } finally {
+            setIsPickingLocalFiles(false);
+        }
+    }, [runActive, compacting, isPickingLocalFiles, sessionId]);
 
     const handleFiles = useCallback(async (files: File[]) => {
         if (runActive || compacting) {
@@ -429,7 +510,7 @@ const PromptInput: React.FC<PromptInputProps> = ({
             useNotificationStore.getState().addNotification({
                 key: `drop-nonimage-ignored-${generateUUID()}`,
                 level: 'warning',
-                message: `仅支持上传图片文件，已忽略 ${nonImageCount} 个非图片文件`,
+                message: `非图片文件不会上传，请使用“引用本地文件路径”按钮选择`,
             });
         }
         if (imagesOnly.length === 0) return;
@@ -444,6 +525,10 @@ const PromptInput: React.FC<PromptInputProps> = ({
             }
             return prev.filter(a => a.id !== id);
         });
+    }, []);
+
+    const removeLocalFilePath = useCallback((id: string) => {
+        setLocalFilePaths(previous => previous.filter(file => file.id !== id));
     }, []);
 
     // 用 ref 追踪最新 attachments，确保卸载时能释放所有预览 URL
@@ -584,6 +669,39 @@ const PromptInput: React.FC<PromptInputProps> = ({
                 </div>
             )}
 
+            {/* 本地文件仅引用绝对路径，不进入图片附件协议。 */}
+            {localFilePaths.length > 0 && (
+                <div className="mb-2" aria-label="已引用的本地文件">
+                    <div className="flex gap-2 flex-wrap">
+                        {localFilePaths.map(file => (
+                            <span
+                                key={file.id}
+                                className="flex min-w-0 max-w-full items-center gap-1 rounded border border-gray-700
+                                           bg-gray-800 px-2 py-1 text-xs text-gray-300"
+                                title={file.path}
+                            >
+                                <FilePlus2 size={13} className="shrink-0" />
+                                <span className="min-w-0 truncate">{file.path}</span>
+                                <span className="shrink-0 text-gray-500">
+                                    ({formatFileSize(file.size)})
+                                </span>
+                                <button
+                                    onClick={() => removeLocalFilePath(file.id)}
+                                    className="ml-1 shrink-0 text-gray-500 hover:text-gray-300"
+                                    type="button"
+                                    aria-label={`移除本地文件 ${file.name}`}
+                                >
+                                    <X size={12} />
+                                </button>
+                            </span>
+                        ))}
+                    </div>
+                    <div className="mt-1 text-xs text-gray-500">
+                        仅引用本地绝对路径；路径会随消息发送给模型服务商
+                    </div>
+                </div>
+            )}
+
             {/* Input area */}
             <div className="flex items-end gap-2">
                 <textarea
@@ -637,16 +755,30 @@ const PromptInput: React.FC<PromptInputProps> = ({
 
                 {/* Toolbar */}
                 {!runActive && !compacting && (
-                    <FileUpload
-                        onFiles={handleFiles}
-                        accept="image/*"
-                        disabled={disabled || isSubmitting || !imageUploadAvailable}
-                        title={!modelCapabilitiesLoaded
-                            ? '正在加载模型图片能力…'
-                            : !imageUploadAvailable
-                            ? '当前模型没有可用的图片处理能力'
-                            : `上传图片（当前模型有效上限 ${maxImages} 张）`}
-                    />
+                    <>
+                        <button
+                            onClick={() => { void pickLocalFilePaths(); }}
+                            disabled={disabled || isSubmitting || isPickingLocalFiles}
+                            className="shrink-0 rounded-lg p-2 text-gray-400 transition-colors
+                                       hover:bg-gray-800 hover:text-gray-200 disabled:cursor-not-allowed
+                                       disabled:opacity-50"
+                            title={isPickingLocalFiles ? '正在选择本地文件…' : '引用本地文件路径'}
+                            aria-label="引用本地文件路径"
+                            type="button"
+                        >
+                            <FilePlus2 size={18} />
+                        </button>
+                        <FileUpload
+                            onFiles={handleFiles}
+                            accept="image/*"
+                            disabled={disabled || isSubmitting || !imageUploadAvailable}
+                            title={!modelCapabilitiesLoaded
+                                ? '正在加载模型图片能力…'
+                                : !imageUploadAvailable
+                                ? '当前模型没有可用的图片处理能力'
+                                : `上传图片（当前模型有效上限 ${maxImages} 张）`}
+                        />
+                    </>
                 )}
                 {asrAvailable && !runActive && !compacting && (
                     <VoiceInputButton
@@ -658,8 +790,9 @@ const PromptInput: React.FC<PromptInputProps> = ({
                 <button
                     onClick={() => { void handleSubmit(); }}
                     disabled={disabled || compacting || isSubmitting
+                        || isPickingLocalFiles
                         || (imageCount > 0 && (!imageUploadAvailable || imageLimitExceeded))
-                        || (!input.trim() && attachments.length === 0)}
+                        || (!input.trim() && attachments.length === 0 && localFilePaths.length === 0)}
                     aria-label={runActive ? '发送运行中干预' : '发送消息'}
                     title={runActive ? '发送运行中干预' : '发送消息'}
                     className="shrink-0 p-2.5 rounded-lg text-white transition-colors

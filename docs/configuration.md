@@ -21,12 +21,12 @@ zkcode 0.1.x 仅支持 macOS Apple Silicon 本地运行。`./dev` 会把仓库�
 不能当作秘密或用于敏感内容。
 
 建议启动后在 **设置 → API Keys** 替换为自己的凭据；也可以在 `.env` 配置。
-以 DashScope Token Plan 和 `qwen3.8-max` 为例：
+以普通 DashScope 和默认模型 `qwen3.8-max-0902` 为例：
 
 ```dotenv
-LLM_PROVIDER_DASHSCOPE_TOKEN_PLAN_API_KEY=在本机填写真实密钥
-LLM_PROVIDER_DASHSCOPE_TOKEN_PLAN_MODELS=qwen3.8-max
-ZK_DEFAULT_MODEL=qwen3.8-max
+LLM_PROVIDER_DASHSCOPE_API_KEY=在本机填写真实密钥
+LLM_PROVIDER_DASHSCOPE_MODELS=qwen3.8-max-0902,qwen3.7-plus
+ZK_DEFAULT_MODEL=qwen3.8-max-0902
 ```
 
 模型清单必须包含默认模型。多个 provider 可以同时配置；只有 API key 非空的
@@ -67,14 +67,16 @@ TTS 固定使用 `qwen3-tts-flash` 的 `Cherry` 音色；麦克风录音需要 H
 | `ZK_DEV_ALLOW_DEMO_CREDENTIAL` | `0` | 源码开发公开 demo 门控；仅接受 `0/1`，修改后需重启 |
 | `ZK_SNAPSHOT_DIR` | `~/.zk/snapshots` | Session 快照目录 |
 | `ZK_WORKSPACE_DEFAULT_ROOT` | 当前启动目录 | 目录选择器的初始根 |
-| `ZK_WORKSPACE_ALLOWED_ROOTS` | 空 | 可选的逗号分隔绝对路径白名单 |
-| `ZK_LOCAL_PICKER_ENABLED` | `true` | 启用 macOS 本机目录选择器 |
+| `ZK_WORKSPACE_ALLOWED_ROOTS` | 空 | 可选的逗号分隔绝对路径白名单；空表示本机路径不设限 |
+| `ZK_LOCAL_PICKER_ENABLED` | `true` | 启用 macOS 本机目录和文件选择器 |
 | `ZK_STATIC_DIR` | 自动探测 | 后端静态资源目录 |
 | `ZK_CORS_ALLOWED_ORIGINS` | 空 | 额外 loopback 开发源；不用于远程部署 |
 | `ZK_LOG` / `RUST_LOG` | `info` | 服务日志级别 |
 
-`ZK_WORKSPACE_ALLOWED_ROOTS` 为空并不等于任意路径自动授权。Project 选择、路径
-规范化、敏感路径检查和每次操作的 Admission 仍会执行。
+`ZK_WORKSPACE_ALLOWED_ROOTS` 为空时，Rust 和 Python 都不施加全局路径白名单，适合
+本机单用户安装；`WORKSPACE_ROOT` 只作为相对路径的解析起点。Project 选择仍要求
+本机直连和本地选择器授权，路径规范化、敏感路径检查与每次操作的 Admission 也仍会
+执行。需要额外隔离时，再显式配置一个或多个允许根目录。
 
 ## Python 与浏览器
 

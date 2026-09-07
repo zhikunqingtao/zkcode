@@ -29,7 +29,7 @@
 //! `supportsStreaming`），可从 `application.yml` 该节一对一转写：
 //!
 //! ```json
-//! { "capabilities": { "qwen3.7-max": { "contextWindow": 1000000,
+//! { "capabilities": { "qwen3.8-max-0902": { "contextWindow": 1000000,
 //!   "tokenCharRatio": 2.5, "outputMaxTokens": 65536, "supportsToolUse": true } } }
 //! ```
 //!
@@ -424,14 +424,14 @@ pub static BUILTIN_MODELS: &[ModelCapabilities] = &[
         0.0006,
     ),
     ModelCapabilities::caps(
-        "qwen3.7-max",
-        "Qwen 3.7 Max",
+        "qwen3.8-max-0902",
+        "Qwen 3.8 Max 0902",
         65536,
         1_000_000,
         true,
         true,
-        false,
-        0,
+        true,
+        4,
         true,
         0.009,
         0.054,
@@ -928,7 +928,7 @@ mod tests {
     #[test]
     fn max_output_tokens_accessor_matches_capabilities() {
         assert_eq!(max_output_tokens_for("kimi-k3"), 131_072);
-        assert_eq!(max_output_tokens_for("qwen3.7-max"), 65536);
+        assert_eq!(max_output_tokens_for("qwen3.8-max-0902"), 65536);
         assert_eq!(max_output_tokens_for("deepseek-v4-pro"), 384_000);
         assert_eq!(
             max_output_tokens_for("deepseek-v4-flash-vision-exp"),
@@ -1050,6 +1050,22 @@ mod tests {
     }
 
     #[test]
+    fn qwen_38_max_0902_matches_dashscope_registry_entry() {
+        let caps = capabilities_for("qwen3.8-max-0902");
+        assert_eq!(caps.display_name, "Qwen 3.8 Max 0902");
+        assert_eq!(caps.max_output_tokens, 65_536);
+        assert_eq!(caps.context_window, 1_000_000);
+        assert!(caps.supports_streaming);
+        assert!(caps.supports_thinking);
+        assert!(caps.supports_images);
+        assert_eq!(caps.max_images, 4);
+        assert!(caps.supports_tool_use);
+        assert!((caps.cost_per_1k_input - 0.009).abs() < f64::EPSILON);
+        assert!((caps.cost_per_1k_output - 0.054).abs() < f64::EPSILON);
+        assert!(is_known_model("qwen3.8-max-0902"));
+    }
+
+    #[test]
     fn qwen_38_flash_has_confirmed_zero_cost_capabilities() {
         let caps = capabilities_for("qwen3.8-flash");
         assert_eq!(caps.display_name, "Qwen 3.8 Flash（百炼）");
@@ -1065,14 +1081,12 @@ mod tests {
         assert!(is_known_model("qwen3.8-flash"));
     }
 
-    /// 旧 `application.yml` 的 `model.capabilities` 节（L295+，8 个模型）一对一
-    /// 转写为 JSON——用于证明配置面可从旧配置逐字迁移，且合并结果与旧
-    /// `applyConfiguredOverrides` 一致。
-    const LEGACY_YAML_AS_JSON: &str = r#"{
+    /// `model.capabilities` 配置转写为 JSON，用于证明配置覆盖能与内置能力合并。
+    const CAPABILITIES_CONFIG_JSON: &str = r#"{
       "capabilities": {
         "claude-sonnet-4-6": { "contextWindow": 200000, "tokenCharRatio": 3.5, "outputMaxTokens": 64000,
           "supportsCache": true, "supportsToolUse": true, "supportsVision": true, "supportsStreaming": true },
-        "qwen3.7-max":  { "contextWindow": 1000000, "tokenCharRatio": 2.5, "outputMaxTokens": 65536, "supportsToolUse": true },
+        "qwen3.8-max-0902":  { "contextWindow": 1000000, "tokenCharRatio": 2.5, "outputMaxTokens": 65536, "supportsToolUse": true },
         "qwen3.7-plus": { "contextWindow": 1000000, "tokenCharRatio": 2.5, "outputMaxTokens": 8192,  "supportsToolUse": true },
         "deepseek-coder": { "contextWindow": 65536, "tokenCharRatio": 2.8, "outputMaxTokens": 8192 },
         "anthropic/claude-opus-4.8": { "contextWindow": 1000000, "tokenCharRatio": 3.5, "outputMaxTokens": 64000,
@@ -1086,19 +1100,20 @@ mod tests {
 
     #[test]
     fn config_overrides_win_over_builtin_table() {
-        let registry = ModelRegistry::from_json_str(LEGACY_YAML_AS_JSON).expect("legacy config");
+        let registry =
+            ModelRegistry::from_json_str(CAPABILITIES_CONFIG_JSON).expect("capabilities config");
         assert_eq!(registry.configured_model_ids().len(), 8);
 
         // 覆盖生效：比率不再是内置表的 3.5（旧 caps() 助手恒 3.5），而是配置的 2.5。
-        let qwen = registry.capabilities("qwen3.7-max");
+        let qwen = registry.capabilities("qwen3.8-max-0902");
         assert!((qwen.token_char_ratio - 2.5).abs() < f64::EPSILON);
         assert_eq!(qwen.context_window, 1_000_000);
         assert_eq!(qwen.max_output_tokens, 65536);
         assert!(qwen.supports_tool_use);
-        // 未覆盖维度恒取 base（内置表 qwen3.7-max）。
-        assert_eq!(qwen.display_name, "Qwen 3.7 Max");
+        // 未覆盖维度恒取 base（内置表 qwen3.8-max-0902）。
+        assert_eq!(qwen.display_name, "Qwen 3.8 Max 0902");
         assert!(qwen.supports_thinking);
-        assert_eq!(qwen.max_images, 0);
+        assert_eq!(qwen.max_images, 4);
         assert!((qwen.cost_per_1k_input - 0.009).abs() < f64::EPSILON);
 
         // claude-sonnet-4-6：内置表输出上限 16384 → 配置抬到 64000；supportsCache 覆盖为 true。
@@ -1116,7 +1131,8 @@ mod tests {
     fn override_of_unlisted_model_takes_default_base_and_id_as_display_name() {
         // deepseek-coder 不在内置表 → 旧 resolveBase 落到 DEFAULT，
         // displayName 取模型 ID 本身（`"unknown".equals(base.modelId()) ? id : ...`）。
-        let registry = ModelRegistry::from_json_str(LEGACY_YAML_AS_JSON).expect("legacy config");
+        let registry =
+            ModelRegistry::from_json_str(CAPABILITIES_CONFIG_JSON).expect("capabilities config");
         let caps = registry.capabilities("deepseek-coder");
         assert_eq!(caps.model_id, "deepseek-coder");
         assert_eq!(caps.display_name, "deepseek-coder");

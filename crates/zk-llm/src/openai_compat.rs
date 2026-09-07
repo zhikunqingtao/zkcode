@@ -810,7 +810,7 @@ mod tests {
     use crate::provider::{ChatMessage, ToolCallRequest, ToolSpec};
 
     fn qwen_request() -> ChatRequest {
-        ChatRequest::new("qwen3.7-max")
+        ChatRequest::new("qwen3.8-max-0902")
             .with_system_prompt(Some("be terse".into()))
             .with_message(ChatMessage::user("hello"))
             .with_message(ChatMessage::assistant("hi"))
@@ -835,7 +835,7 @@ mod tests {
     #[test]
     fn request_body_matches_legacy_shape() {
         let body = build_request_body(&qwen_request());
-        assert_eq!(body["model"], "qwen3.7-max");
+        assert_eq!(body["model"], "qwen3.8-max-0902");
         assert_eq!(body["max_tokens"], 2048);
         assert_eq!(body["stream"], true);
         assert_eq!(body["stream_options"]["include_usage"], true);
@@ -942,7 +942,7 @@ mod tests {
     /// 体任何层级都不得出现 `cache_control`（旧 buildOpenAiRequest 无该字段）。
     #[test]
     fn cache_breakpoints_never_reach_openai_request() {
-        let req = ChatRequest::new("qwen3.7-max")
+        let req = ChatRequest::new("qwen3.8-max-0902")
             .with_system(SystemPrompt::segmented("static core", "session state"))
             .with_tools(vec![
                 ToolSpec {
@@ -976,7 +976,7 @@ mod tests {
 
     #[test]
     fn request_body_tools_use_openai_function_format() {
-        let req = ChatRequest::new("qwen3.7-max").with_tools(vec![ToolSpec {
+        let req = ChatRequest::new("qwen3.8-max-0902").with_tools(vec![ToolSpec {
             name: "get_weather".into(),
             description: "query weather".into(),
             parameters: json!({ "type": "object", "properties": {} }),
@@ -992,7 +992,7 @@ mod tests {
     #[test]
     fn request_body_tool_and_assistant_tool_call_shapes() {
         // 多轮回填历史：assistant(tool_calls) → tool 结果 → assistant 纯文本。
-        let req = ChatRequest::new("qwen3.7-max")
+        let req = ChatRequest::new("qwen3.8-max-0902")
             .with_message(ChatMessage::user("check"))
             .with_message(ChatMessage::assistant_tool_calls(
                 "",
@@ -1339,8 +1339,14 @@ mod tests {
         ));
         assert!(thinking_params_for("qwen3.8-flash", ThinkingMode::Enabled));
         assert!(!thinking_params_for("qwen3.8-max", ThinkingMode::Disabled));
-        assert!(thinking_params_for("qwen3.7-max", ThinkingMode::Enabled));
-        assert!(!thinking_params_for("qwen3.7-max", ThinkingMode::Disabled));
+        assert!(thinking_params_for(
+            "qwen3.8-max-0902",
+            ThinkingMode::Enabled
+        ));
+        assert!(!thinking_params_for(
+            "qwen3.8-max-0902",
+            ThinkingMode::Disabled
+        ));
         for model in [
             "gpt-5.6-sol",
             "openai/gpt-5.6-sol",

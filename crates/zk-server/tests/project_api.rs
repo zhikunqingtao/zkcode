@@ -7,13 +7,15 @@
 
 mod common;
 
-use axum::http::{Method, StatusCode};
+use axum::http::{HeaderName, Method, StatusCode, header};
 use common::{
-    app, app_with_config, call, json_body, local_delete, local_get, local_post, local_put,
-    local_with_headers, sample,
+    LAN_PEER, app, app_with_config, call, json_body, local_delete, local_get, local_post,
+    local_put, local_with_headers, request_from, sample,
 };
 use std::path::PathBuf;
 use zk_server::config::Config;
+use zk_server::routes::build_router;
+use zk_server::state::AppState;
 
 /// 独占临时目录（macOS `/tmp` 为 symlink，必须 canonicalize 再用）。
 fn temp_dir(tag: &str) -> PathBuf {
@@ -366,6 +368,71 @@ async fn pick_directory_guards() {
 }
 
 #[tokio::test]
+async fn pick_local_file_reuses_native_picker_guards() {
+    let endpoint = "/api/files/pick";
+    let (mut enabled, _db) = app_with_config(picker_enabled_config());
+
+    let (status, _, bytes) = call(&mut enabled, local_post(endpoint, None)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(error_code(&bytes), "NATIVE_PICKER_HEADER_REQUIRED");
+
+    let (status, _, bytes) = call(
+        &mut enabled,
+        local_with_headers(
+            endpoint,
+            Method::POST,
+            None,
+            &[
+                ("X-Zhikun-Native-Picker", "1"),
+                ("X-Forwarded-For", "10.0.0.1"),
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(error_code(&bytes), "NATIVE_PICKER_FORWARDED_REQUEST");
+
+    let mut disabled = app();
+    let (status, _, bytes) = call(
+        &mut disabled,
+        local_with_headers(
+            endpoint,
+            Method::POST,
+            None,
+            &[("X-Zhikun-Native-Picker", "1")],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(error_code(&bytes), "NATIVE_PICKER_FORBIDDEN");
+
+    let state = AppState::new(
+        zk_db::Db::open_in_memory().expect("in-memory db"),
+        picker_enabled_config(),
+    );
+    let token = state.access_tokens.token().to_owned();
+    let mut lan_enabled = build_router(state);
+    let (status, _, bytes) = call(
+        &mut lan_enabled,
+        request_from(
+            LAN_PEER,
+            endpoint,
+            Method::POST,
+            &[
+                (header::AUTHORIZATION, format!("Bearer {token}")),
+                (
+                    HeaderName::from_static("x-zhikun-native-picker"),
+                    "1".to_owned(),
+                ),
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(error_code(&bytes), "NATIVE_PICKER_FORBIDDEN");
+}
+
+#[tokio::test]
 async fn project_config_matches_samples_and_persists() {
     let mut app = app();
 
@@ -511,6 +578,7 @@ async fn openapi_includes_project_paths() {
         "/api/runs/session/{sessionId}",
         "/api/runs/{runId}",
         "/api/runs/{runId}/events",
+        "/api/files/pick",
         "/api/files/search",
         "/api/sessions/{sessionId}/files/preview",
         "/api/sessions/{sessionId}/files/reveal",
@@ -550,5 +618,5 @@ async fn openapi_includes_project_paths() {
     ] {
         assert!(paths.contains_key(path), "missing {path}");
     }
-    assert_eq!(paths.len(), 62);
+    assert_eq!(paths.len(), 63);
 }

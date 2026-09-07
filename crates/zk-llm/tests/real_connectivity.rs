@@ -158,7 +158,7 @@ async fn dashscope_live() {
         zk_llm::config::DASHSCOPE_BASE_URL,
         "LLM_PROVIDER_DASHSCOPE_API_KEY",
         "ZK_REAL_DASHSCOPE_MODEL",
-        "qwen3.7-max",
+        "qwen3.8-max-0902",
     )
     .await;
 }

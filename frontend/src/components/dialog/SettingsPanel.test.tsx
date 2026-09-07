@@ -113,9 +113,10 @@ describe('SettingsPanel permission modes', () => {
 
         const modelOption = screen.getByRole('option', { name: 'New Provider Model' });
         expect(modelOption).toBeInTheDocument();
-        expect(screen.queryByRole('option', { name: 'Qwen 3.7 Max' })).not.toBeInTheDocument();
         const modelSelect = modelOption.closest('select');
         expect(modelSelect).not.toBeNull();
+        expect(Array.from(modelSelect?.options ?? [], (option) => option.value))
+            .toEqual(['current-model', 'new-model']);
         if (modelSelect) fireEvent.change(modelSelect, { target: { value: 'new-model' } });
         expect(useSessionStore.getState().model).toBe('new-model');
         expect(saveConfig).toHaveBeenCalledWith({ defaultModel: 'new-model' });

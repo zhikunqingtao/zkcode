@@ -1,9 +1,12 @@
-//! 工作区服务层——Projects 域的路径校验 / 目录浏览 / 原生目录选择器（2.1）。
+//! 工作区服务层——Projects 域的路径校验 / 目录浏览，以及本地文件系统的
+//! 原生选择器。
 //!
 //! 语义来源（旧仓库只读，2026-08-16 冻结）：`ProjectWorkspaceService.java`
 //! （错误码 / HTTP 状态 / 消息文案 / 校验顺序逐条复刻）与
 //! `NativeDirectoryPicker.java`（macOS osascript 实现；目标平台仅 macOS，
-//! Windows PowerShell 分支不移植）。有意偏离（留痕 docs/compatibility.md
+//! Windows PowerShell 分支不移植）。本仓库另在同一安全边界内提供原生文件
+//! 选择器，只返回经过校验的路径元数据，不读取或复制文件内容。有意偏离
+//! （留痕 docs/compatibility.md
 //! §2）：错误消息中的环境变量名换用本仓库前缀（`ZHIKUN_*` → `ZK_*`）；
 //! picker 子进程仅采集 stdout（旧实现 `redirectErrorStream` 合并 stderr，
 //! 输出上限判定含 stderr 噪声——AppleScript 结果只走 stdout，语义不变）。
@@ -539,7 +542,7 @@ pub(crate) fn browse_directories(
     })
 }
 
-// ─── 原生目录选择器（旧 SystemNativeDirectoryPicker，macOS osascript） ───
+// ─── 原生选择器（目录沿用旧实现；文件选择复用同一安全边界） ───
 
 /// macOS 系统选择器可执行文件（旧 `executableFor(MACOS)`）。
 const OSASCRIPT: &str = "/usr/bin/osascript";
@@ -550,13 +553,25 @@ const MAX_OUTPUT_BYTES: usize = 16 * 1024;
 /// 选择器等待上限（旧 `DEFAULT_TIMEOUT` 5 分钟）。
 const PICKER_TIMEOUT: Duration = Duration::from_mins(5);
 
-/// AppleScript（旧 `macScript()` 逐字照抄）：固定脚本，不含任何请求数据。
-const MAC_SCRIPT: &str = "on run argv\n\
+/// 目录 AppleScript（旧 `macScript()` 逐字照抄）：固定脚本，不含任何请求数据。
+const MAC_DIRECTORY_SCRIPT: &str = "on run argv\n\
     set startFolder to POSIX file (item 1 of argv) as alias\n\
     try\n\
     set selectedFolder to choose folder with prompt \
     \"Select a zkcode workspace\" default location startFolder\n\
     return POSIX path of selectedFolder\n\
+    on error number -128\n\
+    return \"__ZHIKUN_CANCELLED__\"\n\
+    end try\n\
+    end run";
+
+/// 文件 AppleScript：固定脚本，不接收文件名、提示词等请求数据。
+const MAC_FILE_SCRIPT: &str = "on run argv\n\
+    set startFolder to POSIX file (item 1 of argv) as alias\n\
+    try\n\
+    set selectedFile to choose file with prompt \
+    \"Select a local file for zkcode\" default location startFolder\n\
+    return POSIX path of selectedFile\n\
     on error number -128\n\
     return \"__ZHIKUN_CANCELLED__\"\n\
     end try\n\
@@ -580,6 +595,17 @@ pub(crate) enum PickerFailure {
     Timeout,
     /// 不可用（可执行缺失 / 启动失败 / 非零退出 / 超长输出）。
     Unavailable,
+}
+
+/// 已校验的本地文件元数据。路径为 canonical 绝对路径；不承载文件内容。
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct LocalFileMetadata {
+    /// canonical 绝对路径。
+    pub path: String,
+    /// 文件名。
+    pub name: String,
+    /// 文件长度（字节）。
+    pub size: u64,
 }
 
 impl From<PickerFailure> for ApiError {
@@ -650,14 +676,74 @@ fn default_start_directory() -> PathBuf {
 /// # Errors
 /// [`PickerFailure`] 三分支（Busy / Timeout / Unavailable）。
 pub(crate) async fn run_native_picker() -> Result<PickerOutcome, PickerFailure> {
+    run_native_picker_with_script(MAC_DIRECTORY_SCRIPT).await
+}
+
+/// 打开系统文件选择器并等待用户操作。它与目录选择器共享互斥锁和超时护栏。
+///
+/// # Errors
+/// [`PickerFailure`] 三分支（Busy / Timeout / Unavailable）。
+pub(crate) async fn run_native_file_picker() -> Result<PickerOutcome, PickerFailure> {
+    run_native_picker_with_script(MAC_FILE_SCRIPT).await
+}
+
+async fn run_native_picker_with_script(script: &str) -> Result<PickerOutcome, PickerFailure> {
     let _lease = PickerLease::acquire().ok_or(PickerFailure::Busy)?;
     let args = vec![
         "-e".to_owned(),
-        MAC_SCRIPT.to_owned(),
+        script.to_owned(),
         "--".to_owned(),
         default_start_directory().to_string_lossy().into_owned(),
     ];
     run_picker_command(Path::new(OSASCRIPT), &args, PICKER_TIMEOUT).await
+}
+
+/// 规范化并验证选择器返回的文件。只打开文件确认当前进程可读，不读取内容。
+///
+/// # Errors
+/// 非绝对、已消失或非常规文件回 409 `LOCAL_FILE_UNAVAILABLE`；权限拒绝回
+/// 403 `LOCAL_FILE_ACCESS_DENIED`。
+pub(crate) fn validate_picked_file(selected: &str) -> Result<LocalFileMetadata, ApiError> {
+    let raw = Path::new(selected);
+    if selected.is_empty() || !raw.is_absolute() {
+        return Err(local_file_unavailable());
+    }
+    let canonical = std::fs::canonicalize(raw).map_err(|err| map_local_file_io_error(&err))?;
+    let metadata = std::fs::metadata(&canonical).map_err(|err| map_local_file_io_error(&err))?;
+    if !metadata.is_file() {
+        return Err(local_file_unavailable());
+    }
+    std::fs::File::open(&canonical).map_err(|err| map_local_file_io_error(&err))?;
+    let Some(name) = canonical.file_name() else {
+        return Err(local_file_unavailable());
+    };
+    let path = canonical.to_str().ok_or_else(local_file_unavailable)?;
+    let name = name.to_str().ok_or_else(local_file_unavailable)?;
+    Ok(LocalFileMetadata {
+        path: path.to_owned(),
+        name: name.to_owned(),
+        size: metadata.len(),
+    })
+}
+
+fn map_local_file_io_error(err: &std::io::Error) -> ApiError {
+    if err.kind() == std::io::ErrorKind::PermissionDenied {
+        failure(
+            StatusCode::FORBIDDEN,
+            "LOCAL_FILE_ACCESS_DENIED",
+            "The selected file is not readable",
+        )
+    } else {
+        local_file_unavailable()
+    }
+}
+
+fn local_file_unavailable() -> ApiError {
+    failure(
+        StatusCode::CONFLICT,
+        "LOCAL_FILE_UNAVAILABLE",
+        "The selected file is no longer an available regular file",
+    )
 }
 
 /// 选择器子进程执行核心（参数化 executable/timeout 以便单测注入假脚本；
@@ -687,11 +773,19 @@ async fn run_picker_command(
     if output.stdout.len() > MAX_OUTPUT_BYTES || !output.status.success() {
         return Err(PickerFailure::Unavailable);
     }
-    let selected = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    parse_picker_output(&output.stdout)
+}
+
+/// `osascript` 正常输出只追加一个行结束符。仅移除该终止符，保留路径本身
+/// 合法的首尾空格；非 UTF-8 输出拒绝，避免用替换字符构造错误路径。
+fn parse_picker_output(stdout: &[u8]) -> Result<PickerOutcome, PickerFailure> {
+    let output = std::str::from_utf8(stdout).map_err(|_| PickerFailure::Unavailable)?;
+    let selected = output.strip_suffix('\n').unwrap_or(output);
+    let selected = selected.strip_suffix('\r').unwrap_or(selected);
     if selected.is_empty() || selected == CANCELLED_SENTINEL {
         return Ok(PickerOutcome::Cancelled);
     }
-    Ok(PickerOutcome::Selected(selected))
+    Ok(PickerOutcome::Selected(selected.to_owned()))
 }
 
 #[cfg(test)]
@@ -925,6 +1019,63 @@ mod tests {
             timeout,
         )
         .await
+    }
+
+    #[test]
+    fn picked_file_is_canonical_regular_and_readable() {
+        let dir = temp_dir("picked-file");
+        let file = dir.join("report draft.docx");
+        std::fs::write(&file, b"test").expect("write file");
+        let metadata = validate_picked_file(&file.to_string_lossy()).expect("valid file");
+        assert_eq!(metadata.path, file.to_string_lossy());
+        assert_eq!(metadata.name, "report draft.docx");
+        assert_eq!(metadata.size, 4);
+        let alias = dir.join("report-link.docx");
+        std::os::unix::fs::symlink(&file, &alias).expect("symlink file");
+        let alias_metadata = validate_picked_file(&alias.to_string_lossy()).expect("valid alias");
+        assert_eq!(alias_metadata.path, file.to_string_lossy());
+
+        assert_eq!(
+            validate_picked_file("relative.docx")
+                .expect_err("relative path")
+                .code,
+            "LOCAL_FILE_UNAVAILABLE"
+        );
+        assert_eq!(
+            validate_picked_file(&dir.to_string_lossy())
+                .expect_err("directory")
+                .code,
+            "LOCAL_FILE_UNAVAILABLE"
+        );
+        assert_eq!(
+            validate_picked_file(&dir.join("missing.docx").to_string_lossy())
+                .expect_err("missing")
+                .code,
+            "LOCAL_FILE_UNAVAILABLE"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn picker_output_parser_preserves_paths_and_rejects_invalid_text() {
+        assert_eq!(
+            parse_picker_output(b"/Users/demo/report draft.docx\n").expect("selected"),
+            PickerOutcome::Selected("/Users/demo/report draft.docx".to_owned())
+        );
+        assert_eq!(
+            parse_picker_output(b"/Users/demo/trailing-space \n").expect("selected"),
+            PickerOutcome::Selected("/Users/demo/trailing-space ".to_owned())
+        );
+        assert_eq!(
+            parse_picker_output(b"__ZHIKUN_CANCELLED__\r\n").expect("cancelled"),
+            PickerOutcome::Cancelled
+        );
+        assert_eq!(
+            parse_picker_output(&[0xff]).expect_err("invalid utf-8"),
+            PickerFailure::Unavailable
+        );
+        assert!(MAC_FILE_SCRIPT.contains("choose file"));
+        assert!(!MAC_FILE_SCRIPT.contains("choose folder"));
     }
 
     #[tokio::test]

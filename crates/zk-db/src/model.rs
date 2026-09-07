@@ -524,7 +524,7 @@ mod tests {
             id: "s1".into(),
             title: None,
             goal_preview: None,
-            model: "qwen3.7-max".into(),
+            model: "qwen3.8-max-0902".into(),
             working_directory: "/tmp".into(),
             message_count: 0,
             cost_usd: 0.0,

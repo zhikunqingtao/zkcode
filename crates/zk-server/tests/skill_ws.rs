@@ -73,7 +73,7 @@ async fn spawn_bound_with_db() -> (SocketAddr, String, Arc<RecordingEngine>, zk_
     // 存的即 canonical 路径），令本地执行的斜杠命令拿不到上下文。
     let workspace = std::fs::canonicalize(std::env::temp_dir()).expect("canonical temp dir");
     let session_id = db
-        .create_session("qwen3.7-max", &workspace.to_string_lossy())
+        .create_session("qwen3.8-max-0902", &workspace.to_string_lossy())
         .await
         .expect("seed session")
         .id;

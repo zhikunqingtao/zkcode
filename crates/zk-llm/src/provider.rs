@@ -610,12 +610,12 @@ mod tests {
 
     #[test]
     fn chat_request_builder_defaults() {
-        let req = ChatRequest::new("qwen3.7-max")
+        let req = ChatRequest::new("qwen3.8-max-0902")
             .with_message(ChatMessage::user("hi"))
             .with_system_prompt(Some("be brief".into()))
             .with_max_tokens(1024)
             .with_thinking(ThinkingMode::Enabled);
-        assert_eq!(req.model, "qwen3.7-max");
+        assert_eq!(req.model, "qwen3.8-max-0902");
         assert_eq!(req.messages.len(), 1);
         assert_eq!(req.system_prompt.as_deref(), Some("be brief"));
         assert_eq!(req.max_tokens, 1024);

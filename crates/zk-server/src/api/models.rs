@@ -5,11 +5,10 @@
 //! `INVALID_REQUEST`）。响应形状权威：`GET_api-models.json` 样例逐键对齐。
 //!
 //! 2.7 裁定：模型清单从 [`AppState::providers`]（[`zk_llm::ProviderRegistry`]）
-//! 动态聚合——注册表非空时按其 model → provider 索引序生成条目（命中静态目录
-//! 取权威能力值，未收录的新模型走 [`dynamic_info`] 兜底元数据）；注册表为空
-//!（Phase 1 单 provider 回退 / 未配任何 `LLM_PROVIDER_*` key）时退化为声明式
-//! 静态目录（在样例 16 模型基线上追加已验证的新模型，能力值与
-//! `ModelRegistry.BUILTIN_MODELS` 交叉核实一致），保住既有响应契约。
+//! 动态聚合——注册表非空时按其 model → provider 索引序生成条目，注册表为空
+//!（Phase 1 单 provider 回退 / 未配任何 `LLM_PROVIDER_*` key）时使用
+//! [`zk_llm::declared_models`] 的声明式基线。已知模型的元数据统一取
+//! [`zk_llm::capabilities_for`]，未收录的新模型走 [`dynamic_info`] 兜底。
 //! `defaultModel` 取注册表的有效默认：配置模型已下线时回退到首个已注册模型；
 //! Phase 1 自定义默认若不在静态目录中，会以动态能力条目追加，保证默认值始终
 //! 可由同一响应的 `models` 选择。响应形状（models 数组 + defaultModel，每条
@@ -64,278 +63,64 @@ pub(crate) struct ModelListResponse {
     pub default_model: String,
 }
 
-/// 目录条目便捷构造（旧 `ModelRegistry.caps` 的参数序照抄）。
-#[allow(clippy::fn_params_excessive_bools, clippy::too_many_arguments)]
-fn caps(
-    id: &str,
-    display_name: &str,
-    max_output_tokens: i64,
-    context_window: i64,
-    supports_streaming: bool,
-    supports_thinking: bool,
-    supports_images: bool,
-    max_images: i64,
-    supports_tool_use: bool,
-    cost_per_1k_input: f64,
-    cost_per_1k_output: f64,
-) -> ModelInfo {
+/// 将 `zk-llm` 的内部能力记录投影为公开 API 形状；内部专用的字符比率和缓存
+/// 能力不进入既有 wire contract。
+fn info_from_capabilities(id: &str, capabilities: &zk_llm::ModelCapabilities) -> ModelInfo {
     ModelInfo {
         id: id.to_owned(),
-        display_name: display_name.to_owned(),
-        max_output_tokens,
-        context_window,
-        supports_streaming,
-        supports_thinking,
-        supports_images,
-        max_images,
-        supports_tool_use,
-        cost_per_1k_input,
-        cost_per_1k_output,
+        display_name: capabilities.display_name.to_string(),
+        max_output_tokens: i64::from(capabilities.max_output_tokens),
+        context_window: i64::from(capabilities.context_window),
+        supports_streaming: capabilities.supports_streaming,
+        supports_thinking: capabilities.supports_thinking,
+        supports_images: capabilities.supports_images,
+        max_images: i64::from(capabilities.max_images),
+        supports_tool_use: capabilities.supports_tool_use,
+        cost_per_1k_input: capabilities.cost_per_1k_input,
+        cost_per_1k_output: capabilities.cost_per_1k_output,
     }
-}
-
-/// Phase 1 静态模型目录（`GET_api-models.json` 样例 16 条为基线，随后追加
-/// 已验证模型；数据表函数，行数上限豁免）。
-#[allow(clippy::too_many_lines)]
-fn catalog() -> Vec<ModelInfo> {
-    vec![
-        caps(
-            "qwen3.7-max",
-            "Qwen 3.7 Max",
-            65536,
-            1_000_000,
-            true,
-            true,
-            false,
-            0,
-            true,
-            0.009,
-            0.054,
-        ),
-        caps(
-            "qwen3.7-plus",
-            "Qwen 3.7 Plus",
-            8192,
-            1_000_000,
-            true,
-            true,
-            true,
-            4,
-            true,
-            0.0008,
-            0.002,
-        ),
-        caps(
-            "qwen3.8-max",
-            "Qwen 3.8 Max (百炼订阅)",
-            65536,
-            1_000_000,
-            true,
-            true,
-            true,
-            4,
-            true,
-            0.009,
-            0.054,
-        ),
-        caps(
-            "qwen3.8-flash",
-            "Qwen 3.8 Flash（百炼）",
-            131_072,
-            1_000_000,
-            true,
-            true,
-            true,
-            20,
-            true,
-            0.0,
-            0.0,
-        ),
-        caps(
-            "deepseek-v4-pro",
-            "DeepSeek V4 Pro",
-            384_000,
-            1_000_000,
-            true,
-            true,
-            false,
-            0,
-            true,
-            0.001,
-            0.004,
-        ),
-        caps(
-            "deepseek-v4-flash",
-            "DeepSeek V4 Flash",
-            384_000,
-            1_000_000,
-            true,
-            true,
-            false,
-            0,
-            true,
-            0.0005,
-            0.002,
-        ),
-        caps(
-            "kimi-k3", "Kimi K3", 131_072, 1_000_000, true, true, true, 8, true, 0.002, 0.012,
-        ),
-        caps(
-            "kimi-k2.7-code",
-            "Kimi K2.7 Code",
-            16384,
-            256_000,
-            true,
-            true,
-            true,
-            8,
-            true,
-            0.002,
-            0.012,
-        ),
-        caps(
-            "moonshot-v1-128k",
-            "Moonshot V1 128K",
-            8192,
-            128_000,
-            true,
-            false,
-            false,
-            0,
-            true,
-            0.001,
-            0.002,
-        ),
-        caps(
-            "glm-5.3", "GLM-5.3", 131_072, 1_048_576, true, true, false, 0, true, 0.001, 0.001,
-        ),
-        caps(
-            "glm-5.3-flash",
-            "GLM-5.3-Flash",
-            131_072,
-            1_048_576,
-            true,
-            true,
-            true,
-            50,
-            true,
-            0.00015,
-            0.0005,
-        ),
-        caps(
-            "MiniMax-M3",
-            "MiniMax M3",
-            16384,
-            1_000_000,
-            true,
-            true,
-            true,
-            4,
-            true,
-            0.001,
-            0.004,
-        ),
-        caps(
-            "anthropic/claude-opus-4.8",
-            "Claude Opus 4.8",
-            64000,
-            1_000_000,
-            true,
-            false,
-            true,
-            5,
-            true,
-            0.005,
-            0.025,
-        ),
-        caps(
-            "anthropic/claude-fable-5",
-            "Claude Fable 5",
-            64000,
-            1_000_000,
-            true,
-            false,
-            true,
-            5,
-            true,
-            0.010,
-            0.050,
-        ),
-        caps(
-            "openai/gpt-5.6-sol",
-            "OpenAI GPT-5.6 Sol",
-            128_000,
-            1_050_000,
-            true,
-            true,
-            true,
-            4,
-            true,
-            0.030,
-            0.180,
-        ),
-        caps(
-            "openai/gpt-6-astra",
-            "OpenAI GPT-6 Astra",
-            128_000,
-            1_050_000,
-            true,
-            true,
-            true,
-            4,
-            true,
-            0.010,
-            0.050,
-        ),
-        caps(
-            "google/gemini-3.8-flash",
-            "Google Gemini 3.8 Flash",
-            65_536,
-            1_048_576,
-            true,
-            true,
-            true,
-            4,
-            true,
-            0.0015,
-            0.0075,
-        ),
-        caps(
-            "x-ai/grok-4.6",
-            "xAI Grok 4.6",
-            65_536,
-            500_000,
-            true,
-            true,
-            true,
-            4,
-            true,
-            0.004,
-            0.012,
-        ),
-    ]
 }
 
 /// 未知模型的兜底能力（对齐旧 `ModelRegistry` 未注册模型的缺省 capabilities：
 /// 8192 输出 / 200k 上下文 / 流式 + 图片 + 工具，无 thinking）——动态聚合遇到
-/// 目录未收录的新模型时使用，`id` / `displayName` 取模型标识本身。
+/// 能力表未收录的新模型时使用，`id` / `displayName` 取模型标识本身。
 fn dynamic_info(id: &str) -> ModelInfo {
-    caps(
-        id, id, 8192, 200_000, true, false, true, 10, true, 0.003, 0.015,
-    )
+    ModelInfo {
+        id: id.to_owned(),
+        display_name: id.to_owned(),
+        max_output_tokens: 8192,
+        context_window: 200_000,
+        supports_streaming: true,
+        supports_thinking: false,
+        supports_images: true,
+        max_images: 10,
+        supports_tool_use: true,
+        cost_per_1k_input: 0.003,
+        cost_per_1k_output: 0.015,
+    }
 }
 
-/// 单模型元数据：命中静态目录取其权威能力值，否则动态生成兜底元数据。
+/// 单模型元数据：已知模型直接复用 `zk-llm` 能力表，否则保留动态兜底语义。
 fn info_for(id: &str) -> ModelInfo {
-    catalog()
+    let capabilities = zk_llm::capabilities_for(id);
+    if zk_llm::is_known_model(id) {
+        info_from_capabilities(id, capabilities)
+    } else {
+        dynamic_info(id)
+    }
+}
+
+/// 默认公开目录的成员和顺序取 provider 声明，元数据统一取能力表。
+fn catalog() -> Vec<ModelInfo> {
+    zk_llm::declared_models()
         .into_iter()
-        .find(|model| model.id == id)
-        .unwrap_or_else(|| dynamic_info(id))
+        .map(|id| info_for(&id))
+        .collect()
 }
 
 /// `GET /api/models` 的有效模型清单（2.7）：注册表非空则按其聚合模型序动态
 /// 生成条目；注册表为空（Phase 1 单 provider 回退 / 未配任何 provider key）则
-/// 退化为声明式静态目录（16 条样例基线 + 已验证新增模型），保住既有响应契约。
+/// 退化为 provider 声明式目录，保住既有响应契约。
 #[cfg(test)]
 fn effective_models(state: &AppState) -> Vec<ModelInfo> {
     let registry = state.providers.load();
@@ -428,13 +213,40 @@ mod tests {
         }
     }
 
-    /// 目录 18 条、ID 唯一、序列化键形状（camelCase `costPer1kInput`）。
+    /// 目录 21 条、ID 唯一、序列化键形状（camelCase `costPer1kInput`）。
     #[test]
     fn catalog_size_and_wire_shape() {
         let models = catalog();
-        assert_eq!(models.len(), 18);
+        assert_eq!(models.len(), 21);
         let ids: std::collections::HashSet<&str> = models.iter().map(|m| m.id.as_str()).collect();
-        assert_eq!(ids.len(), 18);
+        assert_eq!(ids.len(), 21);
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.id.clone())
+                .collect::<Vec<_>>(),
+            zk_llm::declared_models()
+        );
+        for model in &models {
+            let capabilities = zk_llm::capabilities_for(&model.id);
+            assert_eq!(model.display_name, capabilities.display_name);
+            assert_eq!(
+                model.max_output_tokens,
+                i64::from(capabilities.max_output_tokens)
+            );
+            assert_eq!(model.context_window, i64::from(capabilities.context_window));
+            assert_eq!(model.supports_streaming, capabilities.supports_streaming);
+            assert_eq!(model.supports_thinking, capabilities.supports_thinking);
+            assert_eq!(model.supports_images, capabilities.supports_images);
+            assert_eq!(model.max_images, i64::from(capabilities.max_images));
+            assert_eq!(model.supports_tool_use, capabilities.supports_tool_use);
+            assert!(
+                (model.cost_per_1k_input - capabilities.cost_per_1k_input).abs() < f64::EPSILON
+            );
+            assert!(
+                (model.cost_per_1k_output - capabilities.cost_per_1k_output).abs() < f64::EPSILON
+            );
+        }
         let astra = models
             .iter()
             .find(|model| model.id == "openai/gpt-6-astra")
@@ -498,16 +310,12 @@ mod tests {
     }
 
     #[test]
-    fn effective_image_limits_match_the_configured_vision_route() {
+    fn effective_image_limits_match_registered_capabilities() {
         let mut providers = ProviderRegistry::new();
         providers.register(
             "dashscope",
             Arc::new(StubProvider),
-            vec![
-                "qwen3.7-max".into(),
-                "qwen3.8-max".into(),
-                "qwen3.8-flash".into(),
-            ],
+            vec!["qwen3.8-max-0902".into(), "qwen3.7-plus".into()],
         );
         let state = AppState::for_tests().with_providers(providers);
         let models = effective_models(&state);
@@ -519,11 +327,8 @@ mod tests {
                 .max_images
         };
 
-        // The non-vision model routes to the first configured vision model,
-        // so the advertised input limit must match the engine's chosen target.
-        assert_eq!(max_images("qwen3.7-max"), 4);
-        assert_eq!(max_images("qwen3.8-max"), 4);
-        assert_eq!(max_images("qwen3.8-flash"), 20);
+        assert_eq!(max_images("qwen3.8-max-0902"), 4);
+        assert_eq!(max_images("qwen3.7-plus"), 4);
     }
 
     #[tokio::test]

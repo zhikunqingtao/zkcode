@@ -1,11 +1,12 @@
-//! File 域 3 端点 handler（Batch 2 Step 2-4，旧 `FileController.java`；路由
-//! 注册见 `routes`，服务层见 [`crate::file_access`]）。
+//! File 域 handler（旧 `FileController.java` 三端点 + 本地文件选择器；路由
+//! 注册见 `routes`，服务层见 [`crate::file_access`] 与 [`crate::workspace`]）。
 //!
 //! # 端点对照
 //!
 //! | 方法 + 路径 | 旧 handler | 命中 |
 //! |---|---|---|
 //! | `GET /api/files/search` | `searchFiles` | 200 `[FileSearchResult]` |
+//! | `POST /api/files/pick` | 本地扩展 | 200 `{files:[{path,name,size}]}` / 204 |
 //! | `GET /api/sessions/{sessionId}/files/preview` | `preview` | 200 文件流 |
 //! | `POST /api/sessions/{sessionId}/files/reveal` | `reveal` | 200 `RevealResult` / 403 空体 |
 //!
@@ -32,13 +33,15 @@
 //!   → 空 path 400 → 会话 404 → 绑定 → 解析 → `open -R` 等（503 / 成功）。
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 
 use axum::Json;
 use axum::body::{Body, Bytes};
-use axum::extract::{Path as AxumPath, Query, State};
+use axum::extract::{ConnectInfo, Path as AxumPath, Query, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use crate::api::http_params::{parse_spring_int, require_param};
 use crate::error::ApiError;
@@ -48,7 +51,9 @@ use crate::file_access::{
 };
 use crate::session_access::require_session_header;
 use crate::state::AppState;
-use crate::workspace::{failure, local_desktop_access_allowed, require_current_binding};
+use crate::workspace::{
+    PickerOutcome, failure, local_desktop_access_allowed, require_current_binding,
+};
 
 /// `POST /reveal` 请求体（旧 `FileController.RevealFileRequest` record）。
 /// `path` 用 `Option`：缺失或显式 `null` 均归一为 `None`（Java `path()==null`），
@@ -57,6 +62,25 @@ use crate::workspace::{failure, local_desktop_access_allowed, require_current_bi
 pub(crate) struct RevealFileRequest {
     /// 目标文件的工作区相对/绝对路径。
     pub path: Option<String>,
+}
+
+/// 原生选择器返回的单个本地文件元数据，不包含文件内容。
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PickedLocalFile {
+    /// canonical 绝对路径。
+    path: String,
+    /// 文件名。
+    name: String,
+    /// 文件长度（字节）。
+    size: u64,
+}
+
+/// `POST /api/files/pick` 响应。首版单选，数组形状为后续原生多选保留兼容空间。
+#[derive(Debug, Serialize, ToSchema)]
+pub(crate) struct PickLocalFilesResponse {
+    /// 本次选中的文件（当前恒为一项）。
+    files: Vec<PickedLocalFile>,
 }
 
 /// `spawn_blocking` join 失败归一（对齐 `project` handler 的 500 语义）。
@@ -76,6 +100,49 @@ fn require_matching_session(session_id: &str, asserted: &str) -> Result<(), ApiE
         ));
     }
     Ok(())
+}
+
+/// `POST /api/files/pick`——原生本地文件选择器。仅返回 canonical 路径与
+/// 基础元数据，不读取、上传或复制文件内容。
+#[utoipa::path(
+    post,
+    path = "/api/files/pick",
+    tag = "files",
+    responses(
+        (status = 200, body = PickLocalFilesResponse, description = "选中文件的路径元数据"),
+        (status = 204, description = "用户取消选择"),
+        (status = 403, description = "NATIVE_PICKER_HEADER_REQUIRED / NATIVE_PICKER_FORWARDED_REQUEST / NATIVE_PICKER_FORBIDDEN / LOCAL_FILE_ACCESS_DENIED"),
+        (status = 409, description = "NATIVE_PICKER_BUSY / LOCAL_FILE_UNAVAILABLE"),
+        (status = 501, description = "选择器不可用（NATIVE_PICKER_UNAVAILABLE）"),
+        (status = 503, description = "选择器运行失败（NATIVE_PICKER_UNAVAILABLE）"),
+        (status = 504, description = "选择超时（NATIVE_PICKER_TIMEOUT）")
+    )
+)]
+pub(crate) async fn pick_local_file(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    crate::api::project::assert_native_picker_headers(&headers)?;
+    crate::workspace::assert_native_picker_allowed(&state.config, peer.ip().is_loopback())?;
+    match crate::workspace::run_native_file_picker().await? {
+        PickerOutcome::Cancelled => Ok(StatusCode::NO_CONTENT.into_response()),
+        PickerOutcome::Selected(selected) => {
+            let metadata = tokio::task::spawn_blocking(move || {
+                crate::workspace::validate_picked_file(&selected)
+            })
+            .await
+            .map_err(|err| join_internal(&err))??;
+            Ok(Json(PickLocalFilesResponse {
+                files: vec![PickedLocalFile {
+                    path: metadata.path,
+                    name: metadata.name,
+                    size: metadata.size,
+                }],
+            })
+            .into_response())
+        }
+    }
 }
 
 /// `GET /api/files/search`——工作区模糊搜索（旧 `searchFiles`）。
@@ -256,4 +323,30 @@ pub(crate) async fn reveal(
     .await
     .map_err(|err| join_internal(&err))??;
     Ok(Json(result).into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_file_picker_response_has_stable_metadata_shape() {
+        let response = PickLocalFilesResponse {
+            files: vec![PickedLocalFile {
+                path: "/Users/demo/report.docx".to_owned(),
+                name: "report.docx".to_owned(),
+                size: 42,
+            }],
+        };
+        assert_eq!(
+            serde_json::to_value(response).expect("serialize picker response"),
+            serde_json::json!({
+                "files": [{
+                    "path": "/Users/demo/report.docx",
+                    "name": "report.docx",
+                    "size": 42
+                }]
+            })
+        );
+    }
 }

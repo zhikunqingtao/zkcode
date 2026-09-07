@@ -78,7 +78,7 @@ impl Default for UserConfig {
             auth_type: "localhost".into(),
             api_key: None,
             oauth_token: None,
-            default_model: "qwen3.8-max".into(),
+            default_model: "qwen3.8-max-0902".into(),
             model_aliases: BTreeMap::new(),
             theme: "dark".into(),
             locale: "en".into(),

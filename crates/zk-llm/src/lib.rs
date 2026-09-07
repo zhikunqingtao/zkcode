@@ -105,8 +105,8 @@ pub use vision_router::{
 fn crate_boots() {
     // 模块树完整性：核心类型均可命名（编译期即验证，此处保底运行期引用）。
     let _ = Role::User.as_str();
-    let request = ChatRequest::new("qwen3.7-max");
-    assert_eq!(request.model, "qwen3.7-max");
+    let request = ChatRequest::new("qwen3.8-max-0902");
+    assert_eq!(request.model, "qwen3.8-max-0902");
     assert_eq!(
         FinishReason::from_openai("stop").as_str(),
         "end_turn",

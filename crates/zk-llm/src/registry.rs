@@ -17,7 +17,7 @@
 //!
 //! # 模型降级链（`ZK_MODEL_FALLBACK_CHAIN`）
 //!
-//! 链是**模型**序列（如 `kimi-k3:qwen3.7-max:deepseek-chat`）。候选序 =
+//! 链是**模型**序列（如 `kimi-k3:qwen3.8-max-0902:deepseek-chat`）。候选序 =
 //! 请求模型 + 链中其后继（请求模型不在链中时接整条链），去重后截断到
 //! [`MAX_FALLBACK_DEPTH`]。降级触发条件（三者同时成立）：
 //!
@@ -740,17 +740,17 @@ mod tests {
             "dashscope",
             Arc::new(ScriptedProvider::new("dashscope", Vec::new())),
             // kimi-k3 重复声明——首个归属者（moonshot）胜。
-            vec!["qwen3.7-max".into(), "kimi-k3".into(), "  ".into()],
+            vec!["qwen3.8-max-0902".into(), "kimi-k3".into(), "  ".into()],
         );
         assert_eq!(registry.names(), ["moonshot", "dashscope"]);
         assert_eq!(registry.len(), 2);
         assert!(!registry.is_empty());
         assert_eq!(
             registry.models(),
-            ["kimi-k3", "moonshot-v1-128k", "qwen3.7-max"]
+            ["kimi-k3", "moonshot-v1-128k", "qwen3.8-max-0902"]
         );
         assert_eq!(registry.model_owner("kimi-k3"), Some("moonshot"));
-        assert_eq!(registry.model_owner("qwen3.7-max"), Some("dashscope"));
+        assert_eq!(registry.model_owner("qwen3.8-max-0902"), Some("dashscope"));
         assert_eq!(registry.model_owner("unknown-model"), None);
         assert!(registry.get("moonshot").is_some());
         assert!(registry.get("zhipu").is_none());
@@ -802,10 +802,10 @@ mod tests {
         registry.register(
             "dashscope",
             Arc::new(ScriptedProvider::new("dashscope", Vec::new())),
-            vec!["qwen3.7-max".into()],
+            vec!["qwen3.8-max-0902".into()],
         );
         // 默认模型归属者接管未知模型。
-        let registry = registry.with_default_model("qwen3.7-max");
+        let registry = registry.with_default_model("qwen3.8-max-0902");
         assert_eq!(registry.resolve_provider("nope"), Some("dashscope"));
         // 默认模型也未注册时退到首个注册 provider。
         let registry = registry.with_default_model("not-registered");
@@ -818,14 +818,14 @@ mod tests {
     fn candidate_models_follow_chain_suffix_and_depth_cap() {
         let registry = ProviderRegistry::new().with_fallback_chain(vec![
             "kimi-k3".into(),
-            "qwen3.7-max".into(),
+            "qwen3.8-max-0902".into(),
             "deepseek-chat".into(),
             "glm-5.3".into(),
         ]);
         // 请求模型在链中 → 取其后继（含自身共 MAX_FALLBACK_DEPTH 个）。
         assert_eq!(
             registry.candidate_models("kimi-k3"),
-            ["kimi-k3", "qwen3.7-max", "deepseek-chat"]
+            ["kimi-k3", "qwen3.8-max-0902", "deepseek-chat"]
         );
         assert_eq!(
             registry.candidate_models("deepseek-chat"),
@@ -834,7 +834,7 @@ mod tests {
         // 请求模型不在链中 → 接整条链（同样截断）。
         assert_eq!(
             registry.candidate_models("MiniMax-M3"),
-            ["MiniMax-M3", "kimi-k3", "qwen3.7-max"]
+            ["MiniMax-M3", "kimi-k3", "qwen3.8-max-0902"]
         );
         // 无链配置 → 只有首选。
         assert_eq!(
@@ -851,9 +851,9 @@ mod tests {
         let seen = provider.seen_models.clone();
         let mut registry = ProviderRegistry::new();
         registry.register("openai-compat", Arc::new(provider), Vec::new());
-        let events = drain(&registry, "qwen3.7-max").await.expect("stream");
+        let events = drain(&registry, "qwen3.8-max-0902").await.expect("stream");
         assert_eq!(events.len(), 2);
-        assert_eq!(seen.lock().expect("lock").as_slice(), ["qwen3.7-max"]);
+        assert_eq!(seen.lock().expect("lock").as_slice(), ["qwen3.8-max-0902"]);
         assert!(registry.models().is_empty(), "no declared models to expose");
     }
 
@@ -865,9 +865,13 @@ mod tests {
         let secondary_seen = secondary.seen_models.clone();
         let mut registry = ProviderRegistry::new();
         registry.register("moonshot", Arc::new(primary), vec!["kimi-k3".into()]);
-        registry.register("dashscope", Arc::new(secondary), vec!["qwen3.7-max".into()]);
+        registry.register(
+            "dashscope",
+            Arc::new(secondary),
+            vec!["qwen3.8-max-0902".into()],
+        );
         let registry = registry
-            .with_fallback_chain(vec!["kimi-k3".into(), "qwen3.7-max".into()])
+            .with_fallback_chain(vec!["kimi-k3".into(), "qwen3.8-max-0902".into()])
             .with_default_model("kimi-k3")
             // 本例只验证降级转移语义，关掉同 provider 重试。
             .with_retry_policy(RetryPolicy::none());
@@ -889,7 +893,7 @@ mod tests {
         assert_eq!(primary_seen.lock().expect("lock").as_slice(), ["kimi-k3"]);
         assert_eq!(
             secondary_seen.lock().expect("lock").as_slice(),
-            ["qwen3.7-max"],
+            ["qwen3.8-max-0902"],
             "fallback request must carry the fallback model"
         );
     }
@@ -906,9 +910,13 @@ mod tests {
         let secondary_seen = secondary.seen_models.clone();
         let mut registry = ProviderRegistry::new();
         registry.register("moonshot", Arc::new(primary), vec!["kimi-k3".into()]);
-        registry.register("dashscope", Arc::new(secondary), vec!["qwen3.7-max".into()]);
+        registry.register(
+            "dashscope",
+            Arc::new(secondary),
+            vec!["qwen3.8-max-0902".into()],
+        );
         let registry = registry
-            .with_fallback_chain(vec!["kimi-k3".into(), "qwen3.7-max".into()])
+            .with_fallback_chain(vec!["kimi-k3".into(), "qwen3.8-max-0902".into()])
             .with_retry_policy(RetryPolicy::immediate(5));
 
         let events = drain(&registry, "kimi-k3").await.expect("stream");
@@ -945,9 +953,13 @@ mod tests {
         let secondary_seen = secondary.seen_models.clone();
         let mut registry = ProviderRegistry::new();
         registry.register("moonshot", Arc::new(primary), vec!["kimi-k3".into()]);
-        registry.register("dashscope", Arc::new(secondary), vec!["qwen3.7-max".into()]);
+        registry.register(
+            "dashscope",
+            Arc::new(secondary),
+            vec!["qwen3.8-max-0902".into()],
+        );
         let registry = registry
-            .with_fallback_chain(vec!["kimi-k3".into(), "qwen3.7-max".into()])
+            .with_fallback_chain(vec!["kimi-k3".into(), "qwen3.8-max-0902".into()])
             .with_retry_policy(RetryPolicy::immediate(3));
 
         let events = drain(&registry, "kimi-k3").await.expect("stream");
@@ -970,7 +982,7 @@ mod tests {
         );
         assert_eq!(
             secondary_seen.lock().expect("lock").as_slice(),
-            ["qwen3.7-max"]
+            ["qwen3.8-max-0902"]
         );
     }
 
@@ -983,9 +995,13 @@ mod tests {
         let secondary_seen = secondary.seen_models.clone();
         let mut registry = ProviderRegistry::new();
         registry.register("moonshot", Arc::new(primary), vec!["kimi-k3".into()]);
-        registry.register("dashscope", Arc::new(secondary), vec!["qwen3.7-max".into()]);
+        registry.register(
+            "dashscope",
+            Arc::new(secondary),
+            vec!["qwen3.8-max-0902".into()],
+        );
         let registry = registry
-            .with_fallback_chain(vec!["kimi-k3".into(), "qwen3.7-max".into()])
+            .with_fallback_chain(vec!["kimi-k3".into(), "qwen3.8-max-0902".into()])
             // 30s 退避 + 已取消令牌：biased select 必走取消分支，无真实等待。
             .with_retry_policy(RetryPolicy {
                 delay_override_ms: Some(crate::retry::MAX_DELAY_MS),
@@ -1067,8 +1083,13 @@ mod tests {
         let secondary_seen = secondary.seen_models.clone();
         let mut registry = ProviderRegistry::new();
         registry.register("moonshot", Arc::new(primary), vec!["kimi-k3".into()]);
-        registry.register("dashscope", Arc::new(secondary), vec!["qwen3.7-max".into()]);
-        let registry = registry.with_fallback_chain(vec!["kimi-k3".into(), "qwen3.7-max".into()]);
+        registry.register(
+            "dashscope",
+            Arc::new(secondary),
+            vec!["qwen3.8-max-0902".into()],
+        );
+        let registry =
+            registry.with_fallback_chain(vec!["kimi-k3".into(), "qwen3.8-max-0902".into()]);
 
         let events = drain(&registry, "kimi-k3").await.expect("stream");
         assert_eq!(events.len(), 2);
@@ -1091,8 +1112,13 @@ mod tests {
         let secondary_seen = secondary.seen_models.clone();
         let mut registry = ProviderRegistry::new();
         registry.register("moonshot", Arc::new(primary), vec!["kimi-k3".into()]);
-        registry.register("dashscope", Arc::new(secondary), vec!["qwen3.7-max".into()]);
-        let registry = registry.with_fallback_chain(vec!["kimi-k3".into(), "qwen3.7-max".into()]);
+        registry.register(
+            "dashscope",
+            Arc::new(secondary),
+            vec!["qwen3.8-max-0902".into()],
+        );
+        let registry =
+            registry.with_fallback_chain(vec!["kimi-k3".into(), "qwen3.8-max-0902".into()]);
 
         let events = drain(&registry, "kimi-k3").await.expect("stream");
         assert_eq!(events.len(), 1);
@@ -1117,14 +1143,19 @@ mod tests {
             }),
             vec!["kimi-k3".into()],
         );
-        registry.register("dashscope", Arc::new(secondary), vec!["qwen3.7-max".into()]);
-        let registry = registry.with_fallback_chain(vec!["kimi-k3".into(), "qwen3.7-max".into()]);
+        registry.register(
+            "dashscope",
+            Arc::new(secondary),
+            vec!["qwen3.8-max-0902".into()],
+        );
+        let registry =
+            registry.with_fallback_chain(vec!["kimi-k3".into(), "qwen3.8-max-0902".into()]);
 
         let events = drain(&registry, "kimi-k3").await.expect("stream");
         assert_eq!(events.len(), 2);
         assert_eq!(
             secondary_seen.lock().expect("lock").as_slice(),
-            ["qwen3.7-max"]
+            ["qwen3.8-max-0902"]
         );
     }
 
@@ -1193,8 +1224,13 @@ mod tests {
         let primary_seen = primary.seen_models.clone();
         let mut registry = ProviderRegistry::new();
         registry.register("moonshot", Arc::new(primary), vec!["kimi-k3".into()]);
-        registry.register("dashscope", Arc::new(secondary), vec!["qwen3.7-max".into()]);
-        let registry = registry.with_fallback_chain(vec!["kimi-k3".into(), "qwen3.7-max".into()]);
+        registry.register(
+            "dashscope",
+            Arc::new(secondary),
+            vec!["qwen3.8-max-0902".into()],
+        );
+        let registry =
+            registry.with_fallback_chain(vec!["kimi-k3".into(), "qwen3.8-max-0902".into()]);
         let breaker = registry.breaker("moonshot").expect("slot");
         for _ in 0..3 {
             breaker.record_status(503);

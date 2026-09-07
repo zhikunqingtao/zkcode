@@ -15,7 +15,7 @@
 - 多 Agent 协作：子 Agent、Team、只读 Swarm
 - MCP Client/Server、Python UDS sidecar、Playwright 浏览器回放
 - 多 LLM Provider：DashScope、DeepSeek、Moonshot、Zhipu、MiniMax、Anthropic、OpenAI 等
-- 默认模型：`qwen3.8-max`（百炼订阅），内置 `qwen3.8-flash` 和 `glm-5.3-flash`
+- 默认模型：`qwen3.8-max-0902`（普通 DashScope）；另内置百炼订阅模型 `qwen3.8-max`、`qwen3.8-flash`，以及智谱模型 `glm-5.3-flash`
 - GFM/工作区图片渲染，以及基于 DashScope 的语音输入和助手消息朗读
 
 ## 模型、Markdown 与语音
@@ -23,6 +23,8 @@
 - 聊天正文和 Memory 预览支持 GFM 表格、任务列表、删除线等语法。
 - Markdown 图片可以使用 HTTP(S)、安全的 raster `data:image`、Blob URL，以及工作区内的
   绝对或相对路径。本地路径通过 Session 文件预览接口读取，不会直接暴露给浏览器。
+- 输入区可通过“引用本地文件路径”选择任意本机文件。选择器不上传文件内容，
+  仅将规范化后的绝对路径随消息发送给模型服务商；Word、PDF 等二进制文件不会因此自动解析。
 - `qwen3.8-flash` 支持思考、图片和工具调用；内置 GLM 视觉模型已更新为
   `glm-5.3-flash`。旧的 `glm-5v-turbo` ID 不提供兼容别名，升级后的旧 Session 需要手动选择新模型。
 - 语音输入使用 `qwen3-asr-flash`，录音最长 120 秒；助手消息完成后可使用
@@ -160,7 +162,7 @@ sudo 缓存、免密授权或 `SUDO_ASKPASS` 时使用。
 |---|---|
 | 服务器 | `ZK_HOST`、`ZK_PORT`、`ZK_LOG` |
 | LLM Provider | `LLM_PROVIDER_{NAME}_API_KEY`（DashScope / DeepSeek / Moonshot / Zhipu / MiniMax / Anthropic / OpenAI） |
-| 默认模型 | `ZK_DEFAULT_MODEL`（默认 `qwen3.8-max`） |
+| 默认模型 | `ZK_DEFAULT_MODEL`（默认 `qwen3.8-max-0902`） |
 | Python 侧车 | `ZK_PYTHON_ENABLED`、`BROWSER_TYPE` |
 | 功能门控 | `ZK_AGENT_ENABLED`、`ZK_SWARM_ENABLED` |
 | Feature Flags | `ZK_FEATURE_THINKING_MODE`、`ZK_FEATURE_COORDINATOR_MODE` 等 |

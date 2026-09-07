@@ -49,8 +49,11 @@ fn assistant_msg(content: &str, input: i64, output: i64) -> NewMessage {
 #[tokio::test]
 async fn create_session_persists_active_row() {
     let db = zk_db::Db::open_in_memory().unwrap();
-    let summary = db.create_session("qwen3.7-max", "/tmp/work").await.unwrap();
-    assert_eq!(summary.model, "qwen3.7-max");
+    let summary = db
+        .create_session("qwen3.8-max-0902", "/tmp/work")
+        .await
+        .unwrap();
+    assert_eq!(summary.model, "qwen3.8-max-0902");
     assert_eq!(summary.working_directory, "/tmp/work");
     assert_eq!(summary.message_count, 0);
     assert_eq!(summary.cost_usd, 0.0);

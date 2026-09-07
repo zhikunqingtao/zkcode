@@ -129,7 +129,7 @@ async fn setup(
     Db,
     String,
 ) {
-    setup_with_model(scripts, "qwen3.7-max").await
+    setup_with_model(scripts, "qwen3.8-max-0902").await
 }
 
 /// 内存库 + 指定模型的会话 + 引擎装配（输出预算/费率随模型能力表变化的
@@ -485,7 +485,7 @@ async fn single_turn_streams_and_persists() {
     // 会话模型。
     assert_eq!(provider.request_count(), 1);
     let request = provider.request_at(0);
-    assert_eq!(request.model, "qwen3.7-max");
+    assert_eq!(request.model, "qwen3.8-max-0902");
     assert_eq!(request.thinking, zk_llm::ThinkingMode::Adaptive);
     // 拼装结果整体逐字互锁（任务 #54：6 个 P0 静态段 + env_info，段序与
     // 分隔符对照旧 `SystemPromptBuilder`）；环境信息段必须逐字告知会话工作
@@ -500,7 +500,7 @@ async fn single_turn_streams_and_persists() {
     assert!(system_prompt.starts_with("你是一个交互式 AI 编码助手"));
     assert!(system_prompt.contains("# 执行任务"));
     assert!(system_prompt.contains(" - 主工作目录：/tmp\n"));
-    assert!(system_prompt.contains(" - 你由模型 qwen3.7-max 驱动。\n"));
+    assert!(system_prompt.contains(" - 你由模型 qwen3.8-max-0902 驱动。\n"));
     assert!(system_prompt.contains("`/tmp/.zk/scratchpad`"));
     assert_eq!(request.messages.len(), 1);
     assert_eq!(request.messages[0].content, "hi");
@@ -553,7 +553,10 @@ async fn production_prompt_includes_workspace_project_memory_language_and_tools(
         .await
         .expect("locale");
     let session = db
-        .create_session("qwen3.7-max", workspace.to_str().expect("utf8 workspace"))
+        .create_session(
+            "qwen3.8-max-0902",
+            workspace.to_str().expect("utf8 workspace"),
+        )
         .await
         .expect("session");
     let provider = Arc::new(MockProvider::new(vec![events(vec![
@@ -899,7 +902,7 @@ async fn setup_with_tools(
 ) {
     let db = Db::open_in_memory().expect("in-memory db");
     let session = db
-        .create_session("qwen3.7-max", "/tmp")
+        .create_session("qwen3.8-max-0902", "/tmp")
         .await
         .expect("create session");
     let provider = Arc::new(MockProvider::new(scripts));
@@ -1736,7 +1739,7 @@ async fn context_limit_413_recovers_and_retries() {
     // 压缩能真正减 token（否则 compact 返回 NoTokenSavings → 恢复耗尽）。
     let db = Db::open_in_memory().expect("in-memory db");
     let session = db
-        .create_session("qwen3.7-max", "/tmp")
+        .create_session("qwen3.8-max-0902", "/tmp")
         .await
         .expect("create session");
     let sid = session.id.clone();

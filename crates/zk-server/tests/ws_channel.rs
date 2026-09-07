@@ -108,7 +108,7 @@ fn bind_frame(session_id: &str, request_id: &str, epoch: i64) -> serde_json::Val
 /// 建库种子会话（一条 user 文本消息），返回 session id。
 async fn seed_session(db: &zk_db::Db) -> String {
     let summary = db
-        .create_session("qwen3.7-max", "/tmp")
+        .create_session("qwen3.8-max-0902", "/tmp")
         .await
         .expect("seed session");
     db.append_message(

@@ -31,13 +31,17 @@ async fn models_shape_matches_sample() {
             .collect()
     };
     let ids = ids(&body);
-    assert_eq!(ids.len(), 18);
+    assert_eq!(ids.len(), 21);
     assert_eq!(
         ids.iter().collect::<std::collections::HashSet<_>>().len(),
         ids.len(),
         "model ids stay unique"
     );
     for expected in [
+        "qwen3.8-max-0902",
+        "deepseek-v4-pro-0813",
+        "deepseek-v4-flash-0731",
+        "deepseek-v4-flash-vision-exp",
         "openai/gpt-5.6-sol",
         "openai/gpt-6-astra",
         "google/gemini-3.8-flash",
@@ -59,14 +63,54 @@ async fn models_shape_matches_sample() {
     assert_eq!(max_images(&body, "qwen3.8-flash"), 20);
     assert_eq!(max_images(&sample, "qwen3.8-flash"), 20);
     // 测试配置的默认模型（Config::test_config）。
-    assert_eq!(body["defaultModel"], "qwen3.8-max");
+    assert_eq!(body["defaultModel"], "qwen3.8-max-0902");
     assert!(
         ids.iter()
             .any(|id| id == body["defaultModel"].as_str().expect("default model"))
     );
+    let qwen_0902 = body["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .find(|model| model["id"] == "qwen3.8-max-0902")
+        .expect("qwen3.8-max-0902 model entry");
+    assert_eq!(qwen_0902["displayName"], "Qwen 3.8 Max 0902");
+    assert_eq!(qwen_0902["contextWindow"], 1_000_000);
+    assert_eq!(qwen_0902["maxOutputTokens"], 65_536);
+    assert_eq!(qwen_0902["supportsThinking"], true);
+    assert_eq!(qwen_0902["supportsImages"], true);
     // 每个条目 11 键齐全（assert_same_shape 只锁首元素，此处全量锁）。
     for model in body["models"].as_array().expect("array") {
         assert_eq!(model.as_object().expect("obj").len(), 11, "model: {model}");
+    }
+}
+
+/// 百炼版本和视觉实验版必须使用已登记的展示名与能力，不能退回动态兜底值。
+#[tokio::test]
+async fn models_expose_registered_deepseek_metadata() {
+    let mut router = app();
+    let (status, _headers, body) = call(&mut router, local_get("/api/models")).await;
+    assert_eq!(status, StatusCode::OK);
+    let body = json_body(&body);
+
+    for (id, display_name) in [
+        ("deepseek-v4-pro-0813", "DeepSeek V4 Pro 0813（百炼）"),
+        ("deepseek-v4-flash-0731", "DeepSeek V4 Flash 0731（百炼）"),
+        (
+            "deepseek-v4-flash-vision-exp",
+            "DeepSeek V4 Flash Vision Exp",
+        ),
+    ] {
+        let model = body["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .find(|model| model["id"] == id)
+            .expect("registered DeepSeek model");
+        assert_eq!(model["displayName"], display_name);
+        assert_eq!(model["contextWindow"], 1_000_000);
+        assert_eq!(model["maxOutputTokens"], 384_000);
+        assert_eq!(model["supportsThinking"], true);
     }
 }
 
@@ -79,7 +123,7 @@ async fn models_known_model_id_passes() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         json_body(&body)["models"].as_array().expect("arr").len(),
-        18
+        21
     );
 }
 
@@ -108,7 +152,7 @@ async fn config_get_default_shape_matches_sample() {
     assert_same_shape(&sample("GET_api-config.json"), &body, "config");
     assert_eq!(body["authType"], "localhost");
     assert_eq!(body["theme"], "dark");
-    assert_eq!(body["defaultModel"], "qwen3.8-max");
+    assert_eq!(body["defaultModel"], "qwen3.8-max-0902");
     assert_eq!(body["autoCompactThreshold"], 80);
 }
 

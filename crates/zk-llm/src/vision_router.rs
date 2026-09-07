@@ -174,17 +174,18 @@ mod tests {
         // 当前模型已支持图片 → None（即使替身内一个 provider 都没有）。
         let view = FakeView::new(&[]);
         assert!(resolve_vision_model(&view, "deepseek-v4-flash-vision-exp").is_none());
+        assert!(resolve_vision_model(&view, "qwen3.8-max-0902").is_none());
         assert!(resolve_vision_model(&view, "qwen3.7-plus").is_none());
         assert!(resolve_vision_model(&view, "kimi-k3").is_none());
     }
 
     #[test]
     fn same_provider_vision_model_preferred_over_global_fallback() {
-        // dashscope 下 qwen3.8-max 支持图片 → 同 provider 命中，不落全局兜底。
-        let view = FakeView::new(&[("dashscope", &["qwen3.7-max", "qwen3.8-max"])]);
+        // 同属 dashscope 时，文本模型优先路由到同 provider 的 0902 视觉模型。
+        let view = FakeView::new(&[("dashscope", &["qwen-turbo", "qwen3.8-max-0902"])]);
         assert_eq!(
-            resolve_vision_model(&view, "qwen3.7-max").as_deref(),
-            Some("qwen3.8-max")
+            resolve_vision_model(&view, "qwen-turbo").as_deref(),
+            Some("qwen3.8-max-0902")
         );
     }
 
@@ -193,7 +194,7 @@ mod tests {
         // DeepSeek provider 没注册 vision-exp（如未配 Key），同 provider 也无
         // 视觉模型 → 落到全局兜底 qwen3.7-plus（dashscope 已配置）。
         let view = FakeView::new(&[
-            ("dashscope", &["qwen3.7-max", "qwen3.7-plus"]),
+            ("dashscope", &["qwen3.8-max-0902", "qwen3.7-plus"]),
             ("deepseek", &["deepseek-v4-flash"]),
         ]);
         assert_eq!(

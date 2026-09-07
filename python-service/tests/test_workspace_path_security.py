@@ -72,18 +72,19 @@ def test_resolve_workspace_path_accepts_relative_descendant(monkeypatch, tmp_pat
     assert resolve_workspace_path("project", require_directory=True) == project.resolve()
 
 
-def test_resolve_workspace_path_rejects_absolute_outside_path(monkeypatch, tmp_path):
+def test_resolve_workspace_path_accepts_absolute_path_without_allowlist(
+        monkeypatch, tmp_path):
     workspace = tmp_path / "workspace"
     outside = tmp_path / "outside"
     workspace.mkdir()
     outside.mkdir()
     monkeypatch.setenv("WORKSPACE_ROOT", str(workspace))
 
-    with pytest.raises(WorkspacePathError):
-        resolve_workspace_path(str(outside), require_directory=True)
+    assert resolve_workspace_path(
+        str(outside), require_directory=True) == outside.resolve()
 
 
-def test_resolve_workspace_path_rejects_symlink_escape(monkeypatch, tmp_path):
+def test_configured_allowed_roots_reject_symlink_escape(monkeypatch, tmp_path):
     workspace = tmp_path / "workspace"
     outside = tmp_path / "outside"
     workspace.mkdir()
@@ -91,6 +92,7 @@ def test_resolve_workspace_path_rejects_symlink_escape(monkeypatch, tmp_path):
     escape = workspace / "escape"
     escape.symlink_to(outside, target_is_directory=True)
     monkeypatch.setenv("WORKSPACE_ROOT", str(workspace))
+    monkeypatch.setenv("ZK_WORKSPACE_ALLOWED_ROOTS", str(workspace))
 
     with pytest.raises(WorkspacePathError):
         resolve_workspace_path(str(escape), require_directory=True)
@@ -129,7 +131,7 @@ def test_allowed_roots_override_local_picker_mode(monkeypatch, tmp_path):
         resolve_workspace_path(str(outside), require_directory=True)
 
 
-def test_explicitly_disabled_local_picker_fails_closed(monkeypatch, tmp_path):
+def test_disabled_local_picker_does_not_restrict_python_paths(monkeypatch, tmp_path):
     workspace = tmp_path / "workspace"
     outside = tmp_path / "outside"
     workspace.mkdir()
@@ -137,8 +139,26 @@ def test_explicitly_disabled_local_picker_fails_closed(monkeypatch, tmp_path):
     monkeypatch.setenv("WORKSPACE_ROOT", str(workspace))
     monkeypatch.setenv("ZK_LOCAL_PICKER_ENABLED", "false")
 
-    with pytest.raises(WorkspacePathError):
-        resolve_workspace_path(str(outside), require_directory=True)
+    assert resolve_workspace_path(
+        str(outside), require_directory=True) == outside.resolve()
+
+
+@pytest.mark.asyncio
+async def test_file_tree_accepts_external_project_without_allowlist(
+        monkeypatch, tmp_path):
+    workspace = tmp_path / "workspace"
+    external_project = tmp_path / "external-project"
+    workspace.mkdir()
+    external_project.mkdir()
+    (external_project / "main.py").write_text("value = 1\n", encoding="utf-8")
+    monkeypatch.setenv("WORKSPACE_ROOT", str(workspace))
+
+    response = await get_file_tree(FileTreeRequest(
+        root_path=str(external_project), max_depth=1))
+    children = response["data"].children or []
+
+    assert response["success"] is True
+    assert {child.name for child in children} == {"main.py"}
 
 
 @pytest.mark.asyncio
@@ -157,6 +177,7 @@ async def test_file_inspection_endpoints_reject_files_outside_workspace(
     workspace.mkdir()
     outside_file.write_text("private", encoding="utf-8")
     monkeypatch.setenv("WORKSPACE_ROOT", str(workspace))
+    monkeypatch.setenv("ZK_WORKSPACE_ALLOWED_ROOTS", str(workspace))
 
     with pytest.raises(HTTPException) as raised:
         await handler(request_type(file_path=str(outside_file)))
@@ -172,6 +193,7 @@ async def test_watch_endpoint_rejects_directory_outside_workspace(
     workspace.mkdir()
     outside.mkdir()
     monkeypatch.setenv("WORKSPACE_ROOT", str(workspace))
+    monkeypatch.setenv("ZK_WORKSPACE_ALLOWED_ROOTS", str(workspace))
 
     with pytest.raises(HTTPException) as raised:
         await watch_files(path=str(outside), extensions="")
@@ -188,6 +210,7 @@ async def test_recursive_analysis_endpoints_reject_roots_outside_workspace(
     workspace.mkdir()
     outside.mkdir()
     monkeypatch.setenv("WORKSPACE_ROOT", str(workspace))
+    monkeypatch.setenv("ZK_WORKSPACE_ALLOWED_ROOTS", str(workspace))
 
     with pytest.raises(HTTPException) as raised:
         if endpoint == "diagram":
@@ -298,9 +321,22 @@ def test_git_service_rejects_repository_outside_workspace(monkeypatch, tmp_path)
     workspace.mkdir()
     (outside_repo / ".git").mkdir(parents=True)
     monkeypatch.setenv("WORKSPACE_ROOT", str(workspace))
+    monkeypatch.setenv("ZK_WORKSPACE_ALLOWED_ROOTS", str(workspace))
 
     with pytest.raises(ValueError):
         GitEnhancedService()._validate_repo_path(str(outside_repo))
+
+
+def test_git_service_accepts_repository_outside_default_root_without_allowlist(
+        monkeypatch, tmp_path):
+    workspace = tmp_path / "workspace"
+    outside_repo = tmp_path / "outside-repo"
+    workspace.mkdir()
+    _create_git_repo(outside_repo)
+    monkeypatch.setenv("WORKSPACE_ROOT", str(workspace))
+
+    assert GitEnhancedService()._validate_repo_path(
+        str(outside_repo)) == str(outside_repo.resolve())
 
 
 def test_git_service_accepts_normal_repository_in_workspace(monkeypatch, tmp_path):
@@ -335,6 +371,7 @@ def test_git_service_rejects_symlinked_git_metadata_escape(monkeypatch, tmp_path
     (facade / ".git").symlink_to(outside.git_dir, target_is_directory=True)
     (facade / "main.py").write_text("value = 2\n", encoding="utf-8")
     monkeypatch.setenv("WORKSPACE_ROOT", str(workspace))
+    monkeypatch.setenv("ZK_WORKSPACE_ALLOWED_ROOTS", str(workspace))
 
     with pytest.raises(ValueError, match="metadata is outside"):
         GitEnhancedService()._validate_repo_path(str(facade))
@@ -348,6 +385,7 @@ def test_git_service_rejects_linked_worktree_with_external_common_dir(
     linked = workspace / "linked"
     outside_repo.git.worktree("add", "-b", "external-linked", str(linked), "HEAD")
     monkeypatch.setenv("WORKSPACE_ROOT", str(workspace))
+    monkeypatch.setenv("ZK_WORKSPACE_ALLOWED_ROOTS", str(workspace))
 
     with pytest.raises(ValueError, match="metadata is outside"):
         GitEnhancedService()._validate_repo_path(str(linked))
@@ -407,7 +445,7 @@ def test_git_service_rejects_symlinked_object_database(monkeypatch, tmp_path):
         Path(outside.common_dir) / "objects", target_is_directory=True)
     monkeypatch.setenv("WORKSPACE_ROOT", str(workspace))
 
-    with pytest.raises(ValueError, match="object database is outside"):
+    with pytest.raises(ValueError, match="object database must not be a symlink"):
         GitEnhancedService()._validate_repo_path(str(repo.working_tree_dir))
 
 
@@ -499,6 +537,7 @@ async def test_change_impact_rejects_project_outside_workspace(monkeypatch, tmp_
     outside_file = outside / "source.py"
     outside_file.write_text("print('outside')", encoding="utf-8")
     monkeypatch.setenv("WORKSPACE_ROOT", str(workspace))
+    monkeypatch.setenv("ZK_WORKSPACE_ALLOWED_ROOTS", str(workspace))
 
     response = await analyze_change_impact(ChangeImpactRequest(
         file_path=str(outside_file), changed_lines=[1],
@@ -516,6 +555,7 @@ async def test_complexity_rejects_project_outside_workspace(monkeypatch, tmp_pat
     workspace.mkdir()
     outside.mkdir()
     monkeypatch.setenv("WORKSPACE_ROOT", str(workspace))
+    monkeypatch.setenv("ZK_WORKSPACE_ALLOWED_ROOTS", str(workspace))
 
     with pytest.raises(HTTPException) as raised:
         await analyze_complexity(ComplexityRequest(project_root=str(outside)))

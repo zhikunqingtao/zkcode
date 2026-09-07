@@ -30,21 +30,13 @@ def workspace_root() -> Path:
     return root
 
 
-def _local_picker_enabled() -> bool:
-    return os.getenv("ZK_LOCAL_PICKER_ENABLED", "").strip().lower() in {
-        "1", "true", "yes", "on",
-    }
+def _allowed_roots() -> tuple[Path, ...] | None:
+    """Return explicitly configured roots, or no global path restriction.
 
-
-def _allowed_roots(default_root: Path) -> tuple[Path, ...] | None:
-    """Return enforced roots, or ``None`` for explicit local-desktop mode.
-
-    ``WORKSPACE_ROOT`` remains the anchor for relative requests. Production
-    and remote deployments restrict absolute requests with
-    ``ZK_WORKSPACE_ALLOWED_ROOTS``; when no allowed roots are configured,
-    the default root remains the fail-closed boundary. Only the existing,
-    explicitly enabled local picker mode may select an absolute Project
-    elsewhere on the local machine.
+    ``WORKSPACE_ROOT`` remains the anchor for relative requests. The sidecar is
+    part of a local, single-user application, so absolute requests are
+    unrestricted by default. Deployments that need containment can opt in with
+    ``ZK_WORKSPACE_ALLOWED_ROOTS``.
     """
     configured = os.getenv("ZK_WORKSPACE_ALLOWED_ROOTS", "")
     values = [value.strip() for value in configured.split(",")
@@ -63,9 +55,7 @@ def _allowed_roots(default_root: Path) -> tuple[Path, ...] | None:
             if root not in roots:
                 roots.append(root)
         return tuple(roots)
-    if _local_picker_enabled():
-        return None
-    return (default_root,)
+    return None
 
 
 def _is_allowed(path: Path, roots: tuple[Path, ...] | None) -> bool:
@@ -82,9 +72,9 @@ def resolve_workspace_path(
     """Resolve an absolute or relative path without allowing symlink escape.
 
     Relative paths are anchored at ``base`` when supplied, otherwise at
-    ``WORKSPACE_ROOT``. Explicit allowed roots are always enforced. With no
-    allowed roots, the default root remains the boundary unless the existing
-    local-only directory picker mode is explicitly enabled.
+    ``WORKSPACE_ROOT``. Explicit allowed roots are always enforced; without
+    them, absolute paths may address any local file or directory. A supplied
+    ``base`` still contains relative requests to that project directory.
     """
     if not raw_path or "\x00" in raw_path:
         raise WorkspacePathError("Path is empty or invalid")
@@ -92,7 +82,7 @@ def resolve_workspace_path(
         raise WorkspacePathError("Path cannot be both a directory and a file")
 
     root = workspace_root()
-    allowed_roots = _allowed_roots(root)
+    allowed_roots = _allowed_roots()
     try:
         anchor = root if base is None else Path(base).resolve(strict=True)
     except (OSError, RuntimeError) as error:

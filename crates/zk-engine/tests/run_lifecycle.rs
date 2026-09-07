@@ -197,7 +197,7 @@ async fn setup(
 ) {
     let db = Db::open_in_memory().expect("in-memory db");
     let session = db
-        .create_session("qwen3.7-max", "/tmp")
+        .create_session("qwen3.8-max-0902", "/tmp")
         .await
         .expect("create session");
     let sink = Arc::new(RecordingSink::default());
@@ -364,7 +364,7 @@ async fn tool_phase_resolves_run_ancestry_and_executes() {
 async fn missing_run_row_reproduces_missing_parent_message() {
     let db = Db::open_in_memory().expect("in-memory db");
     let session = db
-        .create_session("qwen3.7-max", "/tmp")
+        .create_session("qwen3.8-max-0902", "/tmp")
         .await
         .expect("create session");
     assert_eq!(
@@ -377,7 +377,7 @@ async fn missing_run_row_reproduces_missing_parent_message() {
         &session.id,
         None,
         Some("query"),
-        "qwen3.7-max",
+        "qwen3.8-max-0902",
     )
     .await
     .expect("start run");

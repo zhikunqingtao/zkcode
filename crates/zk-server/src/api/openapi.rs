@@ -59,6 +59,7 @@ use crate::api::{
         run::list_runs,
         run::get_run,
         run::get_events,
+        file::pick_local_file,
         file::search_files,
         file::preview,
         file::reveal,
@@ -111,7 +112,7 @@ pub(crate) async fn openapi_json() -> Json<utoipa::openapi::OpenApi> {
 mod tests {
     use super::*;
 
-    /// 聚合文档含全部 62 条业务路径（逐路径互锁在集成测试，
+    /// 聚合文档含全部 63 条业务路径（逐路径互锁在集成测试，
     /// 此处锁 paths 非空与关键八域在位）。
     #[test]
     fn api_doc_aggregates_paths() {
@@ -127,6 +128,7 @@ mod tests {
         assert!(paths.contains_key("/api/tools"));
         assert!(paths.contains_key("/api/tools/{toolName}"));
         assert!(paths.contains_key("/api/doctor"));
+        assert!(paths.contains_key("/api/files/pick"));
         // MCP 域（Batch 4B）：服务器 9 路径 + 能力注册表 7 路径。
         assert!(paths.contains_key("/api/mcp/servers"));
         assert!(paths.contains_key("/api/mcp/servers/{name}/restart"));
@@ -149,6 +151,6 @@ mod tests {
         assert!(paths.contains_key("/api/asr/recognize"));
         assert!(paths.contains_key("/api/tts/status"));
         assert!(paths.contains_key("/api/tts/synthesize"));
-        assert_eq!(paths.len(), 62);
+        assert_eq!(paths.len(), 63);
     }
 }

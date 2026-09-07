@@ -9,7 +9,7 @@
 //! | `ZK_DB_PATH` | `.zk/data.db` | `SQLite` 库路径（D6，相对启动目录） |
 //! | `ZK_DEMO_CREDENTIAL_DB` | `configuration/bootstrap/demo-credentials.db` | 公开、只读的首次启动凭据种子；不是用户运行库 |
 //! | `ZK_DEV_ALLOW_DEMO_CREDENTIAL` | `0` | 是否允许导入公开 demo 凭据；仅接受 `0` / `1` |
-//! | `ZK_DEFAULT_MODEL` | `qwen3.8-max` | 创建会话缺省模型 |
+//! | `ZK_DEFAULT_MODEL` | `qwen3.8-max-0902` | 创建会话缺省模型 |
 //! | `ZK_AUTH_MODE` | `localhost` | 鉴权模式（`localhost` / `lan_token`，对齐旧 `auth.mode`；只影响 `/api/auth/*` 上报与 token 下发，准入判定恒走 `access_guard`） |
 //! | `ZK_STATIC_DIR` | 自动探测 `resources/static` | 静态资源根（`remote.html`；旧 `src/main/resources/static`） |
 //! | `ZK_CORS_ALLOWED_ORIGINS` | 空 | 追加 CORS 白名单（逗号分隔，对齐旧 `CORS_ALLOWED_ORIGINS`） |
@@ -221,7 +221,7 @@ impl Config {
                     .join(zk_engine::SNAPSHOT_DIR_NAME)
                     .to_string_lossy(),
             ))),
-            default_model: env_or("ZK_DEFAULT_MODEL", "qwen3.8-max"),
+            default_model: env_or("ZK_DEFAULT_MODEL", "qwen3.8-max-0902"),
             auth_mode: env_or("ZK_AUTH_MODE", AUTH_MODE_LOCALHOST),
             access_token_path: Some(crate::access_token::default_token_path()),
             static_dir: PathBuf::from(env_or("ZK_STATIC_DIR", &default_static_dir())),
@@ -307,7 +307,7 @@ impl Config {
                 .join("../../configuration/bootstrap/demo-credentials.db"),
             demo_credential_allowed: false,
             snapshot_dir: None,
-            default_model: "qwen3.8-max".into(),
+            default_model: "qwen3.8-max-0902".into(),
             auth_mode: AUTH_MODE_LOCALHOST.into(),
             // 测试装配不落盘：token 只存活于进程内，绝不污染用户 `~/.zk/`。
             access_token_path: None,

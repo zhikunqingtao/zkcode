@@ -15,11 +15,12 @@ import {
     vi,
 } from 'vitest';
 import PromptInput from './PromptInput';
-import type { Command } from '@/types';
+import type { Command, SubmitEvent } from '@/types';
 import { useWorkbenchViewStore } from '@/store/workbenchViewStore';
 import { useSpeechAvailabilityStore } from '@/store/speechAvailabilityStore';
 import { useSessionStore } from '@/store/sessionStore';
 import { useModelStore } from '@/store/modelStore';
+import { useNotificationStore } from '@/store/notificationStore';
 
 const voiceButtonMock = vi.hoisted(() => ({
     callbacks: [] as Array<(text: string) => void>,
@@ -95,6 +96,7 @@ describe('PromptInput asynchronous submit', () => {
             checked: true,
             checking: false,
         });
+        useNotificationStore.getState().clearAll();
     });
 
     afterEach(() => {
@@ -103,6 +105,7 @@ describe('PromptInput asynchronous submit', () => {
             scrollIntoView?: unknown;
         }).scrollIntoView;
         vi.restoreAllMocks();
+        vi.unstubAllGlobals();
     });
 
     it('clears the draft only after the message was sent', async () => {
@@ -289,5 +292,126 @@ describe('PromptInput asynchronous submit', () => {
         renderInput(vi.fn().mockResolvedValue(true));
 
         expect(screen.getByTitle('当前模型没有可用的图片处理能力')).toBeDisabled();
+    });
+
+    it('references a picked local path without creating an attachment', async () => {
+        const localPath = '/Users/example/Documents/报告 "最终".docx';
+        const fetchMock = vi.fn().mockResolvedValue({
+            ok: true,
+            status: 200,
+            json: async () => ({
+                files: [{
+                    path: localPath,
+                    name: '报告 "最终".docx',
+                    size: 2048,
+                }],
+            }),
+        });
+        vi.stubGlobal('fetch', fetchMock);
+        useSessionStore.setState({ model: 'no-vision-route' });
+        const onSubmit = vi.fn().mockResolvedValue(true);
+        renderInput(onSubmit);
+
+        const pickerButton = screen.getByRole('button', {
+            name: '引用本地文件路径',
+        });
+        expect(pickerButton).toBeEnabled();
+        fireEvent.click(pickerButton);
+
+        await waitFor(() => expect(screen.getByTitle(localPath)).toBeInTheDocument());
+        expect(fetchMock).toHaveBeenCalledWith('/api/files/pick', {
+            method: 'POST',
+            headers: { 'X-Zhikun-Native-Picker': '1' },
+        });
+
+        fireEvent.click(screen.getByRole('button', {
+            name: '移除本地文件 报告 "最终".docx',
+        }));
+        expect(screen.queryByTitle(localPath)).not.toBeInTheDocument();
+
+        fireEvent.click(pickerButton);
+        await waitFor(() => expect(screen.getByTitle(localPath)).toBeInTheDocument());
+        fireEvent.change(screen.getByRole('textbox', { name: '输入消息' }), {
+            target: { value: '检查这个文件' },
+        });
+        fireEvent.click(screen.getByRole('button', { name: '发送消息' }));
+
+        await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+        const submitted = onSubmit.mock.calls[0][0] as SubmitEvent;
+        expect(submitted.text).toBe(
+            `检查这个文件\n\n本地文件路径：${JSON.stringify(localPath)}`,
+        );
+        expect(submitted.attachments).toEqual([]);
+        await waitFor(() => expect(screen.queryByTitle(localPath)).not.toBeInTheDocument());
+    });
+
+    it('ignores a local path picked for a previous session', async () => {
+        let resolvePicker!: (response: object) => void;
+        vi.stubGlobal('fetch', vi.fn(() => new Promise(resolve => {
+            resolvePicker = resolve;
+        })));
+        renderInput(vi.fn().mockResolvedValue(true));
+
+        fireEvent.click(screen.getByRole('button', {
+            name: '引用本地文件路径',
+        }));
+        act(() => useSessionStore.setState({ sessionId: 'session-b' }));
+        resolvePicker({
+            ok: true,
+            status: 200,
+            json: async () => ({
+                files: [{ path: '/Users/example/old.docx', name: 'old.docx', size: 42 }],
+            }),
+        });
+
+        await waitFor(() => expect(screen.getByRole('button', {
+            name: '引用本地文件路径',
+        })).toBeEnabled());
+        expect(screen.queryByTitle('/Users/example/old.docx')).not.toBeInTheDocument();
+    });
+
+    it('clears a selected local path when the session changes', async () => {
+        const localPath = '/Users/example/session-a.docx';
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+            ok: true,
+            status: 200,
+            json: async () => ({
+                files: [{ path: localPath, name: 'session-a.docx', size: 42 }],
+            }),
+        }));
+        const onSubmit = vi.fn().mockResolvedValue(true);
+        renderInput(onSubmit);
+
+        fireEvent.click(screen.getByRole('button', {
+            name: '引用本地文件路径',
+        }));
+        await waitFor(() => expect(screen.getByTitle(localPath)).toBeInTheDocument());
+
+        act(() => useSessionStore.setState({ sessionId: 'session-b' }));
+        await waitFor(() => expect(screen.queryByTitle(localPath)).not.toBeInTheDocument());
+
+        fireEvent.change(screen.getByRole('textbox', { name: '输入消息' }), {
+            target: { value: 'session b message' },
+        });
+        fireEvent.click(screen.getByRole('button', { name: '发送消息' }));
+
+        await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+        expect((onSubmit.mock.calls[0][0] as SubmitEvent).text).toBe('session b message');
+    });
+
+    it('directs dropped non-image files to the native local-path picker', () => {
+        renderInput(vi.fn().mockResolvedValue(true));
+        const input = screen.getByRole('textbox', { name: '输入消息' });
+
+        fireEvent.drop(input, {
+            dataTransfer: {
+                files: [new File(['document'], 'report.docx', {
+                    type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                })],
+            },
+        });
+
+        expect(useNotificationStore.getState().notifications.at(-1)?.message)
+            .toBe('非图片文件不会上传，请使用“引用本地文件路径”按钮选择');
     });
 });

@@ -61,6 +61,29 @@ pub(crate) fn has_forwarding_headers(headers: &HeaderMap) -> bool {
         .any(|name| headers.contains_key(*name))
 }
 
+/// 原生选择器的 HTTP 意图与直连守卫。目录和文件选择器共用，避免两条本地
+/// 能力在 header 或代理判断上失同步。
+pub(crate) fn assert_native_picker_headers(headers: &HeaderMap) -> Result<(), ApiError> {
+    let intent = headers
+        .get("x-zhikun-native-picker")
+        .and_then(|value| value.to_str().ok());
+    if intent != Some("1") {
+        return Err(failure(
+            StatusCode::FORBIDDEN,
+            "NATIVE_PICKER_HEADER_REQUIRED",
+            "X-Zhikun-Native-Picker: 1 is required",
+        ));
+    }
+    if has_forwarding_headers(headers) {
+        return Err(failure(
+            StatusCode::FORBIDDEN,
+            "NATIVE_PICKER_FORWARDED_REQUEST",
+            "Native folder selection is unavailable through a proxy",
+        ));
+    }
+    Ok(())
+}
+
 /// `spawn_blocking` join 失败归一（任务被取消/panic 已由 `CatchPanic` 之外
 /// 的运行时路径触达，统一 500）。
 fn join_internal(err: &tokio::task::JoinError) -> ApiError {
@@ -176,23 +199,7 @@ pub(crate) async fn pick_directory(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     // 旧 Controller 守卫顺序：意图头 → 转发头 → 服务层三条件 + 可用性。
-    let intent = headers
-        .get("x-zhikun-native-picker")
-        .and_then(|value| value.to_str().ok());
-    if intent != Some("1") {
-        return Err(failure(
-            StatusCode::FORBIDDEN,
-            "NATIVE_PICKER_HEADER_REQUIRED",
-            "X-Zhikun-Native-Picker: 1 is required",
-        ));
-    }
-    if has_forwarding_headers(&headers) {
-        return Err(failure(
-            StatusCode::FORBIDDEN,
-            "NATIVE_PICKER_FORWARDED_REQUEST",
-            "Native folder selection is unavailable through a proxy",
-        ));
-    }
+    assert_native_picker_headers(&headers)?;
     workspace::assert_native_picker_allowed(&state.config, true)?;
     let outcome = workspace::run_native_picker().await?;
     match outcome {

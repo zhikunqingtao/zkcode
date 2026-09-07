@@ -18,7 +18,7 @@
 //! | `LLM_PROVIDER_<NAME>_MODELS` | 模型清单（逗号分隔）；覆盖目录声明 |
 //! | `LLM_PROVIDER_<NAME>_BASE_URL` | 覆盖目录 `base_url`（联调 / 私有网关） |
 //! | `LLM_PROVIDER_<NAME>_DEFAULT_MODEL` | 覆盖目录默认模型 |
-//! | `ZK_MODEL_FALLBACK_CHAIN` | 模型降级链（冒号分隔，如 `kimi-k3:qwen3.7-max`） |
+//! | `ZK_MODEL_FALLBACK_CHAIN` | 模型降级链（冒号分隔，如 `kimi-k3:qwen3.8-max-0902`） |
 //!
 //! `<NAME>` = provider 名大写、`-` 换 `_`（`dashscope-token-plan` →
 //! `DASHSCOPE_TOKEN_PLAN`，与旧 `.env` 完全一致）。
@@ -130,16 +130,16 @@ impl ProviderConfig {
         self
     }
 
-    /// `DashScope` 主通道（对齐 application.yml：qwen3.7-max 默认 +
-    /// qwen3.7-max/qwen3.7-plus 模型注册）。
+    /// `DashScope` 主通道（对齐 application.yml：qwen3.8-max-0902 默认 +
+    /// qwen3.8-max-0902/qwen3.7-plus 模型注册）。
     #[must_use]
     pub fn dashscope(api_key: ApiKey) -> Self {
         Self::new(
             "dashscope",
             DASHSCOPE_BASE_URL,
             api_key,
-            "qwen3.7-max",
-            vec!["qwen3.7-max".into(), "qwen3.7-plus".into()],
+            "qwen3.8-max-0902",
+            vec!["qwen3.8-max-0902".into(), "qwen3.7-plus".into()],
         )
     }
 
@@ -194,8 +194,8 @@ pub const PROVIDER_CATALOG: &[CatalogEntry] = &[
     CatalogEntry {
         name: "dashscope",
         base_url: DASHSCOPE_BASE_URL,
-        default_model: "qwen3.7-max",
-        models: &["qwen3.7-max", "qwen3.7-plus"],
+        default_model: "qwen3.8-max-0902",
+        models: &["qwen3.8-max-0902", "qwen3.7-plus"],
         protocol: ProviderProtocol::OpenAiCompat,
         in_default_catalog: true,
     },
@@ -286,7 +286,7 @@ pub const PROVIDER_CATALOG: &[CatalogEntry] = &[
 ];
 
 /// 声明目录默认模型（旧 `LlmProviderRegistry.getDefaultModel` 兜底值）。
-pub const DEFAULT_MODEL: &str = "qwen3.8-max";
+pub const DEFAULT_MODEL: &str = "qwen3.8-max-0902";
 
 /// 按名查目录条目。
 #[must_use]
@@ -408,8 +408,8 @@ mod tests {
         let cfg = ProviderConfig::dashscope(ApiKey::new("sk-x"));
         assert_eq!(cfg.name, "dashscope");
         assert_eq!(cfg.base_url, DASHSCOPE_BASE_URL);
-        assert_eq!(cfg.default_model, "qwen3.7-max");
-        assert_eq!(cfg.models, vec!["qwen3.7-max", "qwen3.7-plus"]);
+        assert_eq!(cfg.default_model, "qwen3.8-max-0902");
+        assert_eq!(cfg.models, vec!["qwen3.8-max-0902", "qwen3.7-plus"]);
         assert_eq!(cfg.protocol, ProviderProtocol::OpenAiCompat);
         assert_eq!(cfg.api_keys.len(), 1);
     }
@@ -433,7 +433,7 @@ mod tests {
     #[test]
     fn catalog_matches_plan_matrix() {
         let expected: [(&str, &str, &str, usize); 9] = [
-            ("dashscope", DASHSCOPE_BASE_URL, "qwen3.7-max", 2),
+            ("dashscope", DASHSCOPE_BASE_URL, "qwen3.8-max-0902", 2),
             (
                 "dashscope-token-plan",
                 DASHSCOPE_TOKEN_PLAN_BASE_URL,
@@ -474,7 +474,7 @@ mod tests {
         assert_eq!(
             declared_models(),
             vec![
-                "qwen3.7-max",
+                "qwen3.8-max-0902",
                 "qwen3.7-plus",
                 "qwen3.8-max",
                 "qwen3.8-flash",

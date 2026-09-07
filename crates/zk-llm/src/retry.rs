@@ -529,9 +529,9 @@ mod tests {
             MAX_DELAY_MS
         );
         // qwen 族不遵循 retry-after → 回到自身基数 10s 的指数退避。
-        assert!(!policy.respect_retry_after("qwen3.7-max", 1_200));
+        assert!(!policy.respect_retry_after("qwen3.8-max-0902", 1_200));
         assert_eq!(
-            policy.delay_ms_with_jitter("qwen3.7-max", 1, Some(1_200), 0),
+            policy.delay_ms_with_jitter("qwen3.8-max-0902", 1, Some(1_200), 0),
             10_000
         );
         // retryAfterMs <= 0 视为缺失（旧 shouldRespectRetryAfter 首行短路）。
@@ -549,7 +549,7 @@ mod tests {
                 respect_retry_after: true,
             }
         );
-        assert_eq!(retry_config_for("qwen3.7-max").base_delay_ms, 10_000);
+        assert_eq!(retry_config_for("qwen3.8-max-0902").base_delay_ms, 10_000);
         assert_eq!(retry_config_for("deepseek-v4-pro").base_delay_ms, 20_000);
         // 大小写无关的子串匹配（旧 toLowerCase + startsWith/contains）。
         assert_eq!(retry_config_for("Anthropic/CLAUDE-opus").max_retries, 5);

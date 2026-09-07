@@ -40,7 +40,7 @@ const DEFAULT_THEME: ThemeConfig = {
     borderRadius: 'md',
 };
 
-export const DEFAULT_MODEL = 'qwen3.8-max';
+export const DEFAULT_MODEL = 'qwen3.8-max-0902';
 
 export const useConfigStore = create<ConfigStoreState>()(
     subscribeWithSelector(

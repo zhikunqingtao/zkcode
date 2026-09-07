@@ -683,7 +683,7 @@ mod tests {
     fn markdown_export_skeleton() {
         let detail = SessionDetail {
             session_id: "s1".into(),
-            model: "qwen3.7-max".into(),
+            model: "qwen3.8-max-0902".into(),
             working_dir: "/w".into(),
             title: None,
             status: "active".into(),
@@ -697,7 +697,7 @@ mod tests {
         };
         let markdown = export_markdown(&detail);
         assert!(markdown.starts_with("# Session: s1\n\n"));
-        assert!(markdown.contains("- **Model**: qwen3.7-max\n"));
+        assert!(markdown.contains("- **Model**: qwen3.8-max-0902\n"));
         assert!(markdown.contains("- **Messages**: 2\n"));
         assert!(markdown.contains("## User\n\nquestion\n\n"));
         assert!(markdown.contains("## Assistant\n\nanswer\n\n"));

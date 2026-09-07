@@ -74,7 +74,7 @@ mod tests {
     fn detail(messages: Vec<MessageRecord>, status: &str) -> SessionDetail {
         SessionDetail {
             session_id: "s-1".to_owned(),
-            model: "qwen3.7-max".to_owned(),
+            model: "qwen3.8-max-0902".to_owned(),
             working_dir: "/tmp".to_owned(),
             title: None,
             status: status.to_owned(),
@@ -103,7 +103,7 @@ mod tests {
         assert_eq!(value["bindingEpoch"], 4);
         assert_eq!(value["metadata"]["permissionMode"], "DEFAULT");
         assert_eq!(value["metadata"]["status"], "active");
-        assert_eq!(value["metadata"]["model"], "qwen3.7-max");
+        assert_eq!(value["metadata"]["model"], "qwen3.8-max-0902");
         assert!(value["serverNow"].as_i64().is_some());
         assert!(value.get("activities").is_none(), "phase2 fields absent");
         assert!(value.get("runSnapshot").is_none());
