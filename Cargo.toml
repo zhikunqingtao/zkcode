@@ -35,7 +35,7 @@ rusqlite = { version = "0.39", features = ["bundled"] }
 arc-swap = "1"
 refinery = { version = "0.9", features = ["rusqlite-bundled"] }
 # 游标 Base64 编解码（对齐旧系统 java.util.Base64 标准 alphabet + padding）。
-base64 = "0.22"
+base64 = "0.23"
 # 会话/消息主键 = UUIDv4（对齐旧系统 UUID.randomUUID()）。
 uuid = { version = "1", features = ["v4"] }
 # S6（zk-llm）引入：异步流原语 / OpenAI 兼容 HTTP 客户端 / 取消令牌 / 字节缓冲。
