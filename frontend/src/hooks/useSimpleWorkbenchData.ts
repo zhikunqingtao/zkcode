@@ -1,5 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ActivityData } from '@/types/apos';
+import type {
+    RuntimeCleanupStatus,
+    RuntimeRunStatus,
+    RuntimeTaskStatus,
+    RuntimeVerificationStatus,
+} from '@/types';
 
 export interface SessionDetail {
     sessionId: string;
@@ -15,14 +21,61 @@ export interface SessionDetail {
 export interface RunSummary {
     id: string;
     sessionId: string;
-    parentRunId: string | null;
-    status: string;
-    agentType: string;
+    taskId?: string;
+    parentRunId?: string | null;
+    status: RuntimeRunStatus;
+    agentType?: string;
     startedAt: string | null;
-    finishedAt: string | null;
+    finishedAt?: string | null;
     updatedAt: string;
-    verificationStatus: string;
-    errorSummary: string | null;
+    verificationStatus: RuntimeVerificationStatus;
+    cleanupStatus?: string;
+    inputTokens?: number;
+    outputTokens?: number;
+    costNanosUsd?: number;
+    usageComplete?: boolean;
+    errorSummary?: string | null;
+}
+
+export interface SubtreeUsage {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheCreateTokens: number;
+    costNanosUsd: number;
+    complete: boolean;
+}
+
+export interface WorkbenchTaskSummary {
+    id: string;
+    sessionId: string;
+    parentTaskId: string | null;
+    rootTaskId: string;
+    currentRunId: string | null;
+    description: string;
+    taskType: string;
+    status: RuntimeTaskStatus;
+    reason: string | null;
+    cleanupStatus: RuntimeCleanupStatus;
+    verificationStatus: RuntimeVerificationStatus;
+    usageComplete: boolean;
+    createdAt: string;
+    updatedAt: string;
+    terminalAt: string | null;
+}
+
+export interface WorkbenchActiveTool {
+    invocationId: string;
+    taskId: string;
+    runId: string;
+    toolUseId: string;
+    toolName: string;
+    status: 'preparing' | 'queued' | 'running';
+    input: Record<string, unknown> | null;
+    sideEffectClass: string;
+    cleanupStatus: RuntimeCleanupStatus;
+    startedAt: string | null;
+    createdAt: string;
 }
 
 export interface ArtifactEntrySummary {
@@ -62,7 +115,7 @@ export interface StructuredSummary {
     nextSteps: string[];
 }
 
-export type CriterionStatus = 'PASSED' | 'FAILED' | 'PARTIAL' | 'NOT_VERIFIED';
+export type CriterionStatus = 'PASSED' | 'FAILED' | 'PARTIAL' | 'STALE' | 'NOT_VERIFIED';
 export interface WorkbenchCriterion {
     id: string | null;
     type: 'business' | 'technical';
@@ -99,11 +152,66 @@ export interface WorkbenchActivity extends ActivityData {
     runId: string;
 }
 
+export interface ResearchSourceSummary {
+    sourceId: string;
+    taskId: string;
+    runId: string;
+    sourceKind: string;
+    url: string;
+    title: string | null;
+    provider: string | null;
+    fetchedAt: string;
+    httpStatus: number | null;
+    truncated: boolean;
+}
+
+export interface ResearchFindingSummary {
+    findingId: string;
+    sourceId: string;
+    findingKind: string;
+    excerpt: string;
+    rank: number | null;
+}
+
+export interface ResearchIssueSummary {
+    status: string;
+    summary?: string;
+    question?: string;
+    resolution: string | null;
+}
+
+export interface ResearchRequirementCoverageSummary {
+    coverageId: string;
+    requirementKey: string;
+    requirementText: string;
+    status: string;
+    supportingFindingId: string | null;
+    notes: string | null;
+}
+
+export interface ResearchProjection {
+    rootTaskId: string;
+    truncated: boolean;
+    captures: unknown[];
+    sources: ResearchSourceSummary[];
+    findings: ResearchFindingSummary[];
+    conflicts: ResearchIssueSummary[];
+    openQuestions: ResearchIssueSummary[];
+    requirementCoverage: ResearchRequirementCoverageSummary[];
+}
+
 export interface CurrentWorkbenchView {
-    correlationMode: 'EXACT' | 'LEGACY_FALLBACK';
+    /** EXACT is the only bound state; UNBOUND is an integrity signal, never a guessed fallback. */
+    correlationMode: 'EXACT' | 'EMPTY' | 'UNBOUND';
     requestMessageId: string | null;
     resultMessageId: string | null;
+    rootTask: WorkbenchTaskSummary | null;
+    taskTree: WorkbenchTaskSummary[];
     rootRun: RunSummary | null;
+    runTree: RunSummary[];
+    usage: SubtreeUsage;
+    eventHighWater: number;
+    activeTools: WorkbenchActiveTool[];
     request: WorkbenchMessage | null;
     result: WorkbenchMessage | null;
     structuredSummary: StructuredSummary;
@@ -117,6 +225,7 @@ export interface CurrentWorkbenchView {
     pendingActionCount: number;
     pendingActions: WorkbenchPendingAction[];
     activities: WorkbenchActivity[];
+    research: ResearchProjection;
     previousAvailableDelivery: {
         rootRunId: string;
         finishedAt: string | null;

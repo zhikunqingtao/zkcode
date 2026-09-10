@@ -34,11 +34,11 @@ use futures::future::BoxFuture;
 use serde_json::json;
 use similar::TextDiff;
 
-use crate::atomic::{ExpectedOldState, WriteOutcome, sha256_hex, write_checked};
+use crate::atomic::{ExpectedOldState, WriteOutcome, sha256_hex, write_checked_authorized};
 use crate::file_state::{self, session_key};
 use crate::input::{bool_or, failure, required_str, required_str_allow_empty, resolve_path};
 use crate::snapshot::{MAX_SNAPSHOT_BYTES, SnapshotRequest, SnapshotSink};
-use crate::tool::{Tool, ToolContext, ToolOutput};
+use crate::tool::{FileArtifactReceipt, Tool, ToolContext, ToolOutput};
 
 /// 可编辑文件大小上限（旧 `MAX_EDIT_FILE_SIZE = 1024L * 1024 * 1024`）。
 pub const MAX_EDIT_FILE_BYTES: u64 = 1024 * 1024 * 1024;
@@ -154,26 +154,47 @@ impl EditFileTool {
             );
         }
 
-        // Read-before-Edit + 外部改动过期检测（旧 §11.5.9 前置检查）。
         let session = session_key(ctx.session_id());
-        if !old_string.is_empty() {
-            let store = file_state::global();
-            if !store.has_been_read(session, &file_path) {
-                return failure("FILE_READ_REQUIRED", "请先使用 Read 工具读取文件内容");
+        let metadata = match tokio::fs::symlink_metadata(&path).await {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return failure(
+                    "FILE_EDIT_SYMLINK_FORBIDDEN",
+                    format!("refusing to edit symbolic link: {file_path}"),
+                );
             }
-            if store.is_stale(session, &file_path) {
-                return failure("FILE_READ_STATE_STALE", "文件已被外部修改，请重新 Read");
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if old_string.is_empty() {
+                    return create_file(
+                        &path,
+                        &file_path,
+                        new_string,
+                        session,
+                        ctx.authorized_write_path(),
+                    )
+                    .await;
+                }
+                return failure(
+                    "FILE_NOT_FOUND",
+                    format!("File does not exist: {file_path}"),
+                );
             }
+            Err(error) => {
+                return failure("FILE_EDIT_IO_FAILED", format!("{file_path}: {error}"));
+            }
+        };
+        if metadata.is_dir() {
+            return failure("FILE_NOT_FOUND", format!("{file_path} is a directory"));
         }
 
-        if tokio::fs::symlink_metadata(&path).await.is_err() {
-            if old_string.is_empty() {
-                return create_file(&path, &file_path, new_string, session).await;
-            }
-            return failure(
-                "FILE_NOT_FOUND",
-                format!("File does not exist: {file_path}"),
-            );
+        // Every overwrite is authorized by the digest emitted by a complete
+        // physical Read. The digest, not only mtime, survives same-tick races.
+        let store = file_state::global();
+        let Some(expected_hash) = store.read_hash(session, &file_path) else {
+            return failure("FILE_READ_REQUIRED", "请先使用 Read 工具完整读取文件内容");
+        };
+        if store.is_stale(session, &file_path) {
+            return failure("FILE_READ_STATE_STALE", "文件已被外部修改，请重新 Read");
         }
         self.apply_edit(EditRequest {
             path: &path,
@@ -181,6 +202,7 @@ impl EditFileTool {
             old_string,
             new_string,
             replace_all,
+            expected_hash: &expected_hash,
             session,
             ctx: &ctx,
         })
@@ -195,34 +217,14 @@ impl EditFileTool {
             old_string,
             new_string,
             replace_all,
+            expected_hash,
             session,
             ctx,
         } = request;
-        match tokio::fs::metadata(path).await {
-            Ok(metadata) if metadata.len() > MAX_EDIT_FILE_BYTES => {
-                return failure(
-                    "FILE_EDIT_SIZE_LIMIT",
-                    "File too large (>1GB). Cannot edit.",
-                );
-            }
-            Ok(_) => {}
-            Err(error) => {
-                return failure(
-                    "FILE_EDIT_IO_FAILED",
-                    format!("Failed to edit file: {error}"),
-                );
-            }
-        }
-        let file_content = match tokio::fs::read(path).await {
-            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-            Err(error) => {
-                return failure(
-                    "FILE_EDIT_IO_FAILED",
-                    format!("Failed to edit file: {error}"),
-                );
-            }
+        let file_content = match read_edit_target(path, expected_hash).await {
+            Ok(content) => content,
+            Err(output) => return output,
         };
-        let expected_hash = sha256_hex(file_content.as_bytes());
 
         let Some(actual_old) = find_actual_string(&file_content, old_string) else {
             return failure(
@@ -262,10 +264,11 @@ impl EditFileTool {
             );
         }
 
-        let outcome = write_checked(
+        let outcome = write_checked_authorized(
             path,
             &new_content,
-            &ExpectedOldState::sha256(&expected_hash),
+            &ExpectedOldState::sha256(expected_hash),
+            ctx.authorized_write_path(),
         )
         .await;
         if !outcome.success {
@@ -275,6 +278,16 @@ impl EditFileTool {
         let (history_recorded, history_error) = self.capture(ctx, file_path, &file_content).await;
         file_state::global().mark_modified(session, file_path);
         let diff = unified_diff(file_path, &file_content, &new_content);
+        let artifact = FileArtifactReceipt::capture(
+            path,
+            "modified",
+            outcome.new_hash.as_deref(),
+            new_content.len(),
+        )
+        .await;
+        if artifact.is_none() {
+            tracing::error!(path = %file_path, "applied Edit could not produce an artifact receipt");
+        }
         let mut output = ToolOutput::ok(format!("Edited: {file_path}"));
         output.metadata = Some(json!({
             "structuredResult": {
@@ -286,6 +299,7 @@ impl EditFileTool {
                 "historyErrorCode": history_error,
                 "postCommitErrorCode": "",
                 "matchCount": if replace_all { match_count } else { 1 },
+                "artifact": artifact,
             }
         }));
         output
@@ -331,10 +345,56 @@ struct EditRequest<'a> {
     new_string: &'a str,
     /// 是否全量替换。
     replace_all: bool,
+    /// Digest from the caller's last complete physical Read.
+    expected_hash: &'a str,
     /// 台账分桶 key。
     session: &'a str,
     /// 执行上下文。
     ctx: &'a ToolContext,
+}
+
+/// Read an existing edit target and prove it still matches the caller's last
+/// complete physical `Read` before any replacement work is attempted.
+async fn read_edit_target(
+    path: &std::path::Path,
+    expected_hash: &str,
+) -> Result<String, ToolOutput> {
+    match tokio::fs::metadata(path).await {
+        Ok(metadata) if metadata.len() > MAX_EDIT_FILE_BYTES => {
+            return Err(failure(
+                "FILE_EDIT_SIZE_LIMIT",
+                "File too large (>1GB). Cannot edit.",
+            ));
+        }
+        Ok(_) => {}
+        Err(error) => {
+            return Err(failure(
+                "FILE_EDIT_IO_FAILED",
+                format!("Failed to edit file: {error}"),
+            ));
+        }
+    }
+    let file_content = tokio::fs::read(path).await.map_or_else(
+        |error| {
+            Err(failure(
+                "FILE_EDIT_IO_FAILED",
+                format!("Failed to edit file: {error}"),
+            ))
+        },
+        |bytes| Ok(String::from_utf8_lossy(&bytes).into_owned()),
+    )?;
+    let current_hash = sha256_hex(file_content.as_bytes());
+    if current_hash != expected_hash {
+        return Err(failure(
+            "FILE_VERSION_CONFLICT",
+            format!(
+                "文件自上次完整 Read 后已被修改，请重新读取文件后再编辑。\n\
+                 Expected hash: {expected_hash}\n\
+                 Current hash: {current_hash}"
+            ),
+        ));
+    }
+    Ok(file_content)
 }
 
 /// 「文件不存在 + `old_string` 为空」→ 新建文件（旧 `ExpectedOldState.absent()`）。
@@ -343,18 +403,36 @@ async fn create_file(
     file_path: &str,
     new_string: &str,
     session: &str,
+    authorized_target: Option<&std::path::Path>,
 ) -> ToolOutput {
-    let outcome = write_checked(path, new_string, &ExpectedOldState::Absent).await;
+    let outcome = write_checked_authorized(
+        path,
+        new_string,
+        &ExpectedOldState::Absent,
+        authorized_target,
+    )
+    .await;
     if !outcome.success {
         return write_failure(&outcome);
     }
     file_state::global().mark_modified(session, file_path);
+    let artifact = FileArtifactReceipt::capture(
+        path,
+        "created",
+        outcome.new_hash.as_deref(),
+        new_string.len(),
+    )
+    .await;
+    if artifact.is_none() {
+        tracing::error!(path = %file_path, "applied Edit could not produce an artifact receipt");
+    }
     let mut output = ToolOutput::ok(format!("Created: {file_path}"));
     output.metadata = Some(json!({
         "structuredResult": {
             "type": "create",
             "filePath": file_path,
             "sealedHash": outcome.new_hash,
+            "artifact": artifact,
             // 旧 `postCommitErrorCode` 仅在 markModified 抛异常时置
             // `POST_COMMIT_CACHE_UPDATE_FAILED`；Rust 侧台账更新不会失败。
             "postCommitErrorCode": "",
@@ -548,7 +626,7 @@ mod tests {
     fn temp_dir(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("zk-edit-{tag}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
-        dir
+        std::fs::canonicalize(dir).expect("canonical temp dir")
     }
 
     /// 种一个文件并在台账登记「已读」（等价先跑一次 `Read`）。
@@ -561,7 +639,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn replaces_unique_occurrence_and_reports_diff() {
+    async fn replaces_unique_occurrence_and_reports_diff_and_emits_artifact_receipt() {
         let session = "edit-unique";
         let sink = Arc::new(RecordingSink::default());
         let tool = EditFileTool::with_snapshot_sink(Arc::clone(&sink) as Arc<dyn SnapshotSink>);
@@ -569,7 +647,7 @@ mod tests {
         let output = tool
             .execute(
                 json!({ "file_path": path, "old_string": "beta", "new_string": "delta" }),
-                ctx(session),
+                ctx(session).with_authorized_write_path(path.clone()),
             )
             .await;
         assert!(!output.is_error, "{}", output.content);
@@ -577,6 +655,17 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(&path).expect("read"),
             "alpha\ndelta\ngamma\n"
+        );
+        let receipt = output.file_artifact_receipt().expect("artifact receipt");
+        assert_eq!(receipt.operation, "modified");
+        assert_eq!(receipt.file_size, 18);
+        assert_eq!(
+            receipt.sealed_hash,
+            crate::sha256_hex(b"alpha\ndelta\ngamma\n")
+        );
+        assert_eq!(
+            std::path::PathBuf::from(receipt.canonical_path),
+            std::fs::canonicalize(&path).expect("canonical path")
         );
         let structured = output.metadata.expect("metadata")["structuredResult"].clone();
         assert_eq!(structured["type"], "update");
@@ -616,7 +705,7 @@ mod tests {
         assert!(output.is_error);
         assert_eq!(
             output.content,
-            "FILE_READ_REQUIRED: 请先使用 Read 工具读取文件内容"
+            "FILE_READ_REQUIRED: 请先使用 Read 工具完整读取文件内容"
         );
     }
 
@@ -634,13 +723,34 @@ mod tests {
         let output = tool
             .execute(
                 json!({ "file_path": path, "old_string": "body", "new_string": "next" }),
-                ctx(session),
+                ctx(session).with_authorized_write_path(path.clone()),
             )
             .await;
         assert_eq!(
             output.content,
             "FILE_READ_STATE_STALE: 文件已被外部修改，请重新 Read"
         );
+    }
+
+    #[tokio::test]
+    async fn digest_cas_detects_mutation_even_when_mtime_does_not_advance() {
+        let session = "edit-hash-race";
+        let tool = EditFileTool::new();
+        let path = seed("hash-race", "hash.txt", "body", session);
+        std::fs::write(&path, "raced").expect("external mutation");
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .and_then(|file| file.set_modified(std::time::UNIX_EPOCH))
+            .expect("hide mtime advance");
+        let output = tool
+            .execute(
+                json!({ "file_path": path.clone(), "old_string": "raced", "new_string": "next" }),
+                ctx(session).with_authorized_write_path(&path),
+            )
+            .await;
+        assert!(output.content.starts_with("FILE_VERSION_CONFLICT:"));
+        assert_eq!(std::fs::read_to_string(path).expect("read"), "raced");
     }
 
     #[tokio::test]
@@ -671,7 +781,7 @@ mod tests {
         let ambiguous = tool
             .execute(
                 json!({ "file_path": path.clone(), "old_string": "x", "new_string": "y" }),
-                ctx(session),
+                ctx(session).with_authorized_write_path(path.clone()),
             )
             .await;
         assert_eq!(
@@ -688,7 +798,7 @@ mod tests {
                     "new_string": "y",
                     "replace_all": true,
                 }),
-                ctx(session),
+                ctx(session).with_authorized_write_path(&path),
             )
             .await;
         assert!(!replaced.is_error, "{}", replaced.content);
@@ -728,7 +838,7 @@ mod tests {
         let output = tool
             .execute(
                 json!({ "file_path": display.clone(), "old_string": "", "new_string": "fresh" }),
-                ctx(session),
+                ctx(session).with_authorized_write_path(&path),
             )
             .await;
         assert!(!output.is_error, "{}", output.content);
@@ -751,10 +861,10 @@ mod tests {
                 ctx("edit-absent"),
             )
             .await;
-        // 未读过 → 门禁先于存在性检查（与旧实现次序一致）。
+        // Missing targets are distinguished from unread existing targets.
         assert_eq!(
             output.content,
-            "FILE_READ_REQUIRED: 请先使用 Read 工具读取文件内容"
+            format!("FILE_NOT_FOUND: File does not exist: {display}")
         );
 
         file_state::global().mark_read("edit-absent", &display, "", None, None, false);
@@ -764,12 +874,9 @@ mod tests {
                 ctx("edit-absent"),
             )
             .await;
-        // 台账有记录但磁盘取不到 mtime → 判过期（旧 `isStale` 的 `IOException`
-        // 分支逐字对齐 `return true`）。`FILE_NOT_FOUND` 分支仅在「门禁通过后
-        // 文件被并发删除」的竞态下可达，与旧实现的检查次序完全一致。
         assert_eq!(
             output.content,
-            "FILE_READ_STATE_STALE: 文件已被外部修改，请重新 Read"
+            format!("FILE_NOT_FOUND: File does not exist: {display}")
         );
     }
 

@@ -24,7 +24,8 @@ use crate::config::McpServerConfig;
 use crate::error::McpProtocolError;
 use crate::jsonrpc::{JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, RequestId};
 use crate::sse::{
-    PendingResponse, dispatch_incoming, fail_all_pending, lock, read_lock, write_lock,
+    PendingRequestGuard, PendingResponse, dispatch_incoming, fail_all_pending, lock, read_lock,
+    write_lock,
 };
 use crate::transport::{DisconnectCallback, McpTransport, NotificationHandler, timeout_or_default};
 
@@ -149,6 +150,10 @@ impl WebSocketTransport {
 }
 
 impl McpTransport for WebSocketTransport {
+    fn next_request_id(&self) -> RequestId {
+        RequestId::Number(self.request_id.fetch_add(1, Ordering::Relaxed))
+    }
+
     fn connect(&self) -> BoxFuture<'_, Result<(), McpProtocolError>> {
         Box::pin(async move {
             if self.cancel.is_cancelled() {
@@ -187,21 +192,18 @@ impl McpTransport for WebSocketTransport {
 
     fn send_request<'a>(
         &'a self,
+        request_id: RequestId,
         method: &'a str,
         params: Option<Value>,
         timeout: Duration,
     ) -> BoxFuture<'a, Result<Option<Value>, McpProtocolError>> {
         Box::pin(async move {
-            let id = self.request_id.fetch_add(1, Ordering::Relaxed);
-            let key = id.to_string();
+            let key = request_id.as_key();
             let (sender, receiver) = oneshot::channel();
-            lock(&self.shared.pending).insert(key.clone(), sender);
-            let request = JsonRpcRequest::new(RequestId::Number(id), method, params);
-            if let Err(error) = self.send_value(&request) {
-                lock(&self.shared.pending).remove(&key);
-                return Err(error);
-            }
-            let outcome = match tokio::time::timeout(timeout_or_default(timeout), receiver).await {
+            let _pending = PendingRequestGuard::insert(&self.shared.pending, key, sender);
+            let request = JsonRpcRequest::new(request_id, method, params);
+            self.send_value(&request)?;
+            match tokio::time::timeout(timeout_or_default(timeout), receiver).await {
                 Ok(Ok(outcome)) => outcome,
                 Ok(Err(_)) => Err(McpProtocolError::internal(
                     "WebSocket response channel closed",
@@ -209,9 +211,7 @@ impl McpTransport for WebSocketTransport {
                 Err(_) => Err(McpProtocolError::timeout(format!(
                     "Request timeout: {method}"
                 ))),
-            };
-            lock(&self.shared.pending).remove(&key);
-            outcome
+            }
         })
     }
 
@@ -376,11 +376,94 @@ mod tests {
             WebSocketTransport::new(format!("ws://{address}/mcp"), BTreeMap::new()).unwrap();
         transport.connect().await.unwrap();
         let response = transport
-            .send_request("tools/list", None, Duration::from_secs(2))
+            .send_request(
+                transport.next_request_id(),
+                "tools/list",
+                None,
+                Duration::from_secs(2),
+            )
             .await
             .unwrap();
         assert_eq!(response, Some(json!({"ok": true})));
+        assert!(lock(&transport.shared.pending).is_empty());
         transport.close().await;
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelling_request_future_removes_pending_entry() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (received_tx, received_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            let _ = socket.next().await;
+            let _ = received_tx.send(());
+            let _ = release_rx.await;
+        });
+
+        let transport = Arc::new(
+            WebSocketTransport::new(format!("ws://{address}/mcp"), BTreeMap::new()).unwrap(),
+        );
+        transport.connect().await.unwrap();
+        let caller = Arc::clone(&transport);
+        let request = tokio::spawn(async move {
+            caller
+                .send_request(
+                    caller.next_request_id(),
+                    "tools/list",
+                    None,
+                    Duration::from_secs(30),
+                )
+                .await
+        });
+        received_rx.await.unwrap();
+        assert_eq!(lock(&transport.shared.pending).len(), 1);
+        request.abort();
+        let _ = request.await;
+        assert!(lock(&transport.shared.pending).is_empty());
+        let _ = release_tx.send(());
+        transport.close().await;
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn peer_disconnect_fails_and_cleans_inflight_request() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            let _ = socket.next().await;
+            // Dropping the peer without a response exercises the I/O-failure
+            // drain, not the request timeout path.
+        });
+
+        let transport = Arc::new(
+            WebSocketTransport::new(format!("ws://{address}/mcp"), BTreeMap::new()).unwrap(),
+        );
+        let disconnected = Arc::new(AtomicBool::new(false));
+        let seen = Arc::clone(&disconnected);
+        transport.set_disconnect_callback(Arc::new(move || {
+            seen.store(true, Ordering::Release);
+        }));
+        transport.connect().await.unwrap();
+        let error = transport
+            .send_request(
+                transport.next_request_id(),
+                "tools/list",
+                None,
+                Duration::from_secs(5),
+            )
+            .await
+            .expect_err("peer close must fail request");
+
+        assert_eq!(error.code(), crate::error::INTERNAL_ERROR);
+        assert!(lock(&transport.shared.pending).is_empty());
+        assert!(disconnected.load(Ordering::Acquire));
+        server.await.unwrap();
+        transport.close().await;
     }
 }

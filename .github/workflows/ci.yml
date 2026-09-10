@@ -95,6 +95,30 @@ jobs:
       - name: Official npm vulnerability gate
         run: ../scripts/parity/npm-audit.sh
 
+  production-runtime:
+    name: Production runtime wiring
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+      - name: File SQLite + wire_engine + Router + WebSocket gate
+        run: cargo test -p zk-server --test production_runtime_roundtrip --locked
+      - name: Build the real backend process
+        run: cargo build -p zk-server --locked
+      - name: Browser + scripted Provider + real backend gate
+        working-directory: frontend
+        run: npm run test:e2e:production
+
   python:
     name: Python 3.11
     runs-on: macos-15

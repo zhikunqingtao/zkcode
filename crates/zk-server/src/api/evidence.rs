@@ -13,7 +13,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use zk_authz::sensitive::SensitiveDataFilter;
-use zk_db::{EvidenceBundleRecord, EvidenceItemRecord};
+use zk_db::{EvidenceBundleRecord, EvidenceItemRecord, EvidenceOrigin};
 
 use crate::error::ApiError;
 use crate::session_access::{accessible_run, can_access_session, require_session_header};
@@ -73,6 +73,12 @@ pub(crate) async fn create_evidence(
             "Evidence kind must not be blank",
         ));
     }
+    if !matches!(request.verdict.as_str(), "pending" | "inconclusive") {
+        return Err(ApiError::validation_with_code(
+            "MODEL_ASSERTION_CANNOT_VERIFY",
+            "Submitted claims require a machine check or explicit human review",
+        ));
+    }
     let workspace = PathBuf::from(session.working_dir);
     let mut items = Vec::with_capacity(request.items.len());
     for (sort_order, item) in request.items.into_iter().enumerate() {
@@ -98,6 +104,7 @@ pub(crate) async fn create_evidence(
         };
         items.push(EvidenceItemRecord {
             id: uuid::Uuid::new_v4().to_string(),
+            producer_invocation_id: None,
             item_type: item.item_type,
             summary: item.summary.map(|text| SensitiveDataFilter::filter(&text)),
             blob_sha256,
@@ -111,6 +118,8 @@ pub(crate) async fn create_evidence(
         agent_id: request.agent_id,
         kind: request.kind,
         claim: request.claim.map(|text| SensitiveDataFilter::filter(&text)),
+        origin: EvidenceOrigin::ModelAssertion,
+        producer_invocation_id: None,
         verdict: request.verdict,
         created_at: crate::iso::format_rfc3339_micros(crate::iso::now_millis()),
         run_id: request.run_id,
@@ -161,8 +170,14 @@ pub(crate) async fn verify_evidence(
         .await?
         .ok_or_else(|| ApiError::not_found("EVIDENCE_NOT_FOUND", "Evidence bundle not found"))?;
     require_session(&state, &bundle.session_id, &asserted).await?;
-    if request.verdict.trim().is_empty() {
-        return Err(ApiError::validation("Evidence verdict must not be blank"));
+    if !matches!(
+        request.verdict.as_str(),
+        "verified" | "failed" | "inconclusive"
+    ) {
+        return Err(ApiError::validation_with_code(
+            "EVIDENCE_REVIEW_VERDICT_INVALID",
+            "Human review verdict must be verified, failed or inconclusive",
+        ));
     }
     state
         .db

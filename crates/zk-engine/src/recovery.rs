@@ -32,8 +32,9 @@ use std::time::{Duration, Instant};
 
 use zk_llm::{ChatMessage, Role};
 
-use crate::context::compact::{Summarizer, compact_messages, no_summarizer, reactive_compact};
+use crate::context::compact::{Summarizer, compact_messages_scoped, no_summarizer};
 use crate::context::estimate_tokens;
+use crate::llm_summarizer::SummaryExecution;
 
 /// 默认冷却时长（对照旧 `DEFAULT_COOLDOWN = Duration.ofMinutes(30)`）。
 pub const DEFAULT_COOLDOWN: Duration = Duration::from_mins(30);
@@ -182,16 +183,31 @@ impl ContextRecovery {
         error_message: &str,
         state: &mut RecoveryState,
     ) -> RecoveryOutcome {
+        self.recover_scoped(messages, model, context_window, error_message, state, None)
+    }
+
+    /// Recover with explicit durable attribution for physical LLM summaries.
+    #[must_use]
+    pub fn recover_scoped(
+        &self,
+        messages: &[ChatMessage],
+        model: &str,
+        context_window: u32,
+        error_message: &str,
+        state: &mut RecoveryState,
+        execution: Option<&SummaryExecution>,
+    ) -> RecoveryOutcome {
         let before_tokens = estimate_tokens(messages, model);
 
         // Phase 1: CollapseDrain（半窗口目标；防重复守卫）
         if state.last_transition_reason.as_deref() != Some("collapse_drain_retry")
-            && let Ok(result) = compact_messages(
+            && let Ok(result) = compact_messages_scoped(
                 messages,
                 model,
                 context_window / 2,
                 true,
                 self.summarizer.as_ref(),
+                execution,
             )
         {
             state.last_transition_reason = Some("collapse_drain_retry".to_owned());
@@ -206,12 +222,13 @@ impl ContextRecovery {
         // Phase 2: ReactiveCompact（单次 guard）
         if !state.has_attempted_reactive {
             state.has_attempted_reactive = true;
-            if let Ok(result) = reactive_compact(
+            if let Ok(result) = compact_messages_scoped(
                 messages,
                 model,
                 context_window,
-                false,
+                true,
                 self.summarizer.as_ref(),
+                execution,
             ) {
                 state.last_transition_reason = Some("reactive_compact_retry".to_owned());
                 return RecoveryOutcome::Recovered {
@@ -257,14 +274,18 @@ pub fn strip_media_payloads(messages: &[ChatMessage]) -> Option<Vec<ChatMessage>
     for message in messages {
         if message.role == Role::User {
             let (cleaned, changed) = strip_data_uris(&message.content);
-            if changed {
+            let had_images = !message.images.is_empty();
+            if changed || had_images {
                 changed_any = true;
                 let body = if cleaned.trim().is_empty() {
                     MEDIA_PLACEHOLDER.to_owned()
                 } else {
                     cleaned
                 };
-                out.push(ChatMessage::user(body));
+                let mut stripped = message.clone();
+                stripped.content = body;
+                stripped.images.clear();
+                out.push(stripped);
                 continue;
             }
         }
@@ -674,6 +695,23 @@ mod tests {
     #[test]
     fn strip_media_payloads_returns_none_when_no_media() {
         assert!(strip_media_payloads(&[user("just text"), assistant("reply")]).is_none());
+    }
+
+    #[test]
+    fn strip_media_payloads_removes_structured_images_not_only_data_uris() {
+        let msgs = vec![ChatMessage::user_with_images(
+            "inspect this",
+            vec![zk_llm::ImageSource {
+                media_type: "image/png".into(),
+                data: Some("QUJD".into()),
+                url: None,
+            }],
+        )];
+
+        let stripped = strip_media_payloads(&msgs).expect("structured image must be removed");
+
+        assert_eq!(stripped[0].content, "inspect this");
+        assert!(stripped[0].images.is_empty());
     }
 
     #[test]

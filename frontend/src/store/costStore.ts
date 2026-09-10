@@ -13,8 +13,15 @@ export interface CostStoreState {
     sessionCost: number;
     totalCost: number;
     usage: Usage;
+    /** False when at least one physical model call lacks authoritative usage. */
+    usageComplete: boolean;
 
-    updateCost: (data: { sessionCost: number; totalCost: number; usage: Usage }) => void;
+    updateCost: (data: {
+        sessionCost: number;
+        totalCost: number;
+        usage: Usage;
+        usageComplete?: boolean;
+    }) => void;
     resetSessionCost: () => void;
 }
 
@@ -23,15 +30,18 @@ export const useCostStore = create<CostStoreState>()(
         sessionCost: 0,
         totalCost: 0,
         usage: { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 },
+        usageComplete: true,
 
         updateCost: (data) => set(d => {
             d.sessionCost = data.sessionCost;
             d.totalCost = data.totalCost;
             d.usage = data.usage;
+            d.usageComplete = data.usageComplete ?? true;
         }),
         resetSessionCost: () => set(d => {
             d.sessionCost = 0;
             d.usage = { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 };
+            d.usageComplete = true;
         }),
     })))
 );

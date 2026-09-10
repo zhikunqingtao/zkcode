@@ -40,6 +40,13 @@ provider 会被注册。通用变量规则如下：
 | `LLM_PROVIDER_<NAME>_DEFAULT_MODEL` | 可选的 provider 默认模型覆盖 |
 | `ZK_DEFAULT_MODEL` | 新建 Session 的默认模型 |
 | `ZK_MODEL_FALLBACK_CHAIN` | 冒号分隔的模型降级链 |
+| `ZK_ROOT_TASK_TOKEN_BUDGET` | 可选的根任务 token 硬上限；默认留空、不限制 |
+| `ZK_ROOT_TASK_COST_BUDGET_USD` | 可选的根任务费用硬上限；默认留空、不限制；配置时精确到 nano-dollar 入账 |
+| `ZK_ROOT_TASK_DEADLINE_SECONDS` | 根任务 wall-clock 硬截止；默认 1800 秒 |
+
+默认运行不会因为 token 或费用达到固定阈值而终止任务，但仍会持久记录每次模型调用的
+真实 usage 和费用。Deadline、最大轮数、取消和 usage 完整性检查继续生效。只有显式配置
+上述两个可选变量或在 API 请求中传入 `maxBudgetUsd` 时，才启用相应硬上限。
 
 `<NAME>` 支持 `DASHSCOPE`、`DASHSCOPE_TOKEN_PLAN`、`DEEPSEEK`、`MOONSHOT`、
 `ZHIPU`、`MINIMAX`、`ZENMUX`、`ANTHROPIC` 和 `OPENAI`。服务内置这些
@@ -99,13 +106,21 @@ TTS 固定使用 `qwen3-tts-flash` 的 `Cherry` 音色；麦克风录音需要 H
 
 | 变量 | 默认值 | 说明 |
 |---|---|---|
-| `ZK_AGENT_ENABLED` | `true` | 启用 Agent 生产装配 |
-| `ZK_AGENT_WRITE_ENABLED` | `true` | 允许 Agent 在 Admission 后使用写工具 |
-| `ZK_SWARM_ENABLED` | `true` | 启用显式 Swarm API |
+| `ZK_AGENT_ENABLED` | `true` | 启用 Agent 生产装配；子任务默认 30 分钟，超时收尾最多 30 秒 |
+| `ZHIKUN_COORDINATOR_MODE` | `0` | 进程级顶层 Coordinator 模式；仅接受 `0` / `1`，修改后必须重启 |
+| `ZK_AGENT_WRITE_ENABLED` | `false` | 子 Agent 默认只读；共享写与写工具在独立门禁通过后才可显式开启 |
+| `ZK_SHARED_WORKSPACE_ENABLED` | `false` | sharedWorkspace 独立门禁；还必须同时启用 Agent、子 Agent 写工具并装配进程级 workspace lease |
+| `ZK_AUTO_RESUME_SAFE_TASKS` | `false` | 安全自动恢复请求开关；当前没有完整父链恢复入口，开启时进程会先事实中断旧 Run，再明确启动失败 |
+| `ZK_CRON_ENABLED` | `false` | 启用 SQLite 持久调度；还需统一 Agent TaskRuntime 真实装配 |
+| `ZK_SWARM_ENABLED` | `false` | 仅表达 Swarm 部署意图；当前执行适配器未认证，设为 `true` 会使 API 返回 `FEATURE_NOT_READY`、readiness 返回 `NOT_READY` |
 | `ZK_WORKTREE_ENABLED` | `false` | Worktree 尚未完成真实 Git E2E，必须保持关闭 |
 | `MCP_REGISTRY_PATH` | `configuration/mcp/mcp_capability_registry.json` | MCP 身份与能力授权注册表 |
 
-关闭生产能力门会返回稳定的不可用结果，而不是装配宽松或空实现。
+关闭生产能力门会返回稳定的不可用结果，而不是装配宽松或空实现。健康接口分别
+报告每项能力的 `configured` 与 `executable`；sharedWorkspace 只有四项条件全部
+满足才可执行。Swarm 与自动恢复的 `configured` 忠实反映环境开关，当前两者的
+`executable` 始终为 `false`；误设 Swarm 时 readiness 会 fail-closed，误设自动恢复
+时服务会在完成 restart reconciliation 后明确启动失败，且不会创建恢复 attempt。
 
 ## 功能开关
 
@@ -114,9 +129,12 @@ TTS 固定使用 `qwen3-tts-flash` 的 `Cherry` 音色；麦克风录音需要 H
 `GIT_ENHANCED_TOOL` 和 `RUNTIME_VERIFICATION`。`AGENT_TRIGGERS`、
 `RESOURCE_MONITOR` 与 `SELF_CORRECTION_LOOP` 默认关闭。
 
-`ZHIKUN_COORDINATOR_MODE=1` 会进一步开启自动顶层 Coordinator 行为；它默认是
-`0`，不影响显式 Swarm API。除非正在开发相应功能，不建议修改未列在
-[`.env.example`](../.env.example) 中的内部开关。
+`ZHIKUN_COORDINATOR_MODE` 是启动期读取并冻结的进程级开关，默认 `0`，只接受精确的
+`0` 或 `1`；空串、`true`、带空格的值等均会使启动失败。有效模式还要求
+`COORDINATOR_MODE` feature flag 与 `ZK_AGENT_ENABLED` 同时开启；若有效模式下关闭
+Agent runtime，服务会 fail-fast。修改任一相关配置后必须重启，不会按消息关键词自动
+开启，也不会因恢复旧 Session 改写进程模式。它不能绕过显式 Swarm API 的硬性门禁。
+除非正在开发相应功能，不建议修改未列在 [`.env.example`](../.env.example) 中的内部开关。
 
 ## 管理员端点
 

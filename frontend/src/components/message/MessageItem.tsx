@@ -36,12 +36,18 @@ const MessageItem: React.FC<MessageItemProps> = ({
     thinkingContent,
     activeToolCalls,
 }) => {
+    const isInternalToolResult = message.type === 'user' && !message.content.some(
+        block => block.type === 'text' || block.type === 'image',
+    );
+
     // Show timestamp if gap > 5 min
     const showTimestamp = useMemo(() => {
         if (!prevMessage) return true; // First message always shows
         const gap = message.timestamp - prevMessage.timestamp;
         return gap > TIME_GAP_THRESHOLD;
     }, [message.timestamp, prevMessage]);
+
+    if (isInternalToolResult) return null;
 
     return (
         <div className="message-item">

@@ -20,5 +20,6 @@ done
 (cd "$ROOT_DIR/frontend" && npm run lint)
 (cd "$ROOT_DIR/frontend" && npm run test:run)
 (cd "$ROOT_DIR/frontend" && npm run build)
+(cd "$ROOT_DIR/frontend" && npm run test:e2e:production)
 "$ROOT_DIR/scripts/parity/npm-audit.sh"
 (cd "$ROOT_DIR/python-service" && .venv/bin/python -m pytest --cov=src --cov-fail-under=70)

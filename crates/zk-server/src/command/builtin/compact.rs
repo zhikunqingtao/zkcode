@@ -31,11 +31,9 @@
 use std::fmt::Write as _;
 
 use futures::future::BoxFuture;
-use zk_engine::LlmSummarizer;
-use zk_engine::context::compact::CompactSkip;
+use zk_engine::context::compact::{CompactSkip, NoopSummarizer};
 use zk_engine::context::{compact_messages, context_window_for, estimate_tokens};
 use zk_engine::engine::history_to_chat_messages;
-use zk_llm::ChatProvider;
 
 use crate::command::context::CommandContext;
 use crate::command::traits::{Command, CommandResult, CommandType};
@@ -96,12 +94,11 @@ impl Command for CompactCommand {
             // `before_tokens` 同一算法同一入参，故两值恒等；此处保留旧的两次
             // 计算结构，metadata 的 `beforeTokens` 取本值）。
             let before_tokens = estimate_tokens(&messages, model);
-            let lightweight_model = std::env::var("ZK_LIGHTWEIGHT_MODEL")
-                .ok()
-                .filter(|model| !model.trim().is_empty())
-                .unwrap_or_else(|| ctx.state.providers.load().default_model().to_owned());
-            let provider: std::sync::Arc<dyn ChatProvider> = ctx.state.providers.clone();
-            let summarizer = LlmSummarizer::new(provider, lightweight_model);
+            // Slash commands do not own a durable Task/Run. Never emit an
+            // unattributed physical model call: use the deterministic level-2/3
+            // compaction fallback. Automatic Run compaction remains LLM-backed
+            // and fully accounted through SummaryExecution.
+            let summarizer = NoopSummarizer;
             let result =
                 match compact_messages(&messages, model, context_window, false, &summarizer) {
                     Ok(result) => result,

@@ -8,11 +8,17 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::{SecondsFormat, Utc};
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
 use url::Url;
 
 use crate::input::{failure, optional_usize, required_str};
+use crate::research::{
+    MAX_RESEARCH_EXCERPT_BYTES, MAX_RESEARCH_TITLE_BYTES, MAX_RESEARCH_URL_BYTES,
+    RESEARCH_RECEIPT_SCHEMA_VERSION, ResearchReceipt, ResearchReceiptEntry, ResearchReceiptKind,
+    truncate_utf8_bytes,
+};
 use crate::tool::{Tool, ToolContext, ToolOutput};
 
 /// Maximum bytes accepted from a remote response.
@@ -104,6 +110,17 @@ impl WebFetchTool {
     pub fn new(port: Arc<dyn WebFetchPort>) -> Self {
         Self { port }
     }
+
+    async fn run(&self, input: &Value) -> ToolOutput {
+        let request = match request_from_input(input) {
+            Ok(request) => request,
+            Err(output) => return output,
+        };
+        match self.port.fetch(request).await {
+            Ok(response) => response_output(&response),
+            Err(error) => failure(error.code, error.message),
+        }
+    }
 }
 
 impl Tool for WebFetchTool {
@@ -145,81 +162,126 @@ impl Tool for WebFetchTool {
     }
 
     fn execute(&self, input: Value, _ctx: ToolContext) -> BoxFuture<'_, ToolOutput> {
-        Box::pin(async move {
-            let Ok(raw_url) = required_str(&input, "url") else {
-                return failure("WEB_FETCH_URL_INVALID", "url is required");
-            };
-            let parsed = match Url::parse(raw_url) {
-                Ok(url) if matches!(url.scheme(), "http" | "https") && url.host().is_some() => url,
-                _ => {
-                    return failure(
-                        "WEB_FETCH_URL_INVALID",
-                        "only absolute http:// and https:// URLs are allowed",
-                    );
-                }
-            };
-            if !parsed.username().is_empty() || parsed.password().is_some() {
-                return failure(
-                    "WEB_FETCH_URL_INVALID",
-                    "URLs containing embedded credentials are not allowed",
-                );
+        Box::pin(async move { self.run(&input).await })
+    }
+}
+
+fn request_from_input(input: &Value) -> Result<WebFetchRequest, ToolOutput> {
+    let Ok(raw_url) = required_str(input, "url") else {
+        return Err(failure("WEB_FETCH_URL_INVALID", "url is required"));
+    };
+    let parsed = match Url::parse(raw_url) {
+        Ok(url) if matches!(url.scheme(), "http" | "https") && url.host().is_some() => url,
+        _ => {
+            return Err(failure(
+                "WEB_FETCH_URL_INVALID",
+                "only absolute http:// and https:// URLs are allowed",
+            ));
+        }
+    };
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(failure(
+            "WEB_FETCH_URL_INVALID",
+            "URLs containing embedded credentials are not allowed",
+        ));
+    }
+    let max_bytes = optional_usize(input, "max_bytes").unwrap_or(MAX_FETCH_BYTES);
+    if max_bytes == 0 || max_bytes > MAX_FETCH_BYTES {
+        return Err(failure(
+            "WEB_FETCH_LIMIT_INVALID",
+            format!("max_bytes must be between 1 and {MAX_FETCH_BYTES}"),
+        ));
+    }
+    Ok(WebFetchRequest {
+        url: parsed.to_string(),
+        max_bytes,
+        max_redirects: MAX_REDIRECTS,
+        // 对齐旧 ZhikunCode OkHttp connect/read 各 30s；total 300s 覆盖
+        // 最多 20 跳重定向下单跳 connect+read 的最坏情形，并与工具级
+        // 5 分钟执行上限一致。
+        connect_timeout: Duration::from_secs(30),
+        total_timeout: Duration::from_mins(5),
+    })
+}
+
+fn response_output(response: &WebFetchResponse) -> ToolOutput {
+    if response.final_url.is_empty() || response.final_url.len() > MAX_RESEARCH_URL_BYTES {
+        return failure(
+            "WEB_FETCH_FINAL_URL_INVALID",
+            "the final response URL exceeds the durable research limit",
+        );
+    }
+    let media_type = response
+        .content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    if !allowed_content_type(&media_type) {
+        return failure(
+            "WEB_FETCH_CONTENT_TYPE_BLOCKED",
+            format!("unsupported response content type: {media_type}"),
+        );
+    }
+    let raw = String::from_utf8_lossy(&response.body);
+    let is_html = matches!(media_type.as_str(), "text/html" | "application/xhtml+xml");
+    let title = is_html.then(|| html_title(&raw)).flatten();
+    let extracted = if is_html {
+        html_to_text(&raw)
+    } else {
+        raw.into_owned()
+    };
+    let (content, render_truncated) = truncate_chars(&extracted, MAX_RENDERED_CHARS);
+    if is_html
+        && (content.trim().is_empty()
+            || title
+                .as_deref()
+                .is_some_and(|title| content.trim() == title.trim()))
+    {
+        return failure(
+            "WEB_FETCH_NO_READABLE_CONTENT",
+            "The static HTML contains no readable body beyond its title. This tool does not execute JavaScript. Use another accessible source or report the limitation; do not repeatedly guess URLs, proxy paths or signatures.",
+        );
+    }
+    let truncated = response.truncated || render_truncated;
+    let excerpt = truncate_utf8_bytes(content.trim(), MAX_RESEARCH_EXCERPT_BYTES);
+    let receipt = ResearchReceipt {
+        schema_version: RESEARCH_RECEIPT_SCHEMA_VERSION,
+        kind: ResearchReceiptKind::WebFetch,
+        query: None,
+        fetched_at: Utc::now().to_rfc3339_opts(SecondsFormat::Micros, true),
+        entries: vec![ResearchReceiptEntry {
+            url: response.final_url.clone(),
+            title,
+            provider: None,
+            excerpt: (!excerpt.is_empty()).then_some(excerpt),
+            rank: None,
+            http_status: Some(response.status),
+            content_type: Some(media_type.clone()),
+            truncated,
+        }],
+    };
+    ToolOutput {
+        content,
+        // 对齐旧 ZhikunCode：非 2xx 不算工具错误，错误页正文照常返回，
+        // 状态码仅透出到 metadata 供模型自我纠正后重试。
+        is_error: false,
+        metadata: Some(json!({
+            "finalUrl": response.final_url,
+            "status": response.status,
+            "contentType": media_type,
+            "truncated": truncated,
+            "bytes": response.body.len(),
+            "structuredResult": {
+                "finalUrl": response.final_url,
+                "status": response.status,
+                "contentType": media_type,
+                "truncated": truncated,
+                "bytes": response.body.len(),
+                "research": receipt,
             }
-            let max_bytes = optional_usize(&input, "max_bytes").unwrap_or(MAX_FETCH_BYTES);
-            if max_bytes == 0 || max_bytes > MAX_FETCH_BYTES {
-                return failure(
-                    "WEB_FETCH_LIMIT_INVALID",
-                    format!("max_bytes must be between 1 and {MAX_FETCH_BYTES}"),
-                );
-            }
-            let request = WebFetchRequest {
-                url: parsed.to_string(),
-                max_bytes,
-                max_redirects: MAX_REDIRECTS,
-                // 对齐旧 ZhikunCode OkHttp connect/read 各 30s；total 300s 覆盖
-                // 最多 20 跳重定向下单跳 connect+read 的最坏情形，并与工具级
-                // 5 分钟执行上限一致。
-                connect_timeout: Duration::from_secs(30),
-                total_timeout: Duration::from_mins(5),
-            };
-            let response = match self.port.fetch(request).await {
-                Ok(response) => response,
-                Err(error) => return failure(error.code, error.message),
-            };
-            let media_type = response
-                .content_type
-                .split(';')
-                .next()
-                .unwrap_or_default()
-                .trim()
-                .to_ascii_lowercase();
-            if !allowed_content_type(&media_type) {
-                return failure(
-                    "WEB_FETCH_CONTENT_TYPE_BLOCKED",
-                    format!("unsupported response content type: {media_type}"),
-                );
-            }
-            let raw = String::from_utf8_lossy(&response.body);
-            let extracted = if media_type == "text/html" || media_type == "application/xhtml+xml" {
-                html_to_text(&raw)
-            } else {
-                raw.into_owned()
-            };
-            let (content, render_truncated) = truncate_chars(&extracted, MAX_RENDERED_CHARS);
-            let truncated = response.truncated || render_truncated;
-            ToolOutput {
-                content,
-                // 对齐旧 ZhikunCode：非 2xx 不算工具错误，错误页正文照常返回，
-                // 状态码仅透出到 metadata 供模型自我纠正后重试。
-                is_error: false,
-                metadata: Some(json!({
-                    "finalUrl": response.final_url,
-                    "status": response.status,
-                    "contentType": media_type,
-                    "truncated": truncated,
-                    "bytes": response.body.len(),
-                })),
-            }
-        })
+        })),
     }
 }
 
@@ -307,6 +369,23 @@ fn html_to_text(input: &str) -> String {
         .replace("&quot;", "\"")
         .replace("&#39;", "'");
     decoded.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn html_title(input: &str) -> Option<String> {
+    // Titles appear in the document head. Bound the scan so a hostile page
+    // cannot make title discovery allocate another copy of a 10 MiB body.
+    let mut boundary = input.len().min(65_536);
+    while boundary > 0 && !input.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    let prefix = &input[..boundary];
+    let lower = prefix.to_ascii_lowercase();
+    let opening = lower.find("<title")?;
+    let content_start = lower[opening..].find('>')? + opening + 1;
+    let content_end = lower[content_start..].find("</title>")? + content_start;
+    let title = html_to_text(&prefix[content_start..content_end]);
+    let title = truncate_utf8_bytes(title.trim(), MAX_RESEARCH_TITLE_BYTES);
+    (!title.is_empty()).then_some(title)
 }
 
 fn remove_element(input: &str, tag: &str) -> String {
@@ -408,10 +487,34 @@ mod tests {
         assert!(!output.is_error, "{}", output.content);
         assert_eq!(output.content, "Hello world & friends");
         assert!(!output.content.contains("steal"));
+        let receipt = output.research_receipt().expect("research receipt");
+        assert_eq!(receipt.kind, ResearchReceiptKind::WebFetch);
+        assert_eq!(receipt.entries[0].url, "https://example.com/final");
+        assert_eq!(
+            receipt.entries[0].excerpt.as_deref(),
+            Some("Hello world & friends")
+        );
         let metadata = output.metadata.expect("metadata");
         assert_eq!(metadata["finalUrl"], "https://example.com/final");
         assert_eq!(metadata["status"], 200);
         assert_eq!(metadata["truncated"], false);
+    }
+
+    #[tokio::test]
+    async fn title_only_html_is_not_a_successful_research_fetch() {
+        let tool = WebFetchTool::new(Arc::new(FakePort(Ok(WebFetchResponse {
+            final_url: "https://example.com/pricing".to_owned(),
+            status: 200,
+            content_type: "text/html".to_owned(),
+            body: b"<title>Pricing</title><div id='app'></div><script>render()</script>".to_vec(),
+            truncated: false,
+        }))));
+        let output = tool
+            .execute(json!({"url":"https://example.com/pricing"}), context())
+            .await;
+        assert!(output.is_error);
+        assert!(output.content.starts_with("WEB_FETCH_NO_READABLE_CONTENT:"));
+        assert!(output.research_receipt().is_none());
     }
 
     #[tokio::test]

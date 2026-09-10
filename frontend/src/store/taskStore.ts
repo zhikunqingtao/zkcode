@@ -16,6 +16,7 @@ export interface TaskStoreState {
     agentNameRegistry: Map<string, string>;
 
     addTask: (task: TaskState) => void;
+    replaceTasks: (tasks: TaskState[]) => void;
     updateTask: (taskId: string, update: Partial<TaskState>) => void;
     removeTask: (taskId: string) => void;
     clearTasks: () => void;
@@ -35,6 +36,16 @@ export const useTaskStore = create<TaskStoreState>()(
         agentNameRegistry: new Map(),
 
         addTask: (task) => set(d => { d.tasks.set(task.taskId, task); }),
+        replaceTasks: (tasks) => set(d => {
+            d.tasks.clear();
+            d.agentNameRegistry.clear();
+            d.foregroundedTaskId = null;
+            d.viewingAgentTaskId = null;
+            tasks.forEach(task => {
+                d.tasks.set(task.taskId, task);
+                if (task.agentName) d.agentNameRegistry.set(task.taskId, task.agentName);
+            });
+        }),
         updateTask: (id, upd) => set(d => {
             const t = d.tasks.get(id);
             if (t) Object.assign(t, upd);
@@ -42,6 +53,7 @@ export const useTaskStore = create<TaskStoreState>()(
         removeTask: (id) => set(d => { d.tasks.delete(id); }),
         clearTasks: () => set(d => {
             d.tasks.clear();
+            d.agentNameRegistry.clear();
             d.foregroundedTaskId = null;
             d.viewingAgentTaskId = null;
         }),

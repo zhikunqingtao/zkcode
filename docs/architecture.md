@@ -25,3 +25,6 @@ Worktree remains disabled until its real Git integration gate is complete.
 
 The public contracts are recorded under `docs/parity/` and verified by
 `scripts/parity/check-contracts.sh`.
+
+The greenfield durable task model, V4 tool/WS contract, transaction boundaries,
+and release gates are frozen in [`task-runtime-v4.md`](task-runtime-v4.md).

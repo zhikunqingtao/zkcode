@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use futures::future::BoxFuture;
 use serde_json::json;
-use zk_tools::{Tool, ToolContext, ToolOutput};
+use zk_tools::{ChildToolAccess, Tool, ToolContext, ToolOutput};
 
 use super::{CODE_INTEL, failure, opt_str};
 use crate::python::client::{Correlation, PythonClient};
@@ -65,6 +65,10 @@ impl Tool for CodeIntelTool {
 
     fn description(&self) -> &'static str {
         "查询代码符号结构、代码地图和依赖关系（基于 tree-sitter 的多语言静态分析）"
+    }
+
+    fn child_access(&self) -> ChildToolAccess {
+        ChildToolAccess::ReadOnly
     }
 
     fn parameters(&self) -> serde_json::Value {

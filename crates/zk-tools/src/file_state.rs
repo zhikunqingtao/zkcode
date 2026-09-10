@@ -21,6 +21,8 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::atomic::sha256_hex;
+
 /// LRU 条目上限（旧 `MAX_ENTRIES = 100` 逐字对照）。
 pub const MAX_FILE_STATE_ENTRIES: usize = 100;
 
@@ -33,6 +35,9 @@ pub struct FileState {
     /// 读到的正文（不含 `Read` 工具的行号前缀，对照旧
     /// `String.join("\n", selectedLines)`）。
     pub content: String,
+    /// SHA-256 of the complete on-disk bytes observed by `Read`. `None` means
+    /// the recorded view cannot authorize an overwrite.
+    pub content_sha256: Option<String>,
     /// 记录时刻（Unix 毫秒，对照旧 `System.currentTimeMillis()`）。
     pub timestamp_ms: u64,
     /// 起始行（`None` = 完整读取，对照旧 `offset > 0 ? offset : null`）。
@@ -41,6 +46,19 @@ pub struct FileState {
     pub limit: Option<usize>,
     /// 是否为截断视图（旧 `isPartialView`；`markModified` 强制置真以要求重读）。
     pub is_partial_view: bool,
+}
+
+/// Metadata attached to one physical `Read` observation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReadObservation {
+    /// First line requested, when the read was ranged.
+    pub offset: Option<usize>,
+    /// Maximum requested line count, when bounded.
+    pub limit: Option<usize>,
+    /// Whether the captured content is only a partial file view.
+    pub is_partial: bool,
+    /// Digest of the complete physical file, available only for full reads.
+    pub content_sha256: Option<String>,
 }
 
 /// 缓存内部条目——状态 + 访问序（LRU 依据，等价旧 `LinkedHashMap` accessOrder）。
@@ -81,11 +99,34 @@ impl FileStateCache {
         limit: Option<usize>,
         is_partial: bool,
     ) {
+        self.mark_read_with_hash(
+            path,
+            content,
+            offset,
+            limit,
+            is_partial,
+            (!is_partial).then(|| sha256_hex(content.as_bytes())),
+        );
+    }
+
+    /// Record a read together with the digest of the complete physical file.
+    /// Partial/ranged reads deliberately discard the digest so they cannot
+    /// authorize a destructive full-file overwrite.
+    pub fn mark_read_with_hash(
+        &mut self,
+        path: &str,
+        content: &str,
+        offset: Option<usize>,
+        limit: Option<usize>,
+        is_partial: bool,
+        content_sha256: Option<String>,
+    ) {
         let key = normalize_key(path);
         let access_seq = self.next_seq();
         let entry = Entry {
             state: FileState {
                 content: content.to_owned(),
+                content_sha256: if is_partial { None } else { content_sha256 },
                 timestamp_ms: now_ms(),
                 offset,
                 limit,
@@ -159,6 +200,15 @@ impl FileStateCache {
             .map(|entry| entry.state.clone())
     }
 
+    /// Complete-file digest eligible for overwrite CAS.
+    #[must_use]
+    pub fn read_hash(&self, path: &str) -> Option<String> {
+        self.entries
+            .get(&normalize_key(path))
+            .and_then(|entry| (!entry.state.is_partial_view).then_some(entry))
+            .and_then(|entry| entry.state.content_sha256.clone())
+    }
+
     /// 发一个新的访问序号。
     fn next_seq(&mut self) -> u64 {
         self.access_clock = self.access_clock.wrapping_add(1);
@@ -220,6 +270,25 @@ impl FileStateStore {
         });
     }
 
+    /// Record a complete-file digest supplied by the physical Read tool.
+    pub fn mark_read_with_hash(
+        &self,
+        session_id: &str,
+        path: &str,
+        content: &str,
+        observation: ReadObservation,
+    ) {
+        let ReadObservation {
+            offset,
+            limit,
+            is_partial,
+            content_sha256,
+        } = observation;
+        self.with_session(session_id, |cache| {
+            cache.mark_read_with_hash(path, content, offset, limit, is_partial, content_sha256);
+        });
+    }
+
     /// 标记文件已被本系统改写（会话桶按需创建）。
     pub fn mark_modified(&self, session_id: &str, path: &str) {
         self.with_session(session_id, |cache| cache.mark_modified(path));
@@ -242,6 +311,14 @@ impl FileStateStore {
         sessions
             .get_mut(session_id)
             .is_none_or(|cache| cache.is_stale(path))
+    }
+
+    /// Return the digest from the last complete Read in this session.
+    #[must_use]
+    pub fn read_hash(&self, session_id: &str, path: &str) -> Option<String> {
+        self.lock()
+            .get(session_id)
+            .and_then(|cache| cache.read_hash(path))
     }
 
     /// 已建桶的会话数（测试用）。

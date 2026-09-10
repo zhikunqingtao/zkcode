@@ -57,8 +57,8 @@ use crate::config::McpServerConfig;
 use crate::error::{self, JsonRpcError, McpProtocolError};
 use crate::jsonrpc::{JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, RequestId};
 use crate::protocol::{
-    HTTP_CLIENT_NAME, METHOD_INITIALIZE, METHOD_INITIALIZED, PROTOCOL_VERSION_STREAMABLE_HTTP,
-    client_capabilities, client_info,
+    HTTP_CLIENT_NAME, METHOD_INITIALIZE, METHOD_INITIALIZED, METHOD_PING,
+    PROTOCOL_VERSION_STREAMABLE_HTTP, client_capabilities, client_info,
 };
 use crate::sse::{SseDecoder, lock, read_lock, value_key, write_lock};
 use crate::transport::{
@@ -179,14 +179,15 @@ impl StreamableHttpTransport {
     /// POST JSON-RPC 请求并解析响应（对照 Java `sendRequestInternal`）。
     async fn send_request_internal(
         &self,
+        request_id: RequestId,
         method: &str,
         params: Option<Value>,
         timeout: Duration,
     ) -> Result<Option<Value>, McpProtocolError> {
-        let id = self.request_id.fetch_add(1, Ordering::Relaxed);
-        let request = JsonRpcRequest::new(RequestId::Number(id), method, params);
+        let expected_id = request_id.as_key();
+        let request = JsonRpcRequest::new(request_id, method, params);
         let builder = self.post(&request)?;
-        match tokio::time::timeout(timeout, self.exchange(builder, &id.to_string())).await {
+        match tokio::time::timeout(timeout, self.exchange(builder, &expected_id)).await {
             Ok(outcome) => outcome,
             Err(_) => Err(McpProtocolError::timeout(format!(
                 "Request timeout: {method}"
@@ -223,7 +224,7 @@ impl StreamableHttpTransport {
         if content_type.contains("text/event-stream") {
             self.parse_sse_response(&body, expected_id)
         } else {
-            parse_json_response(&body)
+            parse_json_response(&body, expected_id)
         }
     }
 
@@ -287,10 +288,19 @@ fn header_value(headers: &reqwest::header::HeaderMap, name: &str) -> Option<Stri
 }
 
 /// 解析纯 JSON 响应（对照 Java `parseJsonResponse`）。
-fn parse_json_response(body: &str) -> Result<Option<Value>, McpProtocolError> {
+fn parse_json_response(body: &str, expected_id: &str) -> Result<Option<Value>, McpProtocolError> {
     let node: Value = serde_json::from_str(body).map_err(|error| {
         McpProtocolError::wrapped(format!("Failed to parse JSON response: {error}"))
     })?;
+    let matches_id = node
+        .get("id")
+        .filter(|id| !id.is_null())
+        .is_some_and(|id| value_key(id) == expected_id);
+    if !matches_id {
+        return Err(McpProtocolError::internal(format!(
+            "Mismatched JSON-RPC response id: expected {expected_id}"
+        )));
+    }
     extract_result(&node)
 }
 
@@ -374,6 +384,10 @@ async fn notification_stream(
 }
 
 impl McpTransport for StreamableHttpTransport {
+    fn next_request_id(&self) -> RequestId {
+        RequestId::Number(self.request_id.fetch_add(1, Ordering::Relaxed))
+    }
+
     fn connect(&self) -> BoxFuture<'_, Result<(), McpProtocolError>> {
         Box::pin(async move {
             let params = json!({
@@ -382,7 +396,12 @@ impl McpTransport for StreamableHttpTransport {
                 "clientInfo": client_info(HTTP_CLIENT_NAME),
             });
             match self
-                .send_request_internal(METHOD_INITIALIZE, Some(params), DEFAULT_REQUEST_TIMEOUT)
+                .send_request_internal(
+                    self.next_request_id(),
+                    METHOD_INITIALIZE,
+                    Some(params),
+                    DEFAULT_REQUEST_TIMEOUT,
+                )
                 .await
             {
                 Ok(_) => {}
@@ -408,6 +427,7 @@ impl McpTransport for StreamableHttpTransport {
 
     fn send_request<'a>(
         &'a self,
+        request_id: RequestId,
         method: &'a str,
         params: Option<Value>,
         timeout: Duration,
@@ -418,7 +438,7 @@ impl McpTransport for StreamableHttpTransport {
                     "HTTP transport not connected",
                 ));
             }
-            self.send_request_internal(method, params, timeout_or_default(timeout))
+            self.send_request_internal(request_id, method, params, timeout_or_default(timeout))
                 .await
         })
     }
@@ -476,6 +496,22 @@ impl McpTransport for StreamableHttpTransport {
                     tracing::warn!(request_id = %id, %error, "Failed to send MCP HTTP response");
                 }
             }
+        })
+    }
+
+    fn send_health_ping(&self) -> BoxFuture<'_, bool> {
+        Box::pin(async move {
+            if !self.connected.load(Ordering::Acquire) {
+                return false;
+            }
+            let notification = JsonRpcNotification::new(METHOD_PING, None);
+            let Ok(builder) = self.post(&notification) else {
+                return false;
+            };
+            matches!(
+                tokio::time::timeout(DEFAULT_REQUEST_TIMEOUT, builder.send()).await,
+                Ok(Ok(response)) if response.status().is_success()
+            )
         })
     }
 
@@ -685,6 +721,7 @@ mod tests {
     fn json_error_payload_becomes_protocol_error() {
         let error = parse_json_response(
             r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"Method not found: x"}}"#,
+            "1",
         )
         .expect_err("must fail");
         assert_eq!(error.code(), error::METHOD_NOT_FOUND);
@@ -692,8 +729,19 @@ mod tests {
     }
 
     #[test]
+    fn json_response_must_echo_the_real_request_id() {
+        let error = parse_json_response(r#"{"jsonrpc":"2.0","id":99,"result":{"tools":[]}}"#, "7")
+            .expect_err("mismatched response must be rejected");
+        assert_eq!(error.code(), error::INTERNAL_ERROR);
+        assert_eq!(
+            error.message(),
+            "Mismatched JSON-RPC response id: expected 7"
+        );
+    }
+
+    #[test]
     fn unparsable_body_reports_parse_failure() {
-        let error = parse_json_response("not json").expect_err("must fail");
+        let error = parse_json_response("not json", "1").expect_err("must fail");
         assert!(
             error
                 .to_string()
@@ -706,7 +754,12 @@ mod tests {
     async fn request_before_connect_reports_not_initialized() {
         let transport = transport("http://127.0.0.1:1");
         let error = transport
-            .send_request("tools/list", None, Duration::from_millis(50))
+            .send_request(
+                transport.next_request_id(),
+                "tools/list",
+                None,
+                Duration::from_millis(50),
+            )
             .await
             .expect_err("must fail");
         assert_eq!(error.code(), error::SERVER_NOT_INITIALIZED);
@@ -771,6 +824,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn health_ping_performs_real_http_exchange() {
+        let mut server = start_server().await;
+        server
+            .responses
+            .send(json_response(
+                None,
+                r#"{"jsonrpc":"2.0","id":1,"result":{}}"#,
+            ))
+            .expect("queue");
+        let transport = transport(&server.base_url);
+        assert!(!transport.send_health_ping().await);
+        transport.connect().await.expect("connect");
+        let _initialize = server.requests.recv().await.expect("initialize");
+        let _initialized = server.requests.recv().await.expect("initialized");
+
+        assert!(transport.send_health_ping().await);
+        let ping = server.requests.recv().await.expect("ping");
+        assert_eq!(ping.body["method"], json!(METHOD_PING));
+        assert!(ping.body.get("id").is_none());
+        transport.close().await;
+    }
+
+    #[tokio::test]
     async fn sse_shaped_response_is_matched_by_id_and_notifications_dispatched() {
         let server = start_server().await;
         server
@@ -798,7 +874,12 @@ mod tests {
         transport.connect().await.expect("connect");
 
         let result = transport
-            .send_request("tools/list", None, Duration::from_secs(5))
+            .send_request(
+                transport.next_request_id(),
+                "tools/list",
+                None,
+                Duration::from_secs(5),
+            )
             .await
             .expect("result");
         assert_eq!(result, Some(json!({"tools": []})));
@@ -829,7 +910,12 @@ mod tests {
         let transport = transport(&server.base_url);
         transport.connect().await.expect("connect");
         let error = transport
-            .send_request("tools/list", None, Duration::from_secs(5))
+            .send_request(
+                transport.next_request_id(),
+                "tools/list",
+                None,
+                Duration::from_secs(5),
+            )
             .await
             .expect_err("must fail");
         assert_eq!(error.code(), error::INTERNAL_ERROR);

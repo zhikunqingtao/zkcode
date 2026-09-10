@@ -8,6 +8,7 @@
 //! | `zk_ws_delta_dropped_total` | counter | — | delta 档丢弃数（背压满 / 无订阅者） |
 //! | `zk_ws_critical_timeouts_total` | counter | — | critical 档 200ms 投递超时数 |
 //! | `zk_ws_pending_replayed_total` | counter | — | bind 重放投递数 |
+//! | `zk_ws_pending_evicted_total` | counter | — | 有界缓存淘汰数；持久事件仍在 outbox |
 //! | `zk_ws_connections` | gauge | — | 当前连接数 |
 //! | `zk_ws_pending_depth` | gauge | — | 全会话 critical pending 总深度 |
 //!
@@ -34,6 +35,11 @@ pub(crate) fn count_critical_timeout() {
 /// pending 重放投递计数。
 pub(crate) fn count_pending_replayed(count: u64) {
     with_counter("zk_ws_pending_replayed_total", "", "", count);
+}
+
+/// 有界 pending 缓存淘汰计数。
+pub(crate) fn count_pending_evicted(count: u64) {
+    with_counter("zk_ws_pending_evicted_total", "", "", count);
 }
 
 /// 连接数 gauge（absolute set）。

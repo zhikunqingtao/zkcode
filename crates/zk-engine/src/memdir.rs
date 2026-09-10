@@ -34,9 +34,9 @@
 //! `MemdirService` 的生产入口仅 `MemoryTool`（read / write / delete）与
 //! `MemoryController`（`listEntries`）两处。
 //!
-//! 依既有裁定「Java 死代码方法不得接入主循环 / 生产路径」，本模块**不**接系统
-//! 提示 `memory` 段（该段数据源为 [`crate::project_memory`]，与旧仓一致）；
-//! 能力本身全部实现并由 `Memory` 工具与 `/api/memory*` 端点驱动，不缩水。
+//! 本模块**不**接系统提示 `memory` 段，也不再作为生产 Memory 工具或 API 的
+//! 权威存储；这些入口统一使用 `SQLite` `memories` 表。这里仅保留解析、检索与旧
+//! 文件格式相关的纯能力，避免出现文件与数据库双权威。
 //!
 //! # 未移植（本批范围外）
 //!
@@ -920,38 +920,6 @@ fn compute_bm25(
         score += idf_val * (numerator / denominator);
     }
     score
-}
-
-// ==================== zk-tools 端口实现 ====================
-
-/// [`zk_tools::MemoryStore`] 端口实现——把 `Memory` 工具接到本存储上。
-///
-/// 依赖方向铁律禁止 `zk-tools → zk-engine`，故端口定义在 zk-tools、实现落此处
-/// （`zk-engine → zk-tools` 合法），装配落 zk-server 组合根。旧仓由 Spring 直接
-/// 把 `MemdirService` 注入 `MemoryTool` 构造器，语义等价。
-///
-/// [`zk_tools::MemoryStore::write_tool_memory`] 固定
-/// [`MemorySource::Tool`] + [`MemoryCategory::Semantic`]——旧 `MemoryTool` 逐字调
-/// `writeMemory(content, MemorySource.TOOL)`，即两参重载（分类 `SEMANTIC`）。
-impl zk_tools::MemoryStore for MemdirStore {
-    fn read_memories(&self) -> futures::future::BoxFuture<'_, String> {
-        Box::pin(MemdirStore::read_memories(self))
-    }
-
-    fn write_tool_memory(
-        &self,
-        content: String,
-    ) -> futures::future::BoxFuture<'_, Result<(), String>> {
-        Box::pin(async move {
-            self.write_semantic(&content, MemorySource::Tool)
-                .await
-                .map_err(|error| error.to_string())
-        })
-    }
-
-    fn delete_memory(&self, pattern: String) -> futures::future::BoxFuture<'_, bool> {
-        Box::pin(async move { MemdirStore::delete_memory(self, &pattern).await })
-    }
 }
 
 #[cfg(test)]

@@ -38,10 +38,11 @@
 //!    `content` 支持字符串 / `{type,text}` 两形态。
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
+use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -50,10 +51,11 @@ use crate::error::{self, JsonRpcError, McpProtocolError};
 use crate::jsonrpc::RequestId;
 use crate::protocol::{
     CLIENT_NAME, METHOD_CANCELLED, METHOD_INITIALIZE, METHOD_INITIALIZED, METHOD_PROGRESS,
-    METHOD_PROMPTS_GET, METHOD_PROMPTS_LIST, METHOD_RESOURCES_LIST, METHOD_RESOURCES_READ,
-    METHOD_ROOTS_LIST, METHOD_TOOLS_CALL, METHOD_TOOLS_LIST, PROTOCOL_VERSION, ProgressTracker,
-    PromptArgument, PromptDefinition, PromptMessage, ResourceDefinition, RootsProvider,
-    ToolDefinition, client_capabilities, client_info,
+    METHOD_PROMPTS_GET, METHOD_PROMPTS_LIST, METHOD_RESOURCES_LIST, METHOD_RESOURCES_LIST_CHANGED,
+    METHOD_RESOURCES_READ, METHOD_ROOTS_LIST, METHOD_TOOLS_CALL, METHOD_TOOLS_LIST,
+    METHOD_TOOLS_LIST_CHANGED, PROTOCOL_VERSION, ProgressTracker, PromptArgument, PromptDefinition,
+    PromptMessage, ResourceDefinition, RootsProvider, ToolDefinition, client_capabilities,
+    client_info,
 };
 use crate::sse::{SseTransport, lock, read_lock, write_lock};
 use crate::stdio::StdioTransport;
@@ -83,6 +85,9 @@ const INIT_LOG_LIMIT: usize = 200;
 
 /// 工具列表变更回调（对照 Java `onToolsChanged(Runnable)`）。
 pub type ToolsChangedCallback = Arc<dyn Fn() + Send + Sync>;
+
+type ToolCallFuture<'a> = BoxFuture<'a, Result<Option<Value>, McpProtocolError>>;
+type StartedToolCall<'a> = (RequestId, Arc<dyn McpTransport>, ToolCallFuture<'a>);
 
 /// MCP 服务器连接状态 — 6 种（逐字对照 `McpConnectionStatus.java`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -130,7 +135,12 @@ pub struct McpServerConnection {
     tools: RwLock<Vec<ToolDefinition>>,
     resources: RwLock<Vec<ResourceDefinition>>,
     reconnect_attempts: AtomicU32,
+    /// Monotonic identity of the installed transport.  A reconnect reuses this
+    /// connection object, so pointer identity alone cannot reject callbacks and
+    /// responses emitted by the previous transport.
+    transport_generation: AtomicU64,
     transport: RwLock<Option<Arc<dyn McpTransport>>>,
+    lifecycle: tokio::sync::Mutex<()>,
     resource_cache: Mutex<Option<(Instant, Vec<ResourceDefinition>)>>,
     roots_provider: RwLock<Option<Arc<RootsProvider>>>,
     progress_tracker: RwLock<Option<Arc<dyn ProgressTracker>>>,
@@ -149,7 +159,9 @@ impl McpServerConnection {
             tools: RwLock::new(Vec::new()),
             resources: RwLock::new(Vec::new()),
             reconnect_attempts: AtomicU32::new(0),
+            transport_generation: AtomicU64::new(0),
             transport: RwLock::new(None),
+            lifecycle: tokio::sync::Mutex::new(()),
             resource_cache: Mutex::new(None),
             roots_provider: RwLock::new(None),
             progress_tracker: RwLock::new(None),
@@ -257,14 +269,170 @@ impl McpServerConnection {
     /// 测试专用：直接注入传输替身，跳过 [`Self::connect`] 的真实建连与握手
     /// （供 `tool_adapter` / `manager` 的跨模块单元测试构造已连接实例）。
     #[cfg(test)]
-    pub(crate) fn set_transport_for_test(&self, transport: Arc<dyn McpTransport>) {
-        *write_lock(&self.transport) = Some(transport);
+    pub(crate) fn set_transport_for_test(self: &Arc<Self>, transport: Arc<dyn McpTransport>) {
+        let installed = Arc::clone(&transport);
+        let generation = {
+            let mut slot = write_lock(&self.transport);
+            let generation = self.next_transport_generation();
+            *slot = Some(transport);
+            generation
+        };
+        self.bind_disconnect_handler(&installed, generation);
+        self.bind_notification_handler(&installed, generation);
+    }
+
+    fn next_transport_generation(&self) -> u64 {
+        self.transport_generation.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    fn transport_generation(&self) -> u64 {
+        self.transport_generation.load(Ordering::Acquire)
+    }
+
+    /// Generation of the currently executable transport session.  Adapters
+    /// persist this value with a tool invocation and revalidate it after any
+    /// asynchronous authorization wait.
+    #[must_use]
+    pub fn current_transport_generation(&self) -> Option<u64> {
+        let (generation, transport) = self.transport_snapshot()?;
+        (self.status() == McpConnectionStatus::Connected && transport.is_connected())
+            .then_some(generation)
+    }
+
+    /// Whether the captured generation still names the installed, connected
+    /// transport session.
+    #[must_use]
+    pub fn is_transport_generation_current(&self, generation: u64) -> bool {
+        let Some((current, transport)) = self.transport_snapshot() else {
+            return false;
+        };
+        current == generation
+            && self.status() == McpConnectionStatus::Connected
+            && transport.is_connected()
+    }
+
+    /// Read the installed transport and its generation as one snapshot.
+    /// Generation changes are serialized under the transport write lock, so a
+    /// request can never accidentally pair an old transport with a new ID
+    /// namespace.
+    fn transport_snapshot(&self) -> Option<(u64, Arc<dyn McpTransport>)> {
+        let slot = read_lock(&self.transport);
+        let transport = slot.as_ref().map(Arc::clone)?;
+        Some((self.transport_generation(), transport))
+    }
+
+    /// Execute a synchronous state transition only while `transport` is still
+    /// the installed session.  Holding the read lock through the transition
+    /// orders it before any reconnect/close generation change.
+    fn with_current_transport<R>(
+        &self,
+        generation: u64,
+        transport: &Arc<dyn McpTransport>,
+        action: impl FnOnce() -> R,
+    ) -> Option<R> {
+        let current = read_lock(&self.transport);
+        let matches = self.transport_generation() == generation
+            && current
+                .as_ref()
+                .is_some_and(|value| Arc::ptr_eq(value, transport));
+        if !matches {
+            return None;
+        }
+        let result = action();
+        drop(current);
+        Some(result)
+    }
+
+    fn is_current_transport(&self, generation: u64, transport: &Arc<dyn McpTransport>) -> bool {
+        self.with_current_transport(generation, transport, || ())
+            .is_some()
+    }
+
+    /// Remove every capability derived from a transport session.  Resource
+    /// declarations are security state: carrying them across reconnect would
+    /// allow a new server session to read a URI it never declared.
+    fn clear_transport_capabilities(&self, notify_tools: bool) {
+        self.set_tools(Vec::new());
+        self.set_resources(Vec::new());
+        *lock(&self.resource_cache) = None;
+        if notify_tools {
+            self.notify_tools_changed();
+        }
+    }
+
+    fn bind_disconnect_handler(
+        self: &Arc<Self>,
+        transport: &Arc<dyn McpTransport>,
+        generation: u64,
+    ) {
+        let weak = Arc::downgrade(self);
+        let weak_transport = Arc::downgrade(transport);
+        transport.set_disconnect_callback(Arc::new(move || {
+            if let (Some(connection), Some(transport)) = (weak.upgrade(), weak_transport.upgrade())
+            {
+                let handled = connection.with_current_transport(generation, &transport, || {
+                    connection.set_status(McpConnectionStatus::Failed);
+                    connection.clear_transport_capabilities(true);
+                });
+                if handled.is_some() {
+                    tracing::debug!(
+                        server = %connection.name(),
+                        generation,
+                        "MCP transport disconnect callback triggered"
+                    );
+                } else {
+                    tracing::debug!(
+                        server = %connection.name(),
+                        generation,
+                        "Ignored disconnect from stale MCP transport"
+                    );
+                }
+            }
+        }));
+    }
+
+    fn bind_notification_handler(
+        self: &Arc<Self>,
+        transport: &Arc<dyn McpTransport>,
+        generation: u64,
+    ) {
+        let weak = Arc::downgrade(self);
+        let weak_transport = Arc::downgrade(transport);
+        transport.set_notification_handler(Arc::new(move |node| {
+            if let (Some(connection), Some(transport)) = (weak.upgrade(), weak_transport.upgrade())
+            {
+                tokio::spawn(async move {
+                    if connection.is_current_transport(generation, &transport) {
+                        connection
+                            .dispatch_notification_from(node, &transport, generation)
+                            .await;
+                    } else {
+                        tracing::debug!(
+                            server = %connection.name(),
+                            generation,
+                            "Ignored notification from stale MCP transport"
+                        );
+                    }
+                });
+            }
+        }));
     }
 
     /// 建立连接并完成 MCP 协议握手（对照 Java `connect()`）。
     pub async fn connect(self: &Arc<Self>) {
-        // 重连安全：关闭旧传输防止资源泄漏（`connect_with_retry` 场景）。
-        if let Some(previous) = self.transport() {
+        let _lifecycle = self.lifecycle.lock().await;
+        self.set_status(McpConnectionStatus::Pending);
+
+        // Invalidate the old session before awaiting its close.  Late
+        // responses/callbacks can no longer mutate this connection or its
+        // dynamic directory entries.
+        let (generation, previous) = {
+            let mut slot = write_lock(&self.transport);
+            let generation = self.next_transport_generation();
+            (generation, slot.take())
+        };
+        self.clear_transport_capabilities(true);
+        if let Some(previous) = previous {
             previous.close().await;
         }
         let Some(transport) = create_transport(&self.config) else {
@@ -274,22 +442,18 @@ impl McpServerConnection {
         };
         *write_lock(&self.transport) = Some(Arc::clone(&transport));
 
-        let weak = Arc::downgrade(self);
-        transport.set_disconnect_callback(Arc::new(move || {
-            if let Some(connection) = weak.upgrade() {
-                tracing::debug!(
-                    server = %connection.name(),
-                    "SSE disconnect callback triggered"
-                );
-                connection.set_status(McpConnectionStatus::Failed);
-            }
-        }));
+        self.bind_disconnect_handler(&transport, generation);
 
         match tokio::time::timeout(TRANSPORT_CONNECT_TIMEOUT, transport.connect()).await {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
                 tracing::debug!(server = %self.name(), %error, "Failed to connect MCP server");
-                self.set_status(McpConnectionStatus::Failed);
+                if self.is_current_transport(generation, &transport) {
+                    self.set_status(McpConnectionStatus::Failed);
+                    self.clear_transport_capabilities(true);
+                    write_lock(&self.transport).take();
+                }
+                transport.close().await;
                 return;
             }
             Err(_) => {
@@ -297,9 +461,18 @@ impl McpServerConnection {
                     server = %self.name(),
                     "Failed to connect MCP server: transport connect timed out"
                 );
-                self.set_status(McpConnectionStatus::Failed);
+                if self.is_current_transport(generation, &transport) {
+                    self.set_status(McpConnectionStatus::Failed);
+                    self.clear_transport_capabilities(true);
+                    write_lock(&self.transport).take();
+                }
+                transport.close().await;
                 return;
             }
+        }
+        if !self.is_current_transport(generation, &transport) {
+            transport.close().await;
+            return;
         }
         self.set_status(McpConnectionStatus::Connected);
         tracing::info!(
@@ -308,17 +481,15 @@ impl McpServerConnection {
             "MCP server connected"
         );
 
-        self.perform_protocol_handshake(&transport).await;
+        self.perform_protocol_handshake_for_generation(&transport, Some(generation))
+            .await;
+        if !self.is_current_transport(generation, &transport) {
+            transport.close().await;
+            return;
+        }
 
         // 通知/反向请求分发器最后注册（对照 Java 顺序：握手期间的通知不处理）。
-        let weak = Arc::downgrade(self);
-        transport.set_notification_handler(Arc::new(move |node| {
-            if let Some(connection) = weak.upgrade() {
-                tokio::spawn(async move {
-                    connection.dispatch_notification(node).await;
-                });
-            }
-        }));
+        self.bind_notification_handler(&transport, generation);
     }
 
     /// 带指数退避的连接重试（对照 Java `connectWithRetry()`）。
@@ -350,15 +521,31 @@ impl McpServerConnection {
     }
 
     /// MCP 协议握手（对照 Java `performProtocolHandshake()`）。
+    #[cfg(test)]
     async fn perform_protocol_handshake(&self, transport: &Arc<dyn McpTransport>) {
-        let Err(error) = self.handshake_once(transport).await else {
+        self.perform_protocol_handshake_for_generation(transport, None)
+            .await;
+    }
+
+    async fn perform_protocol_handshake_for_generation(
+        &self,
+        transport: &Arc<dyn McpTransport>,
+        generation: Option<u64>,
+    ) {
+        let Err(error) = self.handshake_once(transport, generation).await else {
             return;
         };
+        if generation.is_some_and(|value| !self.is_current_transport(value, transport)) {
+            return;
+        }
         tracing::error!(server = %self.name(), %error, "MCP protocol handshake failed");
         self.set_status(McpConnectionStatus::Degraded);
         for retry in 0..HANDSHAKE_RETRIES {
             tokio::time::sleep(Duration::from_millis(BACKOFF_BASE_MS << retry)).await;
-            self.discover_tools_with(transport).await;
+            if generation.is_some_and(|value| !self.is_current_transport(value, transport)) {
+                return;
+            }
+            self.discover_tools_with(transport, generation).await;
             if !read_lock(&self.tools).is_empty() {
                 self.set_status(McpConnectionStatus::Connected);
                 tracing::info!(
@@ -379,6 +566,7 @@ impl McpServerConnection {
     async fn handshake_once(
         &self,
         transport: &Arc<dyn McpTransport>,
+        generation: Option<u64>,
     ) -> Result<(), McpProtocolError> {
         if !transport.performs_own_handshake() {
             let params = json!({
@@ -387,8 +575,18 @@ impl McpServerConnection {
                 "capabilities": client_capabilities(),
             });
             let result = transport
-                .send_request(METHOD_INITIALIZE, Some(params), DEFAULT_REQUEST_TIMEOUT)
+                .send_request(
+                    transport.next_request_id(),
+                    METHOD_INITIALIZE,
+                    Some(params),
+                    DEFAULT_REQUEST_TIMEOUT,
+                )
                 .await?;
+            if generation.is_some_and(|value| !self.is_current_transport(value, transport)) {
+                return Err(McpProtocolError::not_initialized(
+                    "MCP transport generation changed during initialize",
+                ));
+            }
             tracing::info!(
                 server = %self.name(),
                 response = %truncate_for_log(result.as_ref()),
@@ -397,7 +595,7 @@ impl McpServerConnection {
             transport.send_notification(METHOD_INITIALIZED, None).await;
             tracing::info!(server = %self.name(), "MCP initialized notification sent");
         }
-        self.discover_tools_with(transport).await;
+        self.discover_tools_with(transport, generation).await;
         Ok(())
     }
 
@@ -407,13 +605,30 @@ impl McpServerConnection {
             tracing::warn!(server = %self.name(), "Cannot discover tools — no transport");
             return;
         };
-        self.discover_tools_with(&transport).await;
+        let generation = self.transport_generation();
+        self.discover_tools_with(&transport, Some(generation)).await;
     }
 
-    async fn discover_tools_with(&self, transport: &Arc<dyn McpTransport>) {
+    async fn discover_tools_with(
+        &self,
+        transport: &Arc<dyn McpTransport>,
+        generation: Option<u64>,
+    ) {
         let outcome = transport
-            .send_request(METHOD_TOOLS_LIST, Some(json!({})), DEFAULT_REQUEST_TIMEOUT)
+            .send_request(
+                transport.next_request_id(),
+                METHOD_TOOLS_LIST,
+                Some(json!({})),
+                DEFAULT_REQUEST_TIMEOUT,
+            )
             .await;
+        if generation.is_some_and(|value| !self.is_current_transport(value, transport)) {
+            tracing::debug!(
+                server = %self.name(),
+                "Ignored tools/list response from stale MCP transport"
+            );
+            return;
+        }
         let result = match outcome {
             Ok(result) => result,
             Err(error) => {
@@ -449,7 +664,19 @@ impl McpServerConnection {
             tools = ?discovered.iter().map(|tool| tool.name.as_str()).collect::<Vec<_>>(),
             "MCP tools/list discovered tools"
         );
-        self.set_tools(discovered);
+        if let Some(generation) = generation {
+            if self
+                .with_current_transport(generation, transport, || self.set_tools(discovered))
+                .is_none()
+            {
+                tracing::debug!(
+                    server = %self.name(),
+                    "Ignored parsed tools/list result from stale MCP transport"
+                );
+            }
+        } else {
+            self.set_tools(discovered);
+        }
     }
 
     /// 调用 MCP 工具（对照 Java `callTool(name, args, timeoutMs, progressToken)`）。
@@ -463,9 +690,24 @@ impl McpServerConnection {
         timeout: Duration,
         progress_token: Option<&str>,
     ) -> Result<Option<Value>, McpProtocolError> {
-        let transport = self.transport();
+        let (_, _, call) = self.start_tool_call(tool_name, arguments, timeout, progress_token)?;
+        call.await
+    }
+
+    /// Prepare a `tools/call` and expose the exact JSON-RPC request ID before
+    /// the request future is polled.  Cancellation notifications must refer to
+    /// this ID, never to the unrelated progress token.
+    pub(crate) fn start_tool_call<'a>(
+        &'a self,
+        tool_name: &str,
+        arguments: Option<Value>,
+        timeout: Duration,
+        progress_token: Option<&str>,
+    ) -> Result<StartedToolCall<'a>, McpProtocolError> {
         let status = self.status();
-        let (Some(transport), McpConnectionStatus::Connected) = (transport, status) else {
+        let snapshot = self.transport_snapshot();
+        let (Some((generation, transport)), McpConnectionStatus::Connected) = (snapshot, status)
+        else {
             return Err(McpProtocolError::not_initialized(format!(
                 "Server '{}' not connected (status: {status})",
                 self.name()
@@ -478,9 +720,27 @@ impl McpServerConnection {
         if let Some(token) = progress_token.filter(|token| !token.is_empty()) {
             params["_meta"] = json!({ "progressToken": token });
         }
-        transport
-            .send_request(METHOD_TOOLS_CALL, Some(params), timeout_or_default(timeout))
-            .await
+        let request_id = transport.next_request_id();
+        let sent_id = request_id.clone();
+        let request_transport = Arc::clone(&transport);
+        let future = Box::pin(async move {
+            let outcome = request_transport
+                .send_request(
+                    sent_id,
+                    METHOD_TOOLS_CALL,
+                    Some(params),
+                    timeout_or_default(timeout),
+                )
+                .await;
+            if self.is_current_transport(generation, &request_transport) {
+                outcome
+            } else {
+                Err(McpProtocolError::not_initialized(
+                    "MCP transport generation changed during tools/call",
+                ))
+            }
+        });
+        Ok((request_id, transport, future))
     }
 
     /// 通用 JSON-RPC 请求（对照 Java `request(method, params, timeoutMs)`）。
@@ -493,15 +753,38 @@ impl McpServerConnection {
         params: Option<Value>,
         timeout: Duration,
     ) -> Result<Option<Value>, McpProtocolError> {
-        let Some(transport) = self.transport() else {
+        self.request_with_session(method, params, timeout)
+            .await
+            .map(|(result, _, _)| result)
+    }
+
+    async fn request_with_session(
+        &self,
+        method: &str,
+        params: Option<Value>,
+        timeout: Duration,
+    ) -> Result<(Option<Value>, u64, Arc<dyn McpTransport>), McpProtocolError> {
+        let Some((generation, transport)) = self.transport_snapshot() else {
             return Err(McpProtocolError::not_initialized(format!(
                 "Server '{}' has no transport",
                 self.name()
             )));
         };
-        transport
-            .send_request(method, params, timeout_or_default(timeout))
-            .await
+        let outcome = transport
+            .send_request(
+                transport.next_request_id(),
+                method,
+                params,
+                timeout_or_default(timeout),
+            )
+            .await;
+        if self.is_current_transport(generation, &transport) {
+            outcome.map(|result| (result, generation, transport))
+        } else {
+            Err(McpProtocolError::not_initialized(
+                "MCP transport generation changed during request",
+            ))
+        }
     }
 
     /// 发送通知（无传输时静默丢弃，对照 Java `if (transport != null)`）。
@@ -512,16 +795,33 @@ impl McpServerConnection {
     }
 
     /// 发送 `notifications/cancelled`（对照 Java `sendCancelNotification`）。
-    pub async fn send_cancel_notification(&self, request_id: &str, reason: Option<&str>) {
+    pub async fn send_cancel_notification(&self, request_id: &RequestId, reason: Option<&str>) {
+        let Some((_, transport)) = self.transport_snapshot() else {
+            return;
+        };
+        self.send_cancel_notification_on(&transport, request_id, reason)
+            .await;
+    }
+
+    /// Send cancellation to the exact transport that owns `request_id`.
+    /// Reconnect may install a new session while a call is in flight; routing
+    /// an old numeric ID to that new session could cancel an unrelated call.
+    pub(crate) async fn send_cancel_notification_on(
+        &self,
+        transport: &Arc<dyn McpTransport>,
+        request_id: &RequestId,
+        reason: Option<&str>,
+    ) {
         let reason = reason.unwrap_or("user_cancelled");
-        self.send_notification(
-            METHOD_CANCELLED,
-            Some(json!({ "requestId": request_id, "reason": reason })),
-        )
-        .await;
+        transport
+            .send_notification(
+                METHOD_CANCELLED,
+                Some(json!({ "requestId": request_id, "reason": reason })),
+            )
+            .await;
         tracing::info!(
             server = %self.name(),
-            request_id,
+            request_id = %request_id,
             reason,
             "MCP cancel notification sent"
         );
@@ -529,18 +829,24 @@ impl McpServerConnection {
 
     /// 健康探测（无传输 → `false`，对照 Java `sendHealthPing()`）。
     pub async fn send_health_ping(&self) -> bool {
-        match self.transport() {
-            Some(transport) => transport.send_health_ping().await,
-            None => false,
-        }
+        let Some((generation, transport)) = self.transport_snapshot() else {
+            return false;
+        };
+        let healthy = transport.send_health_ping().await;
+        healthy && self.is_current_transport(generation, &transport)
     }
 
     /// 关闭连接并清空能力（对照 Java `close()`）。
     pub async fn close(&self) {
+        let _lifecycle = self.lifecycle.lock().await;
         self.set_status(McpConnectionStatus::Disabled);
-        self.set_tools(Vec::new());
-        self.set_resources(Vec::new());
-        if let Some(transport) = self.transport() {
+        let transport = {
+            let mut slot = write_lock(&self.transport);
+            self.next_transport_generation();
+            slot.take()
+        };
+        self.clear_transport_capabilities(true);
+        if let Some(transport) = transport {
             transport.close().await;
         }
     }
@@ -560,14 +866,14 @@ impl McpServerConnection {
             return cached;
         }
         let outcome = self
-            .request(
+            .request_with_session(
                 METHOD_RESOURCES_LIST,
                 Some(json!({})),
                 DEFAULT_REQUEST_TIMEOUT,
             )
             .await;
-        let result = match outcome {
-            Ok(result) => result,
+        let (result, generation, transport) = match outcome {
+            Ok(session) => session,
             Err(error) => {
                 tracing::warn!(
                     server = %self.name(),
@@ -583,7 +889,10 @@ impl McpServerConnection {
             .and_then(Value::as_array);
         let Some(items) = items else {
             tracing::info!(server = %self.name(), "MCP resources/list returned no resources");
-            self.store_resources_cache(Vec::new());
+            self.with_current_transport(generation, &transport, || {
+                self.set_resources(Vec::new());
+                self.store_resources_cache(Vec::new());
+            });
             return Vec::new();
         };
         let discovered: Vec<ResourceDefinition> = items
@@ -603,9 +912,21 @@ impl McpServerConnection {
             count = discovered.len(),
             "MCP resources/list discovered resources"
         );
-        self.set_resources(discovered.clone());
-        self.store_resources_cache(discovered.clone());
-        discovered
+        if self
+            .with_current_transport(generation, &transport, || {
+                self.set_resources(discovered.clone());
+                self.store_resources_cache(discovered.clone());
+            })
+            .is_some()
+        {
+            discovered
+        } else {
+            tracing::debug!(
+                server = %self.name(),
+                "Ignored resources/list response from stale MCP transport"
+            );
+            Vec::new()
+        }
     }
 
     /// 使资源缓存失效（对照 Java `invalidateResourceCache()`）。
@@ -771,12 +1092,61 @@ impl McpServerConnection {
             .collect())
     }
 
-    /// 分发服务端通知 / 反向请求（对照 Java `dispatchNotification`）。
+    /// Test/direct-entry wrapper around the generation-bound dispatcher.
+    #[cfg(test)]
     async fn dispatch_notification(&self, notification: Value) {
+        let Some((generation, transport)) = self.transport_snapshot() else {
+            return;
+        };
+        self.dispatch_notification_from(notification, &transport, generation)
+            .await;
+    }
+
+    /// Dispatch a notification only within the transport session that emitted
+    /// it.  In particular, reverse requests must never be answered on a newly
+    /// reconnected transport that happens to reuse the same numeric ID.
+    async fn dispatch_notification_from(
+        &self,
+        notification: Value,
+        transport: &Arc<dyn McpTransport>,
+        generation: u64,
+    ) {
+        if !self.is_current_transport(generation, transport) {
+            return;
+        }
         let method = text_or(&notification, "method", "");
         match method.as_str() {
-            METHOD_PROGRESS => self.handle_progress(&notification),
-            METHOD_ROOTS_LIST => self.handle_roots_list(&notification).await,
+            METHOD_PROGRESS => {
+                self.with_current_transport(generation, transport, || {
+                    self.handle_progress(&notification);
+                });
+            }
+            METHOD_TOOLS_LIST_CHANGED => {
+                // A changed directory is untrusted until the replacement list
+                // succeeds.  Clear first so a failed refresh cannot leave a
+                // removed remote tool executable.
+                if self
+                    .with_current_transport(generation, transport, || self.set_tools(Vec::new()))
+                    .is_none()
+                {
+                    return;
+                }
+                self.notify_tools_changed();
+                self.discover_tools_with(transport, Some(generation)).await;
+                self.with_current_transport(generation, transport, || {
+                    self.notify_tools_changed();
+                });
+            }
+            METHOD_RESOURCES_LIST_CHANGED => {
+                self.with_current_transport(generation, transport, || {
+                    self.set_resources(Vec::new());
+                    self.invalidate_resource_cache();
+                });
+            }
+            METHOD_ROOTS_LIST => {
+                self.handle_roots_list_from(&notification, transport, generation)
+                    .await;
+            }
             other => tracing::debug!(method = other, "Unhandled MCP notification"),
         }
     }
@@ -795,7 +1165,12 @@ impl McpServerConnection {
     }
 
     /// 应答 `roots/list` 反向请求（对照 Java `handleRootsList`）。
-    async fn handle_roots_list(&self, notification: &Value) {
+    async fn handle_roots_list_from(
+        &self,
+        notification: &Value,
+        transport: &Arc<dyn McpTransport>,
+        generation: u64,
+    ) {
         let Some(id) = notification
             .get("id")
             .filter(|id| !id.is_null())
@@ -804,13 +1179,9 @@ impl McpServerConnection {
             tracing::debug!("Received roots/list without id, ignoring (treated as notification)");
             return;
         };
-        let Some(transport) = self.transport() else {
-            tracing::warn!(
-                server = %self.name(),
-                "Cannot respond to roots/list — transport unavailable"
-            );
+        if !self.is_current_transport(generation, transport) {
             return;
-        };
+        }
         let roots = read_lock(&self.roots_provider)
             .as_ref()
             .map(|provider| provider.current_roots())
@@ -943,6 +1314,8 @@ mod tests {
         requests: Mutex<Vec<(String, Option<Value>)>>,
         notifications: Mutex<Vec<(String, Option<Value>)>>,
         responses: Mutex<Vec<(RequestId, Value)>>,
+        notification_handler: RwLock<Option<NotificationHandler>>,
+        disconnect_callback: RwLock<Option<DisconnectCallback>>,
     }
 
     impl StubTransport {
@@ -953,6 +1326,8 @@ mod tests {
                 requests: Mutex::new(Vec::new()),
                 notifications: Mutex::new(Vec::new()),
                 responses: Mutex::new(Vec::new()),
+                notification_handler: RwLock::new(None),
+                disconnect_callback: RwLock::new(None),
             })
         }
 
@@ -980,15 +1355,33 @@ mod tests {
         fn responses(&self) -> Vec<(RequestId, Value)> {
             lock(&self.responses).clone()
         }
+
+        fn emit_notification(&self, value: Value) {
+            if let Some(handler) = read_lock(&self.notification_handler).clone() {
+                handler(value);
+            }
+        }
+
+        fn disconnect(&self) {
+            self.connected.store(false, Ordering::Release);
+            if let Some(callback) = read_lock(&self.disconnect_callback).clone() {
+                callback();
+            }
+        }
     }
 
     impl McpTransport for StubTransport {
+        fn next_request_id(&self) -> RequestId {
+            RequestId::Number(1)
+        }
+
         fn connect(&self) -> BoxFuture<'_, Result<(), McpProtocolError>> {
             Box::pin(async { Ok(()) })
         }
 
         fn send_request<'a>(
             &'a self,
+            _request_id: RequestId,
             method: &'a str,
             params: Option<Value>,
             _timeout: Duration,
@@ -1019,9 +1412,13 @@ mod tests {
             self.connected.load(Ordering::Acquire)
         }
 
-        fn set_notification_handler(&self, _handler: NotificationHandler) {}
+        fn set_notification_handler(&self, handler: NotificationHandler) {
+            *write_lock(&self.notification_handler) = Some(handler);
+        }
 
-        fn set_disconnect_callback(&self, _callback: DisconnectCallback) {}
+        fn set_disconnect_callback(&self, callback: DisconnectCallback) {
+            *write_lock(&self.disconnect_callback) = Some(callback);
+        }
 
         fn close(&self) -> BoxFuture<'_, ()> {
             Box::pin(async {
@@ -1437,12 +1834,216 @@ done"#
     }
 
     #[tokio::test]
+    async fn tools_list_changed_replaces_directory_fail_closed() {
+        let transport = StubTransport::scripted(script(vec![(
+            METHOD_TOOLS_LIST,
+            Ok(json!({"tools": [{
+                "name": "replacement",
+                "description": "new",
+                "inputSchema": {"type": "object"}
+            }]})),
+        )]));
+        let connection = connected_with(Arc::clone(&transport) as Arc<dyn McpTransport>);
+        connection.set_tools(vec![ToolDefinition {
+            name: "removed".to_owned(),
+            description: "old".to_owned(),
+            input_schema: json!({}),
+        }]);
+        let changes = Arc::new(AtomicU32::new(0));
+        let seen = Arc::clone(&changes);
+        connection.on_tools_changed(Arc::new(move || {
+            seen.fetch_add(1, Ordering::AcqRel);
+        }));
+
+        connection
+            .dispatch_notification(json!({"method": METHOD_TOOLS_LIST_CHANGED}))
+            .await;
+
+        assert_eq!(
+            connection
+                .tools()
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["replacement"]
+        );
+        assert_eq!(changes.load(Ordering::Acquire), 2);
+        assert_eq!(transport.requests()[0].0, METHOD_TOOLS_LIST);
+    }
+
+    #[tokio::test]
+    async fn resources_list_changed_revokes_cached_declarations() {
+        let transport = StubTransport::scripted(script(vec![]));
+        let connection = connected_with(transport);
+        let old = vec![ResourceDefinition {
+            uri: "file:///old".to_owned(),
+            name: "old".to_owned(),
+            mime_type: None,
+            description: None,
+        }];
+        connection.set_resources(old.clone());
+        connection.store_resources_cache(old);
+
+        connection
+            .dispatch_notification(json!({"method": METHOD_RESOURCES_LIST_CHANGED}))
+            .await;
+
+        assert!(connection.resources().is_empty());
+        assert!(connection.cached_resources().is_none());
+    }
+
+    #[tokio::test]
+    async fn stale_transport_disconnects_and_notifications_are_ignored() {
+        struct CountingTracker(AtomicU32);
+        impl ProgressTracker for CountingTracker {
+            fn register_progress(&self, _t: &str, _s: &str, _sv: &str, _tn: &str) {}
+            fn unregister_progress(&self, _token: &str) {}
+            fn handle_progress_notification(&self, _notification: &Value) {
+                self.0.fetch_add(1, Ordering::AcqRel);
+            }
+        }
+
+        let connection = McpServerConnection::new(McpServerConfig::stdio(
+            "fake",
+            "/bin/true",
+            Vec::<String>::new(),
+        ));
+        let tracker = Arc::new(CountingTracker(AtomicU32::new(0)));
+        connection.set_progress_tracker(tracker.clone() as Arc<dyn ProgressTracker>);
+        let old = StubTransport::scripted(script(vec![]));
+        connection.set_transport_for_test(old.clone() as Arc<dyn McpTransport>);
+        let current = StubTransport::scripted(script(vec![]));
+        connection.set_transport_for_test(current.clone() as Arc<dyn McpTransport>);
+        connection.set_status(McpConnectionStatus::Connected);
+        connection.set_tools(vec![ToolDefinition {
+            name: "current".to_owned(),
+            description: String::new(),
+            input_schema: json!({}),
+        }]);
+
+        old.emit_notification(
+            json!({"method": METHOD_PROGRESS, "params": {"progressToken": "old"}}),
+        );
+        old.emit_notification(json!({
+            "jsonrpc": "2.0",
+            "id": 42,
+            "method": METHOD_ROOTS_LIST
+        }));
+        old.disconnect();
+        tokio::task::yield_now().await;
+        assert_eq!(connection.status(), McpConnectionStatus::Connected);
+        assert_eq!(connection.tools().len(), 1);
+        assert_eq!(tracker.0.load(Ordering::Acquire), 0);
+        assert!(old.responses().is_empty());
+        assert!(current.responses().is_empty());
+
+        current.emit_notification(
+            json!({"method": METHOD_PROGRESS, "params": {"progressToken": "current"}}),
+        );
+        tokio::task::yield_now().await;
+        assert_eq!(tracker.0.load(Ordering::Acquire), 1);
+        current.disconnect();
+        assert_eq!(connection.status(), McpConnectionStatus::Failed);
+        assert!(connection.tools().is_empty());
+    }
+
+    #[tokio::test]
+    async fn old_response_after_generation_change_is_rejected() {
+        struct GatedTransport {
+            started: Arc<tokio::sync::Notify>,
+            release: Arc<tokio::sync::Notify>,
+        }
+
+        impl McpTransport for GatedTransport {
+            fn next_request_id(&self) -> RequestId {
+                RequestId::Number(1)
+            }
+
+            fn connect(&self) -> BoxFuture<'_, Result<(), McpProtocolError>> {
+                Box::pin(async { Ok(()) })
+            }
+
+            fn send_request<'a>(
+                &'a self,
+                _request_id: RequestId,
+                _method: &'a str,
+                _params: Option<Value>,
+                _timeout: Duration,
+            ) -> BoxFuture<'a, Result<Option<Value>, McpProtocolError>> {
+                Box::pin(async move {
+                    self.started.notify_one();
+                    self.release.notified().await;
+                    Ok(Some(json!({"from": "old"})))
+                })
+            }
+
+            fn send_notification<'a>(
+                &'a self,
+                _method: &'a str,
+                _params: Option<Value>,
+            ) -> BoxFuture<'a, ()> {
+                Box::pin(async {})
+            }
+
+            fn send_response(&self, _id: RequestId, _result: Value) -> BoxFuture<'_, ()> {
+                Box::pin(async {})
+            }
+
+            fn is_connected(&self) -> bool {
+                true
+            }
+
+            fn set_notification_handler(&self, _handler: NotificationHandler) {}
+
+            fn close(&self) -> BoxFuture<'_, ()> {
+                Box::pin(async {})
+            }
+        }
+
+        let old = Arc::new(GatedTransport {
+            started: Arc::new(tokio::sync::Notify::new()),
+            release: Arc::new(tokio::sync::Notify::new()),
+        });
+        let connection = McpServerConnection::new(McpServerConfig::stdio(
+            "fake",
+            "/bin/true",
+            Vec::<String>::new(),
+        ));
+        connection.set_transport_for_test(Arc::clone(&old) as Arc<dyn McpTransport>);
+        connection.set_status(McpConnectionStatus::Connected);
+
+        let caller = Arc::clone(&connection);
+        let request = tokio::spawn(async move {
+            caller
+                .request("custom/read", None, Duration::from_secs(5))
+                .await
+        });
+        old.started.notified().await;
+        let current = StubTransport::scripted(script(vec![]));
+        connection.set_transport_for_test(current as Arc<dyn McpTransport>);
+        connection.set_status(McpConnectionStatus::Connected);
+        old.release.notify_one();
+
+        let error = request
+            .await
+            .expect("request task joins")
+            .expect_err("old response must be rejected");
+        assert_eq!(error.code(), error::SERVER_NOT_INITIALIZED);
+        assert_eq!(
+            error.message(),
+            "MCP transport generation changed during request"
+        );
+    }
+
+    #[tokio::test]
     async fn cancel_notification_uses_default_reason() {
         let transport = StubTransport::scripted(script(vec![]));
         let connection = connected_with(Arc::clone(&transport) as Arc<dyn McpTransport>);
-        connection.send_cancel_notification("tok-1", None).await;
         connection
-            .send_cancel_notification("tok-2", Some("timeout"))
+            .send_cancel_notification(&RequestId::Text("tok-1".to_owned()), None)
+            .await;
+        connection
+            .send_cancel_notification(&RequestId::Text("tok-2".to_owned()), Some("timeout"))
             .await;
         let notifications = transport.notifications();
         assert_eq!(notifications[0].0, METHOD_CANCELLED);

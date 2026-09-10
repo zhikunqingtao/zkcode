@@ -1,5 +1,6 @@
 //! Local artifact manifest declaration, sealing and integrity verification.
 
+use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -48,12 +49,28 @@ pub(crate) async fn create_manifest(
     let workspace = std::fs::canonicalize(&session.working_dir).map_err(|_| {
         ApiError::validation_with_code("WORKSPACE_UNAVAILABLE", "Workspace is unavailable")
     })?;
-    let entries = tokio::task::spawn_blocking(move || seal_entries(&workspace, request.entries))
-        .await
-        .map_err(|error| {
-            tracing::error!(%error, "artifact sealing task panicked");
-            ApiError::internal()
-        })??;
+    let mut producer_invocations = HashMap::new();
+    for entry in &request.entries {
+        let invocation_id = state
+            .db
+            .find_artifact_producer_invocation(&run.id, &entry.tool_use_id)
+            .await?
+            .ok_or_else(|| {
+                ApiError::validation_with_code(
+                    "ARTIFACT_PRODUCER_INVOCATION_NOT_FOUND",
+                    "Artifact must reference a succeeded tool invocation from the owning run",
+                )
+            })?;
+        producer_invocations.insert(entry.tool_use_id.clone(), invocation_id);
+    }
+    let entries = tokio::task::spawn_blocking(move || {
+        seal_entries(&workspace, request.entries, &producer_invocations)
+    })
+    .await
+    .map_err(|error| {
+        tracing::error!(%error, "artifact sealing task panicked");
+        ApiError::internal()
+    })??;
     let now = crate::iso::format_rfc3339_micros(crate::iso::now_millis());
     let manifest = ArtifactManifestRecord {
         manifest_id: uuid::Uuid::new_v4().to_string(),
@@ -136,33 +153,42 @@ async fn verify_by_id(
     accessible_run(state, &manifest.run_id, &asserted)
         .await?
         .ok_or_else(|| ApiError::not_found("RUN_NOT_FOUND", "Run not found"))?;
+    let was_verified = manifest.state == "verified";
     let workspace = std::fs::canonicalize(&manifest.workspace_root).map_err(|_| {
         ApiError::validation_with_code("WORKSPACE_UNAVAILABLE", "Workspace is unavailable")
     })?;
     let entries = std::mem::take(&mut manifest.entries);
-    manifest.entries = tokio::task::spawn_blocking(move || verify_entries(&workspace, entries))
-        .await
-        .map_err(|error| {
-            tracing::error!(%error, "artifact verification task panicked");
-            ApiError::internal()
-        })?;
+    manifest.entries =
+        tokio::task::spawn_blocking(move || verify_entries(&workspace, entries, was_verified))
+            .await
+            .map_err(|error| {
+                tracing::error!(%error, "artifact verification task panicked");
+                ApiError::internal()
+            })?;
     manifest.state = if manifest
         .entries
         .iter()
         .all(|entry| entry.state == "integrity_verified")
     {
         "verified".into()
+    } else if was_verified {
+        "unverified".into()
     } else {
         "failed".into()
     };
     manifest.updated_at = crate::iso::format_rfc3339_micros(crate::iso::now_millis());
-    state.db.save_artifact_manifest(&manifest).await?;
+    let invalidates_prior_verification = was_verified && manifest.state != "verified";
+    state
+        .db
+        .save_artifact_verification(&manifest, invalidates_prior_verification)
+        .await?;
     Ok(manifest)
 }
 
 fn seal_entries(
     workspace: &Path,
     entries: Vec<CreateArtifactEntry>,
+    producer_invocations: &HashMap<String, String>,
 ) -> Result<Vec<ArtifactEntryRecord>, ApiError> {
     let now = crate::iso::format_rfc3339_micros(crate::iso::now_millis());
     entries
@@ -185,6 +211,7 @@ fn seal_entries(
             };
             Ok(ArtifactEntryRecord {
                 artifact_id: uuid::Uuid::new_v4().to_string(),
+                producer_invocation_id: producer_invocations.get(&entry.tool_use_id).cloned(),
                 tool_use_id: entry.tool_use_id,
                 canonical_path: path.to_string_lossy().into_owned(),
                 operation: entry.operation,
@@ -202,44 +229,66 @@ fn seal_entries(
         .collect()
 }
 
-fn verify_entries(workspace: &Path, entries: Vec<ArtifactEntryRecord>) -> Vec<ArtifactEntryRecord> {
+fn verify_entries(
+    workspace: &Path,
+    entries: Vec<ArtifactEntryRecord>,
+    invalidation_check: bool,
+) -> Vec<ArtifactEntryRecord> {
     entries
         .into_iter()
         .map(|mut entry| {
             entry.updated_at = crate::iso::format_rfc3339_micros(crate::iso::now_millis());
             if entry.operation == "deleted" {
-                if Path::new(&entry.canonical_path).exists() {
-                    entry.state = "failed".into();
+                // `Path::exists` follows links and therefore misses a dangling
+                // symlink recreated at a path that was sealed as deleted.
+                if std::fs::symlink_metadata(Path::new(&entry.canonical_path)).is_ok() {
+                    entry.state = failed_integrity_state(invalidation_check).into();
                     entry.failure_code = Some("ARTIFACT_DELETED_PATH_EXISTS".into());
+                    entry.validator_result = None;
                 } else {
                     entry.state = "integrity_verified".into();
                     entry.failure_code = None;
                 }
                 return entry;
             }
+            let sealed_size = entry.file_size;
             let result = resolve_artifact_path(workspace, &entry.canonical_path, false)
                 .and_then(|path| reject_special_or_symlink(&path).map(|_| path))
                 .and_then(|path| hash_file(&path));
             match result {
                 Ok((actual, size)) => {
                     entry.actual_hash = Some(actual.clone());
-                    entry.file_size = Some(size);
-                    if entry.sealed_hash.as_deref() == Some(actual.as_str()) {
+                    if sealed_size != Some(size) {
+                        entry.state = failed_integrity_state(invalidation_check).into();
+                        entry.failure_code = Some("ARTIFACT_SIZE_CHANGED".into());
+                        entry.validator_result = None;
+                    } else if entry.sealed_hash.as_deref() == Some(actual.as_str()) {
                         entry.state = "integrity_verified".into();
                         entry.failure_code = None;
                     } else {
-                        entry.state = "failed".into();
+                        entry.state = failed_integrity_state(invalidation_check).into();
                         entry.failure_code = Some("ARTIFACT_HASH_MISMATCH".into());
+                        entry.validator_result = None;
                     }
                 }
                 Err(error) => {
-                    entry.state = "failed".into();
+                    entry.state = failed_integrity_state(invalidation_check).into();
                     entry.failure_code = Some(error.code);
+                    entry.actual_hash = None;
+                    entry.validator_result = None;
                 }
             }
             entry
         })
         .collect()
+}
+
+fn failed_integrity_state(invalidation_check: bool) -> &'static str {
+    if invalidation_check {
+        "unverified"
+    } else {
+        "failed"
+    }
 }
 
 fn resolve_artifact_path(

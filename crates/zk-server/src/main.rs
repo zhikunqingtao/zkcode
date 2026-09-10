@@ -11,9 +11,11 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use tokio_util::sync::CancellationToken;
 use zk_db::Db;
 
 use zk_server::config::Config;
+use zk_server::logging::{LogWriterConfig, SecureRollingMakeWriter};
 use zk_server::metrics_recorder;
 use zk_server::python::{PythonSidecar, SidecarConfig};
 use zk_server::routes::build_router;
@@ -42,7 +44,10 @@ async fn main() {
         eprintln!("zk-server: invalid configuration: {err}");
         std::process::exit(1);
     });
-    init_tracing();
+    if let Err(error) = init_tracing(&config) {
+        eprintln!("zk-server: cannot initialize structured logging: {error}");
+        std::process::exit(1);
+    }
     // #65：旧用户目录 → `~/.zk/` 的一次性迁移，必须先于任何读取 `~/.zk/` 的
     // 初始化。刻意放在 `init_tracing` **之后**：迁移自身零配置依赖，而其降级
     // 路径只发 warn 日志——没有 subscriber 时这条告警会被丢弃，等于静默失败。
@@ -66,6 +71,17 @@ async fn main() {
         );
         std::process::exit(1);
     }
+    // One process owns a data directory at a time. SQLite itself supplies the
+    // advisory OS lock, so a crashed process releases it automatically and no
+    // stale PID-file heuristics are needed. Keep the connection alive for the
+    // entire server lifetime.
+    let _data_dir_lock = match acquire_data_dir_lock(&config.db_path) {
+        Ok(lock) => lock,
+        Err(err) => {
+            eprintln!("zk-server: data directory is already in use: {err}");
+            std::process::exit(1);
+        }
+    };
     let db = match Db::open(&config.db_path) {
         Ok(db) => db,
         Err(err) => {
@@ -94,14 +110,56 @@ async fn main() {
         eprintln!("zk-server: LLM credential startup migration failed");
         std::process::exit(1);
     }
-    match state.db.interrupt_active_tasks().await {
-        Ok(count) if count > 0 => {
-            tracing::warn!(count, "marked tasks interrupted by process restart");
+    let startup_epoch = match state.db.begin_runtime_startup_epoch().await {
+        Ok(epoch) => epoch,
+        Err(error) => {
+            tracing::error!(%error, "failed to allocate durable runtime startup epoch");
+            eprintln!("zk-server: failed to allocate runtime startup epoch");
+            std::process::exit(1);
+        }
+    };
+    if let Err(error) = state.set_startup_epoch(startup_epoch) {
+        tracing::error!(
+            error,
+            startup_epoch,
+            "failed to install runtime startup epoch"
+        );
+        eprintln!("zk-server: failed to install runtime startup epoch");
+        std::process::exit(1);
+    }
+    match state.db.reconcile_runtime_after_restart().await {
+        Ok(report) if report.runs_interrupted > 0 => {
+            tracing::warn!(
+                tasks = report.tasks_needing_attention,
+                runs = report.runs_interrupted,
+                invocations = report.invocations_interrupted,
+                resources_unconfirmed = report.resources_unconfirmed,
+                llm_calls_failed = report.llm_calls_failed,
+                budget_reservations_incomplete = report.budget_reservations_incomplete,
+                outbox_events = report.outbox_events,
+                "durable runtime reconciled after process restart"
+            );
         }
         Ok(_) => {}
         Err(error) => {
             tracing::error!(%error, "failed to reconcile durable tasks after restart");
+            eprintln!("zk-server: failed to reconcile durable tasks after restart");
+            std::process::exit(1);
         }
+    }
+    // Automatic restart recovery remains fail-closed until a recovered parent
+    // execution can be atomically paired with every attached child. Resuming a
+    // child alone would leave its result unconsumed because reconciliation also
+    // interrupted the parent's in-process waiter.
+    if state.config.auto_resume_safe_tasks {
+        tracing::error!(
+            startup_epoch,
+            "automatic safe recovery is configured but parent-chain recovery is not executable"
+        );
+        eprintln!(
+            "zk-server: ZK_AUTO_RESUME_SAFE_TASKS is configured, but coherent parent-chain recovery is not executable"
+        );
+        std::process::exit(1);
     }
     match state.db.interrupt_active_swarms().await {
         Ok(count) if count > 0 => {
@@ -110,6 +168,8 @@ async fn main() {
         Ok(_) => {}
         Err(error) => {
             tracing::error!(%error, "failed to reconcile durable Swarms after restart");
+            eprintln!("zk-server: failed to reconcile durable Swarms after restart");
+            std::process::exit(1);
         }
     }
 
@@ -134,6 +194,19 @@ async fn main() {
     let skill_watcher = wire_skills(&state);
 
     let engine = zk_server::engine_bridge::wire_engine(&state);
+    let cron_scheduler = if state.config.cron_enabled {
+        if let Some(scheduler) = state.cron_scheduler() {
+            tracing::info!("Cron scheduler assembled from persistent TaskRuntime");
+            scheduler.spawn()
+        } else {
+            tracing::error!(
+                "Cron was configured but its Agent runtime is not executable; scheduler remains stopped"
+            );
+            None
+        }
+    } else {
+        None
+    };
     let coordinator_events = state.spawn_coordinator_event_bridge();
     let python_tasks = spawn_python_sidecar(&state, sidecar.clone());
     // Batch 4B：MCP 客户端管理器（旧 `McpClientManager` 的 `SmartLifecycle`，
@@ -146,34 +219,101 @@ async fn main() {
     let ws_cleanup = state.hub.clone().spawn_cleanup();
     // Batch 7b Step 7：Run 注册表周期清理（30min interval，滞留 run 回收）。
     let run_cleanup = engine.spawn_run_cleanup();
-    // Run 启动恢复必须先于交互配额对账——对账按 run_envelopes 终态集合清
-    // 孤儿 pending 交互，Run 先收敛账目才正确。
-    recover_stale_runs(&state.db).await;
+    let runtime_health_metrics = zk_server::runtime_health_metrics::spawn(state.db.clone());
     // 2.5：交互生命周期常驻任务——启动期容量对账（旧 `@PostConstruct
     // reconcileCapacityAfterRestart`）+ 1s 截止扫描（旧 `@Scheduled(fixedRate=1000)
     // expireDeadlines`）+ 250ms 未 ACK 重投（旧 `@Scheduled(fixedDelay=250)`）。
     let interaction_tasks =
         zk_server::ws::spawn_interaction_lifecycle(state.hub.clone(), &state.authz.interactions)
             .await;
+    let task_runtime = state.task_runtime();
+    let execution_supervisor = Arc::clone(&state.execution_supervisor);
     let app = build_router(state);
     let (listener, bind_addr) = bind_listener(&config).await;
     tracing::info!(addr = %bind_addr, "zk-server listening");
-    if let Err(err) = axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(shutdown_signal())
-    .await
-    {
-        eprintln!("zk-server: server error: {err}");
-        std::process::exit(1);
-    }
+    let http_shutdown = CancellationToken::new();
+    let http_shutdown_waiter = http_shutdown.clone();
+    let server = std::future::IntoFuture::into_future(
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move { http_shutdown_waiter.cancelled().await }),
+    );
+    tokio::pin!(server);
+    let mut completed_server_result = None;
+    let server_needs_drain = tokio::select! {
+        result = &mut server => {
+            completed_server_result = Some(result);
+            false
+        }
+        () = shutdown_signal() => true,
+    };
+
+    // Immediately close both execution intakes, durably record serviceRestart,
+    // and then signal Task/leaf cancellation. Do not first wait for an in-flight
+    // HTTP or MCP request, whose normal timeout can be several minutes.
+    let shutdown_phase = task_runtime
+        .begin_shutdown_with_supervisor(
+            execution_supervisor.as_ref(),
+            std::time::Duration::from_secs(10),
+        )
+        .await;
+    // Begin bounded HTTP drain only after no new execution can enter and the
+    // durable cancellation boundary has been attempted.
+    http_shutdown.cancel();
     ws_cleanup.abort();
     coordinator_events.abort();
+    runtime_health_metrics.abort();
+    if let Some(task) = cron_scheduler {
+        task.abort();
+    }
     run_cleanup.abort();
     skill_watcher.abort();
     for task in interaction_tasks {
         task.abort();
+    }
+    // Drain HTTP alongside both execution-owner domains. Reconciliation is
+    // owned by the consuming finish phase and therefore cannot run until Task
+    // drivers and physical leaf owners both reach this bounded boundary.
+    let runtime_drain =
+        task_runtime.finish_shutdown_with_supervisor(execution_supervisor.as_ref(), shutdown_phase);
+    let http_drain = async {
+        if server_needs_drain {
+            match tokio::time::timeout(std::time::Duration::from_secs(10), &mut server).await {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(error)) => Err(format!("HTTP_SERVER_ERROR: {error}")),
+                Err(_) => Err("HTTP_DRAIN_TIMEOUT: server exceeded 10 second grace".to_owned()),
+            }
+        } else {
+            match completed_server_result {
+                Some(Ok(())) => Ok(()),
+                Some(Err(error)) => Err(format!("HTTP_SERVER_ERROR: {error}")),
+                None => Err("HTTP_SERVER_RESULT_MISSING".to_owned()),
+            }
+        }
+    };
+    let (runtime_result, http_result) = tokio::join!(runtime_drain, http_drain);
+    match runtime_result {
+        Ok(report) => tracing::info!(
+            tasks_requested = report.tasks_requested,
+            runs_interrupted = report.runs_interrupted,
+            cleanup_unconfirmed = report.cleanup_unconfirmed,
+            local_owners_timed_out = report.local_owners_timed_out,
+            leaf_owners_requested = report.leaf_owners_requested,
+            leaf_owners_remaining = report.leaf_owners_remaining,
+            drained = report.drained,
+            "unified execution shutdown completed"
+        ),
+        Err(error) => tracing::error!(
+            code = %error.code,
+            message = %error.message,
+            leaf_owners_remaining = execution_supervisor.active_owner_count(),
+            "unified execution shutdown failed after best-effort drain"
+        ),
+    }
+    if let Err(error) = http_result {
+        tracing::error!(%error, "HTTP graceful shutdown did not complete cleanly");
     }
     for task in python_tasks {
         task.abort();
@@ -190,6 +330,33 @@ async fn main() {
         sidecar.stop().await;
     }
     tracing::info!("zk-server stopped");
+}
+
+/// Lifetime guard for the process-wide data-directory lease.
+struct DataDirLock {
+    _connection: rusqlite::Connection,
+}
+
+fn acquire_data_dir_lock(db_path: &std::path::Path) -> rusqlite::Result<Option<DataDirLock>> {
+    if db_path.as_os_str() == ":memory:" {
+        return Ok(None);
+    }
+    let parent = db_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let lock_path = parent.join(".zkcode-runtime-lock.sqlite3");
+    let connection = rusqlite::Connection::open(lock_path)?;
+    connection.busy_timeout(std::time::Duration::ZERO)?;
+    connection.execute_batch(
+        "PRAGMA locking_mode=EXCLUSIVE;\
+         BEGIN EXCLUSIVE;\
+         CREATE TABLE IF NOT EXISTS runtime_lock (singleton INTEGER PRIMARY KEY CHECK(singleton=1));\
+         INSERT OR IGNORE INTO runtime_lock(singleton) VALUES(1);",
+    )?;
+    Ok(Some(DataDirLock {
+        _connection: connection,
+    }))
 }
 
 /// 3B.7：技能磁盘来源装配 + 热重载。内置 14 技能已随 `AppState` 编译期就位，
@@ -332,31 +499,6 @@ fn spawn_mcp(
     vec![boot, manager.spawn_health_check_loop()]
 }
 
-/// Run 启动恢复（旧 `@PostConstruct interruptStaleRuns`，
-/// `RunControlService.java:321-327`）：把上次进程崩溃/重启滞留在非终态
-/// （`queued` / `running` / `waiting_interaction` / `cancelling`）的 Run
-/// 统一中断为 `interrupted` / `service_restart`。
-async fn recover_stale_runs(db: &Db) {
-    match db.interrupt_stale_runs().await {
-        Ok(ids) if ids.is_empty() => {}
-        // 旧源 L324/L326 的 warn + info 双日志（此处恢复为原子调用，统一在
-        // 完成后打点，count 语义一致）。
-        Ok(ids) => {
-            tracing::warn!(
-                count = ids.len(),
-                "recovering stale runs after service restart"
-            );
-            tracing::info!(
-                interrupted_count = ids.len(),
-                "stale run recovery completed"
-            );
-        }
-        // 处置与交互对账失败一致（`spawn_interaction_lifecycle` 内）：记错误
-        // 不阻断监听，滞留 Run 留待下次启动重试。
-        Err(error) => tracing::error!(error = %error, "stale run recovery failed"),
-    }
-}
-
 /// 绑定监听套接字：地址解析失败或端口占用一律退出进程（不静默换端口——
 /// macOS 本地 Beta 只接受由 [`Config`] 验证过的 loopback IP）。
 async fn bind_listener(config: &Config) -> (tokio::net::TcpListener, SocketAddr) {
@@ -377,8 +519,9 @@ async fn bind_listener(config: &Config) -> (tokio::net::TcpListener, SocketAddr)
     }
 }
 
-/// tracing 初始化：紧凑 JSON 结构化日志；过滤指令 `ZK_LOG` > `RUST_LOG` > `info`。
-fn init_tracing() {
+/// tracing 初始化：安全紧凑 JSON 同时写 stderr 与有界滚动文件；过滤指令
+/// `ZK_LOG` > `RUST_LOG` > `info`。
+fn init_tracing(config: &Config) -> Result<(), String> {
     use tracing_subscriber::EnvFilter;
     let directive = ["ZK_LOG", "RUST_LOG"]
         .iter()
@@ -386,11 +529,16 @@ fn init_tracing() {
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty());
     let filter = directive.map_or_else(|| EnvFilter::new("info"), EnvFilter::new);
+    let writer = SecureRollingMakeWriter::new(LogWriterConfig::production(&config.db_path))
+        .map_err(|error| error.to_string())?;
     tracing_subscriber::fmt()
         .json()
+        .with_ansi(false)
         .with_env_filter(filter)
         .with_target(false)
-        .init();
+        .with_writer(writer)
+        .try_init()
+        .map_err(|error| error.to_string())
 }
 
 /// 优雅关停信号（Ctrl-C；Unix 下含 SIGTERM，供 launchd 与本地脚本停止）。
@@ -444,4 +592,41 @@ fn build_provider_registry(config: &Config) -> zk_llm::ProviderRegistry {
         })
         .with_default_model(config.default_model.clone())
         .with_fallback_chain(zk_llm::config::fallback_chain_from_env())
+}
+
+#[cfg(test)]
+mod process_tests {
+    use super::acquire_data_dir_lock;
+
+    #[test]
+    fn data_directory_lock_is_exclusive_and_released_on_drop() {
+        let directory =
+            std::env::temp_dir().join(format!("zk-server-data-lock-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).expect("create lock fixture");
+        let db_path = directory.join("data.db");
+
+        let first = acquire_data_dir_lock(&db_path)
+            .expect("first lock")
+            .expect("file database uses a lock");
+        assert!(
+            acquire_data_dir_lock(&db_path).is_err(),
+            "a second process-equivalent connection must fail closed"
+        );
+        drop(first);
+        let reacquired = acquire_data_dir_lock(&db_path)
+            .expect("lock released with owner")
+            .expect("file database uses a lock");
+        drop(reacquired);
+
+        std::fs::remove_dir_all(directory).expect("remove lock fixture");
+    }
+
+    #[test]
+    fn in_memory_database_needs_no_directory_lock() {
+        assert!(
+            acquire_data_dir_lock(std::path::Path::new(":memory:"))
+                .expect("in-memory lock check")
+                .is_none()
+        );
+    }
 }

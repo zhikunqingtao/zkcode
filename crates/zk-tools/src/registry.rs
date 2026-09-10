@@ -16,16 +16,63 @@
 //! 读路径（`get` / `specs` / `names` / `len`）改为持读锁快照——`Arc<dyn Tool>`
 //! 克隆出锁，故不会把锁带进 `execute` 的 await 点。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
+use tokio_util::sync::CancellationToken;
 
 use crate::tool::{Tool, ToolSpec};
 
 /// 工具注册表（名字 → 工具实例；`BTreeMap` 保证 specs / names 输出稳定有序，
 /// 下发 LLM 的 tools 列表与未知工具引导文案跨次运行确定）。
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct ToolRegistry {
-    tools: RwLock<BTreeMap<String, Arc<dyn Tool>>>,
+    tools: Arc<RwLock<BTreeMap<String, Arc<dyn Tool>>>>,
+    generation: Arc<AtomicU64>,
+    revocations: Arc<RwLock<BTreeMap<String, CancellationToken>>>,
+    visibility: Option<Arc<ToolVisibility>>,
+}
+
+/// A live visibility policy evaluated against the currently registered tool
+/// instance. Unlike a frozen name snapshot, this also governs tools discovered
+/// after a child registry view was created (for example MCP/Python tools).
+type ToolVisibility = dyn Fn(&str, &dyn Tool) -> bool + Send + Sync;
+
+/// Atomic directory resolution used by the execution path.  The binding keeps
+/// the exact tool instance and both revocation generations observed while the
+/// registry read lock was held.
+#[derive(Clone)]
+pub struct ToolBinding {
+    tool: Arc<dyn Tool>,
+    directory_generation: u64,
+    connection_generation: Option<u64>,
+    revocation: CancellationToken,
+}
+
+impl ToolBinding {
+    /// Exact tool instance resolved from the directory.
+    #[must_use]
+    pub fn tool(&self) -> Arc<dyn Tool> {
+        Arc::clone(&self.tool)
+    }
+
+    /// Monotonic directory generation captured with the tool instance.
+    #[must_use]
+    pub const fn directory_generation(&self) -> u64 {
+        self.directory_generation
+    }
+
+    /// Reconnectable transport generation, if any.
+    #[must_use]
+    pub const fn connection_generation(&self) -> Option<u64> {
+        self.connection_generation
+    }
+
+    /// Token cancelled when this exact directory binding is replaced or removed.
+    #[must_use]
+    pub fn revocation_token(&self) -> CancellationToken {
+        self.revocation.clone()
+    }
 }
 
 impl ToolRegistry {
@@ -42,13 +89,12 @@ impl ToolRegistry {
     /// 注册表被共享**之前**跑，毒化不可能已发生，故直接取内值）。
     pub fn register(&mut self, tool: Arc<dyn Tool>) {
         let name = tool.name().to_owned();
-        let table = self
-            .tools
-            .get_mut()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut table = self.write_table();
         if table.insert(name.clone(), tool).is_some() {
             tracing::warn!(tool = %name, "duplicate tool registration overwrites previous");
         }
+        self.rotate_revocation(&name);
+        self.generation.fetch_add(1, Ordering::AcqRel);
     }
 
     /// 运行时注册工具（MCP 工具发现入口，对照 Java
@@ -58,9 +104,12 @@ impl ToolRegistry {
     /// `&self` 接收：调用方持的是 `Arc<ToolRegistry>`。
     pub fn register_dynamic(&self, tool: Arc<dyn Tool>) {
         let name = tool.name().to_owned();
-        if self.write_table().insert(name.clone(), tool).is_some() {
+        let mut table = self.write_table();
+        if table.insert(name.clone(), tool).is_some() {
             tracing::warn!(tool = %name, "duplicate tool registration overwrites previous");
         }
+        self.rotate_revocation(&name);
+        self.generation.fetch_add(1, Ordering::AcqRel);
     }
 
     /// Replace a runtime-derived tool snapshot without treating the expected
@@ -72,7 +121,10 @@ impl ToolRegistry {
     /// immutable catalog without emitting a warning on every capability poll.
     pub fn replace_dynamic(&self, tool: Arc<dyn Tool>) {
         let name = tool.name().to_owned();
-        self.write_table().insert(name, tool);
+        let mut table = self.write_table();
+        table.insert(name.clone(), tool);
+        self.rotate_revocation(&name);
+        self.generation.fetch_add(1, Ordering::AcqRel);
     }
 
     /// 按精确名字摘除一个工具，返回被摘除的实例。
@@ -81,8 +133,11 @@ impl ToolRegistry {
     /// 前缀误伤同族的原生工具。读侧拿到的旧 `Arc` 可安全完成已开始的调用，
     /// 新的 REST/LLM 目录快照则立即不再暴露该能力。
     pub fn unregister(&self, name: &str) -> Option<Arc<dyn Tool>> {
-        let removed = self.write_table().remove(name);
+        let mut table = self.write_table();
+        let removed = table.remove(name);
         if removed.is_some() {
+            self.revoke_name(name);
+            self.generation.fetch_add(1, Ordering::AcqRel);
             tracing::info!(tool = %name, "unregistered dynamic tool");
         }
         removed
@@ -100,8 +155,10 @@ impl ToolRegistry {
             .collect();
         for name in &doomed {
             table.remove(name);
+            self.revoke_name(name);
         }
         if !doomed.is_empty() {
+            self.generation.fetch_add(1, Ordering::AcqRel);
             tracing::info!(%prefix, removed = doomed.len(), "unregistered tools by prefix");
         }
         doomed.len()
@@ -110,31 +167,151 @@ impl ToolRegistry {
     /// 按名查找工具。
     #[must_use]
     pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
-        self.read_table().get(name).cloned()
+        self.resolve(name).map(|binding| binding.tool())
+    }
+
+    /// Resolve a name, exact instance and both generations as one read-locked
+    /// snapshot.  Callers must revalidate after asynchronous admission and
+    /// before starting side effects.
+    #[must_use]
+    pub fn resolve(&self, name: &str) -> Option<ToolBinding> {
+        let table = self.read_table();
+        let tool = table.get(name)?.clone();
+        if !self.is_visible(name, tool.as_ref()) {
+            return None;
+        }
+        let revocation = self
+            .revocations
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(name)?
+            .clone();
+        Some(ToolBinding {
+            connection_generation: tool.connection_generation(),
+            tool,
+            directory_generation: self.generation.load(Ordering::Acquire),
+            revocation,
+        })
+    }
+
+    /// Whether a previously resolved tool is still the currently authorized
+    /// instance in exactly the same directory and connection generation.
+    #[must_use]
+    pub fn is_binding_current(&self, binding: &ToolBinding) -> bool {
+        if !self.is_visible(binding.tool.name(), binding.tool.as_ref()) {
+            return false;
+        }
+        let table = self.read_table();
+        self.generation.load(Ordering::Acquire) == binding.directory_generation
+            && !binding.revocation.is_cancelled()
+            && table
+                .get(binding.tool.name())
+                .is_some_and(|current| Arc::ptr_eq(current, &binding.tool))
+            && binding
+                .connection_generation
+                .is_none_or(|generation| binding.tool.is_connection_generation_current(generation))
     }
 
     /// 导出全量规格（名字典序，供 LLM tools 参数）。
     #[must_use]
     pub fn specs(&self) -> Vec<ToolSpec> {
-        self.read_table().values().map(|tool| tool.spec()).collect()
+        self.read_table()
+            .iter()
+            .filter(|(name, tool)| self.is_visible(name, tool.as_ref()))
+            .map(|(_, tool)| tool.spec())
+            .collect()
     }
 
     /// 全量工具名（名字典序，供未知工具引导文案的可用工具列表）。
     #[must_use]
     pub fn names(&self) -> Vec<String> {
-        self.read_table().keys().cloned().collect()
+        self.read_table()
+            .iter()
+            .filter(|(name, tool)| self.is_visible(name, tool.as_ref()))
+            .map(|(name, _)| name.clone())
+            .collect()
     }
 
     /// 注册数量。
     #[must_use]
     pub fn len(&self) -> usize {
-        self.read_table().len()
+        self.names().len()
     }
 
     /// 是否为空。
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.read_table().is_empty()
+        self.names().is_empty()
+    }
+
+    /// Monotonic generation shared by every filtered view of this directory.
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    /// Create a live, read-only visibility view over the same directory. Dynamic
+    /// replacement and revocation are immediately observed; nested views intersect
+    /// their allowlists and can never widen authority.
+    #[must_use]
+    pub fn filtered(&self, names: BTreeSet<String>) -> Self {
+        let names = Arc::new(names);
+        self.filtered_by(move |name, _| names.contains(name))
+    }
+
+    /// Create a live, read-only policy view over this directory.
+    ///
+    /// The predicate is evaluated for every lookup/snapshot, so a matching tool
+    /// registered after view construction becomes visible immediately. Nested
+    /// views intersect predicates and therefore cannot widen their parent.
+    #[must_use]
+    pub fn filtered_by(
+        &self,
+        predicate: impl Fn(&str, &dyn Tool) -> bool + Send + Sync + 'static,
+    ) -> Self {
+        let predicate: Arc<ToolVisibility> = Arc::new(predicate);
+        let visibility = match self.visibility.as_ref() {
+            None => predicate,
+            Some(current) => {
+                let current = Arc::clone(current);
+                Arc::new(move |name: &str, tool: &dyn Tool| {
+                    current(name, tool) && predicate(name, tool)
+                }) as Arc<ToolVisibility>
+            }
+        };
+        Self {
+            tools: Arc::clone(&self.tools),
+            generation: Arc::clone(&self.generation),
+            revocations: Arc::clone(&self.revocations),
+            visibility: Some(visibility),
+        }
+    }
+
+    fn rotate_revocation(&self, name: &str) {
+        let mut revocations = self
+            .revocations
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(previous) = revocations.insert(name.to_owned(), CancellationToken::new()) {
+            previous.cancel();
+        }
+    }
+
+    fn revoke_name(&self, name: &str) {
+        if let Some(token) = self
+            .revocations
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(name)
+        {
+            token.cancel();
+        }
+    }
+
+    fn is_visible(&self, name: &str, tool: &dyn Tool) -> bool {
+        self.visibility
+            .as_ref()
+            .is_none_or(|visibility| visibility(name, tool))
     }
 
     /// 取读锁（毒化即清毒后续用——工具表只是句柄映射，持锁期不 panic 亦无
@@ -231,6 +408,22 @@ mod tests {
         assert_eq!(registry.get("Echo").expect("echo").description(), "second");
     }
 
+    #[test]
+    fn replacing_or_removing_a_binding_cancels_its_revocation_token() {
+        let registry = ToolRegistry::new();
+        registry.register_dynamic(stub("Echo", "first"));
+        let first = registry.resolve("Echo").expect("first binding");
+        assert!(!first.revocation_token().is_cancelled());
+
+        registry.replace_dynamic(stub("Echo", "second"));
+        assert!(first.revocation_token().is_cancelled());
+        let second = registry.resolve("Echo").expect("second binding");
+        assert!(!second.revocation_token().is_cancelled());
+
+        registry.unregister("Echo");
+        assert!(second.revocation_token().is_cancelled());
+    }
+
     /// 共享句柄上的运行时注册对全部读路径立即可见（MCP 工具发现的核心不变
     /// 式：REST 目录端点与引擎看到的是同一张表）。
     #[test]
@@ -241,6 +434,34 @@ mod tests {
         assert_eq!(reader.len(), 1);
         assert!(reader.get("mcp__weather__forecast").is_some());
         assert_eq!(reader.names(), vec!["mcp__weather__forecast"]);
+    }
+
+    #[test]
+    fn live_policy_view_admits_matching_tools_registered_after_creation() {
+        let registry = ToolRegistry::new();
+        let child = registry.filtered_by(|name, _| name.starts_with("safe__"));
+        assert!(child.is_empty());
+
+        registry.register_dynamic(stub("safe__late", "late safe tool"));
+        registry.register_dynamic(stub("unsafe__late", "late unsafe tool"));
+
+        assert_eq!(child.names(), vec!["safe__late"]);
+        assert!(child.get("safe__late").is_some());
+        assert!(child.get("unsafe__late").is_none());
+    }
+
+    #[test]
+    fn nested_live_policy_views_only_narrow_authority() {
+        let registry = ToolRegistry::new();
+        let broad = registry.filtered_by(|name, _| name.starts_with("safe__"));
+        let exact = broad.filtered(BTreeSet::from(["safe__one".to_owned()]));
+
+        registry.register_dynamic(stub("safe__one", "one"));
+        registry.register_dynamic(stub("safe__two", "two"));
+        registry.register_dynamic(stub("unsafe__one", "unsafe"));
+
+        assert_eq!(broad.names(), vec!["safe__one", "safe__two"]);
+        assert_eq!(exact.names(), vec!["safe__one"]);
     }
 
     /// 前缀摘除只清同前缀条目，且返回摘除条数（服务器下线的批量清理语义）。
@@ -286,5 +507,42 @@ mod tests {
         assert!(registry.get("Git").is_none());
         assert!(registry.get("GitStatus").is_some());
         assert!(registry.unregister("Git").is_none());
+    }
+
+    #[test]
+    fn filtered_views_are_live_and_never_widen_nested_authority() {
+        let mut registry = ToolRegistry::new();
+        registry.register(stub("Read", "read v1"));
+        registry.register(stub("Write", "write"));
+        let start_generation = registry.generation();
+        let view = registry.filtered(BTreeSet::from(["Read".to_owned()]));
+        assert_eq!(view.names(), vec!["Read"]);
+        assert!(view.get("Write").is_none());
+
+        registry.replace_dynamic(stub("Read", "read v2"));
+        assert!(view.generation() > start_generation);
+        assert_eq!(view.get("Read").expect("read").description(), "read v2");
+
+        let nested = view.filtered(BTreeSet::from(["Read".to_owned(), "Write".to_owned()]));
+        assert_eq!(nested.names(), vec!["Read"]);
+        registry.unregister("Read");
+        assert!(view.get("Read").is_none());
+        assert!(nested.is_empty());
+    }
+
+    #[test]
+    fn resolved_binding_is_invalidated_by_directory_replacement_or_removal() {
+        let registry = ToolRegistry::new();
+        registry.register_dynamic(stub("Echo", "v1"));
+        let first = registry.resolve("Echo").expect("first binding");
+        assert!(registry.is_binding_current(&first));
+
+        registry.replace_dynamic(stub("Echo", "v2"));
+        assert!(!registry.is_binding_current(&first));
+        let second = registry.resolve("Echo").expect("second binding");
+        assert!(registry.is_binding_current(&second));
+
+        registry.unregister("Echo");
+        assert!(!registry.is_binding_current(&second));
     }
 }

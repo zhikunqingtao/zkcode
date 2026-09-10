@@ -20,17 +20,119 @@
 mod common;
 
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 use std::{net::SocketAddr, str::FromStr};
 
 use axum::Router;
 use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum::http::{Method, Request, StatusCode, header};
-use common::{call, json_body, local_delete, local_get, local_patch, local_post, local_put};
+use common::{
+    call, json_body, local_delete, local_get, local_patch, local_post, local_put,
+    local_with_headers,
+};
+use futures::future::BoxFuture;
+use zk_db::{CasOutcome, CreateTaskWithRun, Db};
 use zk_server::config::Config;
+use zk_server::routes::build_router;
+use zk_server::state::AppState;
+use zk_tools::{ExecutionResourceTerminal, Tool, ToolContext, ToolOutput};
 
 /// temp 文件名去重计数器（同一进程内多用例并发）。
 static SEQ: AtomicU32 = AtomicU32::new(0);
+
+#[derive(Debug)]
+struct OwnedResourceFixture;
+
+impl Tool for OwnedResourceFixture {
+    fn name(&self) -> &'static str {
+        // Reuse a SAFE_INTERNAL catalog identity so DontAsk admission remains
+        // non-interactive while this fixture exercises resource ownership.
+        "Sleep"
+    }
+
+    fn description(&self) -> &'static str {
+        "register and release one deterministic supervised test resource"
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object", "properties": {}})
+    }
+
+    fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+        true
+    }
+
+    fn execute(
+        &self,
+        _input: serde_json::Value,
+        context: ToolContext,
+    ) -> BoxFuture<'_, ToolOutput> {
+        Box::pin(async move {
+            let lease = match context
+                .register_execution_resource(
+                    "stream",
+                    Some("reverse-mcp-fixture".to_owned()),
+                    serde_json::json!({"fixture": true}),
+                )
+                .await
+            {
+                Ok(Some(lease)) => lease,
+                Ok(None) => return ToolOutput::error("missing execution resource observer"),
+                Err(error) => return ToolOutput::error(error),
+            };
+            if let Err(error) = context
+                .finish_execution_resource(lease, ExecutionResourceTerminal::Released)
+                .await
+            {
+                return ToolOutput::error(error);
+            }
+            ToolOutput::ok("supervised reverse MCP resource")
+        })
+    }
+}
+
+#[derive(Debug)]
+struct CancellableFixture {
+    started: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+}
+
+impl Tool for CancellableFixture {
+    fn name(&self) -> &'static str {
+        "Sleep"
+    }
+
+    fn description(&self) -> &'static str {
+        "wait until the exact reverse MCP request is cancelled"
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object", "properties": {}})
+    }
+
+    fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+        true
+    }
+
+    fn execute(
+        &self,
+        _input: serde_json::Value,
+        context: ToolContext,
+    ) -> BoxFuture<'_, ToolOutput> {
+        let started = self
+            .started
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        Box::pin(async move {
+            if let Some(started) = started {
+                let _ = started.send(());
+            }
+            context.cancel.cancelled().await;
+            ToolOutput::error("cancelled by JSON-RPC request id")
+        })
+    }
+}
 
 /// 独立注册表落盘路径的测试应用。
 fn app_with_isolated_registry() -> Router {
@@ -474,6 +576,271 @@ async fn disabled_capability_cannot_be_invoked() {
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(json_body(&body)["code"], "MCP_CAPABILITY_DISABLED");
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn reverse_mcp_tool_call_uses_supervisor_and_persists_result_in_file_sqlite() {
+    let root = std::env::temp_dir().join(format!(
+        "zkcode-reverse-mcp-runtime-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).expect("isolated MCP workspace");
+    let db = Db::open(root.join("runtime.sqlite3")).expect("file SQLite final schema");
+    let mut config = Config::test_config();
+    config.db_path = root.join("runtime.sqlite3");
+    config.workspace_default_root = workspace.to_string_lossy().into_owned();
+    config.snapshot_dir = Some(root.join("snapshots"));
+    config.scratchpad_system_root = root.join("scratchpad");
+    config.mcp_registry_path = root.join("mcp-capabilities.json");
+    let state = AppState::new(db.clone(), config);
+    state
+        .tools()
+        .register_dynamic(Arc::new(OwnedResourceFixture));
+    let mut app = build_router(state.clone());
+
+    let session = db
+        .create_session("test-model", workspace.to_string_lossy().as_ref())
+        .await
+        .expect("root session");
+    db.create_project("reverse-mcp", workspace.to_string_lossy().as_ref())
+        .await
+        .expect("trusted workspace");
+    let task_id = uuid::Uuid::new_v4().to_string();
+    let run_id = uuid::Uuid::new_v4().to_string();
+    let created = db
+        .create_task_with_run(&CreateTaskWithRun {
+            task_id: task_id.clone(),
+            run_id: run_id.clone(),
+            root_session_id: session.id.clone(),
+            transcript_session_id: session.id.clone(),
+            parent_task_id: None,
+            parent_run_id: None,
+            creator_tool_use_id: None,
+            ordinal: 0,
+            description: "reverse MCP execution gateway".to_owned(),
+            prompt: None,
+            task_type: "agent".to_owned(),
+            model: "test-model".to_owned(),
+            working_dir: workspace.to_string_lossy().into_owned(),
+            execution_config_json: "{}".to_owned(),
+            startup_epoch: 1,
+        })
+        .await
+        .expect("durable task and run");
+    assert_eq!(
+        db.claim_task_run_cas(&task_id, &run_id, created.task.version)
+            .await
+            .expect("claim active run"),
+        CasOutcome::Applied
+    );
+
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 7,
+        "method": "tools/call",
+        "params": {
+            "name": "Sleep",
+            "arguments": {}
+        }
+    })
+    .to_string();
+    let (status, _, body) = call(
+        &mut app,
+        local_with_headers(
+            "/mcp",
+            Method::POST,
+            Some(request),
+            &[("x-session-id", &session.id), ("x-run-id", &run_id)],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let response = json_body(&body);
+    assert!(response.get("error").is_none(), "response: {response}");
+    assert_eq!(response["result"]["isError"], false);
+    let invocation_id = response["result"]["_meta"]["invocationId"]
+        .as_str()
+        .expect("invocation id")
+        .to_owned();
+    let message_id = response["result"]["_meta"]["messageId"]
+        .as_str()
+        .expect("message id")
+        .to_owned();
+    let output_sha256 = response["result"]["_meta"]["outputSha256"]
+        .as_str()
+        .expect("output hash")
+        .to_owned();
+    let expected_invocation = invocation_id.clone();
+    let expected_message = message_id.clone();
+    let persisted = db
+        .with_conn_blocking(move |connection| {
+            let invocation = connection.query_row(
+                "SELECT task_id,run_id,status,input_json,output_ref,side_effect_class,
+                        cleanup_status,directory_generation
+                   FROM tool_invocations WHERE invocation_id=?1",
+                rusqlite::params![expected_invocation],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, Option<i64>>(7)?,
+                    ))
+                },
+            )?;
+            let message = connection.query_row(
+                "SELECT origin,task_id,run_id,content_json FROM messages WHERE id=?1",
+                rusqlite::params![expected_message],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )?;
+            let resources: (i64, i64) = connection.query_row(
+                "SELECT COUNT(*),
+                        SUM(CASE WHEN status='released' THEN 1 ELSE 0 END)
+                   FROM execution_resources WHERE invocation_id=?1",
+                rusqlite::params![invocation_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            Ok((invocation, message, resources))
+        })
+        .expect("read reverse MCP durability facts");
+    assert_eq!(persisted.0.0, task_id);
+    assert_eq!(persisted.0.1, run_id);
+    assert_eq!(persisted.0.2, "succeeded");
+    assert_eq!(persisted.0.3, "{}");
+    assert_eq!(
+        persisted.0.4,
+        format!("message:{message_id}#sha256:{output_sha256}")
+    );
+    assert_eq!(persisted.0.5, "read");
+    assert_eq!(persisted.0.6, "confirmed");
+    assert!(persisted.0.7.is_some());
+    assert_eq!(persisted.1.0, "tool_result");
+    assert_eq!(persisted.1.1, task_id);
+    assert_eq!(persisted.1.2, run_id);
+    assert!(persisted.1.3.contains(&output_sha256));
+    assert!(
+        persisted.2.0 > 0,
+        "fixture must register a supervised physical resource"
+    );
+    assert_eq!(persisted.2.0, persisted.2.1, "all resources are released");
+
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    state.tools().register_dynamic(Arc::new(CancellableFixture {
+        started: Mutex::new(Some(started_tx)),
+    }));
+    let mut cancel_call_app = app.clone();
+    let cancel_session_id = session.id.clone();
+    let cancel_run_id = run_id.clone();
+    let mut in_flight_call = tokio::spawn(async move {
+        call(
+            &mut cancel_call_app,
+            local_with_headers(
+                "/mcp",
+                Method::POST,
+                Some(
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": 77,
+                        "method": "tools/call",
+                        "params": {"name": "Sleep", "arguments": {}}
+                    })
+                    .to_string(),
+                ),
+                &[
+                    ("x-session-id", &cancel_session_id),
+                    ("x-run-id", &cancel_run_id),
+                ],
+            ),
+        )
+        .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), started_rx)
+        .await
+        .expect("reverse MCP tool started")
+        .expect("start signal delivered");
+    let wrong_cancel = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/cancelled",
+        "params": {"requestId": 78, "reason": "wrong request"}
+    })
+    .to_string();
+    let (status, _, _) = call(
+        &mut app,
+        local_with_headers(
+            "/mcp",
+            Method::POST,
+            Some(wrong_cancel),
+            &[("x-session-id", &session.id), ("x-run-id", &run_id)],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(75), &mut in_flight_call,)
+            .await
+            .is_err(),
+        "a different request id must not cancel the tool"
+    );
+
+    let exact_cancel = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/cancelled",
+        "params": {"requestId": 77, "reason": "caller cancelled"}
+    })
+    .to_string();
+    let (status, _, _) = call(
+        &mut app,
+        local_with_headers(
+            "/mcp",
+            Method::POST,
+            Some(exact_cancel),
+            &[("x-session-id", &session.id), ("x-run-id", &run_id)],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let (status, _, body) = tokio::time::timeout(std::time::Duration::from_secs(2), in_flight_call)
+        .await
+        .expect("exact cancellation finishes request")
+        .expect("request task joins");
+    assert_eq!(status, StatusCode::OK);
+    let response = json_body(&body);
+    assert_eq!(response["error"]["code"], -32001);
+
+    let (interrupted, paired): (i64, i64) = db
+        .with_conn_blocking(move |connection| {
+            let interrupted = connection.query_row(
+                "SELECT COUNT(*) FROM tool_invocations
+                 WHERE run_id=?1 AND status='interrupted'",
+                rusqlite::params![run_id],
+                |row| row.get(0),
+            )?;
+            let paired = connection.query_row(
+                "SELECT COUNT(*) FROM messages
+                 WHERE run_id=?1 AND origin='tool_result'",
+                rusqlite::params![run_id],
+                |row| row.get(0),
+            )?;
+            Ok((interrupted, paired))
+        })
+        .expect("read cancelled invocation/result");
+    assert_eq!(interrupted, 1);
+    assert!(paired >= 2, "success and cancelled calls both have results");
+
+    std::fs::remove_dir_all(root).expect("remove isolated MCP workspace");
 }
 
 fn raw_mcp_request(

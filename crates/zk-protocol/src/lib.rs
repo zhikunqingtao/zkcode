@@ -49,7 +49,7 @@ pub mod model;
 pub mod server_message;
 
 pub use client_message::{Attachment, ClientMessage, Reference};
-pub use envelope::{ClientEnvelope, ServerEnvelope};
+pub use envelope::{ClientEnvelope, RuntimeEventContext, ServerEnvelope, WS_PROTOCOL_VERSION};
 pub use error::ProtocolError;
 pub use model::{ContentBlock, FlexEpoch, Message, Usage};
 pub use server_message::{

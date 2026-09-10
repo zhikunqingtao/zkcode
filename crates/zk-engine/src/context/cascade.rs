@@ -29,17 +29,24 @@ use std::sync::Arc;
 use zk_llm::{ChatMessage, Role};
 
 use super::compact::{
-    CompactResult, Summarizer, compact_messages, no_summarizer, reactive_compact,
-    should_auto_compact,
+    CompactResult, Summarizer, compact_messages, compact_messages_scoped, no_summarizer,
+    reactive_compact, should_auto_compact,
 };
 use super::{
     MICRO_COMPACT_PROTECTED_TAIL, TOOL_RESULT_BUDGET_RATIO, char_count, context_window_for,
     estimate_tokens, saturating_tokens, scale_tokens, token_char_ratio,
 };
+use crate::llm_summarizer::SummaryExecution;
 
 /// 熔断阈值：连续失败达此次数后停止尝试 `AutoCompact`（逐字对照旧
 /// `ContextCascade.MAX_CONSECUTIVE_FAILURES`）。
 pub const MAX_CONSECUTIVE_FAILURES: u32 = 3;
+
+/// L1 `MicroCompact` 与 L1.5 `ContextCollapse` 联合落地所需的最低真实净收益。
+///
+/// 低于该门槛时保留原消息，让候选在后续轮次继续累积；L0 单条超大工具结果
+/// 截断与 L2 `AutoCompact` 的压力阈值不受此门槛影响。
+pub const MIN_LIGHTWEIGHT_COMPACTION_SAVINGS_TOKENS: u32 = 1_024;
 
 /// 微压缩清除后的占位文案（逐字对照旧 `MicroCompactService.CLEARED_MESSAGE`）。
 pub const CLEARED_MESSAGE: &str = "[Old tool result content cleared]";
@@ -353,6 +360,19 @@ impl ContextCascade {
         model: &str,
         tracking: &AutoCompactTrackingState,
     ) -> CascadeResult {
+        self.execute_pre_api_cascade_scoped(messages, model, tracking, None)
+    }
+
+    /// Execute the pre-request cascade while binding any LLM compaction request
+    /// to the current durable Task/Run.
+    #[must_use]
+    pub fn execute_pre_api_cascade_scoped(
+        &self,
+        messages: Vec<ChatMessage>,
+        model: &str,
+        tracking: &AutoCompactTrackingState,
+        execution: Option<&SummaryExecution>,
+    ) -> CascadeResult {
         let context_window = context_window_for(model);
         let mut current = messages;
 
@@ -377,25 +397,42 @@ impl ContextCascade {
             0
         };
 
-        // ===== L1 MicroCompact：白名单旧工具结果清除 =====
+        // ===== L1 + L1.5：候选副本中联合执行，按完整消息净收益原子落地 =====
+        // MicroCompact 的占位符和 ContextCollapse 的标记都会占 token，因此不能
+        // 累加各层的理论释放量。只有完整候选相对 L0 输出真实节省至少 1024 token
+        // 才提交；否则保持 L0 输出不变，让同一批候选在后续轮次继续累积。
+        let lightweight_before = estimate_tokens(&current, model);
         let micro = micro_compact(&current, MICRO_COMPACT_PROTECTED_TAIL, model);
-        let micro_compact_executed = micro.tokens_freed > 0;
+        let collapse = progressive_collapse(&micro.messages);
+        let lightweight_after = estimate_tokens(&collapse.messages, model);
+        let lightweight_net_savings = lightweight_before.saturating_sub(lightweight_after);
+        let lightweight_applied =
+            lightweight_net_savings >= MIN_LIGHTWEIGHT_COMPACTION_SAVINGS_TOKENS;
+        let micro_compact_executed = lightweight_applied && micro.cleared_count > 0;
         let micro_compact_tokens_freed = if micro_compact_executed {
-            current = micro.messages;
             micro.tokens_freed
         } else {
             0
         };
-
-        // ===== L2 ContextCollapse：三级渐进折叠 =====
-        let collapse = progressive_collapse(&current);
-        let context_collapse_executed = collapse.collapsed_count > 0;
+        let context_collapse_executed = lightweight_applied && collapse.collapsed_count > 0;
         let context_collapse_chars_freed = if context_collapse_executed {
-            current = collapse.messages;
             collapse.estimated_chars_freed
         } else {
             0
         };
+        tracing::debug!(
+            before_tokens = lightweight_before,
+            candidate_after_tokens = lightweight_after,
+            net_savings_tokens = lightweight_net_savings,
+            minimum_savings_tokens = MIN_LIGHTWEIGHT_COMPACTION_SAVINGS_TOKENS,
+            micro_candidates = micro.cleared_count,
+            collapse_candidates = collapse.collapsed_count,
+            applied = lightweight_applied,
+            "L1/L1.5 lightweight compaction candidate evaluated"
+        );
+        if lightweight_applied {
+            current = collapse.messages;
+        }
 
         // ===== L3 AutoCompact：含 Collapse 互斥协调 =====
         let outcome = self.evaluate_auto_compact(
@@ -404,6 +441,7 @@ impl ContextCascade {
             context_window,
             tracking,
             context_collapse_executed,
+            execution,
         );
 
         let final_tokens = estimate_tokens(&current, model);
@@ -448,6 +486,7 @@ impl ContextCascade {
         context_window: u32,
         tracking: &AutoCompactTrackingState,
         collapse_executed: bool,
+        execution: Option<&SummaryExecution>,
     ) -> AutoCompactOutcome {
         // 分支结构照搬旧实现（含两支在「同时低于阈值且熔断打开」时给出不同
         // 决策标签的差异）。
@@ -467,12 +506,13 @@ impl ContextCascade {
             }
         }
 
-        match compact_messages(
+        match compact_messages_scoped(
             current,
             model,
             context_window,
             false,
             self.summarizer.as_ref(),
+            execution,
         ) {
             Ok(result) => {
                 current.clear();
@@ -649,7 +689,6 @@ pub fn micro_compact(
 ) -> MicroCompactResult {
     let compactable = collect_compactable_tool_ids(messages);
     let boundary = messages.len().saturating_sub(protected_tail);
-    let mut tokens_freed = 0_u32;
     let mut cleared_count = 0_usize;
     let mut result = Vec::with_capacity(messages.len());
 
@@ -662,7 +701,6 @@ pub fn micro_compact(
                 .as_ref()
                 .is_some_and(|id| compactable.contains(id.as_str()));
         if clearable {
-            tokens_freed = tokens_freed.saturating_add(string_tokens(&message.content, model));
             cleared_count += 1;
             let mut next = message.clone();
             CLEARED_MESSAGE.clone_into(&mut next.content);
@@ -672,6 +710,22 @@ pub fn micro_compact(
         }
     }
 
+    let before_tokens = estimate_tokens(messages, model);
+    let after_tokens = estimate_tokens(&result, model);
+    let tokens_freed = before_tokens.saturating_sub(after_tokens);
+    if cleared_count > 0 && tokens_freed == 0 {
+        tracing::debug!(
+            cleared_count,
+            before_tokens,
+            candidate_after_tokens = after_tokens,
+            "L1 MicroCompact candidate rejected because it has no net token savings"
+        );
+        return MicroCompactResult {
+            messages: messages.to_vec(),
+            tokens_freed: 0,
+            cleared_count: 0,
+        };
+    }
     if tokens_freed > 0 {
         tracing::debug!(
             cleared_count,
@@ -697,12 +751,6 @@ fn collect_compactable_tool_ids(messages: &[ChatMessage]) -> std::collections::H
         }
     }
     ids
-}
-
-/// 单串 token 估算（旧 `TokenCounter.estimateTokens(String)`）。
-fn string_tokens(text: &str, model: &str) -> u32 {
-    let chars = char_count(text);
-    saturating_tokens(super::as_f64(chars) / token_char_ratio(model))
 }
 
 /// 前 `count` 个字符。
@@ -891,8 +939,9 @@ fn collapse_relevant_chars(message: &ChatMessage) -> u64 {
 mod tests {
     use super::{
         AutoCompactDecision, AutoCompactTrackingState, CLEARED_MESSAGE, CascadeLevel,
-        CollapseLevel, ContextCascade, MAX_CONSECUTIVE_FAILURES, micro_compact,
-        progressive_collapse, snip_if_needed, snip_tool_results, tool_result_budget_chars,
+        CollapseLevel, ContextCascade, MAX_CONSECUTIVE_FAILURES,
+        MIN_LIGHTWEIGHT_COMPACTION_SAVINGS_TOKENS, micro_compact, progressive_collapse,
+        snip_if_needed, snip_tool_results, tool_result_budget_chars,
     };
     use zk_llm::{ChatMessage, Role, ToolCallRequest};
 
@@ -904,6 +953,34 @@ mod tests {
             name: name.to_owned(),
             arguments: "{}".to_owned(),
         }
+    }
+
+    fn compactable_history(contents: &[String]) -> Vec<ChatMessage> {
+        let mut messages = Vec::with_capacity(contents.len() * 2 + 10);
+        for (index, content) in contents.iter().enumerate() {
+            let id = format!("t{index}");
+            messages.push(ChatMessage::assistant_tool_calls(
+                "",
+                vec![call(&id, "Read")],
+            ));
+            messages.push(ChatMessage::tool(id, content.clone()));
+        }
+        for index in 0..10 {
+            messages.push(ChatMessage::user(format!("tail-{index}")));
+        }
+        messages
+    }
+
+    fn history_with_exact_micro_savings(target: u32) -> Vec<ChatMessage> {
+        let placeholder_chars = CLEARED_MESSAGE.chars().count();
+        let approximate = placeholder_chars + usize::try_from(target).expect("target fits") * 7 / 2;
+        for chars in approximate.saturating_sub(16)..=approximate + 16 {
+            let messages = compactable_history(&["x".repeat(chars)]);
+            if micro_compact(&messages, 10, MODEL).tokens_freed == target {
+                return messages;
+            }
+        }
+        panic!("unable to construct an exact {target}-token MicroCompact candidate");
     }
 
     #[test]
@@ -969,10 +1046,99 @@ mod tests {
         }
         let result = micro_compact(&messages, 10, MODEL);
         assert_eq!(result.cleared_count, 1);
-        assert!(result.tokens_freed > 0);
+        assert_eq!(
+            result.tokens_freed,
+            crate::context::estimate_tokens(&messages, MODEL)
+                - crate::context::estimate_tokens(&result.messages, MODEL)
+        );
         assert_eq!(result.messages[1].content, CLEARED_MESSAGE);
         // tool_call_id 结构保留。
         assert_eq!(result.messages[1].tool_call_id.as_deref(), Some("t1"));
+    }
+
+    #[test]
+    fn micro_compact_rejects_a_placeholder_that_does_not_reduce_tokens() {
+        let messages = compactable_history(&["tiny".to_owned()]);
+        let result = micro_compact(&messages, 10, MODEL);
+        assert_eq!(result.messages, messages);
+        assert_eq!(result.cleared_count, 0);
+        assert_eq!(result.tokens_freed, 0);
+    }
+
+    #[test]
+    fn lightweight_compaction_enforces_the_exact_net_savings_floor() {
+        let cascade = ContextCascade::new();
+        let below = history_with_exact_micro_savings(MIN_LIGHTWEIGHT_COMPACTION_SAVINGS_TOKENS - 1);
+        let below_result = cascade.execute_pre_api_cascade(
+            below.clone(),
+            MODEL,
+            &AutoCompactTrackingState::initial(),
+        );
+        assert_eq!(below_result.messages, below);
+        assert!(!below_result.micro_compact_executed);
+        assert_eq!(below_result.total_tokens_freed(), 0);
+
+        let at_floor = history_with_exact_micro_savings(MIN_LIGHTWEIGHT_COMPACTION_SAVINGS_TOKENS);
+        let at_floor_result =
+            cascade.execute_pre_api_cascade(at_floor, MODEL, &AutoCompactTrackingState::initial());
+        assert!(at_floor_result.micro_compact_executed);
+        assert_eq!(
+            at_floor_result.total_tokens_freed(),
+            MIN_LIGHTWEIGHT_COMPACTION_SAVINGS_TOKENS
+        );
+        assert_eq!(at_floor_result.messages[1].content, CLEARED_MESSAGE);
+    }
+
+    #[test]
+    fn lightweight_candidates_accumulate_until_the_batch_is_worthwhile() {
+        let cascade = ContextCascade::new();
+        let one = compactable_history(&["x".repeat(2_200)]);
+        let one_result = cascade.execute_pre_api_cascade(
+            one.clone(),
+            MODEL,
+            &AutoCompactTrackingState::initial(),
+        );
+        assert_eq!(one_result.messages, one);
+        assert!(!one_result.micro_compact_executed);
+
+        let two = compactable_history(&["x".repeat(2_200), "y".repeat(2_200)]);
+        let candidate = micro_compact(&two, 10, MODEL);
+        assert!(
+            candidate.tokens_freed >= MIN_LIGHTWEIGHT_COMPACTION_SAVINGS_TOKENS,
+            "test fixture must cross the batch floor: {}",
+            candidate.tokens_freed
+        );
+        let two_result =
+            cascade.execute_pre_api_cascade(two, MODEL, &AutoCompactTrackingState::initial());
+        assert!(two_result.micro_compact_executed);
+        assert_eq!(two_result.messages[1].content, CLEARED_MESSAGE);
+        assert_eq!(two_result.messages[3].content, CLEARED_MESSAGE);
+    }
+
+    #[test]
+    fn context_collapse_candidates_share_the_same_batch_floor() {
+        let cascade = ContextCascade::new();
+        let mut below = vec![ChatMessage::assistant("x".repeat(2_000))];
+        below.extend((0..10).map(|index| ChatMessage::assistant(format!("tail-{index}"))));
+        let below_result = cascade.execute_pre_api_cascade(
+            below.clone(),
+            MODEL,
+            &AutoCompactTrackingState::initial(),
+        );
+        assert_eq!(below_result.messages, below);
+        assert!(!below_result.context_collapse_executed);
+
+        let mut accumulated = vec![ChatMessage::assistant("x".repeat(2_000)); 3];
+        accumulated.extend((0..10).map(|index| ChatMessage::assistant(format!("tail-{index}"))));
+        let accumulated_result = cascade.execute_pre_api_cascade(
+            accumulated,
+            MODEL,
+            &AutoCompactTrackingState::initial(),
+        );
+        assert!(accumulated_result.context_collapse_executed);
+        assert!(
+            accumulated_result.total_tokens_freed() >= MIN_LIGHTWEIGHT_COMPACTION_SAVINGS_TOKENS
+        );
     }
 
     #[test]

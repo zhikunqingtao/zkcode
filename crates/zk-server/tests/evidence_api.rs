@@ -7,6 +7,7 @@ use base64::Engine as _;
 use common::{call, json_body, local_with_headers};
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // One authorization fixture covers metadata, blobs, and isolation.
 async fn evidence_bundle_and_blob_round_trip_with_session_authorization() {
     let (mut app, db) = common::app_with_db();
     let workspace = std::env::temp_dir().join(format!("zkcode-evidence-{}", uuid::Uuid::new_v4()));
@@ -51,6 +52,8 @@ async fn evidence_bundle_and_blob_round_trip_with_session_authorization() {
     let created = json_body(&bytes);
     let bundle_id = created["bundleId"].as_str().expect("bundle id");
     let digest = created["items"][0]["blobSha256"].as_str().expect("digest");
+    assert_eq!(created["origin"], "modelAssertion");
+    assert_eq!(created["verdict"], "pending");
     assert_eq!(created["items"][1]["blobSha256"], digest);
     assert_eq!(digest.len(), 64);
     assert!(
@@ -59,6 +62,21 @@ async fn evidence_bundle_and_blob_round_trip_with_session_authorization() {
             .expect("claim")
             .contains("supersecretvalue")
     );
+
+    let (status, _, bytes) = call(
+        &mut app,
+        local_with_headers(
+            &format!("/api/evidence/{bundle_id}/verify"),
+            Method::POST,
+            Some(serde_json::json!({"verdict": "verified"}).to_string()),
+            &[("X-Session-Id", &session.id)],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let reviewed = json_body(&bytes);
+    assert_eq!(reviewed["origin"], "human");
+    assert_eq!(reviewed["verdict"], "verified");
 
     let (status, _, bytes) = call(
         &mut app,
@@ -113,6 +131,44 @@ async fn evidence_bundle_and_blob_round_trip_with_session_authorization() {
     assert_eq!(json_body(&bytes)["code"], "EVIDENCE_BLOB_HASH_INVALID");
 
     std::fs::remove_dir_all(&workspace).expect("remove isolated test workspace");
+}
+
+#[tokio::test]
+async fn submitted_model_claim_cannot_forge_a_verified_verdict() {
+    let (mut app, db) = common::app_with_db();
+    let workspace =
+        std::env::temp_dir().join(format!("zkcode-evidence-claim-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    let session = db
+        .create_session("test-model", workspace.to_str().expect("utf8 path"))
+        .await
+        .expect("session");
+    let body = serde_json::json!({
+        "sessionId": session.id,
+        "kind": "model_report",
+        "claim": "I ran every check",
+        "verdict": "verified"
+    })
+    .to_string();
+    let (status, _, bytes) = call(
+        &mut app,
+        local_with_headers(
+            "/api/evidence",
+            Method::POST,
+            Some(body),
+            &[("X-Session-Id", &session.id)],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(json_body(&bytes)["code"], "MODEL_ASSERTION_CANNOT_VERIFY");
+    assert!(
+        db.find_evidence_by_session(&session.id)
+            .await
+            .expect("query")
+            .is_empty()
+    );
+    std::fs::remove_dir_all(&workspace).expect("remove workspace");
 }
 
 #[cfg(unix)]

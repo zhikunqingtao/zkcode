@@ -120,6 +120,9 @@ const Header: React.FC<{ bundle: EvidenceBundle }> = ({ bundle }) => (
                 <span className="px-1.5 py-0.5 text-[10px] rounded bg-gray-100 text-gray-600 uppercase">
                     {bundle.kind}
                 </span>
+                <span className="px-1.5 py-0.5 text-[10px] rounded bg-slate-100 text-slate-600">
+                    {bundle.origin === 'machine' ? 'Machine evidence' : bundle.origin === 'human' ? 'Human review' : 'Model assertion'}
+                </span>
             </div>
             <div className="text-xs text-gray-400 mt-0.5 font-mono truncate">
                 {shortId(bundle.bundleId)} · {formatTimestamp(bundle.createdAt)}
@@ -139,6 +142,9 @@ const VerdictBadge: React.FC<{ verdict: string }> = ({ verdict }) => {
     }
     if (v === 'inconclusive') {
         return <span className="px-2 py-0.5 text-xs rounded bg-amber-100 text-amber-700">Inconclusive</span>;
+    }
+    if (v === 'stale') {
+        return <span className="px-2 py-0.5 text-xs rounded bg-amber-100 text-amber-700">Stale</span>;
     }
     return <span className="px-2 py-0.5 text-xs rounded bg-blue-100 text-blue-700">{verdict || 'Unknown'}</span>;
 };

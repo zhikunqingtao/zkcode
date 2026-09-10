@@ -1,4 +1,4 @@
-//! `Write` 工具——全量写文件（建必要目录 + 写前快照）。
+//! `Write` 工具——带 Read-version CAS 的全量原子写文件。
 //!
 //! 对照旧 `tool/impl/FileWriteTool.java`（只读权威规格）：工具名 `Write`、
 //! 入参 `file_path` / `content`、全量覆盖写、缺失父目录自动创建、原子落盘
@@ -6,21 +6,20 @@
 //! 写前经 `FileHistoryService.trackAppliedEdit(…, "write")` 落一条
 //! `file_snapshots`（新建文件无旧内容 → 不产快照）。
 //!
-//! 差异（留痕 docs/compatibility.md §4）：旧实现另有「读后写」SHA-256
-//! 冲突检测（依赖会话级 `FileFreshnessService` 读取台账），台账属 2.5
-//! 权限/会话状态面，本阶段不实现；快照落库经 [`SnapshotSink`] 反转依赖，
-//! 未注入 sink 或 [`ToolContext::session_id`] 缺失时静默跳过（旧亦为
-//! best-effort，失败只告警不阻断写入）。
+//! 已存在目标必须由同一 Session 完整 Read，并以该物理读取的 SHA-256
+//! 作为 [`ExpectedOldState`]；新文件使用 `Absent`。快照落库经
+//! [`SnapshotSink`] 反转依赖，未注入 sink 时静默跳过。
 
 use std::sync::Arc;
 
 use futures::future::BoxFuture;
 use serde_json::json;
 
+use crate::atomic::{ExpectedOldState, WriteEffect, write_checked_authorized};
 use crate::file_state::{self, session_key};
 use crate::input::{failure, required_str, resolve_path};
 use crate::snapshot::{MAX_SNAPSHOT_BYTES, SnapshotRequest, SnapshotSink};
-use crate::tool::{Tool, ToolContext, ToolOutput};
+use crate::tool::{FileArtifactReceipt, Tool, ToolContext, ToolOutput};
 
 /// 快照 operation 列写入值（旧调用点逐字传 `"write"`）。
 const SNAPSHOT_OPERATION: &str = "write";
@@ -90,7 +89,8 @@ impl Tool for WriteFileTool {
 
     fn description(&self) -> &'static str {
         "Write a file to the local filesystem, overwriting it entirely. \
-         Parent directories are created when missing."
+         Parent directories are created when missing. Existing files require a complete Read \
+         in the same session and are replaced with a SHA-256 compare-and-swap."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -139,33 +139,78 @@ impl WriteFileTool {
         };
         let path = resolve_path(raw_path, &ctx);
         let display = path.display().to_string();
-        if path.is_dir() {
+        let metadata = match tokio::fs::symlink_metadata(&path).await {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return failure(
+                    "FILE_WRITE_SYMLINK_FORBIDDEN",
+                    format!("refusing to overwrite symbolic link: {display}"),
+                );
+            }
+            Ok(metadata) => Some(metadata),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return failure("FILE_WRITE_IO_FAILED", format!("{display}: {error}"));
+            }
+        };
+        if metadata.as_ref().is_some_and(std::fs::Metadata::is_dir) {
             return failure(
                 "FILE_WRITE_IO_FAILED",
                 format!("{display} is an existing directory"),
             );
         }
-        let previous = tokio::fs::read(&path)
-            .await
-            .ok()
-            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
-        let is_create = previous.is_none();
+        let is_create = metadata.is_none();
+        let session = session_key(ctx.session_id());
+        let (previous, expected) = if is_create {
+            (None, ExpectedOldState::Absent)
+        } else {
+            let store = file_state::global();
+            let Some(expected_hash) = store.read_hash(session, &display) else {
+                return failure(
+                    "FILE_READ_REQUIRED",
+                    "请先使用 Read 工具完整读取文件内容后再覆盖",
+                );
+            };
+            if store.is_stale(session, &display) {
+                return failure("FILE_READ_STATE_STALE", "文件已被外部修改，请重新 Read");
+            }
+            let previous = match tokio::fs::read(&path).await {
+                Ok(bytes) => Some(String::from_utf8_lossy(&bytes).into_owned()),
+                Err(error) => {
+                    return failure("FILE_WRITE_IO_FAILED", format!("{display}: {error}"));
+                }
+            };
+            (previous, ExpectedOldState::sha256(&expected_hash))
+        };
+
+        let outcome =
+            write_checked_authorized(&path, content, &expected, ctx.authorized_write_path()).await;
+        if !outcome.success {
+            let reason = outcome.error.as_deref().unwrap_or("ATOMIC_WRITE_FAILED");
+            let code = if reason.contains("CONFLICT") {
+                "FILE_VERSION_CONFLICT"
+            } else if outcome.effect == WriteEffect::Unknown {
+                "FILE_WRITE_EFFECT_UNKNOWN"
+            } else {
+                "FILE_WRITE_IO_FAILED"
+            };
+            return failure(code, format!("{display}: {reason}"));
+        }
         let snapshot = self.capture(&ctx, &display, previous.as_deref()).await;
-        if let Some(parent) = path.parent()
-            && let Err(error) = tokio::fs::create_dir_all(parent).await
-        {
-            return failure(
-                "FILE_WRITE_IO_FAILED",
-                format!("{}: {error}", parent.display()),
-            );
-        }
-        if let Err(error) = atomic_write(&path, content).await {
-            return failure("FILE_WRITE_IO_FAILED", format!("{display}: {error}"));
-        }
         // 已读台账失效（对照旧 post-commit `cache.markModified(filePath)`，
         // 位于 `trackAppliedEdit` 之后、返回之前）。
         file_state::global().mark_modified(session_key(ctx.session_id()), &display);
         let kind = if is_create { "create" } else { "update" };
+        let operation = if is_create { "created" } else { "modified" };
+        let artifact = FileArtifactReceipt::capture(
+            &path,
+            operation,
+            outcome.new_hash.as_deref(),
+            content.len(),
+        )
+        .await;
+        if artifact.is_none() {
+            tracing::error!(path = %path.display(), "applied Write could not produce an artifact receipt");
+        }
         let mut output = ToolOutput::ok(format!("{kind}: {display}"));
         output.metadata = Some(json!({
             "structuredResult": {
@@ -173,33 +218,12 @@ impl WriteFileTool {
                 "type": kind,
                 "bytesWritten": content.len(),
                 "snapshot": snapshot,
+                "sealedHash": outcome.new_hash,
+                "artifact": artifact,
             }
         }));
         output
     }
-}
-
-/// 原子落盘：同目录临时文件 + rename（对照旧 `Files.move(…,
-/// ATOMIC_MOVE)`；rename 失败回落直写，避免跨设备场景失败）。
-async fn atomic_write(path: &std::path::Path, content: &str) -> std::io::Result<()> {
-    let Some(parent) = path.parent() else {
-        return tokio::fs::write(path, content).await;
-    };
-    let name = path.file_name().map_or_else(
-        || std::ffi::OsString::from("zk-write"),
-        std::ffi::OsStr::to_os_string,
-    );
-    let mut temp_name = name;
-    temp_name.push(format!(".zk-tmp-{}", std::process::id()));
-    let temp = parent.join(temp_name);
-    tokio::fs::write(&temp, content).await?;
-    if tokio::fs::rename(&temp, path).await.is_ok() {
-        return Ok(());
-    }
-    // rename 失败（跨设备 / 权限等）→ 回落为直写，并清理残留临时文件。
-    let result = tokio::fs::write(path, content).await;
-    let _ = tokio::fs::remove_file(&temp).await;
-    result
 }
 
 #[cfg(test)]
@@ -210,6 +234,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::*;
+    use crate::file_read::ReadFileTool;
 
     /// 记录型快照出口（断言写前快照的请求形状）。
     #[derive(Default)]
@@ -237,11 +262,11 @@ mod tests {
     fn temp_dir(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("zk-write-{tag}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
-        dir
+        std::fs::canonicalize(dir).expect("canonical temp dir")
     }
 
     #[tokio::test]
-    async fn creates_file_and_missing_parents_without_snapshot() {
+    async fn creates_file_and_missing_parents_without_snapshot_and_emits_artifact_receipt() {
         let sink = Arc::new(RecordingSink::default());
         let tool = WriteFileTool::with_snapshot_sink(Arc::clone(&sink) as Arc<dyn SnapshotSink>);
         let path = temp_dir("create").join("nested/deep/a.txt");
@@ -249,12 +274,20 @@ mod tests {
         let output = tool
             .execute(
                 json!({ "file_path": path.to_str().expect("utf8"), "content": "hello" }),
-                ctx(),
+                ctx().with_authorized_write_path(&path),
             )
             .await;
         assert!(!output.is_error, "{}", output.content);
         assert!(output.content.starts_with("create: "));
         assert_eq!(std::fs::read_to_string(&path).expect("read"), "hello");
+        let receipt = output.file_artifact_receipt().expect("artifact receipt");
+        assert_eq!(receipt.operation, "created");
+        assert_eq!(receipt.file_size, 5);
+        assert_eq!(receipt.sealed_hash, crate::sha256_hex(b"hello"));
+        assert_eq!(
+            std::path::PathBuf::from(receipt.canonical_path),
+            std::fs::canonicalize(&path).expect("canonical path")
+        );
         assert!(
             sink.seen.lock().expect("lock").is_empty(),
             "new file must not produce a snapshot"
@@ -267,10 +300,14 @@ mod tests {
         let tool = WriteFileTool::with_snapshot_sink(Arc::clone(&sink) as Arc<dyn SnapshotSink>);
         let path = temp_dir("update").join("b.txt");
         std::fs::write(&path, "old body").expect("seed");
+        let read = ReadFileTool
+            .execute(json!({ "file_path": path.to_str().expect("utf8") }), ctx())
+            .await;
+        assert!(!read.is_error, "{}", read.content);
         let output = tool
             .execute(
                 json!({ "file_path": path.to_str().expect("utf8"), "content": "new body" }),
-                ctx(),
+                ctx().with_authorized_write_path(&path),
             )
             .await;
         assert!(output.content.starts_with("update: "));
@@ -316,7 +353,13 @@ mod tests {
         let path = temp_dir("no-session").join("c.txt");
         std::fs::write(&path, "old").expect("seed");
         let (tx, _rx) = mpsc::unbounded_channel();
-        let bare = ToolContext::new(CancellationToken::new(), tx);
+        let bare = ToolContext::new(CancellationToken::new(), tx).with_authorized_write_path(&path);
+        let read = ReadFileTool
+            .execute(json!({ "file_path": path.to_str().expect("utf8") }), bare)
+            .await;
+        assert!(!read.is_error, "{}", read.content);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let bare = ToolContext::new(CancellationToken::new(), tx).with_authorized_write_path(&path);
         let output = tool
             .execute(
                 json!({ "file_path": path.to_str().expect("utf8"), "content": "new" }),
@@ -325,5 +368,47 @@ mod tests {
             .await;
         assert!(!output.is_error);
         assert!(sink.seen.lock().expect("lock").is_empty());
+    }
+
+    #[tokio::test]
+    async fn existing_file_requires_complete_read_and_rejects_stale_hash() {
+        let tool = WriteFileTool::new();
+        let path = temp_dir("read-version").join("versioned.txt");
+        std::fs::write(&path, "first\n").expect("seed");
+        let input = json!({
+            "file_path": path.to_str().expect("utf8"),
+            "content": "replacement\n"
+        });
+
+        let unread = tool.execute(input.clone(), ctx()).await;
+        assert!(unread.is_error);
+        assert!(unread.content.starts_with("FILE_READ_REQUIRED:"));
+
+        let partial = ReadFileTool
+            .execute(
+                json!({ "file_path": path.to_str().expect("utf8"), "offset": 2 }),
+                ctx(),
+            )
+            .await;
+        assert!(!partial.is_error);
+        let partial_write = tool.execute(input.clone(), ctx()).await;
+        assert!(partial_write.content.starts_with("FILE_READ_REQUIRED:"));
+
+        let complete = ReadFileTool
+            .execute(json!({ "file_path": path.to_str().expect("utf8") }), ctx())
+            .await;
+        assert!(!complete.is_error);
+        std::fs::write(&path, "raced\n").expect("external mutation");
+        let raced = tool
+            .execute(input, ctx().with_authorized_write_path(&path))
+            .await;
+        assert!(raced.is_error);
+        assert!(
+            raced.content.starts_with("FILE_READ_STATE_STALE:")
+                || raced.content.starts_with("FILE_VERSION_CONFLICT:"),
+            "{}",
+            raced.content
+        );
+        assert_eq!(std::fs::read_to_string(path).expect("read"), "raced\n");
     }
 }

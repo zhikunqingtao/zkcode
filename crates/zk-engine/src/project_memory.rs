@@ -1,5 +1,4 @@
-//! 项目级记忆——项目根 `zhikun.md` / `zhikun.local.md` 的读写与提示段包裹
-//! （Batch 5 Step 3）。
+//! 旧版项目记忆文件兼容工具——项目根 `zhikun.md` / `zhikun.local.md` 的显式读写。
 //!
 //! 逐字对照旧 `service/ProjectMemoryService.java`（`loadMemory` / `writeMemory` /
 //! `hasMemory`）与 `prompt/SystemPromptBuilder.java` L1102-1107 的
@@ -7,9 +6,9 @@
 //!
 //! # 与 [`crate::memdir`] 的分工
 //!
-//! 本模块是系统提示 `memory` 段的**唯一**数据源（旧 `SystemPromptBuilder` L179-180
-//! 只调 `ProjectMemoryService.loadMemory`）；[`crate::memdir`] 的用户级
-//! `~/.zk/MEMORY.md` 不参与提示注入（理由见该模块文档）。
+//! 本模块保留旧文件格式的独立工具与测试，但不再接入生产系统提示。生产
+//! `memory` 段以 `SQLite` `memories` 表为唯一权威，由 `Engine::prepare_run` 按
+//! project scope 读取并实施上下文预算；文件不存在时不会作为隐式回退。
 //!
 //! # 安全边界（旧实现逐条保留）
 //!

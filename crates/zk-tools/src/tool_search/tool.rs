@@ -123,20 +123,35 @@ impl Tool for ToolSearchTool {
         true
     }
 
-    fn execute(&self, input: Value, _ctx: ToolContext) -> BoxFuture<'_, ToolOutput> {
+    fn execute(&self, input: Value, ctx: ToolContext) -> BoxFuture<'_, ToolOutput> {
         let catalog = Arc::clone(&self.catalog);
-        Box::pin(async move { run(&input, catalog.as_ref()) })
+        let scoped_catalog = ctx.tool_catalog().map(ToOwned::to_owned);
+        Box::pin(async move {
+            if let Some(entries) = scoped_catalog {
+                let entries: Vec<_> = entries
+                    .into_iter()
+                    .map(|spec| ToolDescriptor::new(spec.name, spec.description, spec.parameters))
+                    .collect();
+                run_entries(&input, &entries)
+            } else {
+                run(&input, catalog.as_ref())
+            }
+        })
     }
 }
 
 fn run(input: &Value, catalog: &dyn ToolCatalogPort) -> ToolOutput {
+    let entries = catalog.catalog();
+    run_entries(input, &entries)
+}
+
+fn run_entries(input: &Value, entries: &[ToolDescriptor]) -> ToolOutput {
     let query = match required_str(input, "query") {
         Ok(value) => value,
         Err(rejection) => return rejection,
     };
     let max_results = optional_usize(input, "max_results").unwrap_or(DEFAULT_MAX_RESULTS);
-    let entries = catalog.catalog();
-    let hits = search(&entries, query, max_results);
+    let hits = search(entries, query, max_results);
 
     if hits.is_empty() {
         return ToolOutput::ok(format!(
@@ -258,6 +273,23 @@ mod tests {
             )
             .await;
         assert!(output.content.contains("Found 1 tool(s)"));
+    }
+
+    #[tokio::test]
+    async fn invocation_scoped_catalog_hides_global_entries() {
+        let scoped = Arc::new(vec![crate::tool::ToolSpec {
+            name: "Read".to_owned(),
+            description: "读取文件内容".to_owned(),
+            parameters: json!({ "type": "object" }),
+        }]);
+        let output = tool()
+            .execute(
+                json!({ "query": "select:Read,NotebookEdit" }),
+                ctx().with_tool_catalog(scoped),
+            )
+            .await;
+        assert!(output.content.contains("**Read**"));
+        assert!(!output.content.contains("**NotebookEdit**"));
     }
 
     #[test]

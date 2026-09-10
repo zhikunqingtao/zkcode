@@ -160,6 +160,9 @@ chrono = { version = "0.4", default-features = false, features = [
     "std",
     "serde",
 ] }
+# Cron jobs store explicit IANA zones and must preserve DST behavior across
+# scheduler restarts; fixed offsets are not an acceptable substitute.
+chrono-tz = "0.10"
 
 [workspace.lints.rust]
 # unsafe 是硬红线：Phase 1 全部 crate 无 unsafe 需求；未来若确需（如 FFI），

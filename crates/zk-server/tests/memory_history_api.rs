@@ -1,7 +1,7 @@
 //! Batch 5 Step 6 集成测试——记忆域 5 端点（旧 `MemoryController`）与文件历史
 //! 域 3 端点（旧 `FileHistoryController`）的端到端契约。
 //!
-//! 覆盖点：记忆 CRUD 往返与 `PUT` 的 upsert 语义、`/all` 双源信封、
+//! 覆盖点：记忆 CRUD 往返与 `PUT` 的 upsert 语义、SQLite 唯一权威、
 //! 快照按 `messageId` 分组的单元素数组形状、`rewind` 恒 200 与真实文件恢复、
 //! `diff` 的必填参数守卫，以及两域同栈过 `access_guard`。
 
@@ -9,6 +9,13 @@ mod common;
 
 use axum::http::{Method, StatusCode};
 use std::path::{Path, PathBuf};
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
+use zk_db::MemoryTarget;
+use zk_server::config::Config;
+use zk_server::routes::build_router;
+use zk_server::state::AppState;
+use zk_tools::ToolContext;
 
 use common::{
     app_with_db, call, json_body, local_delete, local_get, local_post, local_put,
@@ -70,6 +77,7 @@ async fn memory_crud_round_trip() {
             "createdAt",
             "id",
             "keywords",
+            "projectPath",
             "scope",
             "source",
             "title",
@@ -77,8 +85,9 @@ async fn memory_crud_round_trip() {
         ]
     );
     assert_eq!(entries[0]["id"], id.as_str());
-    // 缺省兜底：INSERT 路径的 scope=global / source=USER。
-    assert_eq!(entries[0]["scope"], "global");
+    // 缺省作用域是当前项目；global 必须显式请求。
+    assert_eq!(entries[0]["scope"], "project");
+    assert!(entries[0]["projectPath"].as_str().is_some());
     assert_eq!(entries[0]["source"], "USER");
 
     // PUT 是逐条 upsert：命中已有 id 时改标题，不新增行。
@@ -136,7 +145,7 @@ async fn memory_put_inserts_when_id_absent() {
     let entries = listed["entries"].as_array().expect("entries");
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0]["id"], "mem-ghost");
-    assert_eq!(entries[0]["scope"], "global");
+    assert_eq!(entries[0]["scope"], "project");
 }
 
 /// 差异留痕 1：`PUT {}` 视作 0 条更新 → 200（旧实现为 NPE → 500）。
@@ -166,10 +175,9 @@ async fn memory_write_endpoints_reject_malformed_body() {
     }
 }
 
-/// `/all` 双源信封：`sqlite` 复用同一降序查询，`memoryMd` 为四键条目数组
-/// （`~/.zk/MEMORY.md` 缺失时为空数组，测试不写用户目录）。
+/// `/all` 只返回所选 `SQLite` scope，不再暴露 `MEMORY.md` 双源。
 #[tokio::test]
-async fn memory_all_merges_sqlite_and_memory_md() {
+async fn memory_all_is_sqlite_only() {
     let (mut router, _db) = app_with_db();
     call(
         &mut router,
@@ -180,31 +188,93 @@ async fn memory_all_merges_sqlite_and_memory_md() {
     let (status, _headers, body) = call(&mut router, local_get("/api/memory/all")).await;
     assert_eq!(status, StatusCode::OK);
     let all = json_body(&body);
-    let mut keys: Vec<&str> = all
-        .as_object()
-        .expect("object")
-        .keys()
-        .map(String::as_str)
-        .collect();
-    keys.sort_unstable();
-    assert_eq!(keys, vec!["memoryMd", "sqlite"]);
-    let sqlite = all["sqlite"].as_array().expect("sqlite array");
-    assert_eq!(sqlite.len(), 1);
-    assert_eq!(sqlite[0]["id"], "mem-a");
-    for item in all["memoryMd"].as_array().expect("memoryMd array") {
-        let mut item_keys: Vec<&str> = item
-            .as_object()
-            .expect("md entry object")
+    assert_eq!(
+        all.as_object()
+            .expect("object")
             .keys()
             .map(String::as_str)
-            .collect();
-        item_keys.sort_unstable();
-        assert_eq!(
-            item_keys,
-            vec!["category", "content", "source", "timestamp"],
-            "entry: {item}"
-        );
-    }
+            .collect::<Vec<_>>(),
+        ["entries"]
+    );
+    let entries = all["entries"].as_array().expect("entries array");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["id"], "mem-a");
+}
+
+/// Production composition proof: the `Memory` tool and HTTP API share the
+/// same real `SQLite` handle, default to the project, and hide global rows until
+/// the caller explicitly selects `global`.
+#[tokio::test]
+async fn memory_tool_and_api_share_scoped_sqlite_authority() {
+    let project = workspace("memory-sqlite-authority");
+    let mut config = Config::test_config();
+    config.workspace_default_root = project.to_string_lossy().into_owned();
+    let db = zk_db::Db::open_in_memory().expect("sqlite");
+    let state = AppState::new(db.clone(), config);
+    let memory = state.tools().get("Memory").expect("Memory tool registered");
+    let (progress, _progress_rx) = mpsc::unbounded_channel();
+    let ctx = ToolContext::new(CancellationToken::new(), progress).with_working_dir(&project);
+
+    let written = memory
+        .execute(
+            serde_json::json!({"action":"write", "content":"use cargo nextest"}),
+            ctx.clone(),
+        )
+        .await;
+    assert!(!written.is_error, "{}", written.content);
+    let project_rows = db
+        .list_memories(MemoryTarget::project(project.to_string_lossy()).unwrap())
+        .await
+        .expect("project rows");
+    assert_eq!(project_rows.len(), 1);
+    assert_eq!(project_rows[0].source, "TOOL");
+
+    let mut router = build_router(state);
+    let (status, _, _) = call(
+        &mut router,
+        local_post(
+            "/api/memory",
+            Some(
+                serde_json::json!({
+                    "id": "global-only",
+                    "category": "USER_PREFERENCE",
+                    "title": "global",
+                    "content": "global preference",
+                    "scope": "global"
+                })
+                .to_string(),
+            ),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(
+        db.list_memories(MemoryTarget::global())
+            .await
+            .expect("global rows")
+            .len(),
+        1
+    );
+
+    let (status, _, body) = call(&mut router, local_get("/api/memory")).await;
+    assert_eq!(status, StatusCode::OK);
+    let default_rows = json_body(&body);
+    assert_eq!(default_rows["entries"].as_array().unwrap().len(), 1);
+    assert_eq!(default_rows["entries"][0]["source"], "TOOL");
+
+    let (status, _, body) = call(&mut router, local_get("/api/memory?scope=global")).await;
+    assert_eq!(status, StatusCode::OK);
+    let global_rows = json_body(&body);
+    assert_eq!(global_rows["entries"].as_array().unwrap().len(), 1);
+    assert_eq!(global_rows["entries"][0]["id"], "global-only");
+
+    let read_back = memory
+        .execute(serde_json::json!({"action":"read"}), ctx)
+        .await;
+    assert!(!read_back.is_error);
+    assert!(read_back.content.contains("use cargo nextest"));
+    assert!(!read_back.content.contains("global preference"));
+    cleanup(&project);
 }
 
 /// 快照按 `messageId` 分组，每键恒单元素数组；`fileCount` 与 `trackedFiles`

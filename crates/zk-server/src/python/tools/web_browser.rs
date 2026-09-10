@@ -4,7 +4,7 @@
 //! Markdown 指引）、18 个 schema 字段、15 个 action 白名单、五条校验分支 +
 //! 超时上限检查、截图落盘特化路径、四条错误码与文案。
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,7 +12,8 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use futures::future::BoxFuture;
 use serde_json::json;
-use zk_tools::{Tool, ToolContext, ToolOutput};
+use zk_tools::atomic::{ExpectedOldState, write_checked_bytes_authorized};
+use zk_tools::{ChildToolAccess, Tool, ToolContext, ToolOutput};
 
 use super::{BROWSER_AUTOMATION, PythonEnvelope, allowed_list, failure, int_or, is_blank, opt_str};
 use crate::api::browser_replay::BrowserReplayStore;
@@ -218,6 +219,10 @@ impl Tool for WebBrowserTool {
         DESCRIPTION
     }
 
+    fn child_access(&self) -> ChildToolAccess {
+        ChildToolAccess::WriteGated
+    }
+
     fn parameters(&self) -> serde_json::Value {
         json!({
             "type": "object",
@@ -342,7 +347,8 @@ impl Tool for WebBrowserTool {
                     reported_size,
                     &session_id,
                     ctx.working_dir(),
-                );
+                )
+                .await;
             }
             if action == "snapshot-semantic"
                 && let Some(replay) = &self.replay
@@ -367,7 +373,7 @@ impl Tool for WebBrowserTool {
 /// 路径 `{workingDir}/screenshots/screenshot_{sessionId}_{millis}.png`；写入
 /// 走「同目录临时文件 + `rename`」的原子替换（旧 `AtomicFileWriter` 的等价
 /// 语义），失败按旧端分两档错误码。
-fn persist_screenshot(
+async fn persist_screenshot(
     base64_png: &str,
     reported_size: Option<i64>,
     session_id: &str,
@@ -389,50 +395,38 @@ fn persist_screenshot(
     };
     let filename = format!("screenshot_{session_id}_{}.png", now_millis());
     let filepath = working_dir.join("screenshots").join(filename);
-    match atomic_write(&filepath, &bytes) {
-        Ok(()) => {
-            let absolute = std::fs::canonicalize(&filepath).unwrap_or_else(|_| filepath.clone());
-            tracing::info!(
-                path = %filepath.display(),
-                bytes = bytes.len(),
-                "screenshot saved"
-            );
-            let mut output = ToolOutput::ok(format!(
-                "Screenshot saved to: {} (size: {} bytes)",
-                absolute.display(),
-                bytes.len()
-            ));
-            output.metadata = Some(json!({ "filePath": filepath.to_string_lossy() }));
-            output
-        }
-        Err(error) => failure(
+    let outcome = write_checked_bytes_authorized(
+        &filepath,
+        &bytes,
+        &ExpectedOldState::Absent,
+        Some(&filepath),
+    )
+    .await;
+    if outcome.success {
+        let absolute = std::fs::canonicalize(&filepath).unwrap_or_else(|_| filepath.clone());
+        tracing::info!(
+            path = %filepath.display(),
+            bytes = bytes.len(),
+            "screenshot saved"
+        );
+        let mut output = ToolOutput::ok(format!(
+            "Screenshot saved to: {} (size: {} bytes)",
+            absolute.display(),
+            bytes.len()
+        ));
+        output.metadata = Some(json!({ "filePath": filepath.to_string_lossy() }));
+        output
+    } else {
+        failure(
             "BROWSER_SCREENSHOT_WRITE_FAILED",
             format!(
                 "Failed to write screenshot to {}: {error}",
-                filepath.display()
+                filepath.display(),
+                error = outcome
+                    .error
+                    .unwrap_or_else(|| "atomic write failed".to_owned())
             ),
-        ),
-    }
-}
-
-/// 原子写：同目录 `.tmp` 落盘后 `rename` 顶替（同一文件系统内为原子操作）。
-fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let mut temp: PathBuf = path.to_path_buf();
-    let stem = path.file_name().map_or_else(
-        || "screenshot.png".to_owned(),
-        |n| n.to_string_lossy().into_owned(),
-    );
-    temp.set_file_name(format!(".{stem}.{}.tmp", std::process::id()));
-    std::fs::write(&temp, bytes)?;
-    match std::fs::rename(&temp, path) {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            std::fs::remove_file(&temp).ok();
-            Err(error)
-        }
+        )
     }
 }
 
@@ -673,13 +667,14 @@ mod tests {
     }
 
     /// 截图落盘：路径形状 / 输出文案 / metadata 对齐旧 :286-289。
-    #[test]
-    fn screenshot_persists_and_reports_absolute_path() {
+    #[tokio::test]
+    async fn screenshot_persists_and_reports_absolute_path() {
         let dir = std::env::temp_dir().join(format!("zk-shot-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp working dir");
         let png = BASE64_STANDARD.encode(b"\x89PNG\r\n\x1a\nfake");
 
-        let out = persist_screenshot(&png, Some(13), "sess-1", &dir);
+        let canonical_dir = std::fs::canonicalize(&dir).expect("canonical temp working dir");
+        let out = persist_screenshot(&png, Some(13), "sess-1", &canonical_dir).await;
         assert!(!out.is_error, "unexpected failure: {}", out.content);
         assert!(out.content.starts_with("Screenshot saved to: "));
         assert!(out.content.ends_with(" bytes)"));
@@ -708,10 +703,10 @@ mod tests {
     }
 
     /// base64 非法 → `PERSIST_FAILED`（旧 :290-294 的 `RuntimeException` 分支）。
-    #[test]
-    fn invalid_base64_reports_persist_failure() {
+    #[tokio::test]
+    async fn invalid_base64_reports_persist_failure() {
         let dir = std::env::temp_dir().join(format!("zk-shot-bad-{}", std::process::id()));
-        let out = persist_screenshot("!!!not-base64!!!", Some(42), "s", &dir);
+        let out = persist_screenshot("!!!not-base64!!!", Some(42), "s", &dir).await;
         assert!(out.is_error);
         assert!(
             out.content

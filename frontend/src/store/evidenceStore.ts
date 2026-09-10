@@ -27,6 +27,11 @@ export interface EvidenceBundle {
     /** "journey" | "qa" | "visual" | "repro" | ... */
     kind: string;
     claim: string | null;
+    /** Provenance of the verdict; model assertions cannot satisfy verification. */
+    origin: 'machine' | 'modelAssertion' | 'human';
+    /** Durable physical tool invocation that produced the evidence, when present. */
+    producerInvocationId: string | null;
+    runId: string | null;
     /** "verified" | "failed" | "inconclusive" */
     verdict: string;
     items: EvidenceItem[];

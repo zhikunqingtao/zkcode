@@ -32,6 +32,7 @@ pub mod workflow;
 pub mod workflow_engine;
 
 pub use event_bus::{CoordinatorEvent, CoordinatorEventBus};
+pub use prompt::build_coordinator_prompt;
 pub use service::{COORDINATOR_MODE_ENV, CoordinatorService, SwarmPhase};
 pub use team::{
     AgentRequest, AgentResult, InProcessBackend, MAX_WORKERS_PER_TEAM, SwarmResults, SwarmService,

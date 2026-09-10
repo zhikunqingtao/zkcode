@@ -67,6 +67,7 @@ use crate::api::skill;
 use crate::api::speech;
 use crate::api::swarm;
 use crate::api::system;
+use crate::api::task_diagnostic;
 use crate::api::tool;
 use crate::api::verify;
 use crate::api::workbench;
@@ -198,6 +199,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/runs/{runId}", get(run::get_run))
         .route("/api/runs/{runId}/events", get(run::get_events))
         .route("/api/runs/{runId}/cancel", post(run::cancel_run))
+        // ── TaskRuntime 只读取证诊断（正文列不会进入 DB 投影）──
+        .route(
+            "/api/tasks/{taskId}/diagnostic",
+            get(task_diagnostic::get_task_diagnostic),
+        )
         // ── Evidence 域（WP-06；统一 SQLite + workspace blob store）──
         .route("/api/evidence", post(evidence::create_evidence))
         .route("/api/evidence/{bundleId}", get(evidence::get_evidence))

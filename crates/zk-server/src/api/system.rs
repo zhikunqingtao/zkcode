@@ -43,15 +43,32 @@ pub(crate) async fn health(State(state): State<AppState>) -> Json<serde_json::Va
     // `allHealthy` 会让未装 Python 的部署整体 DEGRADED/503，与降级判据冲突。
     let overall = if db_ok { "UP" } else { "DOWN" };
     let db_status = if db_ok { "UP" } else { "DOWN" };
+    let agent_assembled = state.agent_runtime().is_some();
+    let tools = state.tools();
+    let execution_runtime_ready = execution_runtime_ready(&state);
+    let agent_executable =
+        execution_runtime_ready && agent_assembled && tools.get("Agent").is_some();
     Json(json!({
         "status": overall,
         "service": "zk-server",
         "version": env!("CARGO_PKG_VERSION"),
+        "build": {
+            "gitSha": crate::BUILD_GIT_SHA,
+            "builtAtUnixSeconds": crate::BUILD_UNIX_SECONDS,
+            "schemaVersion": crate::DB_SCHEMA_VERSION,
+            "protocolVersion": zk_protocol::WS_PROTOCOL_VERSION,
+        },
         "uptime": uptime_secs,
         "subsystems": {
             "database": {
                 "status": db_status,
                 "message": "SQLite embedded database available",
+                "schema": {
+                    "version": zk_db::GREENFIELD_SCHEMA_VERSION,
+                    "kind": zk_db::GREENFIELD_SCHEMA_KIND,
+                    "migrationMode": zk_db::DATABASE_MIGRATION_MODE,
+                    "legacyWriteCompatibility": zk_db::LEGACY_WRITE_COMPATIBILITY,
+                },
             },
             "runtime": {
                 "status": "UP",
@@ -62,29 +79,60 @@ pub(crate) async fn health(State(state): State<AppState>) -> Json<serde_json::Va
         "capabilities": {
             "agent": capability_readiness(
                 state.config.agent_enabled,
+                agent_executable,
                 "WP-01 child context, admission, persistence, and recovery gates pass"
             ),
             "agentWrite": capability_readiness(
                 state.config.agent_enabled && state.config.agent_write_enabled,
+                agent_executable && state.config.agent_write_enabled,
                 "child Write/Edit/Bash admission and short Kimi safety gates pass"
+            ),
+            "sharedWorkspace": capability_readiness(
+                state.config.shared_workspace_enabled,
+                execution_runtime_ready && state.shared_workspace_executable(),
+                "Agent, child writes, the independent shared-workspace gate, and the production workspace lease are all ready"
+            ),
+            "autoResumeSafeTasks": capability_readiness(
+                state.config.auto_resume_safe_tasks,
+                state.safe_recovery_executable(),
+                "typed checkpoint proof plus atomic root-and-attached-child continuation must be assembled; child-only recovery is fail-closed"
             ),
             "worktree": capability_readiness(
                 state.config.worktree_enabled,
+                execution_runtime_ready && agent_assembled && tools.get("Worktree").is_some(),
                 "real Git worktree isolation gates pass"
             ),
             "swarm": capability_readiness(
                 state.config.swarm_enabled,
-                "WP-11 dispatch, cancellation, persistence, and event gates pass"
+                execution_runtime_ready && state.swarm_executable(),
+                "the legacy process-local coordinator is removed and TaskRuntime result, receipt, cancellation, budget, recovery, event, and verification gates pass"
+            ),
+            "cron": capability_readiness(
+                state.config.cron_enabled,
+                execution_runtime_ready && state.cron_executable(),
+                "persistent SQLite scheduler and unified TaskRuntime are both assembled"
             ),
         },
         "timestamp": format_rfc3339_micros(now_millis()),
     }))
 }
 
-fn capability_readiness(enabled: bool, enable_when: &str) -> serde_json::Value {
+/// Execution readiness is stricter than component assembly: a runtime built
+/// before the durable startup epoch exists, or one whose intake is draining,
+/// cannot truthfully accept Agent/Task work.
+fn execution_runtime_ready(state: &AppState) -> bool {
+    state.startup_epoch() > 0 && state.task_runtime.accepts_new_execution()
+}
+
+fn capability_readiness(
+    configured: bool,
+    executable: bool,
+    enable_when: &str,
+) -> serde_json::Value {
     json!({
-        "enabled": enabled,
-        "code": if enabled { "READY" } else { "FEATURE_NOT_READY" },
+        "configured": configured,
+        "executable": executable,
+        "code": if configured && executable { "READY" } else { "FEATURE_NOT_READY" },
         "enableWhen": enable_when,
     })
 }
@@ -163,7 +211,24 @@ pub(crate) async fn health_live() -> &'static str {
     )
 )]
 pub(crate) async fn health_ready(State(state): State<AppState>) -> (StatusCode, &'static str) {
-    if state.db.list_sessions(None, 1).await.is_ok() {
+    let db_ready = state.db.list_sessions(None, 1).await.is_ok();
+    let execution_ready = !state.config.agent_enabled
+        || (execution_runtime_ready(&state)
+            && state.agent_runtime().is_some()
+            && state.tools().get("Agent").is_some());
+    let cron_ready = !state.config.cron_enabled || state.cron_executable();
+    let shared_workspace_ready =
+        !state.config.shared_workspace_enabled || state.shared_workspace_executable();
+    let swarm_ready = !state.config.swarm_enabled || state.swarm_executable();
+    let auto_resume_ready =
+        !state.config.auto_resume_safe_tasks || state.safe_recovery_executable();
+    if db_ready
+        && execution_ready
+        && cron_ready
+        && shared_workspace_ready
+        && swarm_ready
+        && auto_resume_ready
+    {
         (StatusCode::OK, "READY")
     } else {
         (StatusCode::SERVICE_UNAVAILABLE, "NOT_READY")
@@ -292,6 +357,17 @@ mod tests {
         )
     }
 
+    async fn install_runtime_startup_epoch(state: &AppState) {
+        let epoch = state
+            .db
+            .begin_runtime_startup_epoch()
+            .await
+            .expect("allocate durable startup epoch");
+        state
+            .set_startup_epoch(epoch)
+            .expect("install runtime startup epoch");
+    }
+
     /// `Authorization: Bearer {token}` 单头。
     fn bearer(token: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();
@@ -304,6 +380,152 @@ mod tests {
 
     const LOOPBACK: &str = "127.0.0.1:51717";
     const LAN: &str = "192.168.1.5:51717";
+
+    #[tokio::test]
+    async fn agent_readiness_requires_startup_epoch_and_open_runtime_intake() {
+        let mut configured = crate::config::Config::test_config();
+        configured.agent_enabled = true;
+
+        let missing_epoch = AppState::new(
+            zk_db::Db::open_in_memory().expect("in-memory db boots"),
+            configured.clone(),
+        );
+        let body = health(State(missing_epoch.clone())).await;
+        assert_eq!(body.0["capabilities"]["agent"]["configured"], true);
+        assert_eq!(body.0["capabilities"]["agent"]["executable"], false);
+        assert_eq!(
+            health_ready(State(missing_epoch)).await.0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+
+        let ready = AppState::new(
+            zk_db::Db::open_in_memory().expect("in-memory db boots"),
+            configured,
+        );
+        install_runtime_startup_epoch(&ready).await;
+        let body = health(State(ready.clone())).await;
+        assert_eq!(body.0["capabilities"]["agent"]["executable"], true);
+        assert_eq!(health_ready(State(ready.clone())).await.0, StatusCode::OK);
+
+        let report = ready
+            .task_runtime()
+            .shutdown(std::time::Duration::from_secs(1))
+            .await
+            .expect("empty runtime shuts down cleanly");
+        assert!(report.drained);
+        let body = health(State(ready.clone())).await;
+        assert_eq!(body.0["capabilities"]["agent"]["executable"], false);
+        assert_eq!(
+            health_ready(State(ready)).await.0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    #[tokio::test]
+    async fn cron_health_reports_configured_and_executable_independently() {
+        let mut unavailable = crate::config::Config::test_config();
+        unavailable.cron_enabled = true;
+        let unavailable = AppState::new(
+            zk_db::Db::open_in_memory().expect("in-memory db boots"),
+            unavailable,
+        );
+        let body = health(State(unavailable.clone())).await;
+        assert_eq!(body.0["capabilities"]["cron"]["configured"], true);
+        assert_eq!(body.0["capabilities"]["cron"]["executable"], false);
+        assert_eq!(
+            health_ready(State(unavailable)).await.0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+
+        let mut ready = crate::config::Config::test_config();
+        ready.agent_enabled = true;
+        ready.cron_enabled = true;
+        let ready = AppState::new(
+            zk_db::Db::open_in_memory().expect("in-memory db boots"),
+            ready,
+        );
+        install_runtime_startup_epoch(&ready).await;
+        let _scheduler = ready.cron_scheduler().expect("Cron scheduler assembled");
+        let body = health(State(ready.clone())).await;
+        assert_eq!(body.0["capabilities"]["cron"]["configured"], true);
+        assert_eq!(body.0["capabilities"]["cron"]["executable"], true);
+        assert_eq!(health_ready(State(ready)).await.0, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn shared_workspace_and_auto_resume_fail_closed_independently() {
+        let mut write_only = crate::config::Config::test_config();
+        write_only.agent_enabled = true;
+        write_only.agent_write_enabled = true;
+        let write_only = AppState::new(
+            zk_db::Db::open_in_memory().expect("in-memory db boots"),
+            write_only,
+        );
+        install_runtime_startup_epoch(&write_only).await;
+        let body = health(State(write_only.clone())).await;
+        assert_eq!(
+            body.0["capabilities"]["sharedWorkspace"]["configured"],
+            false
+        );
+        assert_eq!(
+            body.0["capabilities"]["sharedWorkspace"]["executable"],
+            false
+        );
+        assert_eq!(
+            body.0["capabilities"]["autoResumeSafeTasks"]["configured"],
+            false
+        );
+        assert_eq!(
+            body.0["capabilities"]["autoResumeSafeTasks"]["executable"],
+            false
+        );
+        assert_eq!(health_ready(State(write_only)).await.0, StatusCode::OK);
+
+        let mut shared = crate::config::Config::test_config();
+        shared.agent_enabled = true;
+        shared.agent_write_enabled = true;
+        shared.shared_workspace_enabled = true;
+        let shared = AppState::new(
+            zk_db::Db::open_in_memory().expect("in-memory db boots"),
+            shared,
+        );
+        install_runtime_startup_epoch(&shared).await;
+        let body = health(State(shared.clone())).await;
+        assert_eq!(
+            body.0["capabilities"]["sharedWorkspace"]["configured"],
+            true
+        );
+        assert_eq!(
+            body.0["capabilities"]["sharedWorkspace"]["executable"],
+            true
+        );
+        assert_eq!(health_ready(State(shared)).await.0, StatusCode::OK);
+
+        let mut unsupported_resume = crate::config::Config::test_config();
+        unsupported_resume.auto_resume_safe_tasks = true;
+        let unsupported_resume = AppState::new(
+            zk_db::Db::open_in_memory().expect("in-memory db boots"),
+            unsupported_resume,
+        );
+        let body = health(State(unsupported_resume.clone())).await;
+        assert_eq!(
+            body.0["capabilities"]["autoResumeSafeTasks"]["configured"],
+            true
+        );
+        assert!(
+            body.0["capabilities"]["autoResumeSafeTasks"]
+                .get("requested")
+                .is_none()
+        );
+        assert_eq!(
+            body.0["capabilities"]["autoResumeSafeTasks"]["executable"],
+            false
+        );
+        assert_eq!(
+            health_ready(State(unsupported_resume)).await.0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
 
     /// 非 `lan_token` 模式：无论来源恒 404（旧源先判模式后判来源）。
     #[tokio::test]

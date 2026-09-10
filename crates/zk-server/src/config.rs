@@ -15,6 +15,9 @@
 //! | `ZK_CORS_ALLOWED_ORIGINS` | 空 | 追加 CORS 白名单（逗号分隔，对齐旧 `CORS_ALLOWED_ORIGINS`） |
 //! | `ZK_LLM_BASE_URL` | `DashScope` 兼容模式端点 | `OpenAI` 兼容 provider 端点（S9；Moonshot/Kimi 填 `https://api.moonshot.cn/v1`） |
 //! | `ZK_LLM_API_KEY` | 空 | provider 密钥（S9；未配置时 chat 请求期回 `query_error`，密钥全路径脱敏不落日志） |
+//! | `ZK_ROOT_TASK_TOKEN_BUDGET` | 留空 | 可选的根 Task token 硬上限 |
+//! | `ZK_ROOT_TASK_COST_BUDGET_USD` | 留空 | 可选的根 Task 费用硬上限（精确到 9 位小数） |
+//! | `ZK_ROOT_TASK_DEADLINE_SECONDS` | `1800` | 根 Task wall-clock 硬截止时间 |
 //! | `ZK_LOG` / `RUST_LOG` | `info` | tracing env-filter |
 //! | `ZK_WORKSPACE_ALLOWED_ROOTS` | 空 | Projects 域 workspace 白名单根（逗号分隔绝对路径；空 = 不设限但受本地选择器守卫，2.1） |
 //! | `ZK_WORKSPACE_DEFAULT_ROOT` | 进程当前目录 | 目录浏览缺省起点（对齐旧 `app.workspace.default-root=user.dir`） |
@@ -26,8 +29,12 @@
 //! | `ZK_PYTHON_HEALTH_CHECK_INTERVAL_MS` | `30000` | 健康轮询间隔（对齐旧 `python.service.health-check-interval`） |
 //! | `ZK_SCRATCHPAD_SYSTEM_ROOT` | `{workspace_default_root}/.zk/scratchpad` | 服务端自有暂存区根（对齐旧 `zhikuncode.scratchpad.system-root`，2.5） |
 //! | `ZK_AGENT_ENABLED` | `true` | 已验收的生产子 Agent 总开关 |
-//! | `ZK_AGENT_WRITE_ENABLED` | `true` | 子 Agent 写工具开关，仍受统一 Admission 约束 |
-//! | `ZK_SWARM_ENABLED` | `true` | 已验收的生产 Coordinator/Swarm 开关 |
+//! | `ZHIKUN_COORDINATOR_MODE` | `0` | 进程级顶层 Coordinator 模式；仅接受 `0` / `1`，修改后需重启 |
+//! | `ZK_AGENT_WRITE_ENABLED` | `false` | 子 Agent 写工具安全门禁（显式开启） |
+//! | `ZK_SHARED_WORKSPACE_ENABLED` | `false` | sharedWorkspace 独立安全门禁；还需 Agent、写工具和生产 workspace lease 同时就绪 |
+//! | `ZK_AUTO_RESUME_SAFE_TASKS` | `false` | 安全自动恢复请求开关；恢复执行入口实现前保持关闭 |
+//! | `ZK_CRON_ENABLED` | `false` | 持久 Cron 调度与工具总开关；仅在 Agent runtime 真实装配后生效 |
+//! | `ZK_SWARM_ENABLED` | `false` | Coordinator/Swarm 验收门禁（显式开启） |
 //! | `ZK_WORKTREE_ENABLED` | `false` | Worktree 总开关；真实 Git 验收前恒保持关闭 |
 //!
 //! 非法值（端口非数字等）直接启动失败（fail fast、明确报错），不静默回退。
@@ -112,6 +119,9 @@ pub struct Config {
     pub llm_base_url: String,
     /// provider 密钥（`ApiKey` newtype——`Config` 派生 Debug 亦恒脱敏）。
     pub llm_api_key: zk_llm::ApiKey,
+    /// Production root execution policy. Token/cost ceilings are optional;
+    /// the finite deadline and durable usage accounting are always retained.
+    pub root_task_budget_policy: zk_engine::RootTaskBudgetPolicy,
     /// Projects 域 workspace 白名单根（canonical 目录；空 = 不设限，2.1）。
     pub workspace_allowed_roots: Vec<PathBuf>,
     /// 目录浏览缺省起点（旧 `defaultWorkspaceRoot`，默认进程当前目录）。
@@ -130,12 +140,24 @@ pub struct Config {
     pub python_health_check_interval: Duration,
     /// 子代理总开关。WP-13 真实 Kimi/持久化验收完成后默认开启。
     pub agent_enabled: bool,
-    /// 子代理写工具开关。默认开启但仍逐调用经过统一 Admission；显式关闭时
+    /// 进程级顶层 Coordinator 模式开关。启动期严格解析
+    /// `ZHIKUN_COORDINATOR_MODE=0|1`，默认关闭且运行时不可改写。
+    pub coordinator_mode_enabled: bool,
+    /// 子代理写工具开关。默认关闭；显式开启后仍逐调用经过统一 Admission；
     /// 不会把 Write/Edit/Bash 暴露进子代理工具规格。
     pub agent_write_enabled: bool,
+    /// sharedWorkspace 独立安全门禁。默认关闭；即使显式开启，也必须同时满足
+    /// Agent、写工具和进程级 workspace lease 均真实装配后才可执行。
+    pub shared_workspace_enabled: bool,
+    /// 安全自动恢复请求开关。当前版本没有恢复执行入口，故默认关闭且不会因
+    /// 配置为 true 就被健康接口宣称为可执行。
+    pub auto_resume_safe_tasks: bool,
+    /// 持久 Cron 能力总开关。默认关闭；即使开启，也只有在统一 Agent
+    /// `TaskRuntime` 真实装配后才注册工具并启动 scheduler。
+    pub cron_enabled: bool,
     /// Worktree 能力总开关。真实 Git 验收完成前必须保持关闭。
     pub worktree_enabled: bool,
-    /// Swarm 能力总开关。真实 Coordinator/Kimi/重启门禁完成后默认开启。
+    /// Swarm 能力总开关。默认关闭，完成 Coordinator/重启门禁后才可显式开启。
     pub swarm_enabled: bool,
     /// 特性标志表（旧 `FeatureFlagService` 单例 Bean 的等价物）。
     ///
@@ -186,6 +208,10 @@ impl Config {
     ///
     /// `ZK_PORT` 非法（非数字 / 越界）、`ZK_LOCAL_PICKER_ENABLED` 非布尔、
     /// `ZK_WORKSPACE_ALLOWED_ROOTS` 含不可用目录时返回 `Err`，进程应启动失败。
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the composition root validates and assembles each documented environment field"
+    )]
     pub fn from_env() -> Result<Self, String> {
         let port = match std::env::var("ZK_PORT") {
             Ok(raw) if raw.trim().is_empty() => DEFAULT_PORT,
@@ -198,6 +224,14 @@ impl Config {
         let host = env_or("ZK_HOST", DEFAULT_HOST);
         // flag 表先于其余字段装配：两个工具门控字段是它的投影，必须同源。
         let feature_flags = Arc::new(FeatureFlags::from_env());
+        let agent_enabled = parse_bool_env("ZK_AGENT_ENABLED", true)?;
+        let coordinator_mode_enabled =
+            parse_zero_one_env(zk_engine::coordinator::COORDINATOR_MODE_ENV)?;
+        validate_coordinator_configuration(
+            coordinator_mode_enabled,
+            feature_flags.is_enabled(feature_flags::COORDINATOR_MODE),
+            agent_enabled,
+        )?;
         let host_ip = host
             .parse::<std::net::IpAddr>()
             .map_err(|_| format!("invalid ZK_HOST value: {host:?} (expected IP address)"))?;
@@ -234,6 +268,14 @@ impl Config {
                 .collect(),
             llm_base_url: env_or("ZK_LLM_BASE_URL", zk_llm::DASHSCOPE_BASE_URL),
             llm_api_key: zk_llm::ApiKey::new(env_or("ZK_LLM_API_KEY", "")),
+            root_task_budget_policy: zk_engine::RootTaskBudgetPolicy {
+                token_limit: parse_optional_positive_i64_env("ZK_ROOT_TASK_TOKEN_BUDGET")?,
+                cost_limit_nanos_usd: parse_optional_usd_nanos_env("ZK_ROOT_TASK_COST_BUDGET_USD")?,
+                deadline: Duration::from_secs(parse_positive_u64_env(
+                    "ZK_ROOT_TASK_DEADLINE_SECONDS",
+                    zk_engine::DEFAULT_ROOT_DEADLINE.as_secs(),
+                )?),
+            },
             workspace_allowed_roots: parse_allowed_roots(
                 &std::env::var("ZK_WORKSPACE_ALLOWED_ROOTS").unwrap_or_default(),
             )?,
@@ -252,10 +294,14 @@ impl Config {
                 "ZK_PYTHON_HEALTH_CHECK_INTERVAL_MS",
                 DEFAULT_PYTHON_HEALTH_CHECK_INTERVAL_MS,
             )?),
-            agent_enabled: parse_bool_env("ZK_AGENT_ENABLED", true)?,
-            agent_write_enabled: parse_bool_env("ZK_AGENT_WRITE_ENABLED", true)?,
+            agent_enabled,
+            coordinator_mode_enabled,
+            agent_write_enabled: parse_bool_env("ZK_AGENT_WRITE_ENABLED", false)?,
+            shared_workspace_enabled: parse_bool_env("ZK_SHARED_WORKSPACE_ENABLED", false)?,
+            auto_resume_safe_tasks: parse_bool_env("ZK_AUTO_RESUME_SAFE_TASKS", false)?,
+            cron_enabled: parse_bool_env("ZK_CRON_ENABLED", false)?,
             worktree_enabled: parse_bool_env("ZK_WORKTREE_ENABLED", false)?,
-            swarm_enabled: parse_bool_env("ZK_SWARM_ENABLED", true)?,
+            swarm_enabled: parse_bool_env("ZK_SWARM_ENABLED", false)?,
             feature_web_browser_tool: feature_flags.is_enabled(feature_flags::WEB_BROWSER_TOOL),
             feature_git_enhanced_tool: feature_flags.is_enabled(feature_flags::GIT_ENHANCED_TOOL),
             feature_flags,
@@ -315,6 +361,7 @@ impl Config {
             extra_cors_origins: Vec::new(),
             llm_base_url: zk_llm::DASHSCOPE_BASE_URL.to_owned(),
             llm_api_key: zk_llm::ApiKey::new(""),
+            root_task_budget_policy: zk_engine::RootTaskBudgetPolicy::default(),
             workspace_allowed_roots: Vec::new(),
             workspace_default_root: default_root(),
             local_picker_enabled: false,
@@ -328,7 +375,11 @@ impl Config {
                 DEFAULT_PYTHON_HEALTH_CHECK_INTERVAL_MS,
             ),
             agent_enabled: false,
+            coordinator_mode_enabled: false,
             agent_write_enabled: false,
+            shared_workspace_enabled: false,
+            auto_resume_safe_tasks: false,
+            cron_enabled: false,
             worktree_enabled: false,
             swarm_enabled: false,
             // 测试装配不读环境变量：flag 取出厂默认（两个门控的出厂值皆为 `true`，
@@ -450,6 +501,23 @@ fn parse_zero_one(key: &str, raw: &str) -> Result<bool, String> {
     }
 }
 
+/// Coordinator is executable only when both startup switches are enabled and
+/// the production Agent runtime is present. Rejecting this combination during
+/// configuration assembly prevents a prompt-only coordinator from starting.
+fn validate_coordinator_configuration(
+    explicitly_enabled: bool,
+    feature_enabled: bool,
+    agent_enabled: bool,
+) -> Result<(), String> {
+    if explicitly_enabled && feature_enabled && !agent_enabled {
+        return Err(format!(
+            "{}=1 requires ZK_AGENT_ENABLED=true while the COORDINATOR_MODE feature flag is enabled",
+            zk_engine::coordinator::COORDINATOR_MODE_ENV
+        ));
+    }
+    Ok(())
+}
+
 /// 解析 u64 环境变量：缺省/空串取默认，非法值 fail-fast。
 fn parse_u64_env(key: &str, default: u64) -> Result<u64, String> {
     match std::env::var(key) {
@@ -462,6 +530,77 @@ fn parse_u64_env(key: &str, default: u64) -> Result<u64, String> {
     }
 }
 
+fn parse_positive_u64_env(key: &str, default: u64) -> Result<u64, String> {
+    let value = parse_u64_env(key, default)?;
+    if value == 0 {
+        return Err(format!("invalid {key} value: expected positive integer"));
+    }
+    Ok(value)
+}
+
+fn parse_optional_positive_i64_env(key: &str) -> Result<Option<i64>, String> {
+    let Some(raw) = std::env::var(key)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return Ok(None);
+    };
+    let value = raw
+        .trim()
+        .parse::<i64>()
+        .map_err(|_| format!("invalid {key} value: {raw:?} (expected positive integer)"))?;
+    if value <= 0 {
+        return Err(format!(
+            "invalid {key} value: {raw:?} (expected positive integer)"
+        ));
+    }
+    Ok(Some(value))
+}
+
+fn parse_optional_usd_nanos_env(key: &str) -> Result<Option<i64>, String> {
+    let Some(raw) = std::env::var(key)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return Ok(None);
+    };
+    parse_usd_nanos(key, raw.trim()).map(Some)
+}
+
+fn parse_usd_nanos(key: &str, raw: &str) -> Result<i64, String> {
+    let invalid = || {
+        format!(
+            "invalid {key} value: {raw:?} (expected positive USD with at most 9 decimal places)"
+        )
+    };
+    let (whole, fraction) = raw.split_once('.').map_or((raw, ""), |parts| parts);
+    if whole.is_empty()
+        || !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || fraction.len() > 9
+        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(invalid());
+    }
+    let dollars = whole.parse::<i64>().map_err(|_| invalid())?;
+    let fractional = if fraction.is_empty() {
+        0
+    } else {
+        let value = fraction.parse::<i64>().map_err(|_| invalid())?;
+        let scale = 10_i64
+            .checked_pow(u32::try_from(9_usize.saturating_sub(fraction.len())).unwrap_or(0))
+            .ok_or_else(invalid)?;
+        value.checked_mul(scale).ok_or_else(invalid)?
+    };
+    let nanos = dollars
+        .checked_mul(1_000_000_000)
+        .and_then(|value| value.checked_add(fractional))
+        .ok_or_else(invalid)?;
+    if nanos <= 0 {
+        return Err(invalid());
+    }
+    Ok(nanos)
+}
+
 /// 读环境变量，缺省或空串时取默认值。
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key)
@@ -472,7 +611,21 @@ fn env_or(key: &str, default: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_zero_one;
+    use super::{Config, parse_usd_nanos, parse_zero_one, validate_coordinator_configuration};
+
+    #[test]
+    fn cron_is_default_off_in_test_composition() {
+        assert!(!Config::test_config().cron_enabled);
+    }
+
+    #[test]
+    fn destructive_multi_agent_gates_are_default_off_in_test_composition() {
+        let config = Config::test_config();
+        assert!(!config.coordinator_mode_enabled);
+        assert!(!config.agent_write_enabled);
+        assert!(!config.shared_workspace_enabled);
+        assert!(!config.auto_resume_safe_tasks);
+    }
 
     #[test]
     fn demo_credential_opt_in_accepts_only_canonical_zero_or_one() {
@@ -484,5 +637,33 @@ mod tests {
                 "accepted {invalid:?}"
             );
         }
+    }
+
+    #[test]
+    fn coordinator_opt_in_accepts_only_canonical_zero_or_one() {
+        assert_eq!(parse_zero_one("ZHIKUN_COORDINATOR_MODE", "0"), Ok(false));
+        assert_eq!(parse_zero_one("ZHIKUN_COORDINATOR_MODE", "1"), Ok(true));
+        for invalid in ["", "true", "false", " 1", "1 ", "01", "2"] {
+            assert!(
+                parse_zero_one("ZHIKUN_COORDINATOR_MODE", invalid).is_err(),
+                "accepted {invalid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn effective_coordinator_requires_agent_runtime() {
+        assert!(validate_coordinator_configuration(true, true, false).is_err());
+        assert!(validate_coordinator_configuration(true, true, true).is_ok());
+        assert!(validate_coordinator_configuration(false, true, false).is_ok());
+        assert!(validate_coordinator_configuration(true, false, false).is_ok());
+    }
+
+    #[test]
+    fn root_cost_budget_uses_exact_nano_dollars() {
+        assert_eq!(parse_usd_nanos("COST", "4"), Ok(4_000_000_000));
+        assert_eq!(parse_usd_nanos("COST", "0.000000001"), Ok(1));
+        assert!(parse_usd_nanos("COST", "0").is_err());
+        assert!(parse_usd_nanos("COST", "1.0000000001").is_err());
     }
 }

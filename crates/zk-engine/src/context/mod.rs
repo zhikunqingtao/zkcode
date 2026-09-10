@@ -138,7 +138,7 @@ pub fn token_char_ratio(model: &str) -> f64 {
 /// 单条消息的等效字符数（逐条对照旧 `TokenCounter.estimateMessageChars`
 /// 对各 `ContentBlock` 的求和）。
 ///
-/// - 文本正文 → 字符数（旧 `TextBlock`）；
+/// - 文本正文与会被重新发送的 assistant reasoning → 字符数；
 /// - 每个 `tool_calls` 项 → 名称 + 入参 + 20（旧 `ToolUseBlock`）；
 /// - [`Role::Tool`] 消息 → 额外 +10（旧 `ToolResultBlock`）。
 ///
@@ -146,7 +146,8 @@ pub fn token_char_ratio(model: &str) -> f64 {
 /// UTF-16 码元数，二者在 BMP（含全部 CJK 常用字）一致。
 #[must_use]
 pub fn message_chars(message: &ChatMessage) -> u64 {
-    let mut chars = char_count(&message.content);
+    let mut chars = char_count(&message.content)
+        .saturating_add(message.thinking.as_deref().map_or(0, char_count));
     for call in &message.tool_calls {
         chars +=
             char_count(&call.name) + char_count(&call.arguments) + TOOL_USE_BLOCK_OVERHEAD_CHARS;
@@ -311,6 +312,13 @@ mod tests {
             }],
         );
         assert_eq!(message_chars(&assistant), 2 + 4 + 2 + 20);
+    }
+
+    #[test]
+    fn message_chars_includes_replayed_assistant_reasoning() {
+        let assistant =
+            ChatMessage::assistant("answer").with_thinking(Some("private reasoning".to_owned()));
+        assert_eq!(message_chars(&assistant), 6 + 17);
     }
 
     #[test]

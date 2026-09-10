@@ -74,7 +74,7 @@ async fn connect_bound(addr: SocketAddr, session_id: &str) -> WsStream {
             "sessionId": session_id,
             "bindRequestId": "br-mcp",
             "bindingEpoch": 1,
-            "protocolVersion": 3,
+            "protocolVersion": 4,
         }),
     )
     .await;
@@ -225,7 +225,7 @@ async fn unbound_connection_drops_mcp_operation() {
             "sessionId": session_id,
             "bindRequestId": "br-mcp-late",
             "bindingEpoch": 1,
-            "protocolVersion": 3,
+            "protocolVersion": 4,
         }),
     )
     .await;

@@ -96,7 +96,9 @@ pub async fn deliver_interaction(
     // 旧 L307：`pushInteractionView(findInteraction(id), "interaction_created")`
     //——claim 已改写代次与 ACK 截止，必须回查权威行再投。
     match service.find_by_id(&record.interaction_id).await {
-        Ok(Some(current)) => push_interaction_view(hub, &current, "interaction_created").await,
+        Ok(Some(current)) => {
+            push_interaction_view(hub, service.database(), &current, "interaction_created").await;
+        }
         Ok(None) => tracing::warn!(
             interaction_id = %record.interaction_id,
             "interaction row vanished before delivery"
@@ -112,6 +114,7 @@ pub async fn deliver_interaction(
 /// 旧 `pushInteractionView(request, type)`（L310-315）：视图不可投时只记告警。
 pub(crate) async fn push_interaction_view(
     hub: &WsHub,
+    db: &zk_db::Db,
     record: &InteractionRecord,
     event_type: &str,
 ) {
@@ -133,7 +136,8 @@ pub(crate) async fn push_interaction_view(
         "interaction_terminal" => ServerMessage::InteractionTerminal { view },
         _ => ServerMessage::InteractionUpdated { view },
     };
-    hub.push(&record.session_id, message).await;
+    hub.push_runtime_event(db, &record.session_id, &record.session_id, message)
+        .await;
 }
 
 /// 旧 `@Scheduled(fixedDelay = 250) redeliverUnacknowledgedInteractions()`

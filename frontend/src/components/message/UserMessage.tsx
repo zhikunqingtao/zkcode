@@ -16,6 +16,11 @@ interface UserMessageProps {
 }
 
 const UserMessage: React.FC<UserMessageProps> = ({ message }) => {
+    const visibleBlocks = message.content.filter(
+        block => block.type === 'text' || block.type === 'image',
+    );
+    // tool_result 是模型协议内部回执，不是人类发送的消息。
+    if (visibleBlocks.length === 0) return null;
     return (
         <div className="user-message flex gap-3 px-4 py-3">
             {/* Avatar */}
@@ -27,7 +32,7 @@ const UserMessage: React.FC<UserMessageProps> = ({ message }) => {
             <div className="flex-1 min-w-0">
                 <div className="text-xs text-[var(--text-secondary)] mb-1 font-medium">You</div>
                 <div className="text-sm text-[var(--text-primary)]">
-                    {message.content.map((block, i) => (
+                    {visibleBlocks.map((block, i) => (
                         <ContentBlockRenderer key={i} block={block} />
                     ))}
                 </div>

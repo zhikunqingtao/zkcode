@@ -161,10 +161,23 @@ pub(crate) async fn cancel_run(
         return Ok(StatusCode::NOT_FOUND.into_response());
     };
     if run.is_terminal() {
+        let task = state
+            .db
+            .find_runtime_task_by_id(&run.task_id)
+            .await?
+            .ok_or_else(ApiError::internal)?;
+        let cleanup_confirmed = matches!(task.cleanup_status.as_db(), "confirmed" | "notRequired");
+        let fully_cancelled = task.status == zk_db::TaskStatus::Cancelled && cleanup_confirmed;
         return Ok(Json(serde_json::json!({
             "runId": run_id,
+            // Preserve the pre-v4 REST field: terminal retries report the
+            // durable Run status. `alreadyTerminal` carries idempotency state.
             "status": run.status,
-            "cancelled": false,
+            "runStatus": run.status,
+            "taskStatus": task.status,
+            "cleanupStatus": task.cleanup_status,
+            "cancelRequested": false,
+            "cancelled": fully_cancelled,
             "alreadyTerminal": true
         }))
         .into_response());
@@ -178,10 +191,26 @@ pub(crate) async fn cancel_run(
             tracing::error!(%run_id, %error, "REST run cancellation failed");
             ApiError::internal()
         })?;
+    let durable_run = state
+        .db
+        .find_run_by_id(&run_id)
+        .await?
+        .ok_or_else(ApiError::internal)?;
+    let task = state
+        .db
+        .find_runtime_task_by_id(&durable_run.task_id)
+        .await?
+        .ok_or_else(ApiError::internal)?;
+    let cleanup_confirmed = matches!(task.cleanup_status.as_db(), "confirmed" | "notRequired");
+    let fully_cancelled = task.status == zk_db::TaskStatus::Cancelled && cleanup_confirmed;
     Ok(Json(serde_json::json!({
         "runId": run_id,
         "status": transition.as_str(),
-        "cancelled": transition == zk_db::run::TransitionResult::Applied,
+        "runStatus": durable_run.status,
+        "taskStatus": task.status,
+        "cleanupStatus": task.cleanup_status,
+        "cancelRequested": transition == zk_db::run::TransitionResult::Applied,
+        "cancelled": fully_cancelled,
         "alreadyTerminal": transition == zk_db::run::TransitionResult::AlreadyTerminal
     }))
     .into_response())

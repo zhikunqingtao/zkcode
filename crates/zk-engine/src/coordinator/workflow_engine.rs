@@ -129,7 +129,7 @@ impl CoordinatorWorkflowEngine {
     ///
     /// 对齐旧 `executeWorkflow(sessionId, objective)`。
     pub fn execute_workflow(&self, session_id: &str, objective: &str) -> Arc<CoordinatorWorkflow> {
-        let workflow_id = format!("wf-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        let workflow_id = uuid::Uuid::new_v4().to_string();
         let workflow = Arc::new(CoordinatorWorkflow::new(
             workflow_id.clone(),
             objective.to_owned(),
@@ -470,6 +470,12 @@ mod tests {
     fn execute_and_advance_workflow() {
         let engine = CoordinatorWorkflowEngine::new();
         let wf = engine.execute_workflow("session-1", "Build a feature");
+        assert_eq!(
+            uuid::Uuid::parse_str(wf.workflow_id())
+                .expect("workflow id must be a full UUID v4")
+                .get_version_num(),
+            4
+        );
         assert_eq!(wf.status(), super::super::workflow::WorkflowStatus::Running);
         assert_eq!(wf.get_current_phase().map(|p| p.name()), Some("Research"));
 

@@ -1,8 +1,8 @@
-//! Run 终止协调器（旧 `run/RunTerminationCoordinator.java`，115 行）。
+//! Run 取消协调器（旧 `run/RunTerminationCoordinator.java`，115 行）。
 //!
-//! 旧源类文档：*“The only coordinator allowed to move an active Run through
-//! cancellation to a terminal state.”*——把活动 Run 经 `cancelling` 推向终态的
-//! **唯一**入口。旧源以 `@EventListener onTerminationRequested` 订阅
+//! 这个服务端适配器不是第二个生命周期写者：它先把取消请求交给进程唯一
+//! [`TaskRuntime`]，再关闭该 Run 的待决交互。执行所有者负责确认资源清理，并以
+//! Task + Run + `TaskResult` 单事务提交终态。旧源以 `@EventListener onTerminationRequested` 订阅
 //! `RunTerminationRequestedEvent`，而该事件全仓只有两个发布点，都在
 //! `DurableInteractionService`：
 //!
@@ -22,14 +22,14 @@
 //! | [`RunTerminationCoordinator::terminate`] | `terminate(runId, reason, detail)` L40-75 |
 //! | [`RunTerminationCoordinator::cancel_by_user`] | `cancelByUser(runId, detail)` L37-39 |
 //! | `impl RunTerminationRequest for ...` | `@EventListener onTerminationRequested` L78-81 |
-//! | [`assemble`] | Spring 容器对 `DurableInteractionService` ↔ `RunTerminationCoordinator` 的循环装配 |
+//! | [`assemble_with_runtime`] | Spring 容器对 `DurableInteractionService` ↔ `RunTerminationCoordinator` 的循环装配 |
 //!
 //! # 环的处理
 //!
 //! 旧源两者互不直接引用：服务往事件总线 `publishEvent`，协调器从总线收，
 //! 循环由 Spring 的事件总线天然打断。Rust 侧协调器是服务的构造入参，服务又是
-//! 协调器的回调目标，故 [`assemble`] 用 [`Arc::new_cyclic`] 在服务构造完成前
-//! 就把 [`Weak`] 句柄交给协调器——**服务只能经 [`assemble`] 存在**，因此不存在
+//! 协调器的回调目标，故 [`assemble_with_runtime`] 用 [`Arc::new_cyclic`] 在服务构造完成前
+//! 就把 [`Weak`] 句柄交给协调器——**生产服务只能经该函数存在**，因此不存在
 //! 「端口未接线」的中间状态（对比 [`crate::authz::WsInteractionPublisher`] 的
 //! `OnceLock` + `bind` 方案：那里的 publisher 可以独立于服务先建）。
 //!
@@ -59,6 +59,7 @@ use std::sync::{Arc, Weak};
 
 use zk_authz::model::{AuthzError, AuthzResult};
 use zk_db::Db;
+use zk_engine::{RunCancellationPort, TaskRuntime};
 
 use crate::interaction::service::{InteractionPublisher, RunTerminationRequest};
 use crate::interaction::{DurableInteractionService, TransitionResult, runs};
@@ -76,16 +77,20 @@ use crate::interaction::{DurableInteractionService, TransitionResult, runs};
 /// 故句柄必已写入。此处不做静默兜底（造第二个协调器实例会偏离旧源的单 Bean
 /// 语义），宁可让契约被破坏时立刻炸出。
 #[must_use]
-pub fn assemble(
+pub fn assemble_with_runtime(
     db: Db,
     publisher: Arc<dyn InteractionPublisher>,
+    task_runtime: &Arc<TaskRuntime>,
 ) -> (
     Arc<DurableInteractionService>,
     Arc<RunTerminationCoordinator>,
 ) {
     let mut handle = None;
     let interactions = Arc::new_cyclic(|weak| {
-        let coordinator = Arc::new(RunTerminationCoordinator::new(db.clone(), weak.clone()));
+        let coordinator = Arc::new(RunTerminationCoordinator::new(
+            task_runtime.clone(),
+            weak.clone(),
+        ));
         handle = Some(Arc::clone(&coordinator));
         DurableInteractionService::new(db, publisher, coordinator)
     });
@@ -93,11 +98,40 @@ pub fn assemble(
     (interactions, coordinator)
 }
 
-/// 把活动 Run 经 `cancelling` 推向终态的唯一协调器（旧
-/// `RunTerminationCoordinator`）。
-pub struct RunTerminationCoordinator {
-    /// Run 生命周期 SQL 的唯一权威（旧注入的 `RunControlService runs`）。
+#[cfg(test)]
+#[derive(Debug)]
+struct NoopTaskMessageSink;
+
+#[cfg(test)]
+impl zk_engine::MessageSink for NoopTaskMessageSink {
+    fn push<'a>(
+        &'a self,
+        _session_id: &'a str,
+        _message: zk_protocol::ServerMessage,
+    ) -> futures::future::BoxFuture<'a, ()> {
+        Box::pin(async {})
+    }
+}
+
+/// Test-only composition helper for interaction fixtures that do not own an
+/// application-wide runtime. Production must call [`assemble_with_runtime`].
+#[must_use]
+#[cfg(test)]
+pub fn assemble(
     db: Db,
+    publisher: Arc<dyn InteractionPublisher>,
+) -> (
+    Arc<DurableInteractionService>,
+    Arc<RunTerminationCoordinator>,
+) {
+    let runtime = Arc::new(TaskRuntime::new(db.clone(), Arc::new(NoopTaskMessageSink)));
+    assemble_with_runtime(db, publisher, &runtime)
+}
+
+/// 把活动 Run 的取消请求收敛到唯一 [`TaskRuntime`] 的服务端协调器。
+pub struct RunTerminationCoordinator {
+    /// Process-wide Task/Run lifecycle and cancellation-token authority.
+    task_runtime: Arc<TaskRuntime>,
     /// 交互权威回指（旧注入的 `DurableInteractionService interactions`）。
     ///
     /// [`Weak`] 而非 [`Arc`]：协调器由服务持有，反向持强引用即成环泄漏。
@@ -113,10 +147,14 @@ impl std::fmt::Debug for RunTerminationCoordinator {
 }
 
 impl RunTerminationCoordinator {
-    /// 装配（仅 [`assemble`] 调用——`interactions` 须是同一 [`Arc`] 的弱句柄）。
+    /// 装配（仅 [`assemble_with_runtime`] 调用——`interactions` 须是同一
+    /// [`Arc`] 的弱句柄）。
     #[must_use]
-    fn new(db: Db, interactions: Weak<DurableInteractionService>) -> Self {
-        Self { db, interactions }
+    fn new(task_runtime: Arc<TaskRuntime>, interactions: Weak<DurableInteractionService>) -> Self {
+        Self {
+            task_runtime,
+            interactions,
+        }
     }
 
     /// 旧 `cancelByUser(runId, detail)`（L37-39）。
@@ -132,27 +170,19 @@ impl RunTerminationCoordinator {
             .await
     }
 
-    /// 旧 `terminate(runId, reason, detail)`（L40-75）。
+    /// 统一取消分两个持久化阶段：
     ///
-    /// 两步语义逐值对齐旧源：
+    /// 1. [`TaskRuntime::cancel_run_with_cause`] 原子将 Task 和当前 Run 置为
+    ///    `cancelling/pending`，传播 attached 取消，然后才触发已注册的执行 token。
+    /// 2. [`DurableInteractionService::complete_runtime_cancellation`] 校验上述状态后，
+    ///    终结全部待决交互并归还配额。
     ///
-    /// 1. **L41-42**：`interactions.beginRunTermination(runId, reason,
-    ///    detail == null ? reason.dbValue() : detail)`——同一写事务内把 Run 切到
-    ///    `cancelling` 并级联终结其全部待决交互（归还容量配额 + 唤醒等待者 +
-    ///    推 `interaction_terminal`）。**不能**简化为
-    ///    [`zk_db::run::terminate_in_current_write`]：那条路径只做
-    ///    `requestCancel`，会漏掉交互级联，导致容量信号量泄漏。
-    /// 2. **L43-46**：迁移结果非 `APPLIED` 即原样返回、不落终态（Run 已在终态，
-    ///    或已有其它终止流程在跑）。
-    /// 3. **L69-73**：`user_cancelled` → `runs.cancel`，其余 →
-    ///    `runs.fail(runId, reason, detail)`（`detail` 原样传，不做 L42 的兜底），
-    ///    经 [`Db::finish_run`] 落库。
-    ///
-    /// 旧源 L48-67 的子系统停止与静默确认见模块级 R-04。
+    /// 本方法不写 Run 终态；执行所有者完成资源回收后，再原子提交
+    /// Run/Task/TaskResult。因此未确认清理时只能是 `partial/unconfirmed`，不会伪报
+    /// `cancelled`。
     ///
     /// # Errors
-    /// 交互级联取消（`INTERACTION_CANCEL_COUNT_MISMATCH` / 写库失败）或终态写库
-    /// 失败时返回错误。
+    /// `TaskRuntime` 取消请求或交互级联取消失败时返回错误。
     pub async fn terminate(
         &self,
         run_id: &str,
@@ -160,44 +190,74 @@ impl RunTerminationCoordinator {
         detail: Option<&str>,
     ) -> AuthzResult<TransitionResult> {
         let Some(interactions) = self.interactions.upgrade() else {
-            // 不可达：服务只能经 `assemble` 的 `Arc::new_cyclic` 存在，upgrade
-            // 失败仅出现在该 Arc 析构期间——那时不可能有终止请求在飞。
+            // Normally unreachable because the composition root owns both
+            // sides. During shutdown a cloned coordinator can outlive the
+            // interaction service, so this must fail closed: returning success
+            // would let the caller signal an execution token without completing
+            // the unified cancellation workflow.
             tracing::error!(
                 run_id,
                 exit_reason,
-                "run termination skipped: interaction service already dropped"
+                "run cancellation runtime is no longer available"
             );
-            return Ok(TransitionResult::NotFound);
+            return Err(AuthzError::new(
+                "CANCELLATION_RUNTIME_UNAVAILABLE",
+                "interaction cancellation service is no longer available",
+            ));
         };
-        // 旧源 L41-42。
-        let requested = interactions
-            .begin_run_termination(run_id, exit_reason, detail.unwrap_or(exit_reason))
-            .await?;
-        // 旧源 L43-46（`recordSummary` 见 R-06）。
-        if requested.run_transition != TransitionResult::Applied {
-            tracing::debug!(
-                run_id,
-                exit_reason,
-                transition = requested.run_transition.as_str(),
-                "run termination not applicable"
-            );
-            return Ok(requested.run_transition);
-        }
-        // 旧源 L69-73。
-        let terminal = self
-            .db
-            .finish_run(run_id, exit_reason, detail)
+        let cancellation = self
+            .task_runtime
+            .cancel_run_with_cause(run_id, exit_reason, detail.unwrap_or(exit_reason))
             .await
-            .map_err(|error| AuthzError::new("RUN_TERMINATION_FAILED", error.to_string()))?;
+            .map_err(|error| AuthzError::new(error.code, error.message))?;
+        let transition = if cancellation.cancel_requested {
+            TransitionResult::Applied
+        } else if cancellation.task.status.is_terminal() {
+            TransitionResult::AlreadyTerminal
+        } else {
+            TransitionResult::InvalidTransition
+        };
+        let interaction_cleanup = interactions
+            .complete_runtime_cancellation(run_id, detail.unwrap_or(exit_reason))
+            .await?;
+        if matches!(
+            interaction_cleanup.run_transition,
+            TransitionResult::NotFound | TransitionResult::InvalidTransition
+        ) {
+            return Err(AuthzError::new(
+                "RUN_TERMINATION_INVARIANT_FAILED",
+                format!(
+                    "interaction cancellation observed {} after TaskRuntime applied",
+                    interaction_cleanup.run_transition.as_str()
+                ),
+            ));
+        }
         tracing::info!(
             run_id,
             exit_reason,
             detail,
-            interactions_cancelled = requested.interactions_cancelled,
-            transition = terminal.as_str(),
-            "run terminated"
+            interactions_cancelled = interaction_cleanup.interactions_cancelled,
+            interaction_transition = interaction_cleanup.run_transition.as_str(),
+            transition = transition.as_str(),
+            "run cancellation requested"
         );
-        Ok(terminal)
+        Ok(transition)
+    }
+}
+
+impl RunCancellationPort for RunTerminationCoordinator {
+    fn cancel<'a>(
+        &'a self,
+        run_id: &'a str,
+        exit_reason: &'a str,
+        detail: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            self.terminate(run_id, exit_reason, Some(detail))
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
     }
 }
 

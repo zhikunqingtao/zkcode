@@ -11,20 +11,196 @@
 //! [`ToolEvent::Finished`]——事件通道随之关闭，消费方以「通道关闭且无
 //! Finished」判定中断，由引擎按旧 FIX-02 语义合成
 //! `<tool_use_error>Interrupted by user</tool_use_error>` 结果。
+//!
+//! Potential workspace writes additionally acquire a process-wide canonical
+//! root lease after safety admission and before `Tool::execute`: CAS-backed
+//! file writes share the lease, while broad or unknown mutations are exclusive.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
+use std::time::Duration;
 
-use tokio::sync::{Semaphore, mpsc};
+use dashmap::DashMap;
+use futures::{FutureExt, future::BoxFuture};
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc};
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::tool::{MAX_TOOL_TIMEOUT, Tool, ToolContext, ToolOutput};
+use crate::tool::{
+    ExecutionResourceObserver, ExecutionResourceOwner, MAX_TOOL_TIMEOUT, Tool, ToolCleanupStatus,
+    ToolContext, ToolOutput, ToolSpec,
+};
+use crate::workspace_lease::{
+    WorkspaceLeaseError, WorkspaceLeaseGuard, WorkspaceLeaseManager, WorkspaceLeaseMode,
+};
 
 /// 全局并发上限（对照旧 `process.runner.max-concurrent` 默认 16）。
 pub const MAX_CONCURRENT_TOOLS: usize = 16;
 
 /// 单工具输出采集上限（1 MiB；超限截断并追加标记）。
 pub const MAX_TOOL_OUTPUT_BYTES: usize = 1024 * 1024;
+
+/// Progress is advisory and may be coalesced/dropped under pressure. Terminal
+/// results use the same bounded receiver but are sent with backpressure after
+/// progress producers have stopped, so they cannot be lost behind an
+/// unbounded stdout stream.
+pub const TOOL_EVENT_QUEUE_CAPACITY: usize = 128;
+
+/// The managed process path needs at most TERM(5s) plus a short KILL/pipe
+/// collection window. Cancellation retains ownership of the tool future for
+/// this whole interval instead of dropping it at the cancellation boundary.
+pub const TOOL_CLEANUP_GRACE: Duration = Duration::from_secs(9);
+
+/// Result of closing the leaf-execution intake and waiting for every owned
+/// tool/process cleanup future to reach a terminal boundary.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ToolExecutorShutdownReport {
+    /// Number of physical owners which existed when shutdown began.
+    pub owners_requested: usize,
+    /// Number of physical owners still retained after the supplied deadline.
+    pub owners_remaining: usize,
+    /// True only when every retained owned future reached its completion boundary.
+    pub drained: bool,
+}
+
+struct OwnedExecution {
+    cancel: CancellationToken,
+    driver: Mutex<Option<JoinHandle<()>>>,
+}
+
+struct ExecutionOwnerRegistryInner {
+    accepting: AtomicBool,
+    intake_gate: RwLock<()>,
+    active: DashMap<String, Arc<OwnedExecution>>,
+    changed: Notify,
+}
+
+/// Shared process-local ownership for leaf tools and their nested physical
+/// resources. Every clone of one [`ToolExecutor`] points at the same registry.
+#[derive(Clone)]
+pub(crate) struct ExecutionOwnerRegistry {
+    inner: Arc<ExecutionOwnerRegistryInner>,
+}
+
+impl ExecutionOwnerRegistry {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(ExecutionOwnerRegistryInner {
+                accepting: AtomicBool::new(true),
+                intake_gate: RwLock::new(()),
+                active: DashMap::new(),
+                changed: Notify::new(),
+            }),
+        }
+    }
+
+    pub(crate) fn accepts_new_execution(&self) -> bool {
+        self.inner.accepting.load(Ordering::Acquire)
+    }
+
+    fn close_intake(&self) {
+        self.inner.accepting.store(false, Ordering::Release);
+        // A writer barrier guarantees that every caller which passed the first
+        // accepting check has either installed its owner or failed before this
+        // method returns.
+        drop(
+            self.inner
+                .intake_gate
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+    }
+
+    pub(crate) fn spawn_owned(
+        &self,
+        cancel: CancellationToken,
+        future: BoxFuture<'static, ()>,
+    ) -> Result<(), &'static str> {
+        if !self.accepts_new_execution() {
+            return Err("EXECUTION_SUPERVISOR_SHUTTING_DOWN");
+        }
+        let _intake = self
+            .inner
+            .intake_gate
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !self.accepts_new_execution() {
+            return Err("EXECUTION_SUPERVISOR_SHUTTING_DOWN");
+        }
+
+        let owner_id = uuid::Uuid::new_v4().to_string();
+        let owner = Arc::new(OwnedExecution {
+            cancel,
+            driver: Mutex::new(None),
+        });
+        self.inner
+            .active
+            .insert(owner_id.clone(), Arc::clone(&owner));
+        let weak = Arc::downgrade(&self.inner);
+        let driver = tokio::spawn(async move {
+            let outcome = std::panic::AssertUnwindSafe(future).catch_unwind().await;
+            if let Some(inner) = Weak::upgrade(&weak) {
+                inner.active.remove(&owner_id);
+                inner.changed.notify_waiters();
+            }
+            if outcome.is_err() {
+                tracing::error!("owned leaf execution panicked");
+            }
+        });
+        *owner
+            .driver
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(driver);
+        Ok(())
+    }
+
+    fn active_count(&self) -> usize {
+        self.inner.active.len()
+    }
+
+    async fn shutdown(&self, grace: Duration) -> ToolExecutorShutdownReport {
+        self.close_intake();
+        let owners_requested = self.active_count();
+        for owner in &self.inner.active {
+            owner.cancel.cancel();
+            // Reading the retained handle is intentional: this registry owns
+            // every driver until the driver's completion boundary removes its
+            // entry. A finished handle can race that final removal, but is
+            // never mistaken for a missing owner.
+            let _driver_finished = owner
+                .driver
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+                .is_some_and(JoinHandle::is_finished);
+        }
+
+        let deadline = tokio::time::Instant::now() + grace;
+        loop {
+            if self.inner.active.is_empty() || tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            let changed = self.inner.changed.notified();
+            if self.inner.active.is_empty() {
+                break;
+            }
+            let _ = tokio::time::timeout_at(deadline, changed).await;
+        }
+        let owners_remaining = self.active_count();
+        ToolExecutorShutdownReport {
+            owners_requested,
+            owners_remaining,
+            drained: owners_remaining == 0,
+        }
+    }
+}
+
+static GLOBAL_TOOL_SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
+
+fn global_tool_semaphore() -> Arc<Semaphore> {
+    Arc::clone(GLOBAL_TOOL_SEMAPHORE.get_or_init(|| Arc::new(Semaphore::new(MAX_CONCURRENT_TOOLS))))
+}
 
 /// 截断标记（追加于截断点之后）。
 const TRUNCATION_MARKER: &str = "\n... [output truncated at 1MB]";
@@ -46,6 +222,8 @@ pub enum ToolEvent {
         tool_use_id: String,
         /// 执行结果（输出已按上限截断）。
         output: ToolOutput,
+        /// Aggregate physical-resource cleanup state at tool completion.
+        cleanup_status: ToolCleanupStatus,
     },
 }
 
@@ -55,11 +233,16 @@ pub enum ToolEvent {
 /// 进程当前目录）；[`ToolExecutor::spawn_call`] 等价于全默认环境，故
 /// Phase 1/2.2 既有调用方零改动。`tool_use_id` 不在此列——执行器已持有
 /// 该参数，直接注入上下文。
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct CallEnv {
     working_dir: Option<PathBuf>,
     session_id: Option<String>,
     run_id: Option<String>,
+    authorized_write_path: Option<PathBuf>,
+    capability_revocation: Option<CancellationToken>,
+    resource_owner: Option<ExecutionResourceOwner>,
+    resource_observer: Option<Arc<dyn ExecutionResourceObserver>>,
+    tool_catalog: Option<Arc<Vec<ToolSpec>>>,
 }
 
 impl CallEnv {
@@ -106,14 +289,59 @@ impl CallEnv {
         self
     }
 
+    /// Bind the canonical file target returned by authorization.
+    #[must_use]
+    pub fn with_authorized_write_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.authorized_write_path = Some(path.into());
+        self
+    }
+
+    /// Attach the exact dynamic-directory binding lifetime for this call.
+    #[must_use]
+    pub fn with_capability_revocation(mut self, token: CancellationToken) -> Self {
+        self.capability_revocation = Some(token);
+        self
+    }
+
     /// Run ID 视图。
     #[must_use]
     pub fn run_id_str(&self) -> Option<&str> {
         self.run_id.as_deref()
     }
 
+    /// Resolve the workspace root used for write-lease partitioning. Potential
+    /// writes fail closed if the process current directory is unavailable.
+    fn workspace_root(&self) -> Result<PathBuf, String> {
+        self.working_dir.clone().map_or_else(
+            || std::env::current_dir().map_err(|error| error.to_string()),
+            Ok,
+        )
+    }
+
+    /// Attach durable Task/Run/invocation ownership for physical resources.
+    /// The invocation must already exist before this method is used.
+    #[must_use]
+    pub fn with_execution_resources(
+        mut self,
+        owner: ExecutionResourceOwner,
+        observer: Arc<dyn ExecutionResourceObserver>,
+    ) -> Self {
+        self.resource_owner = Some(owner);
+        self.resource_observer = Some(observer);
+        self
+    }
+
+    /// Bind the invocation to the effective (already permission-filtered) tool
+    /// directory.  `ToolSearch` consumes this snapshot instead of its global
+    /// fallback catalog.
+    #[must_use]
+    pub fn with_tool_catalog(mut self, catalog: Vec<ToolSpec>) -> Self {
+        self.tool_catalog = Some(Arc::new(catalog));
+        self
+    }
+
     /// 施加到上下文（缺省项保持 [`ToolContext::new`] 的默认值）。
-    fn apply(self, mut ctx: ToolContext) -> ToolContext {
+    fn apply(self, mut ctx: ToolContext, owners: ExecutionOwnerRegistry) -> ToolContext {
         if let Some(working_dir) = self.working_dir {
             ctx = ctx.with_working_dir(working_dir);
         }
@@ -123,7 +351,16 @@ impl CallEnv {
         if let Some(run_id) = self.run_id {
             ctx = ctx.with_run_id(run_id);
         }
-        ctx
+        if let Some(path) = self.authorized_write_path {
+            ctx = ctx.with_authorized_write_path(path);
+        }
+        if let (Some(owner), Some(observer)) = (self.resource_owner, self.resource_observer) {
+            ctx = ctx.with_execution_resources(owner, observer);
+        }
+        if let Some(catalog) = self.tool_catalog {
+            ctx = ctx.with_tool_catalog(catalog);
+        }
+        ctx.with_execution_owner_registry(owners)
     }
 }
 
@@ -156,9 +393,41 @@ pub trait ToolSafetyGuard: Send + Sync {
 #[derive(Clone)]
 pub struct ToolExecutor {
     semaphore: Arc<Semaphore>,
+    /// Process-wide workspace write isolation. Production constructors always
+    /// clone the same registry, including custom leaf-concurrency executors.
+    workspace_leases: WorkspaceLeaseManager,
     /// 参数安全守卫（未接线时为 `None`——旧源默认形态，见
     /// [`ToolSafetyGuard`] 关于环境安全层不依赖接线的说明）。
     safety_guard: Option<Arc<dyn ToolSafetyGuard>>,
+    /// JoinHandle/cancellation ownership shared by this executor and every clone.
+    owners: ExecutionOwnerRegistry,
+}
+
+/// Owned state moved into the task spawned for one tool invocation.
+struct SpawnedCall {
+    tool: Arc<dyn Tool>,
+    tool_use_id: String,
+    input: serde_json::Value,
+    cancel: CancellationToken,
+    env: CallEnv,
+    event_tx: mpsc::Sender<ToolEvent>,
+    semaphore: Arc<Semaphore>,
+    workspace_leases: WorkspaceLeaseManager,
+    safety_guard: Option<Arc<dyn ToolSafetyGuard>>,
+    owners: ExecutionOwnerRegistry,
+}
+
+/// RAII guards retained for the full lifetime of an admitted tool future.
+struct ExecutionGuards {
+    permit: Option<OwnedSemaphorePermit>,
+    workspace_lease: Option<WorkspaceLeaseGuard>,
+}
+
+enum AdmissionFailure {
+    /// Cancellation or executor shutdown preserves the silent-exit contract.
+    SilentExit,
+    /// A deterministic pre-execution failure must be returned to the caller.
+    Rejected(ToolOutput),
 }
 
 impl Default for ToolExecutor {
@@ -171,7 +440,12 @@ impl ToolExecutor {
     /// 以默认并发上限（[`MAX_CONCURRENT_TOOLS`]）构造。
     #[must_use]
     pub fn new() -> Self {
-        Self::with_concurrency(MAX_CONCURRENT_TOOLS)
+        Self {
+            semaphore: global_tool_semaphore(),
+            workspace_leases: WorkspaceLeaseManager::process_wide(),
+            safety_guard: None,
+            owners: ExecutionOwnerRegistry::new(),
+        }
     }
 
     /// 以指定并发上限构造（测试用）。
@@ -179,7 +453,29 @@ impl ToolExecutor {
     pub fn with_concurrency(max_concurrent: usize) -> Self {
         Self {
             semaphore: Arc::new(Semaphore::new(max_concurrent)),
+            workspace_leases: WorkspaceLeaseManager::process_wide(),
             safety_guard: None,
+            owners: ExecutionOwnerRegistry::new(),
+        }
+    }
+
+    /// Whether this executor owns the process-wide production workspace-lease
+    /// registry required before shared-workspace Agent writes may be exposed.
+    #[must_use]
+    pub fn workspace_leases_ready(&self) -> bool {
+        self.workspace_leases.is_process_wide()
+    }
+
+    #[cfg(test)]
+    fn with_concurrency_and_workspace_leases(
+        max_concurrent: usize,
+        workspace_leases: WorkspaceLeaseManager,
+    ) -> Self {
+        Self {
+            semaphore: Arc::new(Semaphore::new(max_concurrent)),
+            workspace_leases,
+            safety_guard: None,
+            owners: ExecutionOwnerRegistry::new(),
         }
     }
 
@@ -188,6 +484,51 @@ impl ToolExecutor {
     pub fn with_safety_guard(mut self, guard: Arc<dyn ToolSafetyGuard>) -> Self {
         self.safety_guard = Some(guard);
         self
+    }
+
+    /// Stop accepting physical leaf work. Existing owners continue cleanup and
+    /// remain visible to [`Self::shutdown`].
+    pub fn close_intake(&self) {
+        self.owners.close_intake();
+    }
+
+    /// Whether new physical leaf work may still be registered.
+    #[must_use]
+    pub fn accepts_new_execution(&self) -> bool {
+        self.owners.accepts_new_execution()
+    }
+
+    /// Number of tool/process `JoinHandle`s currently retained by this executor.
+    #[must_use]
+    pub fn active_owner_count(&self) -> usize {
+        self.owners.active_count()
+    }
+
+    /// Cancel and drain all retained leaf/process owners inside `grace`.
+    pub async fn shutdown(&self, grace: Duration) -> ToolExecutorShutdownReport {
+        self.owners.shutdown(grace).await
+    }
+
+    /// Retain an operation-level finalizer in the same process-wide owner
+    /// registry as physical leaf tools.
+    ///
+    /// This is intentionally a narrow composition hook for protocol surfaces
+    /// which must remain responsible for durable terminalization after their
+    /// client Future is dropped.  The supplied cancellation token is signalled
+    /// during shutdown, but the Future is never aborted: the owner remains
+    /// visible until the Future has completed its physical cleanup and durable
+    /// commit boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EXECUTION_SUPERVISOR_SHUTTING_DOWN` after the process-wide
+    /// execution intake has closed.
+    pub fn spawn_owned_finalizer(
+        &self,
+        cancel: CancellationToken,
+        future: BoxFuture<'static, ()>,
+    ) -> Result<(), &'static str> {
+        self.owners.spawn_owned(cancel, future)
     }
 
     /// 派发一次工具调用（每调用一 `tokio::spawn`），返回事件接收端。
@@ -201,7 +542,7 @@ impl ToolExecutor {
         tool_use_id: String,
         input: serde_json::Value,
         parent_cancel: &CancellationToken,
-    ) -> mpsc::UnboundedReceiver<ToolEvent> {
+    ) -> mpsc::Receiver<ToolEvent> {
         self.spawn_call_in(tool, tool_use_id, input, parent_cancel, CallEnv::new())
     }
 
@@ -216,84 +557,242 @@ impl ToolExecutor {
         input: serde_json::Value,
         parent_cancel: &CancellationToken,
         env: CallEnv,
-    ) -> mpsc::UnboundedReceiver<ToolEvent> {
-        let (event_tx, event_rx) = mpsc::unbounded_channel();
-        let cancel = parent_cancel.child_token();
-        let semaphore = Arc::clone(&self.semaphore);
-        let safety_guard = self.safety_guard.clone();
-        tokio::spawn(async move {
-            // 并发上限：许可获取本身可取消（排队期间中断即退出，无 Finished）。
-            let permit = tokio::select! {
-                biased;
-                () = cancel.cancelled() => return,
-                permit = semaphore.acquire_owned() => match permit {
-                    Ok(permit) => permit,
-                    // Semaphore 关闭（进程关停路径），静默退出。
-                    Err(_) => return,
-                },
-            };
-            // 参数安全守卫（旧 `ToolSafetyGuard`）：先于工具执行判定「参数
-            // 本身是否安全」，拒绝则直接产出 is_error 结果、不进 execute。
-            if let Some(guard) = safety_guard.as_ref()
-                && let Err(reason) = guard.check_tool_call(tool.as_ref(), &input, &env)
-            {
-                tracing::warn!(tool = tool.name(), %reason, "tool call denied by safety guard");
-                drop(permit);
-                let _ = event_tx.send(ToolEvent::Finished {
-                    tool_use_id,
-                    output: ToolOutput::error(reason),
-                });
-                return;
-            }
-            let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
-            let ctx = env.apply(
-                ToolContext::new(cancel.clone(), progress_tx).with_tool_use_id(tool_use_id.clone()),
-            );
-            let timeout = tool.timeout().min(MAX_TOOL_TIMEOUT);
-            let mut work = tool.execute(input, ctx);
-            let deadline = tokio::time::sleep(timeout);
-            tokio::pin!(deadline);
-            let mut progress_open = true;
-            let output = loop {
-                tokio::select! {
-                    biased;
-                    // 取消优先：不产出 Finished（通道关闭即中断信号）。
-                    () = cancel.cancelled() => {
-                        drop(permit);
-                        return;
-                    }
-                    () = &mut deadline => {
-                        break ToolOutput::error(format!(
-                            "Tool execution timed out after {}ms",
-                            timeout.as_millis()
-                        ));
-                    }
-                    progress = progress_rx.recv(), if progress_open => match progress {
-                        Some(text) => {
-                            let _ = event_tx.send(ToolEvent::Progress {
-                                tool_use_id: tool_use_id.clone(),
-                                text,
-                            });
-                        }
-                        None => progress_open = false,
-                    },
-                    output = &mut work => break output,
-                }
-            };
-            drop(permit);
-            // 排干残余进度（保证 Progress 先于 Finished 的事件序）。
-            while let Ok(text) = progress_rx.try_recv() {
-                let _ = event_tx.send(ToolEvent::Progress {
-                    tool_use_id: tool_use_id.clone(),
-                    text,
-                });
-            }
-            let _ = event_tx.send(ToolEvent::Finished {
-                tool_use_id,
-                output: truncate_output(output),
-            });
-        });
+    ) -> mpsc::Receiver<ToolEvent> {
+        let (event_tx, event_rx) = mpsc::channel(TOOL_EVENT_QUEUE_CAPACITY);
+        let call = SpawnedCall {
+            tool,
+            tool_use_id,
+            input,
+            cancel: parent_cancel.child_token(),
+            env,
+            event_tx,
+            semaphore: Arc::clone(&self.semaphore),
+            workspace_leases: self.workspace_leases.clone(),
+            safety_guard: self.safety_guard.clone(),
+            owners: self.owners.clone(),
+        };
+        let cancel = call.cancel.clone();
+        let _ = self
+            .owners
+            .spawn_owned(cancel, Box::pin(run_spawned_call(call)));
         event_rx
+    }
+}
+
+async fn run_spawned_call(call: SpawnedCall) {
+    let ExecutionGuards {
+        permit,
+        workspace_lease,
+    } = match admit_call(&call).await {
+        Ok(guards) => guards,
+        Err(AdmissionFailure::SilentExit) => return,
+        Err(AdmissionFailure::Rejected(output)) => {
+            let _ = call
+                .event_tx
+                .send(ToolEvent::Finished {
+                    tool_use_id: call.tool_use_id,
+                    output,
+                    cleanup_status: ToolCleanupStatus::NotRequired,
+                })
+                .await;
+            return;
+        }
+    };
+
+    let (progress_tx, mut progress_rx) = mpsc::channel(TOOL_EVENT_QUEUE_CAPACITY);
+    let capability_revocation = call.env.capability_revocation.clone();
+    let ctx = call.env.apply(
+        ToolContext::with_bounded_progress(call.cancel.clone(), progress_tx)
+            .with_tool_use_id(call.tool_use_id.clone()),
+        call.owners.clone(),
+    );
+    // Keep a second handle to the per-invocation resource tracker after the
+    // ToolContext itself moves into the tool future.
+    let cleanup_ctx = ctx.clone();
+    let timeout = match call.tool.timeout_policy() {
+        crate::tool::ToolTimeoutPolicy::Executor => call.tool.timeout().min(MAX_TOOL_TIMEOUT),
+        crate::tool::ToolTimeoutPolicy::TaskRuntime => Duration::from_mins(32),
+    };
+    let work = call.tool.execute(call.input, ctx);
+    let Some(output) = drive_tool(
+        work,
+        timeout,
+        &call.cancel,
+        &cleanup_ctx,
+        capability_revocation.as_ref(),
+        &call.event_tx,
+        &call.tool_use_id,
+        &mut progress_rx,
+    )
+    .await
+    else {
+        drop(permit);
+        return;
+    };
+
+    drop(workspace_lease);
+    drop(permit);
+    // 排干残余进度（保证 Progress 先于 Finished 的事件序）。
+    while let Ok(text) = progress_rx.try_recv() {
+        let _ = call.event_tx.try_send(ToolEvent::Progress {
+            tool_use_id: call.tool_use_id.clone(),
+            text,
+        });
+    }
+    let _ = call
+        .event_tx
+        .send(ToolEvent::Finished {
+            tool_use_id: call.tool_use_id,
+            output: truncate_output(output),
+            cleanup_status: cleanup_ctx.execution_cleanup_status(),
+        })
+        .await;
+}
+
+async fn admit_call(call: &SpawnedCall) -> Result<ExecutionGuards, AdmissionFailure> {
+    // 只有真实叶子执行占用全局许可。Agent/TaskOutput 等持久编排等待
+    // 不占工具槽，避免父任务等待子结果时反向饿死子任务所需工具。
+    let permit = if call.tool.uses_execution_slot() {
+        tokio::select! {
+            biased;
+            () = call.cancel.cancelled() => return Err(AdmissionFailure::SilentExit),
+            permit = Arc::clone(&call.semaphore).acquire_owned() => match permit {
+                Ok(permit) => Some(permit),
+                // Semaphore 关闭（进程关停路径），静默退出。
+                Err(_) => return Err(AdmissionFailure::SilentExit),
+            },
+        }
+    } else {
+        None
+    };
+
+    // 参数安全守卫先于工具执行判定参数本身是否安全。
+    if let Some(guard) = call.safety_guard.as_ref()
+        && let Err(reason) = guard.check_tool_call(call.tool.as_ref(), &call.input, &call.env)
+    {
+        tracing::warn!(tool = call.tool.name(), %reason, "tool call denied by safety guard");
+        return Err(AdmissionFailure::Rejected(ToolOutput::error(reason)));
+    }
+
+    // Read-only invocations never enter workspace write arbitration. The three
+    // built-in CAS writers share the root lease; every other mutation is exclusive.
+    let workspace_lease = match workspace_lease_mode(call.tool.as_ref(), &call.input) {
+        None => None,
+        Some(mode) => {
+            let root = call.env.workspace_root().map_err(|reason| {
+                AdmissionFailure::Rejected(ToolOutput::error(format!(
+                    "WORKSPACE_LEASE_ROOT_INVALID: {reason}"
+                )))
+            })?;
+            match call
+                .workspace_leases
+                .acquire(&root, mode, &call.cancel)
+                .await
+            {
+                Ok(lease) => Some(lease),
+                Err(WorkspaceLeaseError::Cancelled) => {
+                    return Err(AdmissionFailure::SilentExit);
+                }
+                Err(error @ WorkspaceLeaseError::InvalidRoot { .. }) => {
+                    return Err(AdmissionFailure::Rejected(ToolOutput::error(format!(
+                        "WORKSPACE_LEASE_ROOT_INVALID: {error}"
+                    ))));
+                }
+            }
+        }
+    };
+    Ok(ExecutionGuards {
+        permit,
+        workspace_lease,
+    })
+}
+
+#[allow(clippy::too_many_arguments)] // one supervised call's immutable execution envelope
+async fn drive_tool(
+    mut work: BoxFuture<'_, ToolOutput>,
+    timeout: Duration,
+    cancel: &CancellationToken,
+    cleanup_ctx: &ToolContext,
+    capability_revocation: Option<&CancellationToken>,
+    event_tx: &mpsc::Sender<ToolEvent>,
+    tool_use_id: &str,
+    progress_rx: &mut mpsc::Receiver<String>,
+) -> Option<ToolOutput> {
+    let deadline = tokio::time::sleep(timeout);
+    tokio::pin!(deadline);
+    let mut progress_open = true;
+    let revocation = capability_revocation.cloned();
+    let revoked = async move {
+        match revocation {
+            Some(token) => token.cancelled().await,
+            None => std::future::pending::<()>().await,
+        }
+    };
+    tokio::pin!(revoked);
+    loop {
+        tokio::select! {
+            biased;
+            () = &mut revoked => {
+                cancel.cancel();
+                if tokio::time::timeout(TOOL_CLEANUP_GRACE, &mut work)
+                    .await
+                    .is_err()
+                {
+                    cleanup_ctx.force_unconfirmed_execution_resources().await;
+                }
+                return Some(ToolOutput::error(
+                    "TOOL_CAPABILITY_REVOKED: tool directory or connection changed during execution",
+                ));
+            }
+            // 取消优先：不产出 Finished（通道关闭即中断信号）。
+            () = cancel.cancelled() => {
+                // Retain the process/MCP-owning future for the managed cleanup window.
+                if tokio::time::timeout(TOOL_CLEANUP_GRACE, &mut work)
+                    .await
+                    .is_err()
+                {
+                    cleanup_ctx.force_unconfirmed_execution_resources().await;
+                }
+                return None;
+            }
+            () = &mut deadline => {
+                // Trigger cooperative cleanup before reporting the timeout.
+                cancel.cancel();
+                if tokio::time::timeout(TOOL_CLEANUP_GRACE, &mut work)
+                    .await
+                    .is_err()
+                {
+                    cleanup_ctx.force_unconfirmed_execution_resources().await;
+                }
+                return Some(ToolOutput::error(format!(
+                    "Tool execution timed out after {}ms",
+                    timeout.as_millis()
+                )));
+            }
+            progress = progress_rx.recv(), if progress_open => match progress {
+                Some(text) => {
+                    let _ = event_tx.try_send(ToolEvent::Progress {
+                        tool_use_id: tool_use_id.to_owned(),
+                        text,
+                    });
+                }
+                None => progress_open = false,
+            },
+            output = &mut work => return Some(output),
+        }
+    }
+}
+
+/// Classify the workspace effect without trusting arbitrary tool names to opt
+/// into shared writes. The allowlist is intentionally limited to the three
+/// built-in CAS writers; an unknown non-read-only leaf is always exclusive.
+fn workspace_lease_mode(tool: &dyn Tool, input: &serde_json::Value) -> Option<WorkspaceLeaseMode> {
+    if !tool.uses_execution_slot() || tool.is_read_only(input) {
+        return None;
+    }
+    match tool.name() {
+        "Write" | "Edit" | "NotebookEdit" => Some(WorkspaceLeaseMode::SharedWrite),
+        _ => Some(WorkspaceLeaseMode::ExclusiveWrite),
     }
 }
 
@@ -313,6 +812,7 @@ fn truncate_output(mut output: ToolOutput) -> ToolOutput {
 
 #[cfg(test)]
 mod tests {
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
@@ -320,6 +820,102 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    struct TempRoot(PathBuf);
+
+    impl TempRoot {
+        fn new(label: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "zk-tool-executor-lease-{label}-{}",
+                uuid::Uuid::new_v4()
+            ));
+            std::fs::create_dir_all(&path).expect("create temp workspace root");
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempRoot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    struct LeaseProbeTool {
+        name: &'static str,
+        read_only: bool,
+        uses_execution_slot: bool,
+        calls: Arc<AtomicUsize>,
+        entered: Arc<tokio::sync::Notify>,
+        release: Option<Arc<tokio::sync::Notify>>,
+    }
+
+    impl Tool for LeaseProbeTool {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+
+        fn description(&self) -> &'static str {
+            "workspace lease probe"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            json!({ "type": "object" })
+        }
+
+        fn uses_execution_slot(&self) -> bool {
+            self.uses_execution_slot
+        }
+
+        fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+            self.read_only
+        }
+
+        fn execute(
+            &self,
+            _input: serde_json::Value,
+            _ctx: ToolContext,
+        ) -> BoxFuture<'_, ToolOutput> {
+            let calls = Arc::clone(&self.calls);
+            let entered = Arc::clone(&self.entered);
+            let release = self.release.clone();
+            Box::pin(async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                entered.notify_one();
+                if let Some(release) = release {
+                    release.notified().await;
+                }
+                ToolOutput::ok("lease probe complete")
+            })
+        }
+    }
+
+    fn lease_probe(
+        name: &'static str,
+        read_only: bool,
+        uses_execution_slot: bool,
+        calls: &Arc<AtomicUsize>,
+        entered: &Arc<tokio::sync::Notify>,
+        release: Option<&Arc<tokio::sync::Notify>>,
+    ) -> Arc<dyn Tool> {
+        Arc::new(LeaseProbeTool {
+            name,
+            read_only,
+            uses_execution_slot,
+            calls: Arc::clone(calls),
+            entered: Arc::clone(entered),
+            release: release.cloned(),
+        })
+    }
+
+    async fn give_spawned_calls_a_chance_to_enter() {
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+    }
 
     /// 并发追踪桩：进入时 current+1 并刷新 max，短暂驻留后退出。
     struct GateTool {
@@ -338,6 +934,10 @@ mod tests {
 
         fn parameters(&self) -> serde_json::Value {
             json!({ "type": "object" })
+        }
+
+        fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+            true
         }
 
         fn execute(
@@ -379,12 +979,92 @@ mod tests {
             self.timeout
         }
 
+        fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+            true
+        }
+
         fn execute(
             &self,
             _input: serde_json::Value,
             _ctx: ToolContext,
         ) -> BoxFuture<'_, ToolOutput> {
             Box::pin(std::future::pending())
+        }
+    }
+
+    struct CancelCleanupTool {
+        entered: Arc<tokio::sync::Notify>,
+        cleaned: Arc<AtomicUsize>,
+    }
+
+    impl Tool for CancelCleanupTool {
+        fn name(&self) -> &'static str {
+            "CancelCleanup"
+        }
+
+        fn description(&self) -> &'static str {
+            "proves the executor retains cleanup after its receiver is dropped"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            json!({ "type": "object" })
+        }
+
+        fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+            true
+        }
+
+        fn execute(
+            &self,
+            _input: serde_json::Value,
+            ctx: ToolContext,
+        ) -> BoxFuture<'_, ToolOutput> {
+            let entered = Arc::clone(&self.entered);
+            let cleaned = Arc::clone(&self.cleaned);
+            Box::pin(async move {
+                entered.notify_one();
+                ctx.cancel.cancelled().await;
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                cleaned.fetch_add(1, Ordering::SeqCst);
+                ToolOutput::ok("cleaned")
+            })
+        }
+    }
+
+    struct OrchestrationWaitTool {
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    impl Tool for OrchestrationWaitTool {
+        fn name(&self) -> &'static str {
+            "OrchestrationWait"
+        }
+
+        fn description(&self) -> &'static str {
+            "waits durably without consuming a leaf slot"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            json!({ "type": "object" })
+        }
+
+        fn uses_execution_slot(&self) -> bool {
+            false
+        }
+
+        fn execute(
+            &self,
+            _input: serde_json::Value,
+            _ctx: ToolContext,
+        ) -> BoxFuture<'_, ToolOutput> {
+            let entered = Arc::clone(&self.entered);
+            let release = Arc::clone(&self.release);
+            Box::pin(async move {
+                entered.notify_one();
+                release.notified().await;
+                ToolOutput::ok("released")
+            })
         }
     }
 
@@ -402,6 +1082,10 @@ mod tests {
 
         fn parameters(&self) -> serde_json::Value {
             json!({ "type": "object" })
+        }
+
+        fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+            true
         }
 
         fn execute(
@@ -433,6 +1117,10 @@ mod tests {
 
         fn parameters(&self) -> serde_json::Value {
             json!({ "type": "object" })
+        }
+
+        fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+            true
         }
 
         fn execute(
@@ -503,6 +1191,7 @@ mod tests {
             ToolEvent::Finished {
                 tool_use_id,
                 output,
+                ..
             } => {
                 assert_eq!(tool_use_id, "call-1");
                 assert!(output.is_error);
@@ -551,7 +1240,7 @@ mod tests {
         assert_eq!(guard.seen.lock().expect("guard lock").len(), 1);
     }
 
-    async fn collect(mut rx: mpsc::UnboundedReceiver<ToolEvent>) -> Vec<ToolEvent> {
+    async fn collect(mut rx: mpsc::Receiver<ToolEvent>) -> Vec<ToolEvent> {
         let mut events = Vec::new();
         while let Some(event) = rx.recv().await {
             events.push(event);
@@ -590,6 +1279,346 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn orchestration_wait_does_not_consume_a_leaf_execution_slot() {
+        let executor = ToolExecutor::with_concurrency(1);
+        let cancel = CancellationToken::new();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let orchestration: Arc<dyn Tool> = Arc::new(OrchestrationWaitTool {
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+        });
+        let orchestration_rx = executor.spawn_call(
+            orchestration,
+            "orchestration".to_owned(),
+            json!({}),
+            &cancel,
+        );
+        entered.notified().await;
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let leaf: Arc<dyn Tool> = Arc::new(CountingTool {
+            calls: Arc::clone(&calls),
+        });
+        let leaf_events = tokio::time::timeout(
+            Duration::from_secs(1),
+            collect(executor.spawn_call(leaf, "leaf".to_owned(), json!({}), &cancel)),
+        )
+        .await
+        .expect("leaf must run while orchestration is waiting");
+        assert!(matches!(
+            leaf_events.as_slice(),
+            [ToolEvent::Finished { output, .. }] if !output.is_error
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        release.notify_one();
+        let orchestration_events = collect(orchestration_rx).await;
+        assert!(matches!(
+            orchestration_events.as_slice(),
+            [ToolEvent::Finished { output, .. }] if !output.is_error
+        ));
+    }
+
+    #[tokio::test]
+    async fn capability_revocation_cancels_an_active_tool_and_returns_terminal_error() {
+        let executor = ToolExecutor::with_concurrency(1);
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let cleaned = Arc::new(AtomicUsize::new(0));
+        let tool: Arc<dyn Tool> = Arc::new(CancelCleanupTool {
+            entered: Arc::clone(&entered),
+            cleaned: Arc::clone(&cleaned),
+        });
+        let revocation = CancellationToken::new();
+        let rx = executor.spawn_call_in(
+            tool,
+            "revoked".to_owned(),
+            json!({}),
+            &CancellationToken::new(),
+            CallEnv::new().with_capability_revocation(revocation.clone()),
+        );
+        entered.notified().await;
+        revocation.cancel();
+
+        let events = tokio::time::timeout(Duration::from_secs(1), collect(rx))
+            .await
+            .expect("revocation must terminate the invocation");
+        assert!(matches!(
+            events.as_slice(),
+            [ToolEvent::Finished { output, .. }]
+                if output.is_error && output.content.contains("TOOL_CAPABILITY_REVOKED")
+        ));
+        assert_eq!(cleaned.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn workspace_lease_classification_is_conservative() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let input = json!({});
+        for name in ["Write", "Edit", "NotebookEdit"] {
+            let tool = lease_probe(name, false, true, &calls, &entered, None);
+            assert_eq!(
+                workspace_lease_mode(tool.as_ref(), &input),
+                Some(WorkspaceLeaseMode::SharedWrite)
+            );
+        }
+
+        let unknown = lease_probe("UnknownMutation", false, true, &calls, &entered, None);
+        assert_eq!(
+            workspace_lease_mode(unknown.as_ref(), &input),
+            Some(WorkspaceLeaseMode::ExclusiveWrite)
+        );
+        let read_only = lease_probe("UnknownRead", true, true, &calls, &entered, None);
+        assert_eq!(workspace_lease_mode(read_only.as_ref(), &input), None);
+        let orchestration = lease_probe("Agent", false, false, &calls, &entered, None);
+        assert_eq!(workspace_lease_mode(orchestration.as_ref(), &input), None);
+    }
+
+    #[tokio::test]
+    async fn unknown_mutation_exclusively_blocks_a_cas_writer() {
+        let manager = WorkspaceLeaseManager::isolated();
+        let executor = ToolExecutor::with_concurrency_and_workspace_leases(4, manager);
+        let root = TempRoot::new("unknown-exclusive");
+        let first_calls = Arc::new(AtomicUsize::new(0));
+        let first_entered = Arc::new(tokio::sync::Notify::new());
+        let first_release = Arc::new(tokio::sync::Notify::new());
+        let first_rx = executor.spawn_call_in(
+            lease_probe(
+                "UnknownMutation",
+                false,
+                true,
+                &first_calls,
+                &first_entered,
+                Some(&first_release),
+            ),
+            "exclusive".to_owned(),
+            json!({}),
+            &CancellationToken::new(),
+            CallEnv::new().with_working_dir(root.path()),
+        );
+        first_entered.notified().await;
+
+        let second_calls = Arc::new(AtomicUsize::new(0));
+        let second_entered = Arc::new(tokio::sync::Notify::new());
+        let second_rx = executor.spawn_call_in(
+            lease_probe("Write", false, true, &second_calls, &second_entered, None),
+            "cas-write".to_owned(),
+            json!({}),
+            &CancellationToken::new(),
+            CallEnv::new().with_working_dir(root.path()),
+        );
+        give_spawned_calls_a_chance_to_enter().await;
+        assert_eq!(
+            second_calls.load(Ordering::SeqCst),
+            0,
+            "CAS writer must wait behind an unknown exclusive mutation"
+        );
+
+        first_release.notify_one();
+        assert!(matches!(
+            collect(first_rx).await.as_slice(),
+            [ToolEvent::Finished { output, .. }] if !output.is_error
+        ));
+        assert!(matches!(
+            collect(second_rx).await.as_slice(),
+            [ToolEvent::Finished { output, .. }] if !output.is_error
+        ));
+        assert_eq!(first_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(second_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn two_cas_writers_execute_concurrently_on_one_root() {
+        let manager = WorkspaceLeaseManager::isolated();
+        let executor = ToolExecutor::with_concurrency_and_workspace_leases(4, manager);
+        let root = TempRoot::new("cas-parallel");
+        let first_calls = Arc::new(AtomicUsize::new(0));
+        let first_entered = Arc::new(tokio::sync::Notify::new());
+        let first_release = Arc::new(tokio::sync::Notify::new());
+        let first_rx = executor.spawn_call_in(
+            lease_probe(
+                "Write",
+                false,
+                true,
+                &first_calls,
+                &first_entered,
+                Some(&first_release),
+            ),
+            "cas-one".to_owned(),
+            json!({}),
+            &CancellationToken::new(),
+            CallEnv::new().with_working_dir(root.path()),
+        );
+        first_entered.notified().await;
+
+        let second_calls = Arc::new(AtomicUsize::new(0));
+        let second_entered = Arc::new(tokio::sync::Notify::new());
+        let second_rx = executor.spawn_call_in(
+            lease_probe("Edit", false, true, &second_calls, &second_entered, None),
+            "cas-two".to_owned(),
+            json!({}),
+            &CancellationToken::new(),
+            CallEnv::new().with_working_dir(root.path()),
+        );
+        tokio::time::timeout(Duration::from_secs(1), second_entered.notified())
+            .await
+            .expect("second CAS writer should enter without waiting for the first writer");
+        assert_eq!(
+            second_calls.load(Ordering::SeqCst),
+            1,
+            "shared CAS writers must not serialize the entire workspace"
+        );
+
+        first_release.notify_one();
+        assert!(matches!(
+            collect(first_rx).await.as_slice(),
+            [ToolEvent::Finished { output, .. }] if !output.is_error
+        ));
+        assert!(matches!(
+            collect(second_rx).await.as_slice(),
+            [ToolEvent::Finished { output, .. }] if !output.is_error
+        ));
+    }
+
+    #[tokio::test]
+    async fn exclusive_mutations_in_different_worktrees_do_not_block() {
+        let manager = WorkspaceLeaseManager::isolated();
+        let executor = ToolExecutor::with_concurrency_and_workspace_leases(4, manager);
+        let first_root = TempRoot::new("worktree-one");
+        let second_root = TempRoot::new("worktree-two");
+        let first_calls = Arc::new(AtomicUsize::new(0));
+        let first_entered = Arc::new(tokio::sync::Notify::new());
+        let first_release = Arc::new(tokio::sync::Notify::new());
+        let first_rx = executor.spawn_call_in(
+            lease_probe(
+                "UnknownMutation",
+                false,
+                true,
+                &first_calls,
+                &first_entered,
+                Some(&first_release),
+            ),
+            "worktree-one".to_owned(),
+            json!({}),
+            &CancellationToken::new(),
+            CallEnv::new().with_working_dir(first_root.path()),
+        );
+        first_entered.notified().await;
+
+        let second_calls = Arc::new(AtomicUsize::new(0));
+        let second_entered = Arc::new(tokio::sync::Notify::new());
+        let second_rx = executor.spawn_call_in(
+            lease_probe(
+                "AnotherUnknownMutation",
+                false,
+                true,
+                &second_calls,
+                &second_entered,
+                None,
+            ),
+            "worktree-two".to_owned(),
+            json!({}),
+            &CancellationToken::new(),
+            CallEnv::new().with_working_dir(second_root.path()),
+        );
+        tokio::time::timeout(Duration::from_secs(1), second_entered.notified())
+            .await
+            .expect("an exclusive mutation in another worktree should enter independently");
+        assert_eq!(second_calls.load(Ordering::SeqCst), 1);
+
+        first_release.notify_one();
+        let _ = collect(first_rx).await;
+        let _ = collect(second_rx).await;
+    }
+
+    #[tokio::test]
+    async fn cancelling_while_waiting_for_workspace_lease_never_executes() {
+        let manager = WorkspaceLeaseManager::isolated();
+        let executor = ToolExecutor::with_concurrency_and_workspace_leases(4, manager);
+        let root = TempRoot::new("cancel-wait");
+        let first_calls = Arc::new(AtomicUsize::new(0));
+        let first_entered = Arc::new(tokio::sync::Notify::new());
+        let first_release = Arc::new(tokio::sync::Notify::new());
+        let first_cancel = CancellationToken::new();
+        let first_rx = executor.spawn_call_in(
+            lease_probe(
+                "UnknownMutation",
+                false,
+                true,
+                &first_calls,
+                &first_entered,
+                Some(&first_release),
+            ),
+            "blocker".to_owned(),
+            json!({}),
+            &first_cancel,
+            CallEnv::new().with_working_dir(root.path()),
+        );
+        first_entered.notified().await;
+
+        let waiting_calls = Arc::new(AtomicUsize::new(0));
+        let waiting_entered = Arc::new(tokio::sync::Notify::new());
+        let waiting_cancel = CancellationToken::new();
+        let waiting_rx = executor.spawn_call_in(
+            lease_probe("Write", false, true, &waiting_calls, &waiting_entered, None),
+            "waiting".to_owned(),
+            json!({}),
+            &waiting_cancel,
+            CallEnv::new().with_working_dir(root.path()),
+        );
+        give_spawned_calls_a_chance_to_enter().await;
+        waiting_cancel.cancel();
+        give_spawned_calls_a_chance_to_enter().await;
+        first_release.notify_one();
+
+        assert!(collect(waiting_rx).await.is_empty());
+        assert_eq!(waiting_calls.load(Ordering::SeqCst), 0);
+        let _ = collect(first_rx).await;
+    }
+
+    #[tokio::test]
+    async fn invalid_workspace_root_fails_before_mutating_tool_execution() {
+        let manager = WorkspaceLeaseManager::isolated();
+        let executor = ToolExecutor::with_concurrency_and_workspace_leases(1, manager);
+        let parent = TempRoot::new("invalid-root");
+        let missing_root = parent.path().join("missing");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let events = collect(executor.spawn_call_in(
+            lease_probe("UnknownMutation", false, true, &calls, &entered, None),
+            "invalid-root".to_owned(),
+            json!({}),
+            &CancellationToken::new(),
+            CallEnv::new().with_working_dir(missing_root),
+        ))
+        .await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(matches!(
+            events.as_slice(),
+            [ToolEvent::Finished { output, .. }]
+                if output.is_error && output.content.contains("WORKSPACE_LEASE_ROOT_INVALID")
+        ));
+    }
+
+    #[test]
+    fn default_executors_share_the_process_wide_leaf_limit() {
+        let first = ToolExecutor::new();
+        let second = ToolExecutor::new();
+        let custom_concurrency = ToolExecutor::with_concurrency(3);
+        assert!(Arc::ptr_eq(&first.semaphore, &second.semaphore));
+        assert!(
+            first
+                .workspace_leases
+                .shares_registry(&custom_concurrency.workspace_leases),
+            "all production constructors must share one workspace lease registry"
+        );
+        assert!(first.workspace_leases_ready());
+        assert!(custom_concurrency.workspace_leases_ready());
+    }
+
+    #[tokio::test]
     async fn timeout_yields_error_finished() {
         let executor = ToolExecutor::new();
         let cancel = CancellationToken::new();
@@ -601,6 +1630,7 @@ mod tests {
         let ToolEvent::Finished {
             tool_use_id,
             output,
+            ..
         } = &events[0]
         else {
             panic!("expected Finished, got {events:?}");
@@ -608,6 +1638,49 @@ mod tests {
         assert_eq!(tool_use_id, "t1");
         assert!(output.is_error);
         assert!(output.content.contains("timed out after 30ms"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn runtime_owned_wait_survives_leaf_timeout() {
+        struct RuntimeWait;
+        impl Tool for RuntimeWait {
+            fn name(&self) -> &'static str {
+                "RuntimeWait"
+            }
+            fn description(&self) -> &'static str {
+                "runtime owned wait"
+            }
+            fn parameters(&self) -> serde_json::Value {
+                json!({})
+            }
+            fn timeout(&self) -> Duration {
+                Duration::from_mins(30)
+            }
+            fn timeout_policy(&self) -> crate::tool::ToolTimeoutPolicy {
+                crate::tool::ToolTimeoutPolicy::TaskRuntime
+            }
+            fn is_read_only(&self, _: &serde_json::Value) -> bool {
+                true
+            }
+            fn execute(&self, _: serde_json::Value, _: ToolContext) -> BoxFuture<'_, ToolOutput> {
+                Box::pin(async {
+                    tokio::time::sleep(Duration::from_mins(11)).await;
+                    ToolOutput::ok("partial result")
+                })
+            }
+        }
+        let executor = ToolExecutor::new();
+        let cancel = CancellationToken::new();
+        let events = collect(executor.spawn_call(
+            Arc::new(RuntimeWait),
+            "runtime-wait".into(),
+            json!({}),
+            &cancel,
+        ))
+        .await;
+        assert!(
+            matches!(&events[0], ToolEvent::Finished { output, .. } if !output.is_error && output.content == "partial result")
+        );
     }
 
     #[tokio::test]
@@ -626,6 +1699,45 @@ mod tests {
             events.is_empty(),
             "cancelled call must not emit events: {events:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn shutdown_retains_and_drains_leaf_after_receiver_is_dropped() {
+        let executor = ToolExecutor::with_concurrency(1);
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let cleaned = Arc::new(AtomicUsize::new(0));
+        let tool: Arc<dyn Tool> = Arc::new(CancelCleanupTool {
+            entered: Arc::clone(&entered),
+            cleaned: Arc::clone(&cleaned),
+        });
+        let receiver = executor.spawn_call(
+            tool,
+            "owned-leaf".to_owned(),
+            json!({}),
+            &CancellationToken::new(),
+        );
+        entered.notified().await;
+        drop(receiver);
+        assert_eq!(executor.active_owner_count(), 1);
+
+        let report = executor.shutdown(Duration::from_secs(1)).await;
+        assert_eq!(report.owners_requested, 1);
+        assert_eq!(report.owners_remaining, 0);
+        assert!(report.drained);
+        assert_eq!(cleaned.load(Ordering::SeqCst), 1);
+        assert!(!executor.accepts_new_execution());
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut rejected = executor.spawn_call(
+            Arc::new(CountingTool {
+                calls: Arc::clone(&calls),
+            }),
+            "after-shutdown".to_owned(),
+            json!({}),
+            &CancellationToken::new(),
+        );
+        assert!(rejected.recv().await.is_none());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

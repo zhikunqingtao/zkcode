@@ -58,8 +58,8 @@ pub use delivery::{
 };
 pub use hub::{BindError, WsHub};
 
-/// WS 协议版本（旧 `WebSocketController.WS_PROTOCOL_VERSION`）。
-pub const WS_PROTOCOL_VERSION: i64 = 3;
+/// WS 协议版本的单一权威来自 `zk-protocol`。服务端不再维护兼容版本常量。
+pub use zk_protocol::WS_PROTOCOL_VERSION;
 
 /// 旧 `WebSocketController.CRITICAL_MESSAGE_TYPES`（L254-260）**15 条**逐字快照
 ///（任务规格表述「14 种」与旧源码实查不符，以代码为准：旧集合实为 15 条）。

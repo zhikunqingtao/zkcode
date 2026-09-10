@@ -40,6 +40,9 @@ pub type DisconnectCallback = Arc<dyn Fn() + Send + Sync>;
 
 /// MCP 传输层统一接口。
 pub trait McpTransport: Send + Sync {
+    /// Reserve the next JSON-RPC request id for this transport/session.
+    fn next_request_id(&self) -> RequestId;
+
     /// 建立连接。
     ///
     /// # Errors
@@ -48,11 +51,14 @@ pub trait McpTransport: Send + Sync {
 
     /// 发送 JSON-RPC 请求并等待响应，返回 `result` 字段（服务端可省略 →
     /// `None`，对照 Java `node.has("result") ? ... : null`）。
+    /// `request_id` 必须由同一 transport 的 [`Self::next_request_id`] 预留；显式
+    /// 传入使调用层能用完全相同的 ID 发送取消通知。
     ///
     /// # Errors
     /// 未连接、超时、服务端返回 `error` 对象、或底层 I/O 失败时返回。
     fn send_request<'a>(
         &'a self,
+        request_id: RequestId,
         method: &'a str,
         params: Option<Value>,
         timeout: Duration,
@@ -78,7 +84,7 @@ pub trait McpTransport: Send + Sync {
     /// 注册服务端通知 / 反向请求处理器。
     fn set_notification_handler(&self, handler: NotificationHandler);
 
-    /// 注册断开回调 — 仅 SSE 传输有实际行为（默认空实现）。
+    /// 注册断开回调 — 持久连接传输会在被动断开时触发（默认空实现）。
     fn set_disconnect_callback(&self, callback: DisconnectCallback) {
         let _ = callback;
     }
@@ -127,11 +133,16 @@ mod tests {
     async fn default_health_ping_mirrors_connected_state() {
         struct Stub(bool);
         impl McpTransport for Stub {
+            fn next_request_id(&self) -> RequestId {
+                RequestId::Number(1)
+            }
+
             fn connect(&self) -> BoxFuture<'_, Result<(), McpProtocolError>> {
                 Box::pin(async { Ok(()) })
             }
             fn send_request<'a>(
                 &'a self,
+                _request_id: RequestId,
                 _method: &'a str,
                 _params: Option<Value>,
                 _timeout: Duration,

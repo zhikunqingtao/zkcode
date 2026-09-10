@@ -27,7 +27,9 @@
     "test:coverage": "vitest run --coverage",
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui",
-    "test:e2e:smoke": "ZK_REAL_BACKEND=1 playwright test e2e/chat-smoke.spec.ts --project=chromium"
+    "test:e2e:smoke": "ZK_REAL_BACKEND=1 playwright test e2e/chat-smoke.spec.ts --project=chromium",
+    "typecheck:e2e:production": "tsc --noEmit --target ES2022 --module ESNext --moduleResolution bundler --strict --skipLibCheck --types node e2e/production-backend.spec.ts playwright.production.config.ts",
+    "test:e2e:production": "npm run typecheck:e2e:production && playwright test --config playwright.production.config.ts"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",

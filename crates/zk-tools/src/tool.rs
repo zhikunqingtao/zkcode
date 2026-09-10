@@ -4,12 +4,186 @@
 //! 超时常量对照旧 `BashTool.java` L51-54（`BASH_DEFAULT_TIMEOUT_MS = 120_000` /
 //! `BASH_MAX_TIMEOUT_MS = 600_000`）。
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::future::BoxFuture;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+
+use crate::executor::ExecutionOwnerRegistry;
+
+/// Explicit child-Agent exposure policy for runtime-discovered tools.
+///
+/// Dynamic tools are denied by default. A concrete adapter may opt in only
+/// after trusted local configuration classifies its effect boundary; remote
+/// names and descriptions alone never grant child access.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ChildToolAccess {
+    /// Never expose this dynamic capability to a child Agent.
+    #[default]
+    Denied,
+    /// Expose in the default read-only child directory.
+    ReadOnly,
+    /// Expose only when the separately gated child-write capability is active.
+    WriteGated,
+}
+
+/// Stable ownership attached to every physical resource created by a tool.
+/// The three IDs have already been committed by `TaskRuntime` before a process
+/// is allowed to spawn.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExecutionResourceOwner {
+    /// Logical task that owns the physical execution.
+    pub task_id: String,
+    /// Physical run attempt that owns the physical execution.
+    pub run_id: String,
+    /// Durable tool invocation that spawned the resource.
+    pub invocation_id: String,
+}
+
+/// A physical resource allocation reported by a tool implementation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExecutionResourceAllocation {
+    /// Full UUID v4 allocated before the registration write begins.
+    pub resource_id: String,
+    /// Closed resource-kind vocabulary from the database contract.
+    pub resource_kind: String,
+    /// Operating-system or transport identifier (for example a process-group ID).
+    pub external_id: Option<String>,
+    /// Non-secret diagnostic metadata.
+    pub metadata: serde_json::Value,
+}
+
+/// Handle retained until a physical resource reaches a cleanup terminal state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExecutionResourceLease {
+    /// Stable resource UUID.
+    pub resource_id: String,
+}
+
+/// Physical cleanup result. `Released` is used only after positive operating-
+/// system confirmation; every ambiguous path is permanently `Unconfirmed`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExecutionResourceTerminal {
+    /// The resource is proven absent/reclaimed.
+    Released,
+    /// Cleanup could not be proven inside the bounded cleanup window.
+    Unconfirmed,
+}
+
+/// Aggregate cleanup state surfaced with the terminal tool event.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToolCleanupStatus {
+    /// The invocation did not allocate a supervised physical resource.
+    NotRequired,
+    /// At least one resource has not reached a terminal cleanup state.
+    Pending,
+    /// Every allocated resource was positively released.
+    Confirmed,
+    /// At least one resource could not be positively released.
+    Unconfirmed,
+}
+
+/// Dependency-inverted persistence port for physical execution resources.
+///
+/// `zk-tools` owns process lifetime but must not depend on `zk-db`; the engine
+/// injects an implementation backed by the same database that owns Task/Run/
+/// tool-invocation state. Futures are `'static` so cleanup can continue in a
+/// detached supervisor task even when its caller future is dropped.
+pub trait ExecutionResourceObserver: Send + Sync {
+    /// Persist an allocation before returning control to the running process.
+    fn register(
+        &self,
+        owner: ExecutionResourceOwner,
+        allocation: ExecutionResourceAllocation,
+    ) -> BoxFuture<'static, Result<ExecutionResourceLease, String>>;
+
+    /// Bind the operating-system/transport identifier discovered only after a
+    /// durable reservation has been committed.
+    fn bind_external(
+        &self,
+        lease: ExecutionResourceLease,
+        external_id: String,
+    ) -> BoxFuture<'static, Result<(), String>>;
+
+    /// Persist the immutable cleanup terminal state.
+    fn finish(
+        &self,
+        lease: ExecutionResourceLease,
+        terminal: ExecutionResourceTerminal,
+    ) -> BoxFuture<'static, Result<(), String>>;
+}
+
+#[derive(Clone)]
+struct ExecutionResourceBinding {
+    owner: ExecutionResourceOwner,
+    observer: Arc<dyn ExecutionResourceObserver>,
+    tracker: Arc<ExecutionResourceTracker>,
+}
+
+#[derive(Default)]
+struct ExecutionResourceTracker {
+    leases: Mutex<HashMap<String, ExecutionResourceLease>>,
+    saw_resource: std::sync::atomic::AtomicBool,
+    unconfirmed: std::sync::atomic::AtomicBool,
+}
+
+impl ExecutionResourceTracker {
+    fn insert(&self, lease: ExecutionResourceLease) {
+        self.saw_resource
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.leases
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(lease.resource_id.clone(), lease);
+    }
+
+    fn complete(&self, resource_id: &str, confirmed: bool) {
+        self.leases
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(resource_id);
+        if !confirmed {
+            self.unconfirmed
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    fn status(&self) -> ToolCleanupStatus {
+        if self.unconfirmed.load(std::sync::atomic::Ordering::Acquire) {
+            return ToolCleanupStatus::Unconfirmed;
+        }
+        if !self
+            .leases
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty()
+        {
+            return ToolCleanupStatus::Pending;
+        }
+        if self.saw_resource.load(std::sync::atomic::Ordering::Acquire) {
+            ToolCleanupStatus::Confirmed
+        } else {
+            ToolCleanupStatus::NotRequired
+        }
+    }
+
+    fn drain_pending_as_unconfirmed(&self) -> Vec<ExecutionResourceLease> {
+        let mut leases = self
+            .leases
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !leases.is_empty() {
+            self.unconfirmed
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        leases.drain().map(|(_, lease)| lease).collect()
+    }
+}
 
 /// 默认单工具执行超时（对照旧 `BASH_DEFAULT_TIMEOUT_MS = 120_000`）。
 pub const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_mins(2);
@@ -17,6 +191,15 @@ pub const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_mins(2);
 /// 单工具执行超时硬上限（对照旧 `BASH_MAX_TIMEOUT_MS = 600_000`；
 /// [`Tool::timeout`] 返回值超过此值时由执行器钳制）。
 pub const MAX_TOOL_TIMEOUT: Duration = Duration::from_mins(10);
+
+/// Trusted timeout ownership; runtime-managed tasks have their own durable deadline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToolTimeoutPolicy {
+    /// The executor applies the ordinary leaf-tool hard limit.
+    Executor,
+    /// `TaskRuntime` owns the deadline; the executor only supplies a watchdog.
+    TaskRuntime,
+}
 
 /// 工具规格三元组（对照旧 `ToolDefinition`：name / description / JSON Schema）。
 ///
@@ -64,6 +247,64 @@ pub struct ToolOutput {
     pub metadata: Option<serde_json::Value>,
 }
 
+/// Immutable receipt emitted by a built-in file tool after its atomic write has
+/// been applied and verified.  The receipt is execution data, not an artifact
+/// ledger: `zk-engine` consumes it exactly once and persists the authoritative
+/// record in `SQLite`.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileArtifactReceipt {
+    /// Canonical absolute path observed immediately after the write.
+    pub canonical_path: String,
+    /// `created` or `modified`.
+    pub operation: String,
+    /// SHA-256 of the exact bytes committed by the atomic writer.
+    pub sealed_hash: String,
+    /// Byte count of the exact content passed to the atomic writer.
+    pub file_size: u64,
+}
+
+impl FileArtifactReceipt {
+    /// Build a receipt for a successfully applied regular-file write.
+    ///
+    /// `None` deliberately fails closed: the engine treats a successful built-in
+    /// file tool without a valid receipt as an artifact-registration failure.
+    pub async fn capture(
+        path: &Path,
+        operation: &str,
+        sealed_hash: Option<&str>,
+        file_size: usize,
+    ) -> Option<Self> {
+        if !matches!(operation, "created" | "modified") {
+            return None;
+        }
+        let sealed_hash = sealed_hash?;
+        if sealed_hash.len() != 64 || !sealed_hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return None;
+        }
+        let sealed_hash = sealed_hash.to_ascii_lowercase();
+        let metadata = tokio::fs::symlink_metadata(path).await.ok()?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return None;
+        }
+        let file_size = u64::try_from(file_size).ok()?;
+        if metadata.len() != file_size {
+            return None;
+        }
+        let canonical_path = tokio::fs::canonicalize(path)
+            .await
+            .ok()?
+            .to_string_lossy()
+            .into_owned();
+        Some(Self {
+            canonical_path,
+            operation: operation.to_owned(),
+            sealed_hash,
+            file_size,
+        })
+    }
+}
+
 impl ToolOutput {
     /// 构造成功结果。
     #[must_use]
@@ -84,6 +325,18 @@ impl ToolOutput {
             metadata: None,
         }
     }
+
+    /// Decode the standardized built-in file-write receipt, when present.
+    #[must_use]
+    pub fn file_artifact_receipt(&self) -> Option<FileArtifactReceipt> {
+        let value = self
+            .metadata
+            .as_ref()?
+            .get("structuredResult")?
+            .get("artifact")?
+            .clone();
+        serde_json::from_value(value).ok()
+    }
 }
 
 /// 工具执行上下文——取消令牌（三层树的 `tool_call` 层）+ 进度通道 +
@@ -93,15 +346,31 @@ impl ToolOutput {
 /// `toolUseId`；其余 11 个字段分属权限管线 / 子代理 / 后台进程域，归后续
 /// 子阶段）。2.3 仅**追加**字段与访问器，[`Self::new`] 签名不变：未显式注入
 /// 时 `working_dir` = 进程当前目录、`session_id` / `tool_use_id` = `None`。
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ToolContext {
     /// 本次调用的取消令牌（run 令牌的 child；工具实现应在长操作中协作检查）。
     pub cancel: CancellationToken,
-    progress: mpsc::UnboundedSender<String>,
+    progress: ProgressSender,
     working_dir: PathBuf,
     session_id: Option<String>,
     tool_use_id: Option<String>,
     run_id: Option<String>,
+    /// Canonical file target bound by the authorization decision for this
+    /// invocation. Built-in writers compare this identity again immediately
+    /// before rename so a post-authorization path swap cannot redirect writes.
+    authorized_write_path: Option<PathBuf>,
+    execution_resources: Option<ExecutionResourceBinding>,
+    execution_owners: Option<ExecutionOwnerRegistry>,
+    /// Invocation-scoped directory snapshot.  A filtered child registry puts
+    /// only its effective capabilities here, so discovery tools cannot expose
+    /// names that the caller is not authorized to execute.
+    tool_catalog: Option<Arc<Vec<ToolSpec>>>,
+}
+
+#[derive(Clone, Debug)]
+enum ProgressSender {
+    Unbounded(mpsc::UnboundedSender<String>),
+    Bounded(mpsc::Sender<String>),
 }
 
 impl ToolContext {
@@ -114,11 +383,38 @@ impl ToolContext {
     pub fn new(cancel: CancellationToken, progress: mpsc::UnboundedSender<String>) -> Self {
         Self {
             cancel,
-            progress,
+            progress: ProgressSender::Unbounded(progress),
             working_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             session_id: None,
             tool_use_id: None,
             run_id: None,
+            authorized_write_path: None,
+            execution_resources: None,
+            execution_owners: None,
+            tool_catalog: None,
+        }
+    }
+
+    /// Construct a context whose progress queue is bounded. When a producer
+    /// outruns the consumer, intermediate progress is intentionally dropped;
+    /// the tool result is delivered on a separate executor path and is never
+    /// dropped with progress.
+    #[must_use]
+    pub fn with_bounded_progress(
+        cancel: CancellationToken,
+        progress: mpsc::Sender<String>,
+    ) -> Self {
+        Self {
+            cancel,
+            progress: ProgressSender::Bounded(progress),
+            working_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            session_id: None,
+            tool_use_id: None,
+            run_id: None,
+            authorized_write_path: None,
+            execution_resources: None,
+            execution_owners: None,
+            tool_catalog: None,
         }
     }
 
@@ -178,10 +474,235 @@ impl ToolContext {
         self.run_id.as_deref()
     }
 
+    /// Bind the exact path approved by the authorization pipeline.
+    #[must_use]
+    pub fn with_authorized_write_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.authorized_write_path = Some(path.into());
+        self
+    }
+
+    /// Exact path approved for this invocation, when it is a file writer.
+    #[must_use]
+    pub fn authorized_write_path(&self) -> Option<&Path> {
+        self.authorized_write_path.as_deref()
+    }
+
+    /// Bind the exact effective tool-directory snapshot for this invocation.
+    #[must_use]
+    pub fn with_tool_catalog(mut self, catalog: Arc<Vec<ToolSpec>>) -> Self {
+        self.tool_catalog = Some(catalog);
+        self
+    }
+
+    /// Effective tool-directory snapshot visible to discovery tools.
+    #[must_use]
+    pub fn tool_catalog(&self) -> Option<&[ToolSpec]> {
+        self.tool_catalog.as_deref().map(Vec::as_slice)
+    }
+
+    /// Attach the durable owner and observer used by process/MCP resource
+    /// supervisors. This is injected only after the tool invocation is stored.
+    #[must_use]
+    pub fn with_execution_resources(
+        mut self,
+        owner: ExecutionResourceOwner,
+        observer: Arc<dyn ExecutionResourceObserver>,
+    ) -> Self {
+        self.execution_resources = Some(ExecutionResourceBinding {
+            owner,
+            observer,
+            tracker: Arc::new(ExecutionResourceTracker::default()),
+        });
+        self
+    }
+
+    pub(crate) fn with_execution_owner_registry(mut self, owners: ExecutionOwnerRegistry) -> Self {
+        self.execution_owners = Some(owners);
+        self
+    }
+
+    pub(crate) fn execution_owner_ready(&self) -> Result<(), String> {
+        match self.execution_owners.as_ref() {
+            Some(owners) if owners.accepts_new_execution() => Ok(()),
+            Some(_) => Err("EXECUTION_SUPERVISOR_SHUTTING_DOWN".to_owned()),
+            None if self.run_id.is_some() => Err("EXECUTION_TASK_SUPERVISOR_REQUIRED".to_owned()),
+            None => Ok(()),
+        }
+    }
+
+    pub(crate) fn spawn_owned_execution(
+        &self,
+        future: BoxFuture<'static, ()>,
+    ) -> Result<(), String> {
+        if let Some(owners) = self.execution_owners.as_ref() {
+            return owners
+                .spawn_owned(self.cancel.clone(), future)
+                .map_err(str::to_owned);
+        }
+        if self.run_id.is_some() {
+            return Err("EXECUTION_TASK_SUPERVISOR_REQUIRED".to_owned());
+        }
+        tokio::spawn(future);
+        Ok(())
+    }
+
+    /// Persist a newly allocated physical resource. The lease is tracked before
+    /// the async write starts so cancellation at the commit boundary remains an
+    /// explicit unconfirmed cleanup responsibility.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a runtime-owned invocation has no durable observer,
+    /// registration fails, or the observer returns a mismatched resource ID.
+    pub async fn register_execution_resource(
+        &self,
+        resource_kind: impl Into<String>,
+        external_id: Option<String>,
+        metadata: serde_json::Value,
+    ) -> Result<Option<ExecutionResourceLease>, String> {
+        let Some(binding) = self.execution_resources.as_ref() else {
+            // A durable Run context without a supervisor would create an
+            // unowned process. Keep standalone unit/CLI uses (no run_id)
+            // available, but fail closed for every runtime-owned invocation.
+            if self.run_id.is_some() {
+                return Err("EXECUTION_RESOURCE_OBSERVER_REQUIRED".to_owned());
+            }
+            return Ok(None);
+        };
+        let lease = ExecutionResourceLease {
+            resource_id: uuid::Uuid::new_v4().to_string(),
+        };
+        binding.tracker.insert(lease.clone());
+        let allocation = ExecutionResourceAllocation {
+            resource_id: lease.resource_id.clone(),
+            resource_kind: resource_kind.into(),
+            external_id,
+            metadata,
+        };
+        match binding
+            .observer
+            .register(binding.owner.clone(), allocation)
+            .await
+        {
+            Ok(registered) if registered.resource_id == lease.resource_id => Ok(Some(registered)),
+            Ok(registered) => {
+                binding.tracker.complete(&lease.resource_id, false);
+                let _ = binding
+                    .observer
+                    .finish(registered, ExecutionResourceTerminal::Unconfirmed)
+                    .await;
+                Err("EXECUTION_RESOURCE_ID_MISMATCH".to_owned())
+            }
+            Err(error) => {
+                // Registration may have committed immediately before its waiter
+                // was cancelled. Persist the conservative terminal by stable ID.
+                let _ = binding
+                    .observer
+                    .finish(lease.clone(), ExecutionResourceTerminal::Unconfirmed)
+                    .await;
+                binding.tracker.complete(&lease.resource_id, false);
+                Err(format!("EXECUTION_RESOURCE_REGISTER_FAILED: {error}"))
+            }
+        }
+    }
+
+    /// Persist resource cleanup. A failed `Released` write is immediately
+    /// retried as `Unconfirmed`; local aggregate state never reports confirmed
+    /// unless the durable observer accepted `Released`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the durable observer cannot persist the requested
+    /// terminal cleanup state.
+    pub async fn finish_execution_resource(
+        &self,
+        lease: ExecutionResourceLease,
+        terminal: ExecutionResourceTerminal,
+    ) -> Result<(), String> {
+        let Some(binding) = self.execution_resources.as_ref() else {
+            return Ok(());
+        };
+        match binding.observer.finish(lease.clone(), terminal).await {
+            Ok(()) => {
+                binding.tracker.complete(
+                    &lease.resource_id,
+                    terminal == ExecutionResourceTerminal::Released,
+                );
+                Ok(())
+            }
+            Err(error) => {
+                if terminal == ExecutionResourceTerminal::Released {
+                    let _ = binding
+                        .observer
+                        .finish(lease.clone(), ExecutionResourceTerminal::Unconfirmed)
+                        .await;
+                }
+                binding.tracker.complete(&lease.resource_id, false);
+                Err(format!("EXECUTION_RESOURCE_FINISH_FAILED: {error}"))
+            }
+        }
+    }
+
+    /// Attach an external process/transport identity to a reservation which was
+    /// durably allocated before the physical resource could be created.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the durable observer cannot bind the external ID.
+    pub async fn bind_execution_resource_external(
+        &self,
+        lease: &ExecutionResourceLease,
+        external_id: String,
+    ) -> Result<(), String> {
+        let Some(binding) = self.execution_resources.as_ref() else {
+            return Ok(());
+        };
+        binding
+            .observer
+            .bind_external(lease.clone(), external_id)
+            .await
+            .map_err(|error| format!("EXECUTION_RESOURCE_BIND_FAILED: {error}"))
+    }
+
+    /// Current aggregate cleanup status for the invocation.
+    #[must_use]
+    pub fn execution_cleanup_status(&self) -> ToolCleanupStatus {
+        self.execution_resources
+            .as_ref()
+            .map_or(ToolCleanupStatus::NotRequired, |binding| {
+                binding.tracker.status()
+            })
+    }
+
+    /// Close every still-owned lease as unconfirmed. The executor invokes this
+    /// before abandoning a tool future after the bounded cleanup deadline.
+    pub async fn force_unconfirmed_execution_resources(&self) {
+        let Some(binding) = self.execution_resources.as_ref() else {
+            return;
+        };
+        for lease in binding.tracker.drain_pending_as_unconfirmed() {
+            if let Err(error) = binding
+                .observer
+                .finish(lease, ExecutionResourceTerminal::Unconfirmed)
+                .await
+            {
+                tracing::error!(%error, "failed to persist unconfirmed execution resource");
+            }
+        }
+    }
+
     /// 上报执行进度（stdout 增量语义，映射下行 `tool_use_progress`）；
     /// 接收端关闭时静默丢弃（进度为尽力而为，不阻断执行）。
     pub fn report_progress(&self, text: impl Into<String>) {
-        let _ = self.progress.send(text.into());
+        let text = text.into();
+        match &self.progress {
+            ProgressSender::Unbounded(sender) => {
+                let _ = sender.send(text);
+            }
+            ProgressSender::Bounded(sender) => {
+                let _ = sender.try_send(text);
+            }
+        }
     }
 }
 
@@ -203,6 +724,25 @@ pub trait Tool: Send + Sync {
     /// [`MAX_TOOL_TIMEOUT`] 钳制上限）。
     fn timeout(&self) -> Duration {
         DEFAULT_TOOL_TIMEOUT
+    }
+
+    /// Select the trusted owner of this tool's execution deadline.
+    fn timeout_policy(&self) -> ToolTimeoutPolicy {
+        ToolTimeoutPolicy::Executor
+    }
+
+    /// Whether this invocation consumes one of the bounded leaf execution slots.
+    /// Durable orchestration and wait tools return `false`: they coordinate other
+    /// work but do not themselves run a process/provider/MCP leaf operation.
+    fn uses_execution_slot(&self) -> bool {
+        true
+    }
+
+    /// Trusted local policy for exposing a runtime-discovered tool to child
+    /// Agents. This is deliberately not inferred from a tool name or from
+    /// untrusted remote metadata.
+    fn child_access(&self) -> ChildToolAccess {
+        ChildToolAccess::Denied
     }
 
     /// 执行工具（入参为 LLM 产出的 JSON；入参校验由实现自担，校验失败
@@ -233,6 +773,18 @@ pub trait Tool: Send + Sync {
     /// MCP 专属授权身份；禁止仅凭 `mcp__` 名字前缀推断信任域。
     fn mcp_identity(&self) -> Option<&McpToolIdentity> {
         None
+    }
+
+    /// Connection generation that owns this tool instance, when the tool is
+    /// backed by a reconnectable transport such as MCP.
+    fn connection_generation(&self) -> Option<u64> {
+        None
+    }
+
+    /// Revalidate a previously captured connection generation immediately
+    /// before execution.  Non-transport tools have no such revocation edge.
+    fn is_connection_generation_current(&self, generation: u64) -> bool {
+        self.connection_generation() == Some(generation)
     }
 
     /// 导出规格（供注册表聚合下发 LLM tools 参数）。

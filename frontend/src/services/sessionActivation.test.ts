@@ -13,6 +13,7 @@ import { useMessageStore } from '@/store/messageStore';
 import { useSessionStore } from '@/store/sessionStore';
 import { useCostStore } from '@/store/costStore';
 import type { Message } from '@/types';
+import { runtimeEnvelope } from '@/test/runtimeEnvelope';
 import {
     activateSessionCandidate,
     getPendingSessionActivation,
@@ -40,8 +41,9 @@ const oldMessage: Message = {
 
 function restore(payload: BindPayload, messages: Message[] = []): void {
     dispatch({
+            ...runtimeEnvelope(),
         type: 'session_restored',
-        protocolVersion: 3,
+        protocolVersion: 4,
         bindRequestId: payload.bindRequestId,
         bindingEpoch: payload.bindingEpoch,
         messages,
@@ -221,6 +223,7 @@ describe('Session activation transaction', () => {
         expect(stale).toBeDefined();
         restore(stale!, [oldMessage]);
         dispatch({
+            ...runtimeEnvelope(),
             type: 'protocol_error',
             code: 'SESSION_NOT_FOUND',
             supportedVersion: 3,
@@ -266,6 +269,7 @@ describe('Session activation transaction', () => {
         });
         await Promise.resolve();
         dispatch({
+            ...runtimeEnvelope(),
             type: 'cost_update',
             sessionCost: 7,
             totalCost: 9,

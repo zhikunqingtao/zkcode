@@ -1,41 +1,36 @@
-//! `CronCreate` 工具——创建定时任务。
-//!
-//! 对照旧 `tool/impl/CronCreateTool.java`（163L，只读权威规格）：名 `CronCreate`、
-//! 入参 `cron`（必填）/ `prompt`（必填）/ `recurring`（默认 true）/
-//! `durable`（默认 false）、`isEnabled() → featureFlags.isEnabled("AGENT_TRIGGERS")`、
-//! `shouldDefer() → true`。
-//!
-//! 校验期错误码逐条对齐旧 `validateInput`：
-//! `MISSING_CRON` / `MISSING_PROMPT` / `INVALID_CRON` / `LIMIT_REACHED`；
-//! 执行期 `CRON_TASK_INVALID`（任务数触顶）/ `CRON_CREATE_FAILED`（其余）。
-//!
-//! 成功返回 JSON，键序与旧 `LinkedHashMap` 逐条一致：
-//! `id` / `cron` / `prompt`（80 字符截断 + `"..."`）/ `recurring` / `durable` /
-//! `next_run` / `expires_at` / `total_tasks`。
+//! `CronCreate` tool backed exclusively by the server-provided durable port.
+#![allow(missing_docs)]
 
 use std::sync::Arc;
 
+use chrono::Utc;
 use futures::future::BoxFuture;
 use serde_json::json;
 
-use super::service::{CronTaskService, clip, next_run, parse_schedule};
+use super::service::{
+    CronCreateRequest, CronTaskPort, DEFAULT_MISSED_POLICY, DEFAULT_OVERLAP_POLICY,
+    DEFAULT_TIMEZONE, clip, next_run_after_ms, parse_timezone,
+};
 use crate::input::{bool_or, failure, optional_str};
 use crate::tool::{Tool, ToolContext, ToolOutput};
 
-/// `prompt` 在成功回执里的截断长度（旧 `length() > 80 ? substring(0, 80) + "..."`）。
 pub const CREATE_PROMPT_CLIP: usize = 80;
 
-/// 定时任务创建工具（旧 `CronCreateTool`）。
-#[derive(Debug)]
 pub struct CronCreateTool {
-    /// 共享任务台账（旧构造注入的 `CronTaskService` bean）。
-    service: Arc<CronTaskService>,
+    service: Arc<dyn CronTaskPort>,
+}
+
+impl std::fmt::Debug for CronCreateTool {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CronCreateTool")
+            .finish_non_exhaustive()
+    }
 }
 
 impl CronCreateTool {
-    /// 绑定任务台账。
     #[must_use]
-    pub fn new(service: Arc<CronTaskService>) -> Self {
+    pub fn new(service: Arc<dyn CronTaskPort>) -> Self {
         Self { service }
     }
 }
@@ -46,10 +41,7 @@ impl Tool for CronCreateTool {
     }
 
     fn description(&self) -> &'static str {
-        // 逐字取自旧 `getDescription()` 三段拼接。
-        "Create a scheduled cron task that triggers at specified intervals. \
-         Uses standard 5-field Unix cron expressions (minute hour day-of-month month day-of-week). \
-         Maximum 50 concurrent tasks. Tasks expire after 30 days."
+        "Create a persistent scheduled task with an explicit IANA timezone. Missed and overlapping occurrences are recorded and skipped by default."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -59,19 +51,29 @@ impl Tool for CronCreateTool {
             "properties": {
                 "cron": {
                     "type": "string",
-                    "description": "5-field Unix cron expression (e.g., '*/5 * * * *' for every 5 minutes)"
+                    "description": "5-field Unix cron expression (for example, '*/5 * * * *')"
                 },
                 "prompt": {
                     "type": "string",
-                    "description": "The prompt/instruction to execute when triggered"
+                    "description": "Instruction executed for each claimed occurrence"
+                },
+                "timezone": {
+                    "type": "string",
+                    "description": "IANA timezone name (default: UTC)"
                 },
                 "recurring": {
                     "type": "boolean",
-                    "description": "Whether the task repeats (default: true)"
+                    "description": "Whether the job remains active after its first occurrence (default: true)"
                 },
-                "durable": {
-                    "type": "boolean",
-                    "description": "Whether the task survives restarts (default: false)"
+                "overlapPolicy": {
+                    "type": "string",
+                    "enum": ["skip"],
+                    "description": "Behavior while an earlier occurrence is active (v1: skip)"
+                },
+                "missedPolicy": {
+                    "type": "string",
+                    "enum": ["skip"],
+                    "description": "Behavior for occurrences missed during downtime (v1: skip)"
                 }
             }
         })
@@ -79,231 +81,206 @@ impl Tool for CronCreateTool {
 
     fn execute(&self, input: serde_json::Value, ctx: ToolContext) -> BoxFuture<'_, ToolOutput> {
         Box::pin(async move {
-            // ── 校验期（旧 validateInput，四条错误码同序） ──
             let Some(expression) = optional_str(&input, "cron") else {
                 return failure("MISSING_CRON", "cron expression is required");
             };
             let Some(prompt) = optional_str(&input, "prompt") else {
                 return failure("MISSING_PROMPT", "prompt is required");
             };
-            let schedule = match parse_schedule(expression) {
-                Ok(schedule) => schedule,
-                Err(reason) => {
-                    return failure("INVALID_CRON", format!("Invalid cron expression: {reason}"));
-                }
+            let timezone = optional_str(&input, "timezone").unwrap_or(DEFAULT_TIMEZONE);
+            let canonical_timezone = match parse_timezone(timezone) {
+                Ok(timezone) => timezone.to_string(),
+                Err(reason) => return failure("INVALID_TIMEZONE", reason),
             };
-            // 旧实现额外验「未来一年内有匹配」；`cron` crate 的迭代器直接给出
-            // 下次触发时刻，取不到即等价于「无未来匹配」。
-            let Some(next) = next_run(&schedule) else {
+            if let Err(reason) = next_run_after_ms(
+                expression,
+                &canonical_timezone,
+                Utc::now().timestamp_millis(),
+            ) {
+                return failure("INVALID_CRON", format!("Invalid cron expression: {reason}"));
+            }
+            let overlap_policy =
+                optional_str(&input, "overlapPolicy").unwrap_or(DEFAULT_OVERLAP_POLICY);
+            if overlap_policy != DEFAULT_OVERLAP_POLICY {
                 return failure(
-                    "INVALID_CRON",
-                    "Cron expression does not match any date in the next year",
-                );
-            };
-            let recurring = bool_or(&input, "recurring", true);
-            let durable = bool_or(&input, "durable", false);
-            // 旧在 durable 分支上提前查上限（`durable && taskCount() >= 50`）。
-            if durable && self.service.task_count() >= super::MAX_JOBS {
-                return failure(
-                    "LIMIT_REACHED",
-                    format!(
-                        "Maximum number of scheduled tasks ({}) reached",
-                        super::MAX_JOBS
-                    ),
+                    "UNSUPPORTED_OVERLAP_POLICY",
+                    "v1 supports only overlapPolicy='skip'",
                 );
             }
-
-            // ── 执行期（旧 call） ──
-            let task = match self.service.add_task(
-                expression,
-                prompt,
-                recurring,
-                durable,
-                ctx.session_id(),
-            ) {
+            let missed_policy =
+                optional_str(&input, "missedPolicy").unwrap_or(DEFAULT_MISSED_POLICY);
+            if missed_policy != DEFAULT_MISSED_POLICY {
+                return failure(
+                    "UNSUPPORTED_MISSED_POLICY",
+                    "v1 supports only missedPolicy='skip'",
+                );
+            }
+            let Some(owner_session_id) = ctx.session_id().map(str::to_owned) else {
+                return failure(
+                    "CRON_CONTEXT_REQUIRED",
+                    "CronCreate requires an authorized root session",
+                );
+            };
+            let task = match self
+                .service
+                .create(CronCreateRequest {
+                    owner_session_id,
+                    cron_expression: expression.to_owned(),
+                    timezone: canonical_timezone,
+                    prompt: prompt.to_owned(),
+                    recurring: bool_or(&input, "recurring", true),
+                    overlap_policy: overlap_policy.to_owned(),
+                    missed_policy: missed_policy.to_owned(),
+                })
+                .await
+            {
                 Ok(task) => task,
-                Err(limit) => return failure("CRON_TASK_INVALID", limit.to_string()),
+                Err(error) => return failure(&error.code, error.message),
             };
 
             let body = json!({
-                "id": task.id,
+                "jobId": task.job_id,
                 "cron": task.cron,
+                "timezone": task.timezone,
                 "prompt": clip(&task.prompt, CREATE_PROMPT_CLIP),
                 "recurring": task.recurring,
-                "durable": task.durable,
-                "next_run": next,
-                "expires_at": task.expires_at_iso(),
-                "total_tasks": self.service.task_count(),
+                "overlapPolicy": task.overlap_policy,
+                "missedPolicy": task.missed_policy,
+                "status": task.status,
+                "nextScheduledAt": task.next_scheduled_at,
+                "createdAt": task.created_at,
             });
-            match serde_json::to_string(&body) {
-                Ok(text) => ToolOutput::ok(text),
-                Err(error) => failure(
-                    "CRON_CREATE_FAILED",
-                    format!("Failed to create cron task: {error}"),
-                ),
-            }
+            serde_json::to_string(&body).map_or_else(
+                |error| {
+                    failure(
+                        "CRON_CREATE_FAILED",
+                        format!("Failed to encode cron job: {error}"),
+                    )
+                },
+                ToolOutput::ok,
+            )
         })
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
 
     use super::*;
+    use crate::cron::{CronDeleteReceipt, CronPortError, CronTask};
+
+    #[derive(Default)]
+    struct FakePort {
+        created: Mutex<Vec<CronCreateRequest>>,
+    }
+
+    impl CronTaskPort for FakePort {
+        fn create(
+            &self,
+            request: CronCreateRequest,
+        ) -> BoxFuture<'_, Result<CronTask, CronPortError>> {
+            self.created
+                .lock()
+                .expect("created lock")
+                .push(request.clone());
+            Box::pin(async move {
+                Ok(CronTask {
+                    job_id: uuid::Uuid::new_v4().to_string(),
+                    cron: request.cron_expression,
+                    timezone: request.timezone,
+                    prompt: request.prompt,
+                    recurring: request.recurring,
+                    overlap_policy: request.overlap_policy,
+                    missed_policy: request.missed_policy,
+                    status: "active".to_owned(),
+                    next_scheduled_at: Some("2026-09-09T01:00:00.000Z".to_owned()),
+                    created_at: "2026-09-09T00:00:00.000Z".to_owned(),
+                    updated_at: "2026-09-09T00:00:00.000Z".to_owned(),
+                })
+            })
+        }
+
+        fn list(
+            &self,
+            _owner_session_id: String,
+        ) -> BoxFuture<'_, Result<Vec<CronTask>, CronPortError>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn delete(
+            &self,
+            _owner_session_id: String,
+            _job_id: String,
+        ) -> BoxFuture<'_, Result<Option<CronDeleteReceipt>, CronPortError>> {
+            Box::pin(async { Ok(None) })
+        }
+    }
 
     fn ctx() -> ToolContext {
         let (tx, _rx) = mpsc::unbounded_channel();
         ToolContext::new(CancellationToken::new(), tx).with_session_id("sess-cron")
     }
 
-    fn tool(tag: &str) -> CronCreateTool {
-        let cwd = std::env::temp_dir().join(format!("zk-cron-create-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&cwd);
-        std::fs::create_dir_all(&cwd).expect("mkdir");
-        CronCreateTool::new(Arc::new(CronTaskService::new(&cwd)))
-    }
-
-    /// 规格：名 / 必填两项 / 四个属性对齐旧 schema。
     #[test]
-    fn spec_matches_legacy_shape() {
-        let spec = tool("spec").spec();
-        assert_eq!(spec.name, "CronCreate");
+    fn schema_is_lower_camel_and_exposes_policies() {
+        let tool = CronCreateTool::new(Arc::new(FakePort::default()));
+        let spec = tool.spec();
         assert_eq!(spec.parameters["required"], json!(["cron", "prompt"]));
-        for key in ["cron", "prompt", "recurring", "durable"] {
+        for key in [
+            "cron",
+            "prompt",
+            "timezone",
+            "recurring",
+            "overlapPolicy",
+            "missedPolicy",
+        ] {
             assert!(spec.parameters["properties"][key].is_object(), "{key}");
         }
-        assert!(spec.description.contains("5-field Unix cron expressions"));
+        assert!(spec.parameters["properties"].get("durable").is_none());
     }
 
-    /// 校验期四条错误码逐条对齐旧 `validateInput`。
     #[tokio::test]
-    async fn validation_errors_match_legacy_codes() {
-        let tool = tool("validate");
+    async fn defaults_to_utc_and_skip_policies() {
+        let port = Arc::new(FakePort::default());
+        let tool = CronCreateTool::new(port.clone());
+        let output = tool
+            .execute(json!({"cron": "*/5 * * * *", "prompt": "status"}), ctx())
+            .await;
+        assert!(!output.is_error, "{}", output.content);
+        let body: serde_json::Value = serde_json::from_str(&output.content).expect("json");
+        assert!(body["jobId"].as_str().is_some());
+        assert_eq!(body["timezone"], "UTC");
+        assert_eq!(body["overlapPolicy"], "skip");
+        assert_eq!(body["missedPolicy"], "skip");
+        assert!(body.get("nextScheduledAt").is_some());
+        let request = port.created.lock().expect("created lock")[0].clone();
+        assert_eq!(request.owner_session_id, "sess-cron");
+    }
+
+    #[tokio::test]
+    async fn rejects_non_iana_zone_and_unimplemented_policies() {
+        let tool = CronCreateTool::new(Arc::new(FakePort::default()));
         for (input, code) in [
-            (json!({}), "MISSING_CRON"),
-            (json!({ "cron": "  " }), "MISSING_CRON"),
-            (json!({ "cron": "* * * * *" }), "MISSING_PROMPT"),
-            (json!({ "cron": "bogus", "prompt": "hi" }), "INVALID_CRON"),
             (
-                json!({ "cron": "99 * * * *", "prompt": "hi" }),
-                "INVALID_CRON",
+                json!({"cron": "* * * * *", "prompt": "x", "timezone": "Mars/Olympus"}),
+                "INVALID_TIMEZONE",
+            ),
+            (
+                json!({"cron": "* * * * *", "prompt": "x", "overlapPolicy": "parallel"}),
+                "UNSUPPORTED_OVERLAP_POLICY",
+            ),
+            (
+                json!({"cron": "* * * * *", "prompt": "x", "missedPolicy": "catchUp"}),
+                "UNSUPPORTED_MISSED_POLICY",
             ),
         ] {
-            let output = tool.execute(input.clone(), ctx()).await;
-            assert!(output.is_error, "{input} unexpectedly succeeded");
-            assert!(
-                output.content.starts_with(&format!("{code}: ")),
-                "{} did not start with {code}",
-                output.content
-            );
+            let output = tool.execute(input, ctx()).await;
+            assert!(output.is_error);
+            assert!(output.content.starts_with(code), "{}", output.content);
         }
-    }
-
-    /// 成功回执键序与内容对齐旧 `LinkedHashMap`，并写入台账。
-    #[tokio::test]
-    async fn creates_a_task_and_returns_legacy_json() {
-        let tool = tool("ok");
-        let output = tool
-            .execute(
-                json!({ "cron": "*/5 * * * *", "prompt": "run the nightly report" }),
-                ctx(),
-            )
-            .await;
-        assert!(!output.is_error, "{}", output.content);
-
-        let body: serde_json::Value = serde_json::from_str(&output.content).expect("json");
-        assert_eq!(body["cron"], "*/5 * * * *");
-        assert_eq!(body["prompt"], "run the nightly report");
-        assert_eq!(body["recurring"], true);
-        assert_eq!(body["durable"], false);
-        assert_eq!(body["total_tasks"], 1);
-        assert_eq!(
-            body["id"].as_str().expect("id").len(),
-            8,
-            "short id is 8 chars"
-        );
-        assert!(
-            body["next_run"].as_str().expect("next_run").ends_with('Z'),
-            "{}",
-            body["next_run"]
-        );
-        assert!(
-            body["expires_at"]
-                .as_str()
-                .expect("expires_at")
-                .ends_with('Z')
-        );
-
-        // 键序（serde_json 的 Map 默认保序编译特性未开时按插入序输出）。
-        let keys: Vec<&str> = body
-            .as_object()
-            .expect("object")
-            .keys()
-            .map(String::as_str)
-            .collect();
-        assert!(keys.contains(&"total_tasks"));
-
-        // 会话 ID 被记为归属代理（旧 `context.sessionId()`）。
-        let stored = tool
-            .service
-            .get_task(body["id"].as_str().expect("id"))
-            .expect("stored");
-        assert_eq!(stored.agent_id.as_deref(), Some("sess-cron"));
-    }
-
-    /// 超长 prompt 在回执里被截到 80 字符 + `"..."`（台账仍存全文）。
-    #[tokio::test]
-    async fn long_prompt_is_clipped_in_the_receipt_only() {
-        let tool = tool("clip");
-        let prompt = "p".repeat(200);
-        let output = tool
-            .execute(json!({ "cron": "0 3 * * *", "prompt": prompt }), ctx())
-            .await;
-        assert!(!output.is_error, "{}", output.content);
-        let body: serde_json::Value = serde_json::from_str(&output.content).expect("json");
-        assert_eq!(
-            body["prompt"],
-            format!("{}...", "p".repeat(CREATE_PROMPT_CLIP))
-        );
-        let stored = tool
-            .service
-            .get_task(body["id"].as_str().expect("id"))
-            .expect("stored");
-        assert_eq!(stored.prompt.len(), 200);
-    }
-
-    /// durable 触顶 → `LIMIT_REACHED`（旧校验期分支）。
-    #[tokio::test]
-    async fn durable_creation_respects_the_cap() {
-        let tool = tool("cap");
-        for index in 0..crate::cron::MAX_JOBS {
-            tool.service
-                .add_task("* * * * *", &format!("job {index}"), true, false, None)
-                .expect("added");
-        }
-        let output = tool
-            .execute(
-                json!({ "cron": "* * * * *", "prompt": "hi", "durable": true }),
-                ctx(),
-            )
-            .await;
-        assert!(output.is_error);
-        assert!(
-            output.content.starts_with("LIMIT_REACHED: "),
-            "{}",
-            output.content
-        );
-
-        // 非 durable 路径触顶落执行期的 `CRON_TASK_INVALID`（旧 catch 分支）。
-        let output = tool
-            .execute(json!({ "cron": "* * * * *", "prompt": "hi" }), ctx())
-            .await;
-        assert!(
-            output.content.starts_with("CRON_TASK_INVALID: "),
-            "{}",
-            output.content
-        );
     }
 }

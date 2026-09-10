@@ -110,7 +110,7 @@ async fn connect_bound(addr: SocketAddr, session_id: &str) -> WsStream {
             "sessionId": session_id,
             "bindRequestId": "br-skill",
             "bindingEpoch": 1,
-            "protocolVersion": 3,
+            "protocolVersion": 4,
         }),
     )
     .await;

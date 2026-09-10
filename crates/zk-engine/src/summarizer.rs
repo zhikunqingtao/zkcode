@@ -82,6 +82,8 @@ use std::sync::{Arc, OnceLock};
 
 use zk_llm::{ChatMessage, Role};
 
+use crate::llm_summarizer::SummaryExecution;
+
 // ===== 截断策略常量（逐值对照旧 ToolResultSummarizer）=====
 
 /// 软限制：超过此字符数触发截断（约 5000 token）。
@@ -175,6 +177,18 @@ pub trait LightModelSummarizer: Send + Sync {
     /// 以轻量模型对给定 system / user 提示生成单行摘要；`None` → 不可用
     /// （触发降级截断，对照旧 LLM 调用失败分支）。
     fn summarize(&self, system_prompt: &str, user_prompt: &str, max_tokens: u32) -> Option<String>;
+
+    /// Generate a summary attributed to an explicit durable Task/Run.
+    fn summarize_scoped(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+        max_tokens: u32,
+        execution: &SummaryExecution,
+    ) -> Option<String> {
+        let _ = execution;
+        self.summarize(system_prompt, user_prompt, max_tokens)
+    }
 }
 
 /// 工具结果摘要器（对照旧 `ToolResultSummarizer`）。
@@ -244,6 +258,47 @@ impl ToolResultSummarizer {
                     truncate_tool_result(message)
                 } else {
                     message.clone()
+                }
+            })
+            .collect()
+    }
+
+    /// Process oversized tool results using the lightweight model while binding
+    /// every physical summary request to the current durable Task/Run. Provider
+    /// or admission failure preserves the deterministic truncation fallback.
+    #[must_use]
+    pub fn process_tool_results_scoped(
+        &self,
+        messages: &[ChatMessage],
+        current_turn: u32,
+        execution: &SummaryExecution,
+    ) -> Vec<ChatMessage> {
+        let _ = current_turn;
+        if !self.gate_enabled {
+            return messages.to_vec();
+        }
+        messages
+            .iter()
+            .map(|message| {
+                if message.role != Role::Tool || char_count(&message.content) <= SOFT_LIMIT_CHARS {
+                    return message.clone();
+                }
+                let Some(port) = self.light_model.as_ref() else {
+                    return truncate_tool_result(message);
+                };
+                let tool_name = message.tool_call_id.as_deref().unwrap_or("Tool");
+                let user_prompt = build_user_prompt(tool_name, "", &message.content);
+                match port.summarize_scoped(
+                    SUMMARY_SYSTEM_PROMPT,
+                    &user_prompt,
+                    SUMMARY_MAX_TOKENS,
+                    execution,
+                ) {
+                    Some(response) => ChatMessage {
+                        content: wrap_summary(&response, char_count(&message.content)),
+                        ..message.clone()
+                    },
+                    None => truncate_tool_result(message),
                 }
             })
             .collect()
@@ -336,6 +391,37 @@ impl ToolResultSummarizer {
         tool_output: &str,
         max_tokens: u32,
     ) -> String {
+        self.summarize_if_needed_inner(tool_name, tool_input, tool_output, max_tokens, None)
+    }
+
+    /// Run-scoped variant used by production execution so any physical light-model
+    /// request is durably attributed to the current Task/Run.
+    #[must_use]
+    pub fn summarize_if_needed_scoped(
+        &self,
+        tool_name: &str,
+        tool_input: &str,
+        tool_output: &str,
+        max_tokens: u32,
+        execution: &SummaryExecution,
+    ) -> String {
+        self.summarize_if_needed_inner(
+            tool_name,
+            tool_input,
+            tool_output,
+            max_tokens,
+            Some(execution),
+        )
+    }
+
+    fn summarize_if_needed_inner(
+        &self,
+        tool_name: &str,
+        tool_input: &str,
+        tool_output: &str,
+        max_tokens: u32,
+        execution: Option<&SummaryExecution>,
+    ) -> String {
         if !self.gate_enabled || tool_output.trim().is_empty() {
             return tool_output.to_owned();
         }
@@ -346,7 +432,16 @@ impl ToolResultSummarizer {
             None => truncate(tool_output, max_tokens),
             Some(port) => {
                 let user_prompt = build_user_prompt(tool_name, tool_input, tool_output);
-                match port.summarize(SUMMARY_SYSTEM_PROMPT, &user_prompt, SUMMARY_MAX_TOKENS) {
+                let summarized = match execution {
+                    Some(execution) => port.summarize_scoped(
+                        SUMMARY_SYSTEM_PROMPT,
+                        &user_prompt,
+                        SUMMARY_MAX_TOKENS,
+                        execution,
+                    ),
+                    None => port.summarize(SUMMARY_SYSTEM_PROMPT, &user_prompt, SUMMARY_MAX_TOKENS),
+                };
+                match summarized {
                     Some(response) => wrap_summary(&response, char_count(tool_output)),
                     None => truncate(tool_output, max_tokens),
                 }

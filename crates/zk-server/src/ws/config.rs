@@ -8,10 +8,12 @@
 //! | `cleanup_period` | 10s | 旧 `cleanupScheduler.scheduleAtFixedRate(…, 10, 10, SECONDS)`（L85-86） |
 //! | `offline_grace` | 30s | 旧 `OFFLINE_GRACE_MS = 30_000`（L51，信息性标记——从不取消 Run，pending 不因 grace 删除） |
 //! | `critical_send_timeout` | 200ms | D9「critical 类 send 带 200ms 超时」 |
-//! | `outbound_capacity` | 256 | 每连接下行 mpsc 容量（旧无对应物；256 帧 ≈ 单回合 delta 密集窗口） |
+//! | `outbound_capacity` | 256 | 每连接下行 mpsc 容量（256 帧 ≈ 单回合 delta 密集窗口） |
+//! | `pending_capacity_per_session` | 1024 | 单会话内存重放缓存上限；权威重放来自 `SQLite` outbox |
+//! | `pending_capacity_total` | 8192 | 全局内存重放缓存上限，防离线会话基数耗尽内存 |
 //!
-//! per-session critical pending **无上界**（对齐旧系统的无限追加语义，不截断
-//! 不淘汰）——堆积深度经 `zk_ws_pending_depth` gauge 监控。
+//! pending 只是已提交 outbox 的投递加速层，不是状态权威。达到上限会淘汰旧的
+//! 内存副本；客户端按 `eventId` 从 `SQLite` 恢复，不会因缓存淘汰丢失持久事件。
 //!
 //! 全部字段可注入（测试缩短心跳/超时，避免慢测试）。
 
@@ -34,6 +36,10 @@ pub struct WsConfig {
     pub critical_send_timeout: Duration,
     /// 每连接下行 mpsc 容量。
     pub outbound_capacity: usize,
+    /// 单会话 critical 内存重放缓存上限。
+    pub pending_capacity_per_session: usize,
+    /// 所有会话 critical 内存重放缓存总上限。
+    pub pending_capacity_total: usize,
 }
 
 impl Default for WsConfig {
@@ -46,6 +52,8 @@ impl Default for WsConfig {
             offline_grace: Duration::from_secs(30),
             critical_send_timeout: Duration::from_millis(200),
             outbound_capacity: 256,
+            pending_capacity_per_session: 1024,
+            pending_capacity_total: 8192,
         }
     }
 }
@@ -65,6 +73,8 @@ impl WsConfig {
             offline_grace: Duration::from_millis(30),
             critical_send_timeout: Duration::from_millis(200),
             outbound_capacity: 4,
+            pending_capacity_per_session: 64,
+            pending_capacity_total: 256,
         }
     }
 }

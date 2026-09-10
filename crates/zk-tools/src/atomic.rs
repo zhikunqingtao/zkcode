@@ -14,10 +14,9 @@
 //!
 //! 差异（留痕 docs/compatibility.md §9）：
 //!
-//! - 旧 `PathSecurityService` / `ManagedWorkspacePathResolver` 的三次路径复检
-//!   （pre / before-move / after-move）未移植——路径准入面由 2.5 的
-//!   `ToolExecutionGateway` 在工具**之前**承担，本 crate 不重复实现；对应地
-//!   `PRE_MOVE_SECURITY_DENIED` / `POST_MOVE_SECURITY_DENIED` 两码不产生。
+//! - 路径准入仍由 `ToolExecutionGateway` 在工具之前承担；本写入器另外在
+//!   CAS 与 rename 前拒绝目标符号链接并复核父目录 canonical identity，
+//!   防止授权后路径替换。rename 后的越界判断由回读 hash 与调用层审计负责。
 //! - 旧 `FileVersionTracker.recordWrite` 的 best-effort 版本登记未移植：
 //!   `Edit` 的读后写冲突检测在工具内自包含完成（见 [`crate::file_edit`]），
 //!   不需要跨调用的全局版本表。因此 `WriteResult.historyRecorded` /
@@ -118,55 +117,102 @@ pub async fn write_checked(
     content: &str,
     expected: &ExpectedOldState,
 ) -> WriteOutcome {
-    let path = absolute_normalized(target);
+    write_checked_bytes(target, content.as_bytes(), expected).await
+}
+
+/// String-oriented authorization-bound writer used by built-in text tools.
+pub async fn write_checked_authorized(
+    target: &Path,
+    content: &str,
+    expected: &ExpectedOldState,
+    authorized_target: Option<&Path>,
+) -> WriteOutcome {
+    write_checked_bytes_authorized(target, content.as_bytes(), expected, authorized_target).await
+}
+
+/// Byte-oriented variant used by binary artifacts such as browser screenshots.
+pub async fn write_checked_bytes(
+    target: &Path,
+    content: &[u8],
+    expected: &ExpectedOldState,
+) -> WriteOutcome {
+    let Some(authorized) = canonical_write_target(target).await else {
+        return WriteOutcome::not_started("WRITE_AUTHORIZED_TARGET_REQUIRED");
+    };
+    write_checked_bytes_authorized(&authorized, content, expected, Some(&authorized)).await
+}
+
+/// Write bytes while binding the operation to the exact target returned by the
+/// authorization pipeline. A missing authorization target fails closed.
+pub async fn write_checked_bytes_authorized(
+    target: &Path,
+    content: &[u8],
+    expected: &ExpectedOldState,
+    authorized_target: Option<&Path>,
+) -> WriteOutcome {
+    let Some(path) = canonical_write_target(target).await else {
+        return WriteOutcome::not_started(
+            "PRE_MOVE_SECURITY_DENIED: target cannot be canonicalized",
+        );
+    };
+    let Some(authorized_target) = authorized_target.map(absolute_normalized) else {
+        return WriteOutcome::not_started("WRITE_AUTHORIZED_TARGET_REQUIRED");
+    };
+    if path != authorized_target {
+        return WriteOutcome::not_started("PRE_MOVE_SECURITY_DENIED: target path changed");
+    }
     // 同路径串行化（对照旧 `pathLocks.withLock(normalized, …)`）：避免并发
     // Edit/Write 在「读旧摘要 → rename」窗口内互相覆盖。
     let lock = path_lock(&path);
     let _guard = lock.lock().await;
 
     let parent = path.parent().map(Path::to_path_buf);
+    let authorized_parent = authorized_target.parent().map(Path::to_path_buf);
+    let Some(authorized_parent) = authorized_parent else {
+        return WriteOutcome::not_started("Atomic write failed: target has no parent directory");
+    };
     if let Some(parent) = parent.as_deref()
         && let Err(error) = tokio::fs::create_dir_all(parent).await
     {
         return WriteOutcome::not_started(format!("Atomic write failed: {error}"));
     }
 
-    // `symlink_metadata` 对应旧 `Files.exists(…, NOFOLLOW_LINKS)`：符号链接
-    // 自身存在即视为存在，不跟随。
-    let exists = tokio::fs::symlink_metadata(&path).await.is_ok();
-    match expected {
-        ExpectedOldState::Absent => {
-            if exists {
-                return WriteOutcome::not_started("FILE_CONFLICT_EXPECTED_ABSENT");
-            }
-        }
-        ExpectedOldState::Sha256(expected_hash) => {
-            if !exists {
-                return WriteOutcome::not_started("FILE_CONFLICT_EXPECTED_EXISTING");
-            }
-            match tokio::fs::read(&path).await {
-                Ok(bytes) => {
-                    if sha256_hex(&bytes) != *expected_hash {
-                        return WriteOutcome::not_started("OLD_HASH_CONFLICT");
-                    }
-                }
-                Err(error) => {
-                    return WriteOutcome::not_started(format!("Atomic write failed: {error}"));
-                }
-            }
-        }
+    if let Err(error) = verify_expected_state(&path, expected).await {
+        return WriteOutcome::not_started(error);
     }
 
     let Some(parent) = parent else {
         return WriteOutcome::not_started("Atomic write failed: target has no parent directory");
     };
+    let admitted_parent = match tokio::fs::canonicalize(&parent).await {
+        Ok(parent) if parent == authorized_parent => parent,
+        Ok(_) => {
+            return WriteOutcome::not_started(
+                "PRE_MOVE_SECURITY_DENIED: parent path differs from authorized target",
+            );
+        }
+        Err(error) => {
+            return WriteOutcome::not_started(format!("Atomic write failed: {error}"));
+        }
+    };
     let temp = match create_temp_sibling(&parent, &path).await {
         Ok(temp) => temp,
         Err(error) => return WriteOutcome::not_started(format!("Atomic write failed: {error}")),
     };
-    if let Err(error) = write_and_sync(&temp, content.as_bytes()).await {
+    if let Err(error) = write_and_sync(&temp, content).await {
         remove_quietly(&temp).await;
         return WriteOutcome::not_started(format!("Atomic write failed: {error}"));
+    }
+    // Authorization and the initial CAS both happen before the temporary file is
+    // flushed. Re-check immediately before rename so a replaced symlink/ancestor
+    // or an external writer cannot silently redirect/overwrite this operation.
+    if tokio::fs::canonicalize(&parent).await.ok().as_ref() != Some(&admitted_parent) {
+        remove_quietly(&temp).await;
+        return WriteOutcome::not_started("PRE_MOVE_SECURITY_DENIED: parent path changed");
+    }
+    if let Err(error) = verify_expected_state(&path, expected).await {
+        remove_quietly(&temp).await;
+        return WriteOutcome::not_started(error);
     }
     // 仅 ATOMIC_MOVE，无非原子降级路径（旧实现的显式设计）。
     if let Err(error) = tokio::fs::rename(&temp, &path).await {
@@ -174,7 +220,7 @@ pub async fn write_checked(
         return WriteOutcome::not_started(format!("Atomic write failed: {error}"));
     }
 
-    let new_hash = sha256_hex(content.as_bytes());
+    let new_hash = sha256_hex(content);
     let actual_hash = tokio::fs::read(&path)
         .await
         .ok()
@@ -196,6 +242,67 @@ pub async fn write_checked(
         new_hash: Some(new_hash),
         error: None,
         effect: WriteEffect::Applied,
+    }
+}
+
+/// Resolve a direct/test invocation to a stable canonical target. Production
+/// writers use the explicit authorization-bound entry point instead.
+/// Canonicalize the target's nearest existing ancestor without following the
+/// target itself. Authorization callers use this exact identity to survive
+/// platform aliases such as macOS `/tmp` -> `/private/tmp` while remaining
+/// bound against later ancestor replacement.
+pub async fn canonical_write_target(target: &Path) -> Option<PathBuf> {
+    let path = absolute_normalized(target);
+    let parent = path.parent()?;
+    let file_name = path.file_name()?;
+    let mut ancestor = parent.to_path_buf();
+    let mut missing = Vec::new();
+    loop {
+        match tokio::fs::symlink_metadata(&ancestor).await {
+            Ok(_) => {
+                let mut canonical_parent = tokio::fs::canonicalize(&ancestor).await.ok()?;
+                for component in missing.iter().rev() {
+                    canonical_parent.push(component);
+                }
+                return Some(canonical_parent.join(file_name));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                missing.push(ancestor.file_name()?.to_os_string());
+                ancestor = ancestor.parent()?.to_path_buf();
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
+/// Verify the exact pre-write state without following a target symlink.
+async fn verify_expected_state(path: &Path, expected: &ExpectedOldState) -> Result<(), String> {
+    let metadata = match tokio::fs::symlink_metadata(path).await {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err("PRE_MOVE_SECURITY_DENIED: target is a symbolic link".to_owned());
+        }
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(format!("Atomic write failed: {error}")),
+    };
+    match expected {
+        ExpectedOldState::Absent if metadata.is_some() => {
+            Err("FILE_CONFLICT_EXPECTED_ABSENT".to_owned())
+        }
+        ExpectedOldState::Absent => Ok(()),
+        ExpectedOldState::Sha256(_) if metadata.is_none() => {
+            Err("FILE_CONFLICT_EXPECTED_EXISTING".to_owned())
+        }
+        ExpectedOldState::Sha256(expected_hash) => {
+            let bytes = tokio::fs::read(path)
+                .await
+                .map_err(|error| format!("Atomic write failed: {error}"))?;
+            if sha256_hex(&bytes) == *expected_hash {
+                Ok(())
+            } else {
+                Err("OLD_HASH_CONFLICT".to_owned())
+            }
+        }
     }
 }
 
@@ -413,5 +520,72 @@ mod tests {
         let outcome = write_checked(&path, "deep", &ExpectedOldState::Absent).await;
         assert!(outcome.success, "{:?}", outcome.error);
         assert_eq!(std::fs::read_to_string(&path).expect("read"), "deep");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn refuses_to_follow_or_replace_target_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let dir = temp_dir("symlink-target");
+        let victim = dir.join("victim.txt");
+        let link = dir.join("link.txt");
+        std::fs::write(&victim, "protected").expect("seed victim");
+        let _ = std::fs::remove_file(&link);
+        symlink(&victim, &link).expect("create symlink");
+
+        let outcome = write_checked(
+            &link,
+            "overwritten",
+            &ExpectedOldState::sha256(&sha256_hex(b"protected")),
+        )
+        .await;
+        assert!(!outcome.success);
+        assert_eq!(
+            outcome.error.as_deref(),
+            Some("PRE_MOVE_SECURITY_DENIED: target is a symbolic link")
+        );
+        assert_eq!(
+            std::fs::read_to_string(victim).expect("victim remains"),
+            "protected"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn authorization_bound_write_rejects_replaced_parent() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::fs::canonicalize(temp_dir("parent-swap")).expect("canonical root");
+        let parent = root.join("authorized");
+        let moved_parent = root.join("authorized-old");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&parent).expect("authorized parent");
+        std::fs::create_dir_all(&outside).expect("outside parent");
+        let target = parent.join("file.txt");
+        let outside_target = outside.join("file.txt");
+        let authorized = canonical_write_target(&target)
+            .await
+            .expect("authorization target");
+
+        std::fs::rename(&parent, &moved_parent).expect("replace authorized parent");
+        symlink(&outside, &parent).expect("redirect authorized parent");
+
+        let outcome = write_checked_authorized(
+            &target,
+            "must not escape",
+            &ExpectedOldState::Absent,
+            Some(&authorized),
+        )
+        .await;
+        assert!(!outcome.success);
+        assert_eq!(
+            outcome.error.as_deref(),
+            Some("PRE_MOVE_SECURITY_DENIED: target path changed")
+        );
+        assert!(
+            !outside_target.exists(),
+            "redirected target must remain absent"
+        );
     }
 }

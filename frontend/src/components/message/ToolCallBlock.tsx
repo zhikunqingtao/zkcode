@@ -31,6 +31,7 @@ interface ToolCallBlockProps {
 }
 
 const STATUS_CONFIG = {
+    preparing:         { icon: Loader2, color: 'text-cyan-400',   label: 'Preparing', spin: true  },
     pending:           { icon: Loader2, color: 'text-gray-400',   label: 'Pending',   spin: false },
     running:           { icon: Loader2, color: 'text-blue-400',   label: 'Running',   spin: true  },
     completed:         { icon: CheckCircle2, color: 'text-green-400', label: 'Completed', spin: false },
@@ -40,7 +41,10 @@ const STATUS_CONFIG = {
 
 const ToolCallBlock: React.FC<ToolCallBlockProps> = ({ toolUseId, toolCall }) => {
     const [inputExpanded, setInputExpanded] = useState(false);
-    const [resultExpanded, setResultExpanded] = useState(true);
+    // Tool output is diagnostics, not the primary conversation. Keeping it
+    // collapsed prevents Agent receipts and large search payloads from
+    // dominating a completed chat while preserving one-click access.
+    const [resultExpanded, setResultExpanded] = useState(false);
 
     const statusCfg = STATUS_CONFIG[toolCall.status];
     const StatusIcon = statusCfg.icon;

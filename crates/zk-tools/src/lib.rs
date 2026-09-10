@@ -28,8 +28,8 @@
 //! # Batch 5：长期记忆工具
 //!
 //! [`MemoryTool`]（名 `Memory`）——`read` / `write` / `delete` 三动作读写跨会话
-//! 记忆；存储经 [`MemoryStore`] 端口反转（生产实现 `zk_engine::MemdirStore`
-//! 的 `~/.zk/MEMORY.md`）。
+//! 记忆；存储经 [`MemoryStore`] 端口反转（生产实现由 zk-server 接到 `SQLite`
+//! 权威库；项目作用域默认、global 作用域显式选择）。
 //!
 //! # Batch 8D：P2 工具域第一波
 //!
@@ -73,6 +73,8 @@
 //! - 输出采集上限 1 MiB（超限按 char 边界截断并追加标记）。
 
 mod input;
+#[path = "generated/task_runtime_v4.rs"]
+mod task_runtime_v4_generated;
 
 pub mod ask_user_question;
 pub mod atomic;
@@ -80,6 +82,7 @@ pub mod bash;
 pub mod builtin;
 pub mod config_tool;
 pub mod elicitation;
+pub mod evidence;
 pub mod executor;
 pub mod file_edit;
 pub mod file_read;
@@ -92,6 +95,7 @@ pub mod list_dir;
 pub mod memory;
 pub mod process;
 pub mod registry;
+pub mod research;
 pub mod snapshot;
 pub mod synthetic_output;
 pub mod todo_write;
@@ -122,6 +126,7 @@ pub mod verify_journey;
 // WP-08: network tools use injected ports; zk-tools never owns credentials.
 pub mod web_fetch;
 pub mod web_search;
+mod workspace_lease;
 
 pub use ask_user_question::{AskUserQuestionTool, QUESTION_TIMEOUT};
 pub use atomic::{ExpectedOldState, WriteEffect, WriteOutcome, sha256_hex, write_checked};
@@ -129,7 +134,14 @@ pub use bash::BashTool;
 pub use builtin::EchoTool;
 pub use config_tool::{BUILTIN_MODEL_ALIASES, ConfigTool, ModelCatalog};
 pub use elicitation::{ElicitationOption, ElicitationOutcome, ElicitationRequest, ElicitationSink};
-pub use executor::{CallEnv, MAX_CONCURRENT_TOOLS, MAX_TOOL_OUTPUT_BYTES, ToolEvent, ToolExecutor};
+pub use evidence::{
+    EVIDENCE_RECEIPT_SCHEMA_VERSION, EvidenceReceipt, EvidenceReceiptItem, EvidenceReceiptVerdict,
+    MAX_EVIDENCE_RECEIPT_ITEMS,
+};
+pub use executor::{
+    CallEnv, MAX_CONCURRENT_TOOLS, MAX_TOOL_OUTPUT_BYTES, ToolEvent, ToolExecutor,
+    ToolExecutorShutdownReport,
+};
 pub use file_edit::{EditFileTool, MAX_EDIT_FILE_BYTES};
 pub use file_read::ReadFileTool;
 pub use file_state::{
@@ -140,22 +152,33 @@ pub use git::{GitDiffTool, GitLogTool, GitStatusTool};
 pub use glob::GlobTool;
 pub use grep::GrepTool;
 pub use list_dir::ListDirectoryTool;
-pub use memory::{MemoryStore, MemoryTool};
+pub use memory::{MemoryScope, MemoryStore, MemoryTarget, MemoryTool};
 pub use process::{MAX_CAPTURE_BYTES, ProcessOutcome, run_shell};
-pub use registry::ToolRegistry;
+pub use registry::{ToolBinding, ToolRegistry};
+pub use research::{
+    MAX_RESEARCH_EXCERPT_BYTES, MAX_RESEARCH_PROVIDER_BYTES, MAX_RESEARCH_QUERY_BYTES,
+    MAX_RESEARCH_RECEIPT_ENTRIES, MAX_RESEARCH_TITLE_BYTES, MAX_RESEARCH_URL_BYTES,
+    RESEARCH_RECEIPT_SCHEMA_VERSION, ResearchReceipt, ResearchReceiptEntry, ResearchReceiptKind,
+    truncate_utf8_bytes,
+};
 pub use snapshot::{MAX_SNAPSHOT_BYTES, SnapshotRequest, SnapshotSink};
 pub use synthetic_output::SyntheticOutputTool;
 pub use todo_write::TodoWriteTool;
 // Batch 6 re-exports
 pub use agent_tool::{AgentInvocation, AgentTool, AgentToolBackend};
-pub use send_message::{SendMessageBackend, SendMessageInvocation, SendMessageTool};
+pub use send_message::{
+    SendMessageBackend, SendMessageInvocation, SendMessageReceipt, SendMessageTool,
+};
 pub use task_tools::{
-    TaskCoordinatorPort, TaskCreateTool, TaskGetTool, TaskInvocation, TaskListTool, TaskOutputTool,
-    TaskSnapshot, TaskStopTool, TaskUpdateTool,
+    TaskCoordinatorPort, TaskCreateTool, TaskGetTool, TaskInvocation, TaskListTool, TaskOutputPage,
+    TaskOutputQuery, TaskOutputTool, TaskPortError, TaskSnapshot, TaskStopReceipt, TaskStopTool,
+    TaskUpdateTool,
 };
 pub use tool::{
-    DEFAULT_TOOL_TIMEOUT, MAX_TOOL_TIMEOUT, McpToolIdentity, Tool, ToolContext, ToolOutput,
-    ToolSpec,
+    ChildToolAccess, DEFAULT_TOOL_TIMEOUT, ExecutionResourceAllocation, ExecutionResourceLease,
+    ExecutionResourceObserver, ExecutionResourceOwner, ExecutionResourceTerminal,
+    FileArtifactReceipt, MAX_TOOL_TIMEOUT, McpToolIdentity, Tool, ToolCleanupStatus, ToolContext,
+    ToolOutput, ToolSpec, ToolTimeoutPolicy,
 };
 // Batch 7 re-exports
 pub use ctx_inspect::{ContextInfo, ContextInfoPort, CtxInspectTool};
@@ -163,7 +186,10 @@ pub use plan_mode::{EnterPlanModeTool, ExitPlanModeTool};
 pub use snip::SnipTool;
 pub use verify_plan::VerifyPlanExecutionTool;
 // Batch 8D re-exports
-pub use cron::{CronCreateTool, CronDeleteTool, CronListTool, CronTask, CronTaskService, MAX_JOBS};
+pub use cron::{
+    CronCreateRequest, CronCreateTool, CronDeleteReceipt, CronDeleteTool, CronListTool,
+    CronPortError, CronTask, CronTaskPort, MAX_JOBS,
+};
 pub use monitor::MonitorTool;
 pub use repl::{MAX_CONCURRENT_SESSIONS, REPLTool, ReplManager, ReplSession};
 pub use terminal_capture::{DEFAULT_CAPTURE_LINES, TerminalCaptureTool};

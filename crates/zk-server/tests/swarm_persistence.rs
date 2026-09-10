@@ -1,4 +1,5 @@
-//! Real file-SQLite + production Router restart evidence for durable Swarm history.
+//! Real file-SQLite evidence that persisted Swarm history is preserved while
+//! the uncertified execution API remains fail-closed.
 
 mod common;
 
@@ -10,7 +11,7 @@ use zk_server::routes::build_router;
 use zk_server::state::AppState;
 
 #[tokio::test]
-async fn router_reads_interrupted_swarm_history_after_database_reopen() {
+async fn configured_swarm_api_stays_closed_after_database_reopen() {
     let path = std::env::temp_dir().join(format!(
         "zk-server-swarm-restart-real-{}.sqlite",
         uuid::Uuid::new_v4()
@@ -37,14 +38,20 @@ async fn router_reads_interrupted_swarm_history_after_database_reopen() {
     );
     let mut config = Config::test_config();
     config.swarm_enabled = true;
+    let persisted = reopened
+        .find_swarm("restart-history")
+        .await
+        .expect("read interrupted history")
+        .expect("persisted Swarm");
+    assert_eq!(persisted.phase, "INTERRUPTED");
+    assert_eq!(persisted.active_workers, 0);
+    assert_eq!(persisted.total_tasks, 2);
+
     let state = AppState::new(reopened, config);
     let mut router = build_router(state);
 
     let (status, _, body) = call(&mut router, local_get("/api/swarm/restart-history")).await;
-    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body:?}");
     let value = json_body(&body);
-    assert_eq!(value["swarmId"], "restart-history");
-    assert_eq!(value["phase"], "INTERRUPTED");
-    assert_eq!(value["activeWorkers"], 0);
-    assert_eq!(value["totalTasks"], 2);
+    assert_eq!(value["code"], "FEATURE_NOT_READY");
 }

@@ -3,11 +3,8 @@
 //! 有意差异：Java 的 `AgentRequest` / `AgentResult` / `AgentDefinition` 为
 //! `record`（不可变值对象），本实现取同构 `struct` + `Clone`；`IsolationMode`
 //! 独立为本模块枚举而非 `SubAgentExecutor` 内部类（Rust 无内部类型）。
-//! 5 种内置代理的系统提示模板移植旧 `SubAgentExecutor` 的 5 个
-//! `static final String` 常量，但仅保留核心段（完整 200+ 行验证提示
-//! 后续按需补全，当前覆盖关键约束与输出格式）。
-
-use std::collections::HashSet;
+//! 5 种内置代理的系统提示模板以当前生产工具契约为准，并保留旧
+//! `SubAgentExecutor` 的角色边界。
 
 // ═══ 隔离模式 ═══
 
@@ -51,6 +48,8 @@ pub enum AgentStatus {
     Interrupted,
     /// 达到最大轮次（`STATUS_MAX_TURNS`）。
     MaxTurns,
+    /// 持久化硬预算在发起下一次模型请求前耗尽。
+    BudgetExhausted,
 }
 
 impl AgentStatus {
@@ -64,16 +63,27 @@ impl AgentStatus {
             Self::Failed => "failed",
             Self::Interrupted => "interrupted",
             Self::MaxTurns => "max_turns",
+            Self::BudgetExhausted => "budget_exhausted",
         }
     }
 
     /// 从 `stop_reason` 分类最终状态（对照旧 `classifyAgentStatus`）。
     #[must_use]
     pub fn classify(stop_reason: Option<&str>, has_messages: bool, has_error: bool) -> Self {
-        if has_error {
-            return Self::Failed;
+        if matches!(stop_reason, Some("timeout" | "TASK_DEADLINE_EXCEEDED")) {
+            return Self::Timeout;
         }
         match stop_reason {
+            // Stable budget failures are failed terminal *events*, but retain
+            // their distinct partial-result status. Therefore exact budget
+            // classification must precede the generic has_error fallback.
+            Some(
+                "budget_exhausted"
+                | "BUDGET_EXHAUSTED"
+                | "TOKEN_BUDGET_EXHAUSTED"
+                | "COST_BUDGET_EXHAUSTED",
+            ) => Self::BudgetExhausted,
+            _ if has_error => Self::Failed,
             Some("end_turn" | "stop") => Self::Completed,
             Some("max_turns") => Self::MaxTurns,
             Some("aborted" | "cancelled") => Self::Interrupted,
@@ -135,16 +145,17 @@ impl AgentRequest {
 pub struct AgentResult {
     /// 最终状态。
     pub status: AgentStatus,
-    /// 结果文本（可能被截断至 `MAX_RESULT_SIZE_CHARS`）。
+    /// 完整结果文本。大小与内联/BLOB/partial 规则由统一 `TaskResult`
+    /// 提交事务负责，执行器不得在持久化前静默截断。
     pub result: Option<String>,
     /// 原始提示词（用于结果关联）。
     pub prompt: String,
     /// 异步模式下的输出文件路径。
     pub output_file: Option<String>,
+    /// Stable terminal code propagated into TaskResult and Agent failure
+    /// notifications. `None` denotes a successful result.
+    pub error_code: Option<String>,
 }
-
-/// 子代理结果最大字符数（对照旧 `MAX_RESULT_SIZE_CHARS = 100_000`）。
-pub const MAX_RESULT_SIZE_CHARS: usize = 100_000;
 
 impl AgentResult {
     /// 构造完成结果。
@@ -155,6 +166,7 @@ impl AgentResult {
             result: Some(result.into()),
             prompt: prompt.into(),
             output_file: None,
+            error_code: None,
         }
     }
 
@@ -166,6 +178,23 @@ impl AgentResult {
             result: Some(message.into()),
             prompt: prompt.into(),
             output_file: None,
+            error_code: Some("AGENT_EXECUTION_FAILED".to_owned()),
+        }
+    }
+
+    /// Construct a failure while preserving its stable originating code.
+    #[must_use]
+    pub fn failed_with_code(
+        message: impl Into<String>,
+        prompt: impl Into<String>,
+        error_code: impl Into<String>,
+    ) -> Self {
+        Self {
+            status: AgentStatus::Failed,
+            result: Some(message.into()),
+            prompt: prompt.into(),
+            output_file: None,
+            error_code: Some(error_code.into()),
         }
     }
 
@@ -177,17 +206,7 @@ impl AgentResult {
             result: Some(message.into()),
             prompt: prompt.into(),
             output_file: None,
-        }
-    }
-
-    /// 截断结果文本至 `MAX_RESULT_SIZE_CHARS`（对照旧 `executeSyncInternal`
-    /// 的截断逻辑）。
-    pub fn truncate_result(&mut self) {
-        if let Some(ref text) = self.result
-            && text.chars().count() > MAX_RESULT_SIZE_CHARS
-        {
-            let kept: String = text.chars().take(MAX_RESULT_SIZE_CHARS).collect();
-            self.result = Some(format!("{kept}\n...[truncated]"));
+            error_code: Some("TIMEOUT".to_owned()),
         }
     }
 
@@ -205,9 +224,8 @@ pub const DEFAULT_MAX_TURNS: u32 = 50;
 
 /// 代理定义（对照旧 `SubAgentExecutor.AgentDefinition` record）。
 ///
-/// 5 种内置代理的 `system_prompt_template` 移植旧 `SubAgentExecutor` 的
-/// 5 个 `static final String` 常量。有意差异：完整验证提示 200+ 行仅保留
-/// 核心约束段（禁止修改 / 9 验证类别 / VERDICT 输出格式），全文后续补全。
+/// 5 种内置代理的 `system_prompt_template` 定义稳定角色边界；具体可用能力
+/// 由执行期真实工具目录追加，模板不得假设某个工具一定存在。
 #[derive(Clone, Debug)]
 pub struct AgentDefinition {
     /// 显示名。
@@ -217,9 +235,9 @@ pub struct AgentDefinition {
     /// 默认模型（`None` = 继承父会话）。
     pub default_model: Option<&'static str>,
     /// 允许的工具集（`None` 或含 `"*"` = 全部）。
-    pub allowed_tools: Option<HashSet<&'static str>>,
+    pub allowed_tools: Option<&'static [&'static str]>,
     /// 禁用的工具集。
-    pub denied_tools: Option<HashSet<&'static str>>,
+    pub denied_tools: Option<&'static [&'static str]>,
     /// 是否省略项目提示段。
     pub omit_project_prompt: bool,
     /// 系统提示模板。
@@ -243,13 +261,13 @@ impl AgentDefinition {
     #[must_use]
     pub fn is_tool_allowed(&self, tool_name: &str) -> bool {
         if let Some(denied) = &self.denied_tools
-            && denied.contains(tool_name)
+            && denied.contains(&tool_name)
         {
             return false;
         }
         match &self.allowed_tools {
             None => true,
-            Some(set) => set.contains("*") || set.contains(tool_name),
+            Some(set) => set.contains(&"*") || set.contains(&tool_name),
         }
     }
 }
@@ -264,12 +282,42 @@ pub const GLOBALLY_DENIED_TOOLS: &[&str] = &[
     "TaskUpdate",
     "TaskList",
     "TaskGet",
+    "TaskOutput",
     "TaskStop",
 ];
 
+/// 在安全冻结阶段可向默认子 Agent 暴露的只读工具。
+///
+/// 这是一份显式的能力合同，而不是对工具名前缀的猜测。参数敏感、
+/// 既可读又可写的工具（如 Bash / Config / Memory）不在此列；它们必须
+/// 通过后续明确的可写能力门禁，不得因为某个空参数样例被判定为
+/// `is_read_only` 就进入子 Agent 目录。
+pub const READ_ONLY_CHILD_TOOLS: &[&str] = &[
+    "Read",
+    "ListDir",
+    "Glob",
+    "Grep",
+    "GitDiff",
+    "GitLog",
+    "GitStatus",
+    "WebSearch",
+    "WebFetch",
+    "ListMcpResources",
+    "ReadMcpResource",
+    "Snip",
+    "TerminalCapture",
+    "ToolSearch",
+];
+
+/// 通过子 Agent 写入门禁后仍只允许的有限可写工具。
+///
+/// 管理配置、记忆、Cron、Swarm 和递归 Agent/Task 工具即使在写模式下
+/// 也不得暴露给 child，避免一个布尔开关意外放大权限。
+pub const WRITE_CHILD_TOOLS: &[&str] = &["Write", "Edit", "Bash", "NotebookEdit"];
+
 // ═══ 系统提示模板 ═══
 
-/// Explore 代理提示（对照旧 `EXPLORE_AGENT_PROMPT`，保留核心约束与搜索策略）。
+/// Explore 代理提示。
 const EXPLORE_PROMPT: &str = "\
 你是一个搜索和探索专家。你在严格的只读模式下运行。\n\
 \n\
@@ -280,11 +328,9 @@ const EXPLORE_PROMPT: &str = "\
 - 如果被要求进行修改，拒绝并说明你是只读模式\n\
 \n\
 ## 搜索策略\n\
-1. search_codebase —— 语义/概念搜索\n\
-2. search_symbol —— 查找特定类/方法/变量定义\n\
-3. Grep —— 精确文本模式匹配\n\
-4. Glob —— 按文件名/扩展名查找文件\n\
-5. Read —— 读取已确定的特定文件\n\
+- 从当前工具目录识别实际可用的只读搜索能力\n\
+- 先缩小候选范围，再精确匹配，最后核对上下文；对应能力未提供时跳过该步骤\n\
+- 只能调用当前工具目录列出的工具，不得尝试调用未列出的能力\n\
 \n\
 ## 输出格式\n\
 - 列出相关文件路径和行号\n\
@@ -292,7 +338,7 @@ const EXPLORE_PROMPT: &str = "\
 - 总结组件之间的关系\n\
 - 如果找不到某些内容，明确说明而不是猜测";
 
-/// Verification 代理提示（对照旧 `VERIFICATION_AGENT_PROMPT`，保留核心约束）。
+/// Verification 代理提示。
 const VERIFICATION_PROMPT: &str = "\
 你是一个验证专家。你的工作不是确认实现能工作——而是尝试破坏它。\n\
 \n\
@@ -301,23 +347,34 @@ const VERIFICATION_PROMPT: &str = "\
 - 在项目目录中创建、修改或删除任何文件\n\
 - 安装依赖或包\n\
 - 运行 git 写操作\n\
+即使工具目录中存在 Bash，也只能运行不会改变项目、依赖、仓库或外部系统状态的检查命令。\n\
 \n\
-=== 验证策略（9 个类别） ===\n\
-前端变更 / 后端API变更 / CLI脚本变更 / 基础设施变更 / 库包变更 / \
-Bug修复 / 数据管道 / 数据库迁移 / 重构\n\
+=== 风险分类 ===\n\
+- HIGH：认证授权、密钥、数据库迁移、并发/恢复、账本或不可逆状态变更\n\
+- MEDIUM：公共 API、协议、CLI、配置、数据管道、跨组件行为或依赖边界\n\
+- LOW：局部实现、文案或不改变外部契约的重构\n\
+先声明风险等级和依据，再覆盖相关类别：前端、后端 API、CLI、基础设施、库包、Bug 修复、数据管道、数据库迁移、重构。\n\
 \n\
-=== 必要步骤 ===\n\
-1. 读取项目 README 了解构建/测试命令\n\
-2. 运行构建（如适用）。构建失败就自动 FAIL\n\
-3. 运行测试套件。测试失败就自动 FAIL\n\
-4. 运行 linter/类型检查器\n\
-5. 检查相关代码的回归问题\n\
+=== 对抗性检查 ===\n\
+1. 从改动和契约推导失败模式、边界输入与负向路径\n\
+2. 检查错误传播、权限收窄、竞态、恢复/重试及兼容性\n\
+3. 若 Bash 可用，运行范围最小且只读的构建、测试、lint 或类型检查\n\
+4. 若 Bash 不可用，只能做静态检查，不得声称运行过命令或测试\n\
+5. 对未覆盖、不可执行或证据不足的项目明确记录限制\n\
 \n\
-=== 输出格式 ===\n\
-每个检查必须包含 Command run / Output observed / Result (PASS/FAIL)\n\
+=== 证据格式 ===\n\
+每个检查必须包含：\n\
+- CHECK：检查对象与失败假设\n\
+- METHOD：实际使用的工具或命令；未执行命令时写 STATIC REVIEW\n\
+- EVIDENCE：文件路径/行号，或命令及观察到的关键输出\n\
+- RESULT：PASS / FAIL / UNVERIFIED\n\
+- LIMITATION：缺失能力或未覆盖风险；没有则写 NONE\n\
 \n\
-以如下行结尾：\n\
-VERDICT: PASS 或 VERDICT: FAIL 或 VERDICT: PARTIAL";
+=== 最终裁决 ===\n\
+- 任一确认缺陷或相关检查失败：VERDICT: FAIL；纯静态审查确认的缺陷也适用，且此规则优先\n\
+- 只有全部相关检查均有执行证据且通过时：VERDICT: PASS\n\
+- 未确认缺陷，但 Bash 不可用、存在 UNVERIFIED 或证据不完整时：VERDICT: PARTIAL\n\
+最终一行必须且只能是：VERDICT: PASS、VERDICT: FAIL 或 VERDICT: PARTIAL";
 
 /// Plan 代理提示（对照旧 `PLAN_AGENT_PROMPT`）。
 const PLAN_PROMPT: &str = "\
@@ -345,14 +402,16 @@ const PLAN_PROMPT: &str = "\
 - Files to Read\n\
 - Execution Order";
 
-/// General-purpose 代理提示（对照旧 `GENERAL_PURPOSE_AGENT_PROMPT`）。
+/// General-purpose 代理提示。
 const GENERAL_PURPOSE_PROMPT: &str = "\
 你是一个通用 worker 代理。高效、正确地完成分配的任务。\n\
 \n\
 ## 核心原则\n\
 - 严格按照任务提示执行——不要添加未要求的功能或改进\n\
-- 在修改之前先阅读现有代码\n\
-- 修改后运行测试以验证正确性\n\
+- 以当前工具目录为唯一能力来源；不要假设命令执行或写工具存在\n\
+- 若目录提供写工具，在修改之前先阅读现有代码；否则保持只读\n\
+- 若目录提供 Bash，在修改后运行相关测试；否则明确说明未执行验证\n\
+- 缺少写工具时不得声称已经修改、创建或删除文件\n\
 - 清晰地报告你的结果：你做了什么，什么成功了，什么没成功\n\
 \n\
 ## 工作风格\n\
@@ -381,7 +440,7 @@ impl AgentDefinition {
         name: "Explore",
         max_turns: DEFAULT_MAX_TURNS,
         default_model: None,
-        allowed_tools: None,
+        allowed_tools: Some(READ_ONLY_CHILD_TOOLS),
         denied_tools: None,
         omit_project_prompt: true,
         system_prompt_template: EXPLORE_PROMPT,
@@ -392,7 +451,7 @@ impl AgentDefinition {
         name: "Verification",
         max_turns: DEFAULT_MAX_TURNS,
         default_model: None,
-        allowed_tools: None,
+        allowed_tools: Some(READ_ONLY_CHILD_TOOLS),
         denied_tools: None,
         omit_project_prompt: false,
         system_prompt_template: VERIFICATION_PROMPT,
@@ -403,7 +462,7 @@ impl AgentDefinition {
         name: "Plan",
         max_turns: DEFAULT_MAX_TURNS,
         default_model: None,
-        allowed_tools: None,
+        allowed_tools: Some(READ_ONLY_CHILD_TOOLS),
         denied_tools: None,
         omit_project_prompt: true,
         system_prompt_template: PLAN_PROMPT,
@@ -425,7 +484,7 @@ impl AgentDefinition {
         name: "Guide",
         max_turns: DEFAULT_MAX_TURNS,
         default_model: None,
-        allowed_tools: None,
+        allowed_tools: Some(READ_ONLY_CHILD_TOOLS),
         denied_tools: None,
         omit_project_prompt: false,
         system_prompt_template: GUIDE_PROMPT,
@@ -470,16 +529,26 @@ mod tests {
             AgentStatus::classify(None, false, true),
             AgentStatus::Failed
         );
-    }
-
-    #[test]
-    fn agent_result_truncate() {
-        let long = "x".repeat(MAX_RESULT_SIZE_CHARS + 100);
-        let mut r = AgentResult::completed(long, "p");
-        r.truncate_result();
-        let result = r.result.expect("has result");
-        assert!(result.ends_with("\n...[truncated]"));
-        assert!(result.chars().count() <= MAX_RESULT_SIZE_CHARS + 20);
+        assert_eq!(
+            AgentStatus::classify(Some("TASK_DEADLINE_EXCEEDED"), true, true),
+            AgentStatus::Timeout
+        );
+        assert_eq!(
+            AgentStatus::classify(Some("BUDGET_USAGE_INCOMPLETE"), true, true),
+            AgentStatus::Failed
+        );
+        for reason in [
+            "budget_exhausted",
+            "BUDGET_EXHAUSTED",
+            "TOKEN_BUDGET_EXHAUSTED",
+            "COST_BUDGET_EXHAUSTED",
+        ] {
+            assert_eq!(
+                AgentStatus::classify(Some(reason), true, true),
+                AgentStatus::BudgetExhausted,
+                "reason={reason}"
+            );
+        }
     }
 
     #[test]
@@ -500,12 +569,48 @@ mod tests {
             AgentDefinition::resolve(Some("unknown")).name,
             "GeneralPurpose"
         );
+        for agent_type in ["explore", "verification", "plan", "guide"] {
+            let definition = AgentDefinition::resolve(Some(agent_type));
+            assert!(definition.is_tool_allowed("Read"));
+            assert!(definition.is_tool_allowed("WebSearch"));
+            assert!(!definition.is_tool_allowed("Write"));
+            assert!(!definition.is_tool_allowed("Bash"));
+        }
     }
 
     #[test]
     fn globally_denied_tools_prevents_recursion() {
         assert!(GLOBALLY_DENIED_TOOLS.contains(&"Agent"));
         assert!(GLOBALLY_DENIED_TOOLS.contains(&"TaskCreate"));
+        assert!(GLOBALLY_DENIED_TOOLS.contains(&"TaskOutput"));
         assert!(GLOBALLY_DENIED_TOOLS.contains(&"TaskStop"));
+    }
+
+    #[test]
+    fn built_in_prompts_defer_capabilities_and_define_verification_evidence() {
+        for invented in ["search_codebase", "search_symbol", "GlobTool", "GrepTool"] {
+            assert!(
+                !EXPLORE_PROMPT.contains(invented),
+                "invented tool: {invented}"
+            );
+        }
+        for runtime_capability in ["Glob", "Grep", "Read", "CodeIntel"] {
+            assert!(
+                !EXPLORE_PROMPT.contains(runtime_capability),
+                "static prompt assumed runtime capability: {runtime_capability}"
+            );
+        }
+        assert!(EXPLORE_PROMPT.contains("当前工具目录"));
+        for evidence_field in ["CHECK", "METHOD", "EVIDENCE", "RESULT", "LIMITATION"] {
+            assert!(
+                VERIFICATION_PROMPT.contains(evidence_field),
+                "missing evidence field: {evidence_field}"
+            );
+        }
+        assert!(VERIFICATION_PROMPT.contains("Bash 不可用"));
+        assert!(VERIFICATION_PROMPT.contains("纯静态审查确认的缺陷也适用"));
+        assert!(VERIFICATION_PROMPT.contains("未确认缺陷，但 Bash 不可用"));
+        assert!(VERIFICATION_PROMPT.contains("VERDICT: PARTIAL"));
+        assert!(GENERAL_PURPOSE_PROMPT.contains("不得声称已经修改"));
     }
 }

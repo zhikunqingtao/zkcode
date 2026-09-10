@@ -19,7 +19,7 @@ const bindSessionAndWaitMock = vi.fn(
     }) => void | boolean) => {
         publish({
             sessionId,
-            protocolVersion: 3,
+            protocolVersion: 4,
             bindRequestId: 'bind-req-test',
             bindingEpoch: 1,
         });
@@ -159,7 +159,7 @@ describe('native WS client', () => {
                 ['/app/rewind', { messageId: 'm', filePaths: [] }, 'rewind_files'],
                 ['/app/elicitation', { requestId: 'r', answer: 'a' }, 'elicitation_response'],
                 ['/app/ping', {}, 'ping'],
-                ['/app/bind-session', { sessionId: 's', bindRequestId: 'b', bindingEpoch: 1, protocolVersion: 3 }, 'bind_session'],
+                ['/app/bind-session', { sessionId: 's', bindRequestId: 'b', bindingEpoch: 1, protocolVersion: 4 }, 'bind_session'],
                 ['/app/interaction-received', { interactionId: 'i', deliveryGeneration: 2 }, 'interaction_ack'],
                 ['/app/activity-save', { id: 'a', operationType: 'op' }, 'activity_save'],
                 ['/app/activity-update', { id: 'a', decision: 'approved' }, 'activity_update'],
@@ -266,7 +266,7 @@ describe('native WS client', () => {
                 sessionId: 'sess-1',
                 bindRequestId: 'bind-req-test',
                 bindingEpoch: 1,
-                protocolVersion: 3,
+                protocolVersion: 4,
             });
 
             // bind promise 落定后启动 10s 心跳
@@ -399,10 +399,10 @@ describe('native WS client', () => {
             const ws = connectAndOpen();
             getStompClient()?.publish({
                 destination: '/app/bind-session',
-                body: JSON.stringify({ sessionId: 's', bindRequestId: 'b', bindingEpoch: 1, protocolVersion: 3 }),
+                body: JSON.stringify({ sessionId: 's', bindRequestId: 'b', bindingEpoch: 1, protocolVersion: 4 }),
             });
             expect(ws.lastSentJson()).toEqual({
-                type: 'bind_session', sessionId: 's', bindRequestId: 'b', bindingEpoch: 1, protocolVersion: 3,
+                type: 'bind_session', sessionId: 's', bindRequestId: 'b', bindingEpoch: 1, protocolVersion: 4,
             });
         });
 

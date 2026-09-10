@@ -40,6 +40,7 @@ function publishBind(payload: {
     protocolVersion: number;
     bindRequestId: string;
     bindingEpoch: number;
+    afterEventId?: number;
 }): boolean {
     return sendToServer('/app/bind-session', payload);
 }

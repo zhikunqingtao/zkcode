@@ -7,8 +7,11 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use zk_db::model::{MessageRecord, MessageRole, StoredBlock};
-use zk_db::{ArtifactManifestRecord, SessionSummary, WorkbenchRecord};
+use zk_db::model::{MessageRecord, StoredBlock};
+use zk_db::{
+    ArtifactManifestRecord, PreviousWorkbenchDelivery, ResearchProjection, SessionSummary,
+    WorkbenchRecord,
+};
 
 use crate::error::ApiError;
 use crate::session_access::{accessible_run, can_access_session, require_session_header};
@@ -19,9 +22,9 @@ pub(crate) async fn get_workbench(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(run_id): Path<String>,
-) -> Result<Json<WorkbenchRecord>, ApiError> {
+) -> Result<Json<Value>, ApiError> {
     let asserted = require_session_header(&headers)?;
-    accessible_run(&state, &run_id, &asserted)
+    let run = accessible_run(&state, &run_id, &asserted)
         .await?
         .ok_or_else(|| ApiError::not_found("RUN_NOT_FOUND", "Run not found"))?;
     let workbench = state
@@ -29,11 +32,22 @@ pub(crate) async fn get_workbench(
         .find_workbench(&run_id)
         .await?
         .ok_or_else(|| ApiError::not_found("WORKBENCH_NOT_FOUND", "Run workbench not found"))?;
-    Ok(Json(workbench))
+    let research = state
+        .db
+        .find_research_projection_by_root_run(&run_id, &asserted)
+        .await?
+        .unwrap_or_else(|| ResearchProjection {
+            root_task_id: run.task_id,
+            ..ResearchProjection::default()
+        });
+    Ok(Json(json!({
+        "binding": workbench.binding,
+        "criteria": workbench.criteria,
+        "research": research,
+    })))
 }
 
 /// Read the latest root-run workbench for an authorized session.
-#[allow(clippy::too_many_lines)] // one correlation projection with durable and legacy branches
 pub(crate) async fn get_current_workbench(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -47,87 +61,26 @@ pub(crate) async fn get_current_workbench(
             message: "Session access denied".into(),
         });
     }
-    let session = state
+    let projection = state
         .db
-        .get_session(&session_id)
+        .find_current_workbench_projection(&session_id)
         .await?
         .ok_or_else(|| ApiError::session_not_found(&session_id))?;
-    let runs = state.db.find_runs_by_session(&session_id, 200).await?;
-    let Some(root) = runs.iter().find(|run| run.parent_run_id.is_none()) else {
-        let request = session
-            .messages
-            .iter()
-            .rev()
-            .find(|message| message.role == MessageRole::User)
-            .map(message_view);
-        let result = session
-            .messages
-            .iter()
-            .rev()
-            .find(|message| message.role == MessageRole::Assistant)
-            .map(message_view);
-        return Ok(Json(empty_projection(request.as_ref(), result.as_ref())));
+    let Some(root) = projection.root_run.as_ref() else {
+        return Ok(Json(empty_projection()));
     };
-    let tree_ids = run_tree_ids(root, &runs);
-    let persisted = state.db.find_workbench(&root.id).await?;
+    let persisted = projection.workbench.as_ref();
     let correlation = if persisted.is_some() {
         "EXACT"
     } else {
-        "LEGACY_FALLBACK"
+        "UNBOUND"
     };
-    let request = persisted
-        .as_ref()
-        .and_then(|workbench| {
-            message_by_id(&session.messages, &workbench.binding.request_message_id)
-        })
-        .or_else(|| {
-            session
-                .messages
-                .iter()
-                .find(|message| message.role == MessageRole::User)
-                .map(message_view)
-        });
-    let result = persisted
-        .as_ref()
-        .and_then(|workbench| workbench.binding.result_message_id.as_deref())
-        .and_then(|id| message_by_id(&session.messages, id));
-    let mut manifests = Vec::new();
-    let mut evidence = Vec::new();
-    for run_id in &tree_ids {
-        if let Some(manifest) = state.db.find_artifact_manifest_by_run(run_id).await? {
-            manifests.push(manifest);
-        }
-        evidence.extend(state.db.find_evidence_by_run(run_id).await?);
-    }
-    let delivery = delivery_view(&manifests);
-    let verification = verification_view(persisted.as_ref(), &manifests, &evidence, root);
-    let pending_actions = state
-        .authz
-        .interactions
-        .pending_views(&session_id)
-        .await
-        .map_err(|_| ApiError::internal())?
-        .into_iter()
-        .filter(|interaction| {
-            interaction
-                .run_id
-                .as_ref()
-                .is_some_and(|run_id| tree_ids.contains(run_id))
-        })
-        .collect::<Vec<_>>();
-    let activities = state
-        .db
-        .find_activities_by_session_paged(&session_id, 0, 200)
-        .await?
-        .into_iter()
-        .filter(|activity| {
-            activity
-                .get("run_id")
-                .and_then(Value::as_str)
-                .is_some_and(|run_id| tree_ids.contains(run_id))
-        })
-        .collect::<Vec<_>>();
-    let failure = if root.is_terminal() && root.status != "COMPLETED" {
+    let request = projection.request_message.as_ref().map(message_view);
+    let result = projection.result_message.as_ref().map(message_view);
+    let delivery = delivery_view(&projection.manifests);
+    let verification =
+        verification_view(persisted, &projection.manifests, &projection.evidence, root);
+    let failure = if root.is_terminal() && root.status != "completed" {
         Some(json!({
             "status": root.status,
             "reason": root.error_summary.as_deref()
@@ -138,84 +91,71 @@ pub(crate) async fn get_current_workbench(
     } else {
         None
     };
-    let previous_delivery = if failure.is_some() {
-        previous_delivery_view(&state, root, &runs, &session.messages).await?
-    } else {
-        None
-    };
-    let request_id = request
+    let previous_delivery = projection
+        .previous_delivery
         .as_ref()
-        .and_then(|value| value["messageId"].as_str());
-    let result_id = result
+        .map(previous_delivery_view);
+    let request_id = projection
+        .request_message
         .as_ref()
-        .and_then(|value| value["messageId"].as_str());
+        .map(|message| message.id.as_str());
+    let result_id = projection
+        .result_message
+        .as_ref()
+        .map(|message| message.id.as_str());
     let result_text = result.as_ref().and_then(|value| value["text"].as_str());
     Ok(Json(json!({
         "correlationMode": correlation,
         "requestMessageId": request_id,
         "resultMessageId": result_id,
+        "rootTask": projection.root_task,
+        "taskTree": projection.task_tree,
         "rootRun": root,
+        "runTree": projection.run_tree,
+        "usage": projection.usage,
+        "eventHighWater": projection.event_high_water,
+        "activeTools": projection.active_tools,
         "request": request,
         "result": result,
         "structuredSummary": structured_summary(result_text),
         "delivery": delivery,
         "verification": verification,
-        "pendingActionCount": pending_actions.len(),
-        "pendingActions": pending_actions,
-        "activities": activities,
+        "pendingActionCount": projection.pending_actions.len(),
+        "pendingActions": projection.pending_actions,
+        "activities": projection.activities,
+        "research": projection.research,
         "previousAvailableDelivery": previous_delivery,
         "currentFailure": failure,
     })))
 }
 
-async fn previous_delivery_view(
-    state: &AppState,
-    current: &zk_db::run::RunEnvelopeView,
-    runs: &[zk_db::run::RunEnvelopeView],
-    messages: &[MessageRecord],
-) -> Result<Option<Value>, ApiError> {
-    for candidate in runs.iter().filter(|run| {
-        run.id != current.id && run.parent_run_id.is_none() && run.status == "COMPLETED"
-    }) {
-        let tree_ids = run_tree_ids(candidate, runs);
-        let mut manifests = Vec::new();
-        for run_id in tree_ids {
-            if let Some(manifest) = state.db.find_artifact_manifest_by_run(&run_id).await? {
-                manifests.push(manifest);
-            }
-        }
-        let delivery = delivery_view(&manifests);
-        if delivery["totalFiles"].as_u64().unwrap_or(0) == 0 {
-            continue;
-        }
-        let result = state
-            .db
-            .find_workbench(&candidate.id)
-            .await?
-            .and_then(|workbench| workbench.binding.result_message_id)
-            .and_then(|id| message_by_id(messages, &id));
-        return Ok(Some(json!({
-            "rootRunId": candidate.id,
-            "finishedAt": candidate.finished_at,
-            "result": result,
-            "delivery": delivery,
-        })));
-    }
-    Ok(None)
+fn previous_delivery_view(previous: &PreviousWorkbenchDelivery) -> Value {
+    json!({
+        "rootRunId": previous.root_run.id,
+        "finishedAt": previous.root_run.finished_at,
+        "result": previous.result_message.as_ref().map(message_view),
+        "delivery": delivery_view(&previous.manifests),
+    })
 }
 
-fn empty_projection(request: Option<&Value>, result: Option<&Value>) -> Value {
-    let request_id = request.and_then(|value| value["messageId"].as_str());
-    let result_id = result.and_then(|value| value["messageId"].as_str());
-    let result_text = result.and_then(|value| value["text"].as_str());
+fn empty_projection() -> Value {
     json!({
-        "correlationMode": "LEGACY_FALLBACK",
-        "requestMessageId": request_id,
-        "resultMessageId": result_id,
+        "correlationMode": "EMPTY",
+        "requestMessageId": null,
+        "resultMessageId": null,
+        "rootTask": null,
+        "taskTree": [],
         "rootRun": null,
-        "request": request,
-        "result": result,
-        "structuredSummary": structured_summary(result_text),
+        "runTree": [],
+        "usage": {
+            "inputTokens": 0, "outputTokens": 0, "cacheReadTokens": 0,
+            "cacheCreateTokens": 0, "costNanosUsd": 0, "complete": true
+        },
+        "eventHighWater": 0,
+        "activeTools": [],
+        "request": null,
+        "result": null,
+        "structuredSummary": structured_summary(None),
         "delivery": {"manifests": [], "files": [], "totalFiles": 0, "primaryArtifactPath": null},
         "verification": {
             "businessCriteria": [], "technicalChecks": [], "evidence": [],
@@ -224,38 +164,13 @@ fn empty_projection(request: Option<&Value>, result: Option<&Value>) -> Value {
         "pendingActionCount": 0,
         "pendingActions": [],
         "activities": [],
+        "research": {
+            "rootTaskId": "", "truncated": false, "captures": [], "sources": [], "findings": [],
+            "conflicts": [], "openQuestions": [], "requirementCoverage": []
+        },
         "previousAvailableDelivery": null,
         "currentFailure": null,
     })
-}
-
-fn run_tree_ids(
-    root: &zk_db::run::RunEnvelopeView,
-    runs: &[zk_db::run::RunEnvelopeView],
-) -> std::collections::HashSet<String> {
-    let mut ids = std::collections::HashSet::from([root.id.clone()]);
-    loop {
-        let before = ids.len();
-        for run in runs {
-            if run
-                .parent_run_id
-                .as_ref()
-                .is_some_and(|parent| ids.contains(parent))
-            {
-                ids.insert(run.id.clone());
-            }
-        }
-        if ids.len() == before {
-            return ids;
-        }
-    }
-}
-
-fn message_by_id(messages: &[MessageRecord], id: &str) -> Option<Value> {
-    messages
-        .iter()
-        .find(|message| message.id == id)
-        .map(message_view)
 }
 
 fn message_view(message: &MessageRecord) -> Value {
@@ -370,17 +285,37 @@ fn verification_view(
         "FAILED"
     } else if manifests
         .iter()
+        .any(|manifest| manifest.state == "unverified")
+    {
+        "STALE"
+    } else if manifests
+        .iter()
         .all(|manifest| manifest.state == "verified")
     {
         "PASSED"
     } else {
         "PARTIAL"
     };
-    let runtime_status = if evidence.is_empty() {
+    let verifying_evidence = evidence
+        .iter()
+        .filter(|bundle| bundle.origin.can_verify())
+        .collect::<Vec<_>>();
+    let runtime_status = if verifying_evidence.is_empty() {
         "NOT_VERIFIED"
-    } else if evidence.iter().any(|bundle| bundle.verdict == "failed") {
+    } else if verifying_evidence
+        .iter()
+        .any(|bundle| bundle.verdict == "failed")
+    {
         "FAILED"
-    } else if evidence.iter().all(|bundle| bundle.verdict == "verified") {
+    } else if verifying_evidence
+        .iter()
+        .any(|bundle| bundle.verdict == "stale")
+    {
+        "STALE"
+    } else if verifying_evidence
+        .iter()
+        .all(|bundle| bundle.verdict == "verified")
+    {
         "PASSED"
     } else {
         "PARTIAL"
@@ -388,7 +323,7 @@ fn verification_view(
     let technical = vec![
         json!({"id":"technical-manifest-integrity","type":"technical","text":"交付文件与Manifest一致","status":manifest_status,"detail":"只统计当前 Root Run 子树的 Manifest","evidenceBundleId":null}),
         json!({"id":"technical-runtime-verification","type":"technical","text":"页面或程序完成运行时检查","status":runtime_status,"detail":"仅使用明确绑定到当前 Run 树的证据","evidenceBundleId":null}),
-        json!({"id":"technical-no-failure-evidence","type":"technical","text":"本轮交付没有明确失败结论","status":if root.is_terminal() && root.status != "COMPLETED" {"FAILED"} else if root.is_terminal() {"PASSED"} else {"NOT_VERIFIED"},"detail":root.error_summary,"evidenceBundleId":null}),
+        json!({"id":"technical-no-failure-evidence","type":"technical","text":"本轮交付没有明确失败结论","status":if root.is_terminal() && root.status != "completed" {"FAILED"} else if root.is_terminal() {"PASSED"} else {"NOT_VERIFIED"},"detail":root.error_summary,"evidenceBundleId":null}),
     ];
     let statuses = business
         .iter()
@@ -397,6 +332,8 @@ fn verification_view(
         .collect::<Vec<_>>();
     let overall = if statuses.contains(&"FAILED") {
         "FAILED"
+    } else if statuses.contains(&"STALE") {
+        "STALE"
     } else if statuses.contains(&"PARTIAL") {
         "PARTIAL"
     } else if !statuses.is_empty() && statuses.iter().all(|status| *status == "PASSED") {
@@ -442,6 +379,7 @@ pub(crate) async fn update_workbench(
         .find_workbench(&run_id)
         .await?
         .ok_or_else(|| ApiError::not_found("WORKBENCH_NOT_FOUND", "Run workbench not found"))?;
+    let run_tree = state.db.find_run_tree(&run_id).await?;
     for decision in request.criteria {
         if !matches!(
             decision.status.as_str(),
@@ -475,6 +413,32 @@ pub(crate) async fn update_workbench(
                 code: "EVIDENCE_ACCESS_DENIED".into(),
                 message: "Evidence does not belong to this session".into(),
             });
+        }
+        if !evidence.run_id.as_deref().is_some_and(|evidence_run_id| {
+            run_tree
+                .iter()
+                .any(|tree_run| tree_run.id == evidence_run_id)
+        }) {
+            return Err(ApiError::validation_with_code(
+                "EVIDENCE_RUN_MISMATCH",
+                "Evidence must be produced by the current root run or one of its children",
+            ));
+        }
+        let verdict_matches = match decision.status.as_str() {
+            "passed" => evidence.origin.can_verify() && evidence.verdict == "verified",
+            "failed" => evidence.origin.can_verify() && evidence.verdict == "failed",
+            "partial" => {
+                evidence.origin.can_verify()
+                    && matches!(evidence.verdict.as_str(), "inconclusive" | "unavailable")
+            }
+            "not_verified" => true,
+            _ => false,
+        };
+        if !verdict_matches {
+            return Err(ApiError::validation_with_code(
+                "EVIDENCE_VERDICT_MISMATCH",
+                "Acceptance status must match deterministic machine or human evidence",
+            ));
         }
         state
             .db
@@ -638,7 +602,7 @@ async fn task_group(
     if !run.is_terminal() {
         return Ok(WorkbenchTaskGroup::Running);
     }
-    if run.status != "COMPLETED" {
+    if run.status != "completed" {
         return Ok(WorkbenchTaskGroup::Reviewable);
     }
     let upper_bound = run.finished_at.as_deref().map_or_else(

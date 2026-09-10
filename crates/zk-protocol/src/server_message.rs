@@ -424,7 +424,7 @@ pub enum ServerMessage {
         /// 活动是否还有更多。
         #[serde(skip_serializing_if = "Option::is_none")]
         has_more: Option<bool>,
-        /// WS 协议版本（当前 3）。
+        /// WS 协议版本（当前 4）。
         protocol_version: i64,
         /// 绑定请求 ID（与上行 `bind_session.bindRequestId` 对应）。
         bind_request_id: Option<String>,
@@ -436,6 +436,8 @@ pub enum ServerMessage {
         /// Run 恢复快照（Phase 2+ run 投影；透传）。
         #[serde(skip_serializing_if = "Option::is_none")]
         run_snapshot: Option<serde_json::Value>,
+        /// 与 transcript 同一 `SQLite` 快照读取的完整根 Task 树。
+        task_tree: serde_json::Value,
         /// 快照事件序号。
         #[serde(skip_serializing_if = "Option::is_none")]
         snapshot_event_seq: Option<i64>,
@@ -906,6 +908,15 @@ pub enum ServerMessage {
         total: f64,
         /// 进度消息。
         message: String,
+        /// Owning physical Run. Missing only for non-production callers.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        run_id: Option<String>,
+        /// Owning tool invocation. Missing only for non-production callers.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tool_use_id: Option<String>,
+        /// `true` means the invocation left every execution path and clients
+        /// must remove the token from their inflight projection.
+        terminal: bool,
     },
 }
 
@@ -1068,6 +1079,25 @@ pub struct InteractionView {
 }
 
 impl ServerMessage {
+    /// 若事件属于某次工具调用，返回其稳定 ID。信封构造器用它填充
+    /// v4 `eventContext.toolUseId`，避免开始、参数、进度与结果被投影到不同工具。
+    #[must_use]
+    pub fn tool_use_id(&self) -> Option<&str> {
+        match self {
+            ServerMessage::ToolUseStart { tool_use_id, .. }
+            | ServerMessage::ToolUseProgress { tool_use_id, .. }
+            | ServerMessage::ToolResult { tool_use_id, .. }
+            | ServerMessage::ToolUseInput { tool_use_id, .. }
+            | ServerMessage::ToolPermissionDenied { tool_use_id, .. }
+            | ServerMessage::PermissionRequest { tool_use_id, .. }
+            | ServerMessage::McpToolProgress {
+                tool_use_id: Some(tool_use_id),
+                ..
+            } => Some(tool_use_id),
+            _ => None,
+        }
+    }
+
     /// 返回该消息的 `type` 标签字符串（与旧白名单逐字一致的 `snake_case` 名）。
     ///
     /// 以序列化实际产物为准（而非手写 match），保证「kind 输出 == 线上 type」

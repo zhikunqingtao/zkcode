@@ -10,6 +10,8 @@ describe('MessageStore', () => {
             streamingMessageId: null,
             streamingContent: '',
             thinkingContent: '',
+            streamingPartitions: new Map(),
+            messagePartitionKeys: new Map(),
             activeToolCalls: new Map(),
         });
     });
@@ -68,7 +70,10 @@ describe('MessageStore', () => {
         expect(state.activeToolCalls.size).toBe(1);
         const tc = state.activeToolCalls.get('tc-1');
         expect(tc?.toolName).toBe('FileReadTool');
-        expect(tc?.status).toBe('running');
+        expect(tc?.status).toBe('preparing');
+
+        useMessageStore.getState().updateToolCallInput('tc-1', { path: '/test.txt' });
+        expect(useMessageStore.getState().activeToolCalls.get('tc-1')?.status).toBe('running');
 
         useMessageStore.getState().completeToolCall('tc-1', {
             content: 'file content',
@@ -79,6 +84,37 @@ describe('MessageStore', () => {
         const completed = state.activeToolCalls.get('tc-1');
         expect(completed?.status).toBe('completed');
         expect(completed?.duration).toBeGreaterThanOrEqual(0);
+    });
+
+    it('partitions concurrent agent streams and colliding tool IDs by source run', () => {
+        useMessageStore.getState().appendStreamDelta('agent A', 'sourceRun:run-a');
+        useMessageStore.getState().appendStreamDelta('agent B', 'sourceRun:run-b');
+        useMessageStore.getState().startToolCall('tool-1', 'Bash', {}, 'sourceRun:run-a');
+        useMessageStore.getState().startToolCall('tool-1', 'Bash', {}, 'sourceRun:run-b');
+
+        let state = useMessageStore.getState();
+        expect(state.streamingPartitions.get('sourceRun:run-a')?.content).toBe('agent A');
+        expect(state.streamingPartitions.get('sourceRun:run-b')?.content).toBe('agent B');
+        expect(state.streamingPartitions.size).toBe(2);
+        expect(state.activeToolCalls.size).toBe(2);
+        expect(Array.from(state.activeToolCalls.values()).map(call => call.status))
+            .toEqual(['preparing', 'preparing']);
+
+        useMessageStore.getState().updateToolCallInput(
+            'tool-1', { command: 'pwd' }, 'sourceRun:run-a');
+        state = useMessageStore.getState();
+        const calls = Array.from(state.activeToolCalls.values());
+        expect(calls.find(call => call.runtimePartitionKey === 'sourceRun:run-a')?.status)
+            .toBe('running');
+        expect(calls.find(call => call.runtimePartitionKey === 'sourceRun:run-b')?.status)
+            .toBe('preparing');
+
+        useMessageStore.getState().finalizeStream({
+            inputTokens: 0, outputTokens: 0,
+            cacheReadInputTokens: 0, cacheCreationInputTokens: 0,
+        }, 'sourceRun:run-a');
+        expect(useMessageStore.getState().streamingPartitions.has('sourceRun:run-a')).toBe(false);
+        expect(useMessageStore.getState().streamingPartitions.has('sourceRun:run-b')).toBe(true);
     });
 
     it('rewindToMessage removes messages after specified ID', () => {
@@ -110,6 +146,22 @@ describe('MessageStore', () => {
         expect(state.streamingMessageId).toBeNull();
         expect(state.streamingContent).toBe('');
         expect(state.messages).toHaveLength(1);
+    });
+
+    it('keeps a terminal tool invocation terminal when WS frames arrive out of order', () => {
+        const store = useMessageStore.getState();
+        store.completeToolCall('tool-late', { content: 'done', isError: false }, 'sourceRun:child');
+        store.startToolCall('tool-late', 'Bash', {}, 'sourceRun:child');
+        store.updateToolCallInput('tool-late', { command: 'pwd' }, 'sourceRun:child');
+        store.updateToolCallProgress('tool-late', 'still running', 'sourceRun:child');
+        store.completeToolCall('tool-late', { content: 'late error', isError: true }, 'sourceRun:child');
+
+        const tool = useMessageStore.getState().activeToolCalls
+            .get('sourceRun:child\u0000tool-late');
+        expect(tool?.status).toBe('completed');
+        expect(tool?.result).toEqual({ content: 'done', isError: false });
+        expect(tool?.progress).toBeUndefined();
+        expect(useMessageStore.getState().streamingPartitions.size).toBe(0);
     });
 
     it('atomically replaces the transient run with the committed generic message tail', () => {
@@ -181,7 +233,7 @@ describe('MessageStore', () => {
 
         const state = useMessageStore.getState();
         expect(state.messages.map(message => message.uuid)).toEqual([
-            'history-anchor', 'committed-user', 'committed-tools', 'committed-results', 'committed-final',
+            'history-anchor', 'committed-user', 'committed-tools', 'committed-final',
         ]);
         expect(state.activeToolCalls.size).toBe(0);
         expect(state.streamingMessageId).toBeNull();
@@ -197,7 +249,7 @@ describe('MessageStore', () => {
         // A duplicated completion frame is idempotent and cannot duplicate history.
         expect(useMessageStore.getState().reconcileCommittedRun('history-anchor', committedTail)).toBe(true);
         expect(useMessageStore.getState().messages.map(message => message.uuid)).toEqual([
-            'history-anchor', 'committed-user', 'committed-tools', 'committed-results', 'committed-final',
+            'history-anchor', 'committed-user', 'committed-tools', 'committed-final',
         ]);
     });
 
@@ -208,6 +260,7 @@ describe('MessageStore', () => {
         }] as Message[];
         useMessageStore.setState({ messages: liveMessages });
         useMessageStore.getState().startToolCall('running-tool', 'Bash', { command: 'pwd' });
+        const projectionBeforeReconcile = useMessageStore.getState().messages;
 
         const reconciled = useMessageStore.getState().reconcileCommittedRun('missing-anchor', [{
             uuid: 'committed-new', type: 'assistant',
@@ -215,7 +268,7 @@ describe('MessageStore', () => {
         }] as Message[]);
 
         expect(reconciled).toBe(false);
-        expect(useMessageStore.getState().messages).toEqual(liveMessages);
+        expect(useMessageStore.getState().messages).toEqual(projectionBeforeReconcile);
         expect(useMessageStore.getState().activeToolCalls.has('running-tool')).toBe(true);
     });
 
@@ -281,6 +334,7 @@ describe('MessageStore', () => {
         useMessageStore.getState().restoreSessionSnapshot(messages, []);
 
         const state = useMessageStore.getState();
+        expect(state.messages.map(message => message.uuid)).toEqual(['assistant-1']);
         const assistant = state.messages[0];
         expect(assistant.type).toBe('assistant');
         if (assistant.type !== 'assistant') throw new Error('expected assistant');
@@ -289,6 +343,39 @@ describe('MessageStore', () => {
         if (toolUse.type !== 'tool_use') throw new Error('expected tool_use');
         expect(toolUse.result?.metadata?.structuredResult).toMatchObject({ url, objectKey });
         expect(state.activeToolCalls.size).toBe(0);
+    });
+
+    it('keeps durable child-result input out of the human message timeline', () => {
+        const messages: Message[] = [
+            {
+                uuid: 'human-request',
+                type: 'user',
+                content: [{ type: 'text', text: '请并行分析' }],
+                timestamp: 1,
+            },
+            {
+                uuid: 'runtime-child-result',
+                type: 'user',
+                content: [{
+                    type: 'text',
+                    text: '<task-result taskId="child" resultVersion="1" status="complete" sha256="abc">\nsummary\n</task-result>',
+                }],
+                timestamp: 2,
+            },
+            {
+                uuid: 'assistant-result',
+                type: 'assistant',
+                content: [{ type: 'text', text: '分析完成' }],
+                timestamp: 3,
+            },
+        ] as Message[];
+
+        useMessageStore.getState().restoreSessionSnapshot(messages, []);
+
+        expect(useMessageStore.getState().messages.map(message => message.uuid)).toEqual([
+            'human-request',
+            'assistant-result',
+        ]);
     });
 
 });

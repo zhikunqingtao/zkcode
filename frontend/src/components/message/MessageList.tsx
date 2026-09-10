@@ -9,10 +9,11 @@
  * - 流式更新不闪烁 (streaming 消息使用增量渲染)
  */
 
-import React, { useCallback, useEffect, useRef } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef } from 'react';
 import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso';
 import { useMessageStore } from '@/store/messageStore';
 import { useWorkbenchViewStore } from '@/store/workbenchViewStore';
+import type { ToolCallState } from '@/types';
 
 import MessageItem from './MessageItem';
 
@@ -31,9 +32,25 @@ const MessageList: React.FC = () => {
     const streamingMessageId = useMessageStore(s => s.streamingMessageId);
     const streamingContent = useMessageStore(s => s.streamingContent);
     const thinkingContent = useMessageStore(s => s.thinkingContent);
+    const streamingPartitions = useMessageStore(s => s.streamingPartitions);
+    const messagePartitionKeys = useMessageStore(s => s.messagePartitionKeys);
     const activeToolCalls = useMessageStore(s => s.activeToolCalls);
     const pendingMessageId = useWorkbenchViewStore(s => s.pendingMessageId);
     const consumePendingMessage = useWorkbenchViewStore(s => s.consumePendingMessage);
+
+    const toolCallsByPartition = useMemo(() => {
+        const result = new Map<string, Map<string, ToolCallState>>();
+        for (const [, toolCall] of activeToolCalls) {
+            const partitionKey = toolCall.runtimePartitionKey ?? 'root';
+            let partition = result.get(partitionKey);
+            if (!partition) {
+                partition = new Map();
+                result.set(partitionKey, partition);
+            }
+            partition.set(toolCall.toolUseId ?? toolCall.toolName, toolCall);
+        }
+        return result;
+    }, [activeToolCalls]);
 
     useEffect(() => {
         if (!pendingMessageId) return;
@@ -75,26 +92,30 @@ const MessageList: React.FC = () => {
         if (!msg) return null;
 
         const prevMsg = index > 0 ? messages[index - 1] : undefined;
-        const isStreaming = msg.uuid === streamingMessageId;
+        const partitionKey = messagePartitionKeys.get(msg.uuid);
+        const partition = partitionKey ? streamingPartitions.get(partitionKey) : undefined;
+        const isStreaming = Boolean(partition) || msg.uuid === streamingMessageId;
+        const messageToolCalls = partitionKey ? toolCallsByPartition.get(partitionKey) : undefined;
 
         return (
             <MessageItem
                 message={msg}
                 prevMessage={prevMsg}
                 isStreaming={isStreaming}
-                streamingContent={isStreaming ? streamingContent : undefined}
-                thinkingContent={isStreaming ? thinkingContent : undefined}
-                activeToolCalls={activeToolCalls}
+                streamingContent={partition?.content ?? (isStreaming ? streamingContent : undefined)}
+                thinkingContent={partition?.thinkingContent ?? (isStreaming ? thinkingContent : undefined)}
+                activeToolCalls={messageToolCalls}
             />
         );
-    }, [messages, streamingMessageId, streamingContent, thinkingContent, activeToolCalls]);
+    }, [messages, streamingMessageId, streamingContent, thinkingContent,
+        messagePartitionKeys, streamingPartitions, toolCallsByPartition]);
 
     // Auto-scroll: follow output when streaming
     const followOutput = useCallback((isAtBottom: boolean): boolean | 'smooth' => {
         // Always follow when streaming, otherwise follow if user is at bottom
-        if (streamingMessageId) return 'smooth';
+        if (streamingPartitions.size > 0 || streamingMessageId) return 'smooth';
         return isAtBottom ? 'smooth' : false;
-    }, [streamingMessageId]);
+    }, [streamingMessageId, streamingPartitions.size]);
 
     if (messages.length === 0) {
         return <EmptyState />;

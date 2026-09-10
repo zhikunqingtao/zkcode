@@ -1,28 +1,15 @@
-//! Coordinator 服务——多代理协作模式核心（对照旧 `CoordinatorService.java`，277L）。
+//! Coordinator 服务——多代理协作模式核心。
 //!
-//! Coordinator 模式让主 LLM 扮演协调者角色，不直接执行工具，
-//! 而是通过 `AgentTool` 生成工人代理并行处理复杂任务的不同部分。
-//!
-//! 激活条件：
-//! 1. `FeatureFlag` `COORDINATOR_MODE` = true
-//! 2. 环境变量 `ZK_COORDINATOR_MODE` = '1'（可选，运行时切换）
-//!
-//! # 有意差异
-//!
-//! - Java 使用 `ConcurrentHashMap<String, String> runtimeEnv` 解决
-//!   `System.getenv()` vs `System.setProperty()` 命名空间不匹配 bug；
-//!   本实现使用 `DashMap<String, String>` 等价替代。
-//! - Java 注入 `SystemScratchpadPathPolicy` 做 scratchpad 路径安全校验；
-//!   本实现使用 `zk_core::paths` 解析 + sessionId 白名单。
-//! - `getWorkerToolsContext` 在旧实现返回 `Map<String, String>`；本实现
-//!   直接返回 `String`（只含 `workerToolsContext` 键）。
-//! - 环境变量名对齐旧 `ZHIKUN_COORDINATOR_MODE`（非 `ZK_COORDINATOR_MODE`）。
+//! 顶层 Coordinator 模式由组合根在启动期解析并冻结。服务构造时将显式
+//! `ZHIKUN_COORDINATOR_MODE=1` 与 `COORDINATOR_MODE` feature flag 求交；此后既不
+//! 读取进程环境，也不接受会话恢复或关键词启发式改写模式。Swarm 生命周期仍由
+//! 本服务的进程内状态机管理，但不会反向改变顶层对话模式。
 
 use std::collections::{BTreeMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use dashmap::DashMap;
-use zk_core::FeatureFlags;
+use zk_core::{FeatureFlags, feature_flags};
 use zk_protocol::WorkerSnapshot;
 
 use crate::{NoopObservabilityRecorder, ObservabilityEvent, ObservabilityRecorder};
@@ -32,19 +19,15 @@ use super::{
     SwarmService, TeamInfo, TeamManager, WorkerStatus, WorkflowPhase,
 };
 
-/// 环境变量名——运行时 Coordinator 模式切换（对齐旧 `ZHIKUN_COORDINATOR_MODE`）。
+/// 顶层 Coordinator 模式的启动期环境变量名。
 pub const COORDINATOR_MODE_ENV: &str = "ZHIKUN_COORDINATOR_MODE";
 
 /// sessionId 白名单正则：字母/数字/下划线/中划线，长度 1–128。
 /// 与旧 `SwarmController.TEAM_NAME_PATTERN` 策略对齐。
 /// Coordinator 服务——多代理协作模式核心。
 pub struct CoordinatorService {
-    /// 特性标志。
-    feature_flags: std::sync::Arc<FeatureFlags>,
-    /// 运行时环境变量存储（对齐旧 `runtimeEnv` `ConcurrentHashMap`）。
-    runtime_env: DashMap<String, String>,
-    /// 会话级 Coordinator 模式覆盖（`matchSessionMode` 使用）。
-    _session_mode_overrides: Mutex<HashSet<String>>,
+    /// 启动期冻结的有效模式：显式进程配置与 feature flag 必须同时开启。
+    coordinator_mode_enabled: bool,
     /// 唯一团队生命周期管理器。
     team_manager: Arc<TeamManager>,
     /// 唯一 Swarm 运行时与取消表。
@@ -91,19 +74,22 @@ impl SwarmPhase {
     }
 }
 
+#[allow(
+    clippy::must_use_candidate,
+    reason = "legacy Swarm command methods return best-effort booleans that callers may intentionally ignore; Swarm API changes are outside this release"
+)]
 impl CoordinatorService {
     /// 创建 `CoordinatorService`。
     #[must_use]
-    pub fn new(feature_flags: std::sync::Arc<FeatureFlags>) -> Self {
+    pub fn new(feature_flags: &FeatureFlags, coordinator_mode_enabled: bool) -> Self {
         let team_manager = Arc::new(TeamManager::new());
         let event_bus = Arc::new(CoordinatorEventBus::new());
         let swarm_service = Arc::new(
             SwarmService::new(Arc::clone(&team_manager), 20).with_event_bus(Arc::clone(&event_bus)),
         );
         Self {
-            feature_flags,
-            runtime_env: DashMap::new(),
-            _session_mode_overrides: Mutex::new(HashSet::new()),
+            coordinator_mode_enabled: coordinator_mode_enabled
+                && feature_flags.is_enabled(feature_flags::COORDINATOR_MODE),
             team_manager,
             swarm_service,
             event_bus,
@@ -417,19 +403,11 @@ impl CoordinatorService {
 
     /// 检查是否处于 Coordinator 模式。
     ///
-    /// 对齐旧 `isCoordinatorMode()`：`FeatureFlag` + 环境变量双判断。
+    /// 该值由构造时的显式进程配置与 `COORDINATOR_MODE` feature flag 共同决定，
+    /// 并在服务生命周期内保持不变。
     #[must_use]
-    pub fn is_coordinator_mode(&self) -> bool {
-        if !self.feature_flags.is_enabled("COORDINATOR_MODE") {
-            return false;
-        }
-        // 先查运行时覆盖，再查进程环境变量
-        let runtime_val = self
-            .runtime_env
-            .get(COORDINATOR_MODE_ENV)
-            .map(|v| v.clone());
-        let env_val = runtime_val.or_else(|| std::env::var(COORDINATOR_MODE_ENV).ok());
-        is_env_truthy(env_val.as_deref())
+    pub const fn is_coordinator_mode(&self) -> bool {
+        self.coordinator_mode_enabled
     }
 
     /// 检查当前是否处于 Coordinator 顶层模式（非子代理）。
@@ -438,70 +416,6 @@ impl CoordinatorService {
     #[must_use]
     pub fn is_coordinator_top_level(&self, is_sub_agent: bool) -> bool {
         self.is_coordinator_mode() && !is_sub_agent
-    }
-
-    /// 自动检测任务复杂度决定是否建议启用 Coordinator。
-    ///
-    /// 基于用户消息中的关键词启发式判断（中英双语）。
-    /// 对齐旧 `shouldSuggestCoordinator(userMessage)`。
-    #[must_use]
-    pub fn should_suggest_coordinator(&self, user_message: &str) -> bool {
-        if !self.feature_flags.is_enabled("COORDINATOR_MODE") {
-            return false;
-        }
-        if user_message.is_empty() {
-            return false;
-        }
-        let lower = user_message.to_lowercase();
-        let mut signals = 0u32;
-        if lower.contains("refactor") || lower.contains("重构") {
-            signals += 1;
-        }
-        if lower.contains("migrate") || lower.contains("迁移") {
-            signals += 1;
-        }
-        if lower.contains("test") && lower.contains("implement") {
-            signals += 1;
-        }
-        if lower.contains("multiple files") || lower.contains("多个文件") {
-            signals += 1;
-        }
-        if lower.contains("parallel")
-            || lower.contains("并行")
-            || lower.contains("并行执行")
-            || lower.contains("多代理")
-        {
-            signals += 1;
-        }
-        if lower.contains("comprehensive") || lower.contains("全面") {
-            signals += 1;
-        }
-        if lower.contains("create agents") || lower.contains("spawn workers") {
-            signals += 1;
-        }
-        signals >= 2
-    }
-
-    /// 会话恢复时同步模式。
-    ///
-    /// 对齐旧 `matchSessionMode(sessionMode)`。
-    #[must_use]
-    pub fn match_session_mode(&self, session_mode: Option<&str>) -> Option<String> {
-        let session_mode = session_mode?;
-        let current = self.is_coordinator_mode();
-        let target = session_mode == "coordinator";
-        if current == target {
-            return None;
-        }
-
-        if target {
-            self.runtime_env
-                .insert(COORDINATOR_MODE_ENV.to_owned(), "1".to_owned());
-            Some("Entered coordinator mode to match resumed session.".to_owned())
-        } else {
-            self.runtime_env.remove(COORDINATOR_MODE_ENV);
-            Some("Exited coordinator mode to match resumed session.".to_owned())
-        }
     }
 
     // ═══ 工人工具上下文 ═══
@@ -534,7 +448,7 @@ impl CoordinatorService {
     /// 对齐旧 `getCoordinatorAllowedTools()`。
     #[must_use]
     pub fn get_coordinator_allowed_tools() -> HashSet<&'static str> {
-        ["Agent", "TaskStop", "SendMessage", "SyntheticOutput"]
+        ["Agent", "TaskOutput", "TaskStop", "SendMessage"]
             .into_iter()
             .collect()
     }
@@ -560,21 +474,6 @@ impl CoordinatorService {
         };
         format!("{base_scratchpad}/{safe_id}")
     }
-
-    /// 设置运行时环境变量覆盖（测试用 / 模式同步用）。
-    pub fn set_runtime_env(&self, key: &str, value: &str) {
-        self.runtime_env.insert(key.to_owned(), value.to_owned());
-    }
-
-    /// 清除运行时环境变量覆盖。
-    pub fn clear_runtime_env(&self, key: &str) {
-        self.runtime_env.remove(key);
-    }
-}
-
-/// 检查环境变量值是否为 truthy（对齐旧 `isEnvTruthy`）。
-fn is_env_truthy(value: Option<&str>) -> bool {
-    matches!(value, Some("1" | "true" | "True" | "TRUE"))
 }
 
 /// 检查 sessionId 是否符合安全白名单。
@@ -593,7 +492,17 @@ fn is_safe_session_id(session_id: &str) -> bool {
 fn is_internal_worker_tool(name: &str) -> bool {
     matches!(
         name,
-        "Agent" | "TeamCreate" | "TeamDelete" | "SendMessage" | "SyntheticOutput"
+        "Agent"
+            | "TaskCreate"
+            | "TaskGet"
+            | "TaskList"
+            | "TaskOutput"
+            | "TaskStop"
+            | "TaskUpdate"
+            | "TeamCreate"
+            | "TeamDelete"
+            | "SendMessage"
+            | "SyntheticOutput"
     )
 }
 
@@ -601,47 +510,49 @@ fn is_internal_worker_tool(name: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn make_service() -> CoordinatorService {
+    fn make_service(enabled: bool) -> CoordinatorService {
         let flags = std::sync::Arc::new(FeatureFlags::with_defaults());
-        CoordinatorService::new(flags)
+        CoordinatorService::new(flags.as_ref(), enabled)
     }
 
     #[test]
-    fn coordinator_mode_requires_flag_and_env() {
-        let svc = make_service();
-        // COORDINATOR_MODE defaults to true in factory, but env not set
-        // Without env var set, is_coordinator_mode should be false
-        // (because runtime_env is empty and std::env::var likely not set)
-        // Note: in test env, ZHIKUN_COORDINATOR_MODE is typically not set
-        let result = svc.is_coordinator_mode();
-        // This depends on whether the env var is set in the test environment
-        // Just verify it doesn't panic
-        let _ = result;
+    fn coordinator_mode_requires_explicit_startup_opt_in() {
+        assert!(!make_service(false).is_coordinator_mode());
+        assert!(make_service(true).is_coordinator_mode());
     }
 
     #[test]
-    fn coordinator_mode_with_runtime_env() {
-        let svc = make_service();
-        svc.set_runtime_env(COORDINATOR_MODE_ENV, "1");
+    fn coordinator_mode_freezes_feature_flag_at_startup() {
+        let flags = std::sync::Arc::new(FeatureFlags::with_defaults());
+        let svc = CoordinatorService::new(flags.as_ref(), true);
+        flags.set_value(
+            feature_flags::COORDINATOR_MODE,
+            zk_core::feature_flags::FlagValue::Bool(false),
+        );
         assert!(svc.is_coordinator_mode());
 
-        svc.clear_runtime_env(COORDINATOR_MODE_ENV);
-        // After clearing, should fall back to env var (likely not set)
+        let disabled_flags = std::sync::Arc::new(FeatureFlags::with_defaults());
+        disabled_flags.set_value(
+            feature_flags::COORDINATOR_MODE,
+            zk_core::feature_flags::FlagValue::Bool(false),
+        );
+        let disabled = CoordinatorService::new(disabled_flags.as_ref(), true);
+        assert!(!disabled.is_coordinator_mode());
     }
 
     #[test]
     fn coordinator_allowed_tools() {
         let tools = CoordinatorService::get_coordinator_allowed_tools();
         assert!(tools.contains("Agent"));
+        assert!(tools.contains("TaskOutput"));
         assert!(tools.contains("TaskStop"));
         assert!(tools.contains("SendMessage"));
-        assert!(tools.contains("SyntheticOutput"));
         assert_eq!(tools.len(), 4);
     }
 
     #[test]
     fn one_service_owns_swarm_state_machine() {
-        let service = make_service();
+        let service = make_service(false);
         let mut events = service.event_bus().subscribe();
         service
             .create_swarm("swarm-1", 2, "session-1")
@@ -683,27 +594,15 @@ mod tests {
     }
 
     #[test]
-    fn should_suggest_coordinator_keywords() {
-        let svc = make_service();
-        svc.set_runtime_env(COORDINATOR_MODE_ENV, "1");
-
-        // Two signals needed
-        assert!(svc.should_suggest_coordinator("refactor and migrate the code"));
-        assert!(svc.should_suggest_coordinator("请并行执行多个文件的全面重构"));
-        assert!(!svc.should_suggest_coordinator("hello"));
-        assert!(!svc.should_suggest_coordinator(""));
-    }
-
-    #[test]
     fn worker_tools_context_filters_internal() {
-        let svc = make_service();
-        svc.set_runtime_env(COORDINATOR_MODE_ENV, "1");
+        let svc = make_service(true);
 
         let tools = vec![
             "Agent".to_owned(),
             "Bash".to_owned(),
             "Read".to_owned(),
             "SendMessage".to_owned(),
+            "TaskOutput".to_owned(),
             "Write".to_owned(),
         ];
         let ctx = svc.get_worker_tools_context(&tools);
@@ -714,27 +613,21 @@ mod tests {
         assert!(tool_list.contains("Write"));
         assert!(!tool_list.contains("Agent"));
         assert!(!tool_list.contains("SendMessage"));
+        assert!(!tool_list.contains("TaskOutput"));
     }
 
     #[test]
     fn scratchpad_dir_safe_session_id() {
-        let svc = make_service();
+        let svc = make_service(false);
         let dir = svc.get_scratchpad_dir("valid-session_123", "/tmp/scratch");
         assert_eq!(dir, "/tmp/scratch/valid-session_123");
     }
 
     #[test]
     fn scratchpad_dir_unsafe_session_id_fallback() {
-        let svc = make_service();
+        let svc = make_service(false);
         let dir = svc.get_scratchpad_dir("../etc/passwd", "/tmp/scratch");
         assert_eq!(dir, "/tmp/scratch/default");
-    }
-
-    #[test]
-    fn match_session_mode_no_change() {
-        let svc = make_service();
-        // Not in coordinator mode, session mode is "normal"
-        assert!(svc.match_session_mode(Some("normal")).is_none());
     }
 
     #[test]

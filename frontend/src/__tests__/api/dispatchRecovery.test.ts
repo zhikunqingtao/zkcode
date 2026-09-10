@@ -12,6 +12,11 @@ import { usePermissionStore } from '@/store/permissionStore';
 import { useRunStore } from '@/store/runStore';
 import { useSessionStore } from '@/store/sessionStore';
 import { useAppUiStore } from '@/store/appUiStore';
+import { useEvidenceStore } from '@/store/evidenceStore';
+import { useInboxStore } from '@/store/inboxStore';
+import { useJourneyVerifyStore } from '@/store/journeyVerifyStore';
+import { usePlanStore } from '@/store/planStore';
+import { runtimeEnvelope } from '@/test/runtimeEnvelope';
 
 const sendToServerMock = vi.hoisted(() => vi.fn(() => true));
 vi.mock('@/api/stompClient', () => ({
@@ -89,12 +94,17 @@ describe('transport-scoped bind recovery', () => {
             sessionCost: 0,
             totalCost: 0,
             usage: { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 },
+            usageComplete: true,
         });
         useRunStore.setState({ recoverySnapshots: new Map(), recoveryEventSeq: new Map() });
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => [] }));
     });
 
     it('clears old interactions at the matching restore and keeps recovered interactions for the new Session', async () => {
+        useInboxStore.getState().addInboxMessage({ fromId: 'old', content: 'old Session' });
+        usePlanStore.getState().enablePlanMode('old plan', 'old Session');
+        useJourneyVerifyStore.getState().setRunning();
+        useEvidenceStore.setState({ loading: true, error: 'old Session' });
         usePermissionStore.getState().showPermission({
             interactionId: 'permission-old', toolUseId: 'tool-old', toolName: 'Write',
             input: {}, riskLevel: 'medium', reason: 'old Session',
@@ -109,13 +119,25 @@ describe('transport-scoped bind recovery', () => {
         let payload: { sessionId: string; protocolVersion: number; bindRequestId: string; bindingEpoch: number } | undefined;
         const bound = bindSessionAndWait('session-new', value => { payload = value; });
         dispatch({
-            type: 'session_restored', bindRequestId: payload!.bindRequestId, protocolVersion: 3,
+            ...runtimeEnvelope(),
+            type: 'session_restored', bindRequestId: payload!.bindRequestId, protocolVersion: 4,
             bindingEpoch: payload!.bindingEpoch, messages: [],
             metadata: { sessionId: 'session-new', model: 'model', permissionMode: 'DEFAULT', status: 'idle' },
+            costSummary: {
+                sessionCost: 1,
+                totalCost: 2,
+                usage: { inputTokens: 3, outputTokens: 4, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 },
+                usageComplete: false,
+            },
         });
 
         expect(usePermissionStore.getState().pendingPermissions).toEqual([]);
         expect(useAppUiStore.getState().elicitationDialog).toBeNull();
+        expect(useInboxStore.getState().messages).toEqual([]);
+        expect(usePlanStore.getState().isPlanMode).toBe(false);
+        expect(useJourneyVerifyStore.getState().status).toBe('idle');
+        expect(useEvidenceStore.getState()).toMatchObject({ loading: false, error: null });
+        expect(useCostStore.getState().usageComplete).toBe(false);
 
         pendingResponse.resolve(response([
             permissionInteraction('session-new', 'new'),
@@ -142,7 +164,8 @@ describe('transport-scoped bind recovery', () => {
         let payloadB: typeof payloadA;
         const boundA = bindSessionAndWait('session-a', value => { payloadA = value; });
         dispatch({
-            type: 'session_restored', bindRequestId: payloadA!.bindRequestId, protocolVersion: 3,
+            ...runtimeEnvelope(),
+            type: 'session_restored', bindRequestId: payloadA!.bindRequestId, protocolVersion: 4,
             bindingEpoch: payloadA!.bindingEpoch, messages: [],
             metadata: { sessionId: 'session-a', model: 'model-a', permissionMode: 'DEFAULT', status: 'idle' },
         });
@@ -150,7 +173,8 @@ describe('transport-scoped bind recovery', () => {
         const boundB = bindSessionAndWait('session-b', value => { payloadB = value; });
         await expect(boundA).resolves.toBe(false);
         dispatch({
-            type: 'session_restored', bindRequestId: payloadB!.bindRequestId, protocolVersion: 3,
+            ...runtimeEnvelope(),
+            type: 'session_restored', bindRequestId: payloadB!.bindRequestId, protocolVersion: 4,
             bindingEpoch: payloadB!.bindingEpoch, messages: [],
             metadata: { sessionId: 'session-b', model: 'model-b', permissionMode: 'DEFAULT', status: 'idle' },
         });
@@ -181,14 +205,16 @@ describe('transport-scoped bind recovery', () => {
         let payloadB: typeof payloadA;
         const boundA = bindSessionAndWait('session-a', value => { payloadA = value; });
         dispatch({
-            type: 'session_restored', bindRequestId: payloadA!.bindRequestId, protocolVersion: 3,
+            ...runtimeEnvelope(),
+            type: 'session_restored', bindRequestId: payloadA!.bindRequestId, protocolVersion: 4,
             bindingEpoch: payloadA!.bindingEpoch, messages: [],
             metadata: { sessionId: 'session-a', model: 'model-a', permissionMode: 'DEFAULT', status: 'idle' },
         });
         const boundB = bindSessionAndWait('session-b', value => { payloadB = value; });
         await expect(boundA).resolves.toBe(false);
         dispatch({
-            type: 'session_restored', bindRequestId: payloadB!.bindRequestId, protocolVersion: 3,
+            ...runtimeEnvelope(),
+            type: 'session_restored', bindRequestId: payloadB!.bindRequestId, protocolVersion: 4,
             bindingEpoch: payloadB!.bindingEpoch, messages: [],
             metadata: { sessionId: 'session-b', model: 'model-b', permissionMode: 'DEFAULT', status: 'idle' },
         });
@@ -206,7 +232,8 @@ describe('transport-scoped bind recovery', () => {
         let payload: { sessionId: string; protocolVersion: number; bindRequestId: string; bindingEpoch: number } | undefined;
         const bound = bindSessionAndWait('session-current', value => { payload = value; });
         dispatch({
-            type: 'session_restored', bindRequestId: payload!.bindRequestId, protocolVersion: 3,
+            ...runtimeEnvelope(),
+            type: 'session_restored', bindRequestId: payload!.bindRequestId, protocolVersion: 4,
             bindingEpoch: payload!.bindingEpoch, messages: [],
             metadata: { sessionId: 'session-current', model: 'model', permissionMode: 'DEFAULT', status: 'idle' },
         });
@@ -232,14 +259,16 @@ describe('transport-scoped bind recovery', () => {
         let payload: { sessionId: string; protocolVersion: number; bindRequestId: string; bindingEpoch: number } | undefined;
         const bound = bindSessionAndWait('session-ack', value => { payload = value; });
         dispatch({
-            type: 'session_restored', bindRequestId: payload!.bindRequestId, protocolVersion: 3,
+            ...runtimeEnvelope(),
+            type: 'session_restored', bindRequestId: payload!.bindRequestId, protocolVersion: 4,
             bindingEpoch: payload!.bindingEpoch, messages: [],
             metadata: { sessionId: 'session-ack', model: 'model', permissionMode: 'DEFAULT', status: 'idle' },
         });
         await expect(bound).resolves.toBe(true);
 
         sendToServerMock.mockReturnValue(false);
-        dispatch({ type: 'interaction_created', ...permissionInteraction('session-ack', 'ack') } as any);
+        dispatch({
+            ...runtimeEnvelope(), type: 'interaction_created', ...permissionInteraction('session-ack', 'ack') } as any);
         await vi.waitFor(() => expect(sendToServerMock).toHaveBeenCalledWith(
             '/app/interaction-received',
             expect.objectContaining({ interactionId: 'permission-ack', deliveryGeneration: 1 }),
@@ -251,7 +280,8 @@ describe('transport-scoped bind recovery', () => {
         let reboundPayload: typeof payload;
         const rebound = bindSessionAndWait('session-ack', value => { reboundPayload = value; });
         dispatch({
-            type: 'session_restored', bindRequestId: reboundPayload!.bindRequestId, protocolVersion: 3,
+            ...runtimeEnvelope(),
+            type: 'session_restored', bindRequestId: reboundPayload!.bindRequestId, protocolVersion: 4,
             bindingEpoch: reboundPayload!.bindingEpoch, messages: [],
             metadata: { sessionId: 'session-ack', model: 'model', permissionMode: 'DEFAULT', status: 'idle' },
         });
@@ -263,6 +293,7 @@ describe('transport-scoped bind recovery', () => {
 
         sendToServerMock.mockClear();
         dispatch({
+            ...runtimeEnvelope(),
             type: 'interaction_created',
             ...permissionInteraction('session-ack', 'ack'),
             deliveryGeneration: 2,
@@ -282,7 +313,8 @@ describe('transport-scoped bind recovery', () => {
         let otherPayload: typeof payload;
         const otherBound = bindSessionAndWait('session-other', value => { otherPayload = value; });
         dispatch({
-            type: 'session_restored', bindRequestId: otherPayload!.bindRequestId, protocolVersion: 3,
+            ...runtimeEnvelope(),
+            type: 'session_restored', bindRequestId: otherPayload!.bindRequestId, protocolVersion: 4,
             bindingEpoch: otherPayload!.bindingEpoch, messages: [],
             metadata: { sessionId: 'session-other', model: 'model', permissionMode: 'DEFAULT', status: 'idle' },
         });
@@ -293,7 +325,8 @@ describe('transport-scoped bind recovery', () => {
         let returnedPayload: typeof payload;
         const returned = bindSessionAndWait('session-ack', value => { returnedPayload = value; });
         dispatch({
-            type: 'session_restored', bindRequestId: returnedPayload!.bindRequestId, protocolVersion: 3,
+            ...runtimeEnvelope(),
+            type: 'session_restored', bindRequestId: returnedPayload!.bindRequestId, protocolVersion: 4,
             bindingEpoch: returnedPayload!.bindingEpoch, messages: [],
             metadata: { sessionId: 'session-ack', model: 'model', permissionMode: 'DEFAULT', status: 'idle' },
         });
@@ -313,26 +346,30 @@ describe('transport-scoped bind recovery', () => {
         await expect(first).resolves.toBe(false);
 
         dispatch({
+            ...runtimeEnvelope(),
             type: 'cost_update', sessionCost: 9, totalCost: 12,
             usage: { inputTokens: 2, outputTokens: 1, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 },
         });
         dispatch({
-            type: 'session_restored', bindRequestId: firstPayload!.bindRequestId, protocolVersion: 3,
+            ...runtimeEnvelope(),
+            type: 'session_restored', bindRequestId: firstPayload!.bindRequestId, protocolVersion: 4,
             bindingEpoch: firstPayload!.bindingEpoch,
             messages: [], metadata: { sessionId: 'session-a', model: 'wrong', permissionMode: 'DEFAULT', status: 'idle' },
         });
         dispatch({
-            type: 'session_restored', bindRequestId: secondPayload!.bindRequestId, protocolVersion: 3,
+            ...runtimeEnvelope(),
+            type: 'session_restored', bindRequestId: secondPayload!.bindRequestId, protocolVersion: 4,
             bindingEpoch: secondPayload!.bindingEpoch,
             messages: [], metadata: { sessionId: 'session-b', model: 'model', permissionMode: 'DEFAULT', status: 'idle' },
-            runSnapshot: { id: 'run-b', status: 'RUNNING' }, snapshotEventSeq: 42,
+            runSnapshot: { id: 'run-b', status: 'running', verificationStatus: 'notRequested' }, snapshotEventSeq: 42,
             activeToolCalls: [{ toolUseId: 'tool-b', toolName: 'Bash', input: { command: 'work' } }],
             costSummary: { totalCost: 3 },
         });
 
         await expect(second).resolves.toBe(true);
         expect(useRunStore.getState().recoveryEventSeq.get('run-b')).toBe(42);
-        expect(useMessageStore.getState().activeToolCalls.has('tool-b')).toBe(true);
+        expect(Array.from(useMessageStore.getState().activeToolCalls.values())
+            .some(tool => tool.toolUseId === 'tool-b')).toBe(true);
         expect(useCostStore.getState().sessionCost).toBe(9);
         expect(useCostStore.getState().totalCost).toBe(12);
     });
@@ -343,6 +380,7 @@ describe('transport-scoped bind recovery', () => {
         const bound = bindSessionAndWait('session-deleted', value => { payload = value; });
 
         dispatch({
+            ...runtimeEnvelope(),
             type: 'protocol_error',
             code: 'SESSION_NOT_FOUND',
             supportedVersion: 3,
@@ -364,6 +402,7 @@ describe('transport-scoped bind recovery', () => {
         await useSessionStore.getState().resumeSession('session-new');
 
         dispatch({
+            ...runtimeEnvelope(),
             type: 'protocol_error',
             code: 'SESSION_NOT_FOUND',
             supportedVersion: 3,
@@ -387,6 +426,7 @@ describe('transport-scoped bind recovery', () => {
 
         await expect(bound).resolves.toBe(false);
         expect(() => dispatch({
+            ...runtimeEnvelope(),
             type: 'cost_update',
             sessionCost: 4,
             totalCost: 6,

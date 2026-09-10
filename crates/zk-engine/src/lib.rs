@@ -38,6 +38,7 @@
 pub mod admission;
 pub mod concurrency;
 pub mod context;
+mod context_checkpoint;
 pub mod conversation_service;
 // Batch 7b Step 4/5：自修正循环（编译错误/测试失败解析器 + 主控）。消费方为
 // 引擎多轮循环，Feature Flag `SELF_CORRECTION_LOOP` 门控。
@@ -45,6 +46,7 @@ pub mod correction;
 pub mod cost;
 pub mod engine;
 pub mod env_info;
+mod execution_resources;
 // Batch 5 Step 5：文件写前快照 + 回合事务 + Rewind（对照旧
 // `FileHistoryService`）。消费方为引擎多轮循环的事务边界与
 // `/api/sessions/{id}/history/*` 端点。
@@ -52,6 +54,7 @@ pub mod file_history;
 // Batch 5 Step 2：用户级长期记忆（`~/.zk/MEMORY.md` + BM25 检索），对照旧
 // `MemdirService` / `MemorySearchEngine`。生产入口为 `Memory` 工具与
 // `/api/memory*` 端点；**不**参与系统提示注入（理由见模块文档）。
+pub mod llm_ledger;
 pub mod llm_summarizer;
 pub mod memdir;
 pub mod normalize;
@@ -104,14 +107,20 @@ pub use correction::loop_ctrl::{
 };
 pub use correction::{ParsedError, ParsedTestFailure};
 pub use cost::{CostTracker, NoopCostTracker};
-pub use engine::{ConversationRunOptions, Engine, TrustedImageUrlCheck};
+pub use engine::{
+    ConversationRunOptions, DEFAULT_ROOT_DEADLINE, Engine, RootTaskBudgetPolicy,
+    RunCancellationPort, TrustedImageUrlCheck,
+};
 pub use env_info::environment_section;
+pub use execution_resources::ExecutionSupervisor;
 pub use file_history::{
     DiffStats, FileHistoryService, RewindResult, SnapshotInfo, TransactionRecord, TurnSnapshots,
     resolve_prospective,
 };
+pub use llm_ledger::{DbLlmCallObserver, DbSummaryObserverFactory};
 pub use llm_summarizer::{
-    LlmSummarizer, MAX_SUMMARY_INPUT_CHARS, SUMMARY_TIMEOUT, SummarizerMetrics,
+    LlmSummarizer, MAX_SUMMARY_INPUT_CHARS, RunScopedLlmSummarizer, SUMMARY_TIMEOUT,
+    SummarizerMetrics, SummaryExecution, SummaryObserverFactory,
 };
 pub use memdir::{
     DocumentEntry, ENTRYPOINT_NAME, MAX_ENTRYPOINT_BYTES, MAX_ENTRYPOINT_LINES,
@@ -158,13 +167,17 @@ pub use tool_tracker::{ToolCallRecord, ToolCallTracker};
 // Batch 6 re-exports
 pub use agent::{
     AgentDefinition, AgentMailboxMessage, AgentMailboxRouter, AgentRequest, AgentResult,
-    AgentStatus, AgentTimeoutConfig, BackgroundAgentTracker, ChildExecutionContext,
-    GitCommandOutput, GitCommandRunner, IsolationMode, MAX_RESULT_SIZE_CHARS,
-    RealSubAgentEngineFactory, SUB_AGENT_TOOL_NAMES, SubAgentEngineFactory, SubAgentExecutor,
-    SystemGitCommandRunner, WorktreeManager, build_sub_agent_registry,
+    AgentStatus, AgentTimeoutConfig, ChildExecutionContext, GitCommandOutput, GitCommandRunner,
+    IsolationMode, RealSubAgentEngineFactory, SUB_AGENT_TOOL_NAMES, SubAgentEngineFactory,
+    SubAgentExecutor, SystemGitCommandRunner, WorktreeManager, build_sub_agent_registry,
     build_sub_agent_registry_with_policy,
 };
-pub use task::{TaskCoordinator, TaskState, TaskStatus};
+pub use task::{
+    CLEANUP_GRACE, CancelReceipt, ChildTaskSubmission, DEFAULT_TASK_TIMEOUT, GLOBAL_AGENT_LIMIT,
+    ROOT_AGENT_LIMIT, TaskExecutionContext, TaskExecutionLease, TaskExecutionResult,
+    TaskOutputRequest, TaskOutputResponse, TaskRuntime, TaskRuntimeError, TaskRuntimeShutdownPhase,
+    TaskRuntimeShutdownReport, TaskSubmissionReceipt,
+};
 
 // Batch 6 Phase C re-exports
 pub use coordinator::{

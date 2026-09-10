@@ -2,9 +2,9 @@
 //!
 //! 形状差异（已在 `docs/compatibility.md` §8 记录）：
 //! - **PG-T01**：旧 `fixture()`（L262-280）自建两张极简表再跑 V015/V019 迁移；
-//!   zkcode 直接用 27 表基线库（`common::Harness`），种子行内容与旧测试逐行一致
-//!   （`s-root`/`s-other` 两会话，`r-root`/`r-child`/`r-sibling`/`r-other` 四 Run，
-//!   父子关系与 `s-child` 合成会话原样保留）。
+//!   zkcode 直接用最终版基线库（`common::Harness`），为四个 Run 创建合法 Task，
+//!   并为两个子 Run 各建独立 internal Session。授权测试关心的根会话与父 Run
+//!   关系保持不变。
 //! - **PG-T02**：旧 `repository.supportedScopes(op)` 是实例方法；Rust 侧同名逻辑
 //!   为自由函数 `zk_authz::grants::supported_scopes`（`grants.rs:569`），断言等价。
 
@@ -48,6 +48,10 @@ fn operation(
 async fn fixture() -> Harness {
     let harness = Harness::new();
     let workspace = harness.workspace.to_string_lossy().to_string();
+    let root_task_id = uuid::Uuid::new_v4().to_string();
+    let child_task_id = uuid::Uuid::new_v4().to_string();
+    let sibling_task_id = uuid::Uuid::new_v4().to_string();
+    let other_task_id = uuid::Uuid::new_v4().to_string();
     harness
         .db
         .with_writer(move |conn| {
@@ -59,17 +63,55 @@ async fn fixture() -> Harness {
                     rusqlite::params![session, workspace, now],
                 )?;
             }
-            for (run, session, parent) in [
-                ("r-root", "s-root", None),
-                ("r-child", "s-child", Some("r-root")),
-                ("r-sibling", "s-child", Some("r-root")),
-                ("r-other", "s-other", None),
+            for (task, run, session) in [
+                (&root_task_id, "r-root", "s-root"),
+                (&other_task_id, "r-other", "s-other"),
             ] {
                 conn.execute(
-                    "INSERT INTO run_envelopes(id,session_id,parent_run_id,status,model,\
-                       started_at,created_at,updated_at) \
-                     VALUES(?1,?2,?3,'running','test-model',?4,?4,?4)",
-                    rusqlite::params![run, session, parent, now],
+                    "INSERT INTO tasks(\
+                       id,session_id,parent_task_id,root_task_id,current_run_id,description,status,\
+                       created_at,updated_at) \
+                     VALUES(?1,?2,NULL,?1,NULL,'permission grant root task','running',?3,?3)",
+                    rusqlite::params![task, session, now],
+                )?;
+                conn.execute(
+                    "INSERT INTO run_envelopes(\
+                       id,session_id,task_id,parent_run_id,status,model,started_at,created_at,updated_at) \
+                     VALUES(?1,?2,?3,NULL,'running','test-model',?4,?4,?4)",
+                    rusqlite::params![run, session, task, now],
+                )?;
+                conn.execute(
+                    "UPDATE tasks SET current_run_id=?2 WHERE id=?1",
+                    rusqlite::params![task, run],
+                )?;
+            }
+
+            for (task, run, session) in [
+                (&child_task_id, "r-child", "s-child"),
+                (&sibling_task_id, "r-sibling", "s-sibling"),
+            ] {
+                conn.execute(
+                    "INSERT INTO tasks(\
+                       id,session_id,parent_task_id,root_task_id,current_run_id,description,status,\
+                       created_at,updated_at) \
+                     VALUES(?1,'s-root',?2,?2,NULL,'permission grant child task','running',?3,?3)",
+                    rusqlite::params![task, root_task_id, now],
+                )?;
+                conn.execute(
+                    "INSERT INTO sessions(\
+                       id,kind,parent_session_id,parent_task_id,model,working_dir,created_at,updated_at) \
+                     VALUES(?1,'internal','s-root',?2,'test-model',?3,?4,?4)",
+                    rusqlite::params![session, task, workspace, now],
+                )?;
+                conn.execute(
+                    "INSERT INTO run_envelopes(\
+                       id,session_id,task_id,parent_run_id,status,model,started_at,created_at,updated_at) \
+                     VALUES(?1,?2,?3,'r-root','running','test-model',?4,?4,?4)",
+                    rusqlite::params![run, session, task, now],
+                )?;
+                conn.execute(
+                    "UPDATE tasks SET current_run_id=?2 WHERE id=?1",
+                    rusqlite::params![task, run],
                 )?;
             }
             Ok(())

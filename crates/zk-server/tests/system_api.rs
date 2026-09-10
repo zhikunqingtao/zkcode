@@ -6,7 +6,7 @@ mod common;
 use axum::http::StatusCode;
 use serde_json::json;
 
-use common::{app, assert_same_shape, call, json_body, local_get, sample};
+use common::{app, app_with_config, assert_same_shape, call, json_body, local_get, sample};
 use zk_server::metrics_recorder;
 
 /// `GET /api/health`：键集对齐样例（`java` → `runtime` 偏离已声明）。
@@ -26,6 +26,7 @@ async fn health_shape() {
     assert_eq!(
         keys,
         vec![
+            "build",
             "capabilities",
             "service",
             "status",
@@ -36,10 +37,18 @@ async fn health_shape() {
         ]
     );
     assert_eq!(health["status"], "UP");
-    assert_eq!(health["capabilities"]["agent"]["enabled"], false);
+    assert_eq!(health["capabilities"]["agent"]["configured"], false);
+    assert_eq!(health["capabilities"]["agent"]["executable"], false);
     assert_eq!(
         health["capabilities"]["worktree"]["code"],
         "FEATURE_NOT_READY"
+    );
+    assert_eq!(health["build"]["protocolVersion"], 4);
+    assert_eq!(health["build"]["schemaVersion"], 2);
+    assert!(
+        health["build"]["gitSha"]
+            .as_str()
+            .is_some_and(|v| !v.is_empty())
     );
     assert!(health["uptime"].as_u64().is_some());
     let subsystems = &health["subsystems"];
@@ -54,6 +63,16 @@ async fn health_shape() {
     // 测试配置 `ZK_PYTHON_ENABLED` 等效关闭 → `DISABLED`，且**不拉低** overall。
     assert_eq!(sub_keys, vec!["database", "python", "runtime"]);
     assert_eq!(subsystems["database"]["status"], "UP");
+    assert_eq!(subsystems["database"]["schema"]["version"], 2);
+    assert_eq!(subsystems["database"]["schema"]["kind"], "greenfieldFinal");
+    assert_eq!(
+        subsystems["database"]["schema"]["migrationMode"],
+        "greenfieldOnly"
+    );
+    assert_eq!(
+        subsystems["database"]["schema"]["legacyWriteCompatibility"],
+        false
+    );
     assert_eq!(subsystems["python"]["status"], "DISABLED");
     let mut python_keys: Vec<&str> = subsystems["python"]
         .as_object()
@@ -105,6 +124,30 @@ async fn health_ready_plain_ready() {
             .is_some_and(|value| value.starts_with("text/plain"))
     );
     assert_eq!(String::from_utf8(body.to_vec()).expect("utf8"), "READY");
+}
+
+/// A deployment request must not turn an uncertified Swarm adapter into an
+/// executable capability or leave the service readiness green.
+#[tokio::test]
+async fn configured_swarm_is_explicitly_not_executable_or_ready() {
+    let mut config = zk_server::config::Config::test_config();
+    config.swarm_enabled = true;
+    let (mut router, _) = app_with_config(config);
+
+    let (status, _, body) = call(&mut router, local_get("/api/health")).await;
+    assert_eq!(status, StatusCode::OK);
+    let health = json_body(&body);
+    assert_eq!(health["capabilities"]["swarm"]["configured"], true);
+    assert_eq!(health["capabilities"]["swarm"]["executable"], false);
+    assert_eq!(health["capabilities"]["swarm"]["code"], "FEATURE_NOT_READY");
+
+    let (status, _, body) = call(&mut router, local_get("/api/health/ready")).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(String::from_utf8(body.to_vec()).expect("utf8"), "NOT_READY");
+
+    let (status, _, body) = call(&mut router, local_get("/api/swarm")).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(json_body(&body)["code"], "FEATURE_NOT_READY");
 }
 
 /// `GET /api/auth/status`：localhost 三元组与样例逐键、逐值一致。

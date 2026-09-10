@@ -1,6 +1,10 @@
 //! Durable child-agent checkpoints stored in the primary `SQLite` database.
 
-use serde_json::Value;
+use std::fmt::Write as _;
+
+use rusqlite::OptionalExtension;
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 use crate::time::{format_rfc3339_micros, now_millis};
 use crate::{Db, DbError};
@@ -45,13 +49,58 @@ impl Db {
     ) -> Result<(), DbError> {
         let checkpoint = checkpoint.clone();
         self.with_writer(move |conn| {
-            let messages_json = serde_json::to_string(&checkpoint.messages)?;
+            let tx = conn.transaction()?;
+            let mut messages = checkpoint.messages.clone();
+            if matches!(
+                messages.get("kind").and_then(Value::as_str),
+                Some("contextCheckpoint")
+            ) {
+                let owner: Option<CheckpointRecoveryOwner> = tx
+                    .query_row(
+                        "SELECT run.task_id,run.startup_epoch,task.parent_task_id,
+                                task.task_type,task.execution_config_json,
+                                task.token_budget_limit,task.cost_budget_nanos_usd,
+                                task.deadline_at_ms,task.budget_consumed_tokens,
+                                task.budget_consumed_cost_nanos_usd,task.usage_complete,
+                                session.working_dir
+                         FROM run_envelopes run
+                         JOIN tasks task ON task.id=run.task_id
+                         JOIN sessions session ON session.id=run.session_id
+                         WHERE run.id=?1 AND run.session_id=?2",
+                        rusqlite::params![checkpoint.run_id, checkpoint.session_id],
+                        |row| {
+                            Ok(CheckpointRecoveryOwner {
+                                task_id: row.get(0)?,
+                                startup_epoch: row.get(1)?,
+                                parent_task_id: row.get(2)?,
+                                task_type: row.get(3)?,
+                                execution_config_json: row.get(4)?,
+                                token_budget_limit: row.get(5)?,
+                                cost_budget_nanos_usd: row.get(6)?,
+                                deadline_at_ms: row.get(7)?,
+                                consumed_tokens: row.get(8)?,
+                                consumed_cost_nanos_usd: row.get(9)?,
+                                usage_complete: row.get::<_, i64>(10)? != 0,
+                                working_dir: row.get(11)?,
+                            })
+                        },
+                    )
+                    .optional()?;
+                if let Some(owner) = owner {
+                    let proof = recovery_proof(&checkpoint, &owner)?;
+                    let object = messages.as_object_mut().ok_or_else(|| {
+                        DbError::Invalid("CONTEXT_CHECKPOINT_NOT_OBJECT".to_owned())
+                    })?;
+                    object.insert("recoveryProof".to_owned(), proof);
+                }
+            }
+            let messages_json = serde_json::to_string(&messages)?;
             let file_state_json = checkpoint
                 .file_state
                 .as_ref()
                 .map(serde_json::to_string)
                 .transpose()?;
-            conn.execute(
+            tx.execute(
                 "INSERT INTO agent_checkpoints \
                  (id, run_id, session_id, agent_id, seq, messages_json, file_state_json, \
                   tool_call_count, turn_count, tokens_consumed, working_dir, created_at) \
@@ -77,6 +126,22 @@ impl Db {
                     checkpoint.created_at,
                 ],
             )?;
+            let owned = tx.execute(
+                "UPDATE run_envelopes SET checkpoint_id=?1, updated_at=?2 \
+                 WHERE id=?3 AND session_id=?4",
+                rusqlite::params![
+                    checkpoint.id,
+                    checkpoint.created_at,
+                    checkpoint.run_id,
+                    checkpoint.session_id,
+                ],
+            )?;
+            if owned != 1 {
+                return Err(DbError::Invalid(
+                    "CHECKPOINT_RUN_OWNERSHIP_MISMATCH".to_owned(),
+                ));
+            }
+            tx.commit()?;
             Ok(())
         })
         .await
@@ -125,6 +190,78 @@ impl Db {
     }
 }
 
+#[derive(Debug)]
+struct CheckpointRecoveryOwner {
+    task_id: String,
+    startup_epoch: i64,
+    parent_task_id: Option<String>,
+    task_type: String,
+    execution_config_json: String,
+    token_budget_limit: Option<i64>,
+    cost_budget_nanos_usd: Option<i64>,
+    deadline_at_ms: Option<i64>,
+    consumed_tokens: i64,
+    consumed_cost_nanos_usd: i64,
+    usage_complete: bool,
+    working_dir: String,
+}
+
+fn recovery_proof(
+    checkpoint: &AgentCheckpointRecord,
+    owner: &CheckpointRecoveryOwner,
+) -> Result<Value, DbError> {
+    let execution_config: Value = serde_json::from_str(&owner.execution_config_json)?;
+    let allowed_tools = execution_config.get("allowedTools");
+    let permission_policy = json!({
+        "version": execution_config.get("permissionPolicyVersion"),
+        "isolation": execution_config.get("isolation"),
+        "allowWriteTools": execution_config.get("allowWriteTools"),
+        "allowedTools": allowed_tools,
+    });
+    let permission_policy_json = serde_json::to_vec(&permission_policy)?;
+    let supported = owner.task_type == "agent"
+        && owner.parent_task_id.is_some()
+        && execution_config
+            .get("permissionPolicyVersion")
+            .and_then(Value::as_u64)
+            == Some(1)
+        && execution_config.get("isolation").and_then(Value::as_str) == Some("readOnly")
+        && execution_config
+            .get("allowWriteTools")
+            .and_then(Value::as_bool)
+            == Some(false)
+        && allowed_tools.is_some_and(Value::is_array)
+        && checkpoint.working_dir.as_deref() == Some(owner.working_dir.as_str());
+    Ok(json!({
+        "proofVersion": 1,
+        "supported": supported,
+        "taskId": owner.task_id,
+        "runId": checkpoint.run_id,
+        "sessionId": checkpoint.session_id,
+        "startupEpoch": owner.startup_epoch,
+        "executionConfigSha256": sha256_hex(owner.execution_config_json.as_bytes()),
+        "permissionFingerprint": sha256_hex(&permission_policy_json),
+        "workspaceBindingSha256": sha256_hex(owner.working_dir.as_bytes()),
+        "budget": {
+            "tokenLimit": owner.token_budget_limit,
+            "costLimitNanosUsd": owner.cost_budget_nanos_usd,
+            "deadlineAtMs": owner.deadline_at_ms,
+            "consumedTokens": owner.consumed_tokens,
+            "consumedCostNanosUsd": owner.consumed_cost_nanos_usd,
+            "usageComplete": owner.usage_complete,
+        },
+    }))
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut output = String::with_capacity(64);
+    for byte in digest {
+        let _ = write!(output, "{byte:02x}");
+    }
+    output
+}
+
 /// Build a checkpoint with a generated id and current timestamp.
 #[must_use]
 pub fn new_agent_checkpoint(
@@ -159,13 +296,20 @@ mod tests {
     #[tokio::test]
     async fn latest_checkpoint_is_durable_and_idempotent_per_sequence() {
         let db = Db::open_in_memory().expect("db");
-        let mut first = new_agent_checkpoint("run-1", "session-1", "agent-1", 1, json!(["a"]));
+        let session = db
+            .create_session("model", "/tmp/checkpoint")
+            .await
+            .expect("session");
+        db.start_run("run-1", &session.id, None, Some("query"), "model")
+            .await
+            .expect("run");
+        let mut first = new_agent_checkpoint("run-1", &session.id, "agent-1", 1, json!(["a"]));
         db.save_agent_checkpoint(&first).await.expect("save first");
         first.messages = json!(["replaced"]);
         db.save_agent_checkpoint(&first)
             .await
             .expect("replace first");
-        let second = new_agent_checkpoint("run-1", "session-1", "agent-1", 2, json!(["b"]));
+        let second = new_agent_checkpoint("run-1", &session.id, "agent-1", 2, json!(["b"]));
         db.save_agent_checkpoint(&second)
             .await
             .expect("save second");
@@ -177,6 +321,15 @@ mod tests {
             .expect("checkpoint");
         assert_eq!(loaded.seq, 2);
         assert_eq!(loaded.messages, json!(["b"]));
+        assert_eq!(
+            db.find_run_by_id("run-1")
+                .await
+                .expect("run lookup")
+                .expect("run exists")
+                .checkpoint_id
+                .as_deref(),
+            Some(second.id.as_str())
+        );
         assert!(
             db.latest_agent_checkpoint("missing")
                 .await

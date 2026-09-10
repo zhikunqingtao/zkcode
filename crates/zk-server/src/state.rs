@@ -1,15 +1,16 @@
 //! 应用状态——handler 层共享句柄（`Db` + 配置 + 启动时刻）。
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Instant;
 
 use zk_core::FeatureFlags;
 use zk_db::Db;
 use zk_engine::{
-    BoundedObservabilityRecorder, ConversationService, CoordinatorService, FileHistoryService,
-    HookService, JsonlObservabilitySink, MemdirStore, ObservabilityRecorder, PluginManager,
-    SessionSnapshotService,
+    BoundedObservabilityRecorder, ConversationService, CoordinatorService, ExecutionSupervisor,
+    FileHistoryService, HookService, JsonlObservabilitySink, ObservabilityRecorder, PluginManager,
+    SessionSnapshotService, TaskRuntime,
 };
 use zk_llm::{ProviderRegistry, SwappableProvider};
 use zk_mcp::{ApprovalPort, McpCapabilityRegistry, McpClientManager};
@@ -22,6 +23,7 @@ use crate::authz::AuthzStack;
 use crate::command::CommandRegistry;
 use crate::config::Config;
 use crate::cost::AtomicCostTracker;
+use crate::cron_runtime::{CronScheduler, SqliteCronService};
 use crate::mcp::{
     HubHealthObserver, HubProgressTracker, InMemoryApproval, RegistryToolSink, TrustFileApproval,
 };
@@ -157,12 +159,6 @@ pub struct AppState {
     pub mcp_progress: Arc<HubProgressTracker>,
     /// MCP 服务器信任表（Batch 4B；旧 `McpApprovalService` 单例）。
     pub mcp_approval: Arc<dyn ApprovalPort>,
-    /// 用户级长期记忆存储（Batch 5；旧 `MemdirService` `@Service` 单例）。
-    ///
-    /// `Memory` 工具（经 [`zk_tools::MemoryStore`] 端口注入）与 `/api/memory`
-    /// 域端点读写**同一实例**：分叉会让工具写入的记忆在 REST 侧不可见，且
-    /// 内部写锁失去互斥意义（并发写会互相覆盖）。
-    pub memdir: Arc<MemdirStore>,
     /// 文件写前快照事务与 Rewind（Batch 5 Step 5；旧 `FileHistoryService`
     /// `@Service` 单例）。
     ///
@@ -177,8 +173,22 @@ pub struct AppState {
     /// Process-wide bounded operations recorder. Structured events are kept
     /// separate from `SQLite` Run recovery logs.
     pub observability: Arc<dyn ObservabilityRecorder>,
+    /// Single production owner for leaf-tool scheduling and durable physical
+    /// resource observation. Engine, verification, and other execution
+    /// surfaces must use this instance rather than constructing local runners.
+    pub execution_supervisor: Arc<ExecutionSupervisor>,
+    /// Process-wide durable lifecycle authority for root conversations,
+    /// attached Agents, Swarm adapters and Cron.
+    pub(crate) task_runtime: Arc<TaskRuntime>,
+    /// Durable process-start epoch allocated after the data-directory lease is
+    /// acquired. New Runs and recovery attempts must carry this exact value.
+    startup_epoch: Arc<AtomicI64>,
     /// Agent/Task/Swarm 共用的生产子代理执行器与任务服务，随 `ToolRegistry` 惰性装配。
     agent_runtime: Arc<OnceLock<Arc<crate::engine_bridge::AgentRuntime>>>,
+    /// Cron 工具唯一 `SQLite` 端口；不持有调度或执行状态。
+    pub(crate) cron_service: Arc<SqliteCronService>,
+    /// 进程内唯一 Cron scheduler。只有显式配置且 Agent runtime 已真实装配时回填。
+    cron_scheduler: Arc<OnceLock<Arc<CronScheduler>>>,
     /// Hook 系统服务（Batch 8B；事件驱动外部副作用通知）。
     ///
     /// 经 [`crate::engine_bridge::wire_engine`] 的 `with_hooks` 注入引擎——引擎
@@ -207,12 +217,19 @@ impl AppState {
     pub fn spawn_coordinator_event_bridge(&self) -> tokio::task::JoinHandle<()> {
         let mut receiver = self.coordinator.event_bus().subscribe();
         let hub = self.hub.clone();
+        let db = self.db.clone();
         tokio::spawn(async move {
             loop {
                 match receiver.recv().await {
                     Ok(event) => {
                         let session_id = event.session_id().to_owned();
-                        hub.push(&session_id, event.to_server_message()).await;
+                        hub.push_runtime_event(
+                            &db,
+                            &session_id,
+                            &session_id,
+                            event.to_server_message(),
+                        )
+                        .await;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(dropped)) => {
                         tracing::warn!(dropped, "coordinator WS bridge lagged");
@@ -408,11 +425,8 @@ impl AppState {
             config.access_token_path.as_deref(),
         ));
         let hub = WsHub::new(ws);
-        // 权限管线在 hub 之后装配：交互下行出口与 `permission_mode_changed`
-        // 推送都要经同一 hub 实例（克隆即共享）。
-        let authz = Arc::new(AuthzStack::build(&db, &config, Some(hub.clone())));
         // MCP 进度追踪器与健康观察者共用同一 hub（克隆即共享同一实例）。
-        let mcp_progress = Arc::new(HubProgressTracker::new(hub.clone()));
+        let mcp_progress = Arc::new(HubProgressTracker::new(hub.clone(), db.clone()));
         // 装配即 `load()`（旧 `@PostConstruct loadRegistry()`）：文件缺失只
         // warn，服务照常起。
         let mcp_capabilities =
@@ -439,6 +453,19 @@ impl AppState {
                         .join("observability-events.jsonl"),
                 )),
             ));
+        let task_runtime = crate::engine_bridge::build_task_runtime(
+            db.clone(),
+            hub.clone(),
+            Arc::clone(&observability),
+        );
+        // Permission interactions and every transport cancellation share the
+        // exact same TaskRuntime instance used by the execution engines.
+        let authz = Arc::new(AuthzStack::build(
+            &db,
+            &config,
+            Some(hub.clone()),
+            &task_runtime,
+        ));
         // Batch 8B：Hook 服务从 workspace 缺省根的 `.zk/hooks.toml` 加载（文件
         // 缺失只 warn 回空表）；与引擎触发点共用同一实例（`wire_engine` 注入）。
         let hooks = Arc::new(
@@ -449,9 +476,11 @@ impl AppState {
             .join(".zk")
             .join("browser-replay");
         let coordinator = Arc::new(
-            CoordinatorService::new(Arc::clone(&feature_flags))
+            CoordinatorService::new(feature_flags.as_ref(), config.coordinator_mode_enabled)
                 .with_observability(Arc::clone(&observability)),
         );
+        let execution_supervisor = Arc::new(ExecutionSupervisor::new(db.clone()));
+        let cron_service = Arc::new(SqliteCronService::new(db.clone()));
         Self {
             db,
             config,
@@ -478,13 +507,16 @@ impl AppState {
             mcp_capabilities,
             mcp_progress,
             mcp_approval,
-            // 目录取 `~/.zk`（旧默认构造器取用户主目录），非会话/项目维度。
-            memdir: Arc::new(MemdirStore::new()),
             file_history,
             session_snapshots,
             coordinator,
             observability,
+            execution_supervisor,
+            task_runtime,
+            startup_epoch: Arc::new(AtomicI64::new(0)),
             agent_runtime: Arc::new(OnceLock::new()),
+            cron_service,
+            cron_scheduler: Arc::new(OnceLock::new()),
             hooks,
             plugin_manager: Arc::new(PluginManager::default()),
             browser_replay: Arc::new(BrowserReplayStore::new(browser_replay_dir)),
@@ -511,11 +543,114 @@ impl AppState {
         self.agent_runtime.get().cloned()
     }
 
+    /// Install the durable startup epoch before any execution surface is wired.
+    ///
+    /// # Errors
+    ///
+    /// Returns `STARTUP_EPOCH_INVALID` for a non-positive epoch and
+    /// `STARTUP_EPOCH_ALREADY_SET` when startup assembly attempts to replace the
+    /// process epoch after it has been installed.
+    pub fn set_startup_epoch(&self, startup_epoch: i64) -> Result<(), &'static str> {
+        if startup_epoch <= 0 {
+            return Err("STARTUP_EPOCH_INVALID");
+        }
+        self.startup_epoch
+            .compare_exchange(0, startup_epoch, Ordering::AcqRel, Ordering::Acquire)
+            .map(|_| ())
+            .map_err(|_| "STARTUP_EPOCH_ALREADY_SET")
+    }
+
+    /// Current durable process epoch. Zero means startup assembly is incomplete
+    /// and execution/recovery must fail closed.
+    #[must_use]
+    pub fn startup_epoch(&self) -> i64 {
+        self.startup_epoch.load(Ordering::Acquire)
+    }
+
+    /// Automatic recovery is deliberately unavailable until root continuation
+    /// and attached-child recovery can be installed as one coherent parent chain.
+    /// A child-only executor is insufficient: restart reconciliation also removes
+    /// the parent's in-process waiter, so its result could never wake the model.
+    #[must_use]
+    pub const fn safe_recovery_executable(&self) -> bool {
+        false
+    }
+
+    /// Return the process-wide durable TaskRuntime used by every execution
+    /// surface. Exposed as a test seam for end-to-end lifecycle assertions.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn task_runtime(&self) -> Arc<TaskRuntime> {
+        Arc::clone(&self.task_runtime)
+    }
+
     /// Bind the first production Agent runtime and reject accidental state forks.
     pub(crate) fn set_agent_runtime(&self, runtime: Arc<crate::engine_bridge::AgentRuntime>) {
         if self.agent_runtime.set(runtime).is_err() {
             tracing::warn!("agent runtime already bound; keeping first instance");
         }
+    }
+
+    /// Whether shared-workspace Agent execution passed every independent
+    /// configuration gate and is backed by the production workspace lease.
+    /// This reads the already-bound runtime cell directly to avoid recursively
+    /// initializing the tool registry while the composition root is building it.
+    #[must_use]
+    pub(crate) fn shared_workspace_executable(&self) -> bool {
+        self.config.agent_enabled
+            && self.config.agent_write_enabled
+            && self.config.shared_workspace_enabled
+            && self.agent_runtime.get().is_some()
+            && self.execution_supervisor.workspace_leases_ready()
+    }
+
+    /// Whether the legacy Team/Swarm adapter has passed the unified runtime gate.
+    ///
+    /// Swarm is deliberately fail-closed even when `ZK_SWARM_ENABLED=true` and
+    /// the Agent runtime is assembled.  Its current coordinator still owns a
+    /// second process-local worker lifecycle, can abort worker futures outside
+    /// the [`TaskRuntime`], and has not passed the durable result/receipt,
+    /// cancellation, budget, recovery, and independent-verification suites.
+    /// Keeping this check separate from configuration prevents health and API
+    /// surfaces from advertising an implementation that is not yet executable.
+    #[must_use]
+    pub(crate) fn swarm_executable(&self) -> bool {
+        if !self.config.swarm_enabled {
+            return false;
+        }
+        false
+    }
+
+    /// Return the one production Cron scheduler only when both the explicit
+    /// feature switch and the executable Agent runtime are present.
+    #[must_use]
+    pub fn cron_scheduler(&self) -> Option<Arc<CronScheduler>> {
+        if !self.config.cron_enabled {
+            return None;
+        }
+        let agent = self.agent_runtime()?;
+        Some(Arc::clone(self.cron_scheduler.get_or_init(|| {
+            Arc::new(CronScheduler::new(
+                self.db.clone(),
+                Arc::clone(&agent.tasks),
+                Arc::clone(&agent.executor),
+                zk_db::time::now_millis(),
+            ))
+        })))
+    }
+
+    /// Whether Cron is configured and every production component, including
+    /// the scheduler and all three tools, is actually assembled.
+    #[must_use]
+    pub fn cron_executable(&self) -> bool {
+        if !self.config.cron_enabled || self.cron_scheduler.get().is_none() {
+            return false;
+        }
+        let tools = self.tools();
+        self.agent_runtime.get().is_some()
+            && ["CronCreate", "CronList", "CronDelete"]
+                .iter()
+                .all(|name| tools.get(name).is_some())
     }
 
     /// 读取已装配的共享对话服务。
@@ -595,10 +730,14 @@ impl AppState {
     #[doc(hidden)]
     #[must_use]
     pub fn for_tests() -> Self {
-        Self::new(
+        let state = Self::new(
             Db::open_in_memory().expect("in-memory db boots with migrations"),
             Config::test_config(),
-        )
+        );
+        state
+            .set_startup_epoch(1)
+            .expect("test startup epoch is installed once");
+        state
     }
 }
 

@@ -35,8 +35,8 @@ pub(crate) struct QueryRequest {
     permission_mode: Option<String>,
     #[serde(default = "default_max_turns")]
     max_turns: u32,
-    #[serde(default = "default_budget")]
-    max_budget_usd: f64,
+    #[serde(default)]
+    max_budget_usd: Option<f64>,
     #[serde(default)]
     allowed_tools: Vec<String>,
     #[serde(default)]
@@ -56,10 +56,6 @@ pub(crate) struct QueryRequest {
 
 const fn default_max_turns() -> u32 {
     MAX_QUERY_TURNS
-}
-
-const fn default_budget() -> f64 {
-    MAX_QUERY_BUDGET_USD
 }
 
 const fn default_timeout() -> u64 {
@@ -136,6 +132,9 @@ async fn execute(
             .as_deref()
             .map(parse_thinking_mode)
             .transpose()?,
+        token_budget: None,
+        cost_budget_nanos_usd: request.max_budget_usd.map(usd_to_nanos).transpose()?,
+        deadline: Some(Duration::from_secs(request.timeout_seconds)),
     };
     let result = tokio::time::timeout(
         Duration::from_secs(request.timeout_seconds),
@@ -149,13 +148,30 @@ async fn execute(
             "Query timed out",
         ));
     };
-    if outcome.cost_usd > request.max_budget_usd {
+    if request
+        .max_budget_usd
+        .is_some_and(|limit| outcome.cost_usd > limit)
+    {
         return Err(ApiError::validation_with_code(
             "QUERY_BUDGET_EXCEEDED",
             "Query exceeded maxBudgetUsd",
         ));
     }
     Ok(outcome)
+}
+
+fn usd_to_nanos(usd: f64) -> Result<i64, ApiError> {
+    let nanos = usd * 1_000_000_000.0;
+    // `validate_request` caps this transport field at $1, so every accepted
+    // value is far below `i64::MAX` after nano-dollar conversion.
+    if !nanos.is_finite() || nanos < 1.0 {
+        return Err(ApiError::validation_with_code(
+            "QUERY_BUDGET_INVALID",
+            "maxBudgetUsd cannot be represented safely",
+        ));
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    Ok(nanos.floor() as i64)
 }
 
 fn validate_request(state: &AppState, request: &QueryRequest) -> Result<(), ApiError> {
@@ -181,9 +197,9 @@ fn validate_request(state: &AppState, request: &QueryRequest) -> Result<(), ApiE
             "maxTurns must be between 1 and 4",
         ));
     }
-    if !request.max_budget_usd.is_finite()
-        || request.max_budget_usd <= 0.0
-        || request.max_budget_usd > MAX_QUERY_BUDGET_USD
+    if request
+        .max_budget_usd
+        .is_some_and(|budget| !budget.is_finite() || budget <= 0.0 || budget > MAX_QUERY_BUDGET_USD)
     {
         return Err(ApiError::validation_with_code(
             "QUERY_BUDGET_INVALID",
@@ -314,6 +330,15 @@ mod tests {
         let mut providers = ProviderRegistry::new();
         providers.register("stub", Arc::new(StubProvider), vec!["current-model".into()]);
         AppState::for_tests().with_providers(providers.with_default_model("retired-default"))
+    }
+
+    #[test]
+    fn omitted_query_budget_means_no_cost_ceiling() {
+        let request: QueryRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "hello"
+        }))
+        .expect("query request");
+        assert_eq!(request.max_budget_usd, None);
     }
 
     #[tokio::test]

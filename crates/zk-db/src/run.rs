@@ -5,8 +5,7 @@
 //! （`setVerification` 等写控制面）属 **M-RUN 里程碑**，不在本模块范围
 //! （`RunEnvelope` 只读视图 API 于 Batch 2 端点域随 `RunController` 移植入本
 //! 模块，见文末 [`RunEnvelopeView`]）；此处移植的是「Run 必须先存在、结束时必须
-//! 落终态」这一生命周期骨架、启动期滞留 Run 恢复（`interruptStaleRuns`），
-//! 以及授权链/交互链无法绕开的状态机迁移。
+//! 落终态」这一生命周期骨架，以及授权链/交互链无法绕开的状态机迁移。
 //!
 //! | 本模块 | 旧源 |
 //! |---|---|
@@ -26,7 +25,6 @@
 //! | [`Db::complete_run`] | `RunTracker.completeRun` L74-89（`control.complete` 部分） |
 //! | [`Db::terminate_run`] | `RunTracker.failRun` L91-93 / `abortRun` L95-107 |
 //! | [`Db::finish_run`] | `RunTerminationCoordinator.terminate` L69-73 |
-//! | [`Db::interrupt_stale_runs`] | `RunControlService.interruptStaleRuns` L321-327 |
 //!
 //! # 层级归属（依赖铁律）
 //!
@@ -56,46 +54,47 @@ use sha2::{Digest, Sha256};
 
 use crate::Db;
 use crate::error::DbError;
+use crate::task_budget::{TaskBudgetLimits, validate_limits};
+use crate::task_runtime::{ExitReason, RunStatus};
 use crate::time;
 
 /// 单条 run 事件 JSON 上限（旧 `MAX_EVENT_BYTES`，`RunControlService.java:44`）。
 const MAX_EVENT_BYTES: usize = 10 * 1024;
 
-/// 终态状态集（旧 `RunEnvelope.RunStatus.terminal()`，L24-26）。
-const TERMINAL_STATUSES: [&str; 4] = ["completed", "failed", "cancelled", "interrupted"];
-
 /// 根 Run 的起始态（旧 `RunEnvelope.start` L50 `RunStatus.RUNNING`）。
-pub const STATUS_RUNNING: &str = "running";
+pub const STATUS_RUNNING: &str = RunStatus::Running.as_db();
 
-/// 正常完成的退出原因（旧 `RunControlService.complete` L125
-/// `RunExitReason.MODEL_FINISHED`）。
-pub const EXIT_MODEL_FINISHED: &str = "model_finished";
+/// The model completed its execution loop normally.
+pub const EXIT_MODEL_FINISHED: &str = ExitReason::ModelFinished.as_db();
+/// The Run exceeded its configured deadline.
+pub const EXIT_TIMEOUT: &str = ExitReason::Timeout.as_db();
+/// The Run exhausted its maximum turn count.
+pub const EXIT_MAX_TURNS: &str = ExitReason::MaxTurns.as_db();
+/// The Run exhausted its token or cost budget.
+pub const EXIT_BUDGET_EXHAUSTED: &str = ExitReason::BudgetExhausted.as_db();
+/// The model Provider failed before the Run could complete.
+pub const EXIT_PROVIDER_ERROR: &str = ExitReason::ProviderError.as_db();
+/// A tool invocation failed the Run.
+pub const EXIT_TOOL_ERROR: &str = ExitReason::ToolError.as_db();
+/// The user requested cancellation of the Run.
+pub const EXIT_USER_CANCELLED: &str = ExitReason::UserCancelled.as_db();
+/// An attached parent requested cancellation of the Run.
+pub const EXIT_PARENT_CANCELLED: &str = ExitReason::ParentCancelled.as_db();
+/// The service restarted while the Run was active.
+pub const EXIT_SERVICE_RESTART: &str = ExitReason::ServiceRestart.as_db();
+/// An internal runtime failure ended the Run.
+pub const EXIT_INTERNAL_ERROR: &str = ExitReason::InternalError.as_db();
 
-/// 用户取消的退出原因（旧 `RunTerminationCoordinator.cancelByUser` L37
-/// `RunExitReason.USER_CANCELLED`）。
-pub const EXIT_USER_CANCELLED: &str = "user_cancelled";
+/// Interaction deadline exhaustion is represented by the public `timeout`
+/// reason; delivery-vs-decision detail remains in `error_summary`.
+pub const EXIT_INTERACTION_EXPIRED: &str = EXIT_TIMEOUT;
 
-/// 内部错误的退出原因（旧 `RunTracker.failRun` L92
-/// `RunExitReason.INTERNAL_ERROR`）。
-pub const EXIT_INTERNAL_ERROR: &str = "internal_error";
+/// Interaction-capacity failure has no separate public exit variant.
+pub const EXIT_INTERACTION_CAPACITY_EXCEEDED: &str = EXIT_INTERNAL_ERROR;
 
-/// 交互期限耗尽的退出原因（旧 `DurableInteractionService.expire` L722-724
-/// `RunExitReason.INTERACTION_EXPIRED`）。
-///
-/// 未 ACK 投递（`undeliverable`）与决策期限耗尽（`expired`）**两条路径同用此
-/// 原因**（旧 `expireIfDue` L605-614 只区分交互侧 `terminal_reason`，Run 侧的
-/// `RunExitReason` 一致），差异只体现在透传的 `detail` →
-/// `run_envelopes.error_summary`：`delivery_not_acknowledged` /
-/// `decision_deadline_exceeded`。
-pub const EXIT_INTERACTION_EXPIRED: &str = "interaction_expired";
-
-/// 待决交互超上限的退出原因（旧 `DurableInteractionService.createInternal` L94-102
-/// `RunExitReason.INTERACTION_CAPACITY_EXCEEDED`）。
-pub const EXIT_INTERACTION_CAPACITY_EXCEEDED: &str = "interaction_capacity_exceeded";
-
-/// 服务重启恢复的退出原因（旧 `RunControlService.interruptStaleRuns` L325
-/// `RunExitReason.SERVICE_RESTART`）。
-pub const EXIT_SERVICE_RESTART: &str = "service_restart";
+fn validate_exit_reason(reason: &str) -> Result<(), DbError> {
+    ExitReason::parse(reason).map(|_| ())
+}
 
 /// 根 Run 的 `agent_type`（旧 `QueryEngine.execute` L288-289：无
 /// `parentSessionId` 即 `"query"`，子代理为 `"subagent"`）。
@@ -134,7 +133,7 @@ impl TransitionResult {
 
 /// 旧 `isTerminal(String)`（L335）。
 fn is_terminal(status: &str) -> bool {
-    TERMINAL_STATUSES.contains(&status)
+    RunStatus::parse(status).is_ok_and(RunStatus::is_terminal)
 }
 
 /// 旧 `value(Object)`（L336）：`null` → `"unknown"`。
@@ -271,6 +270,12 @@ pub fn transition_in_current_write(
     cost: f64,
     turns: i64,
 ) -> Result<TransitionResult, DbError> {
+    for reason in [exit_reason, requested_reason, abort_reason]
+        .into_iter()
+        .flatten()
+    {
+        validate_exit_reason(reason)?;
+    }
     let row: Option<RunSnapshot> = conn
         .query_row(
             "SELECT status,version,parent_run_id,agent_type,requested_exit_reason,\
@@ -397,7 +402,7 @@ pub fn mark_waiting_in_current_write(
         conn,
         run_id,
         &[STATUS_RUNNING],
-        "waiting_interaction",
+        "waitingInteraction",
         None,
         None,
         Some(reason),
@@ -420,7 +425,7 @@ pub fn mark_running_in_current_write(
     transition_in_current_write(
         conn,
         run_id,
-        &["waiting_interaction"],
+        &["waitingInteraction"],
         STATUS_RUNNING,
         None,
         None,
@@ -445,7 +450,7 @@ pub fn request_cancel_in_current_write(
     transition_in_current_write(
         conn,
         run_id,
-        &[STATUS_RUNNING, "waiting_interaction"],
+        &[STATUS_RUNNING, "waitingInteraction"],
         "cancelling",
         None,
         Some(exit_reason),
@@ -498,7 +503,7 @@ pub fn fail_in_current_write(
     transition_in_current_write(
         conn,
         run_id,
-        &[STATUS_RUNNING, "waiting_interaction", "cancelling"],
+        &[STATUS_RUNNING, "waitingInteraction", "cancelling"],
         "failed",
         Some(exit_reason),
         None,
@@ -513,8 +518,7 @@ pub fn fail_in_current_write(
 
 /// 旧 `cancel(runId)`（L135-139）的有界写内联版。
 ///
-/// `abort_reason` 逐字取旧源字面量 `"user_cancelled"`（与
-/// `RunExitReason.USER_CANCELLED.dbValue()` 同值）。
+/// `abort_reason` 使用公共契约字面量 [`EXIT_USER_CANCELLED`]。
 ///
 /// # Errors
 /// 见 [`transition_in_current_write`]。
@@ -525,7 +529,7 @@ pub fn cancel_in_current_write(
     transition_in_current_write(
         conn,
         run_id,
-        &["cancelling", STATUS_RUNNING, "waiting_interaction"],
+        &["cancelling", STATUS_RUNNING, "waitingInteraction"],
         "cancelled",
         Some(EXIT_USER_CANCELLED),
         None,
@@ -550,12 +554,7 @@ pub fn interrupt_in_current_write(
     transition_in_current_write(
         conn,
         run_id,
-        &[
-            "queued",
-            STATUS_RUNNING,
-            "waiting_interaction",
-            "cancelling",
-        ],
+        &["queued", STATUS_RUNNING, "waitingInteraction", "cancelling"],
         "interrupted",
         Some(exit_reason),
         None,
@@ -587,15 +586,20 @@ pub fn start_in_current_write(
     agent_type: Option<&str>,
     model: &str,
 ) -> Result<(), DbError> {
-    if let Some(parent) = parent_run_id {
-        let parents: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM run_envelopes WHERE id=?1",
-            params![parent],
-            |row| row.get(0),
-        )?;
-        if parents != 1 {
+    let parent_task: Option<(String, String)> = if let Some(parent) = parent_run_id {
+        let found = conn
+            .query_row(
+                "SELECT task_id, t.root_task_id
+                   FROM run_envelopes r JOIN tasks t ON t.id=r.task_id
+                  WHERE r.id=?1",
+                params![parent],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if found.is_none() {
             return Err(DbError::Invalid("RUN_PARENT_NOT_FOUND".to_owned()));
         }
+        found
     } else {
         let sessions: i64 = conn.query_row(
             "SELECT COUNT(*) FROM sessions WHERE id=?1",
@@ -605,17 +609,52 @@ pub fn start_in_current_write(
         if sessions != 1 {
             return Err(DbError::Invalid("RUN_ROOT_SESSION_NOT_FOUND".to_owned()));
         }
-    }
+        None
+    };
     let now = time::format_rfc3339_micros(time::now_millis());
+    // Compatibility entry point: every legacy `start_run` is still represented by a
+    // real Task before the Run becomes observable. New TaskRuntime callers create the
+    // task explicitly and use the dedicated repository APIs.
+    let task_id = run_id;
+    let (parent_task_id, root_task_id, ordinal) = if let Some((parent_task_id, root)) = parent_task
+    {
+        let ordinal: i64 = conn.query_row(
+            "SELECT COALESCE(MAX(ordinal),-1)+1 FROM tasks WHERE parent_task_id=?1",
+            params![parent_task_id],
+            |row| row.get(0),
+        )?;
+        (Some(parent_task_id), root, ordinal)
+    } else {
+        (None, task_id.to_owned(), 0)
+    };
+    conn.execute(
+        "INSERT INTO tasks
+            (id,session_id,parent_task_id,root_task_id,creator_run_id,ordinal,
+             description,task_type,status,execution_config_json,lifecycle_policy,
+             cleanup_status,verification_status,created_at,updated_at)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,'agent','running','{}','attached',
+                'notRequired','notRequested',?8,?8)",
+        params![
+            task_id,
+            session_id,
+            parent_task_id,
+            root_task_id,
+            parent_run_id,
+            ordinal,
+            format!("{} run", agent_type.unwrap_or("query")),
+            now,
+        ],
+    )?;
     conn.execute(
         "INSERT INTO run_envelopes \
-         (id,session_id,parent_run_id,status,version,agent_type,model,started_at, \
-          total_tokens,total_cost_usd,tool_call_count,turn_count,verification_status, \
+         (id,session_id,task_id,attempt,startup_epoch,parent_run_id,status,version,agent_type,model,started_at, \
+          total_tokens,total_cost_usd,tool_call_count,turn_count,verification_status,cleanup_status, \
           created_at,updated_at) \
-         VALUES(?1,?2,?3,'running',0,?4,?5,?6,0,0,0,0,'not_requested',?7,?8)",
+         VALUES(?1,?2,?3,1,0,?4,'running',0,?5,?6,?7,0,0,0,0,'notRequested','notRequired',?8,?9)",
         params![
             run_id,
             session_id,
+            task_id,
             parent_run_id,
             agent_type,
             model,
@@ -624,6 +663,18 @@ pub fn start_in_current_write(
             now
         ],
     )?;
+    conn.execute(
+        "UPDATE tasks SET current_run_id=?1 WHERE id=?2",
+        params![run_id, task_id],
+    )?;
+    if let Some(parent_task_id) = parent_task_id {
+        conn.execute(
+            "INSERT INTO task_dependencies
+                (parent_task_id,child_task_id,lifecycle_policy,required,created_at,updated_at)
+             VALUES(?1,?2,'attached',1,?3,?3)",
+            params![parent_task_id, task_id, now],
+        )?;
+    }
     append_event_in_current_write(
         conn,
         run_id,
@@ -643,7 +694,7 @@ pub fn start_in_current_write(
 ///
 /// 前置条件：Run 已由 [`request_cancel_in_current_write`] 切到 `cancelling`
 /// （旧源把这一步交给 `interactions.beginRunTermination`）。分派逐值对齐旧源——
-/// `user_cancelled` → [`cancel_in_current_write`]（旧 L70），其余 →
+/// [`EXIT_USER_CANCELLED`] → [`cancel_in_current_write`]（旧 L70），其余 →
 /// [`fail_in_current_write`]（旧 L72 `runs.fail(runId, reason, detail)`）。
 ///
 /// `detail` **原样透传**：旧源只在第一步（`beginRunTermination` 的交互
@@ -703,6 +754,130 @@ pub fn terminate_in_current_write(
 }
 
 impl Db {
+    /// Atomically create a production root Task/Run with durable execution limits.
+    ///
+    /// Unlike [`Self::start_run`], this entry point always persists a finite deadline.
+    /// Token and cost ceilings are optional; usage integrity remains fail-closed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DbError::Invalid`] when a configured limit is invalid or the deadline is absent,
+    /// or the same persistence errors as [`start_in_current_write`].
+    pub async fn start_root_run_with_budget(
+        &self,
+        run_id: &str,
+        session_id: &str,
+        agent_type: Option<&str>,
+        model: &str,
+        limits: &TaskBudgetLimits,
+    ) -> Result<(), DbError> {
+        self.start_root_run_with_budget_inner(run_id, session_id, agent_type, model, limits, 0)
+            .await
+    }
+
+    /// Atomically create a production root Task/Run with durable execution limits
+    /// and stamp it with the current durable startup epoch.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DbError::Invalid`] when `startup_epoch` is not positive or a
+    /// configured limit is invalid or the deadline is absent, plus persistence errors from
+    /// [`start_in_current_write`].
+    pub async fn start_root_run_with_budget_at_epoch(
+        &self,
+        run_id: &str,
+        session_id: &str,
+        agent_type: Option<&str>,
+        model: &str,
+        limits: &TaskBudgetLimits,
+        startup_epoch: i64,
+    ) -> Result<(), DbError> {
+        if startup_epoch <= 0 {
+            return Err(DbError::Invalid("STARTUP_EPOCH_INVALID".to_owned()));
+        }
+        self.start_root_run_with_budget_inner(
+            run_id,
+            session_id,
+            agent_type,
+            model,
+            limits,
+            startup_epoch,
+        )
+        .await
+    }
+
+    async fn start_root_run_with_budget_inner(
+        &self,
+        run_id: &str,
+        session_id: &str,
+        agent_type: Option<&str>,
+        model: &str,
+        limits: &TaskBudgetLimits,
+        startup_epoch: i64,
+    ) -> Result<(), DbError> {
+        validate_limits(limits)?;
+        if limits.deadline_at_ms.is_none() {
+            return Err(DbError::Invalid("ROOT_BUDGET_NOT_CONFIGURED".to_owned()));
+        }
+        let run_id = run_id.to_owned();
+        let session_id = session_id.to_owned();
+        let agent_type = agent_type.map(str::to_owned);
+        let model = model.to_owned();
+        let limits = limits.clone();
+        self.with_writer(move |conn| {
+            let tx = conn.transaction()?;
+            start_in_current_write(
+                &tx,
+                &run_id,
+                &session_id,
+                None,
+                agent_type.as_deref(),
+                &model,
+            )?;
+            let run_updated = tx.execute(
+                "UPDATE run_envelopes SET startup_epoch=?1,updated_at=?2
+                 WHERE id=?3 AND task_id=?3 AND attempt=1 AND startup_epoch=0",
+                params![
+                    startup_epoch,
+                    time::format_rfc3339_micros(time::now_millis()),
+                    run_id,
+                ],
+            )?;
+            if run_updated != 1 {
+                return Err(DbError::Invalid(
+                    "ROOT_STARTUP_EPOCH_INITIALIZATION_FAILED".to_owned(),
+                ));
+            }
+            let execution_config_json = serde_json::json!({
+                "budget": limits,
+                "source": "conversation",
+                "startupEpoch": startup_epoch,
+            })
+            .to_string();
+            let updated = tx.execute(
+                "UPDATE tasks SET token_budget_limit=?1,cost_budget_nanos_usd=?2,
+                    deadline_at_ms=?3,execution_config_json=?4,budget_version=budget_version+1,
+                    updated_at=?5 WHERE id=?6 AND parent_task_id IS NULL AND root_task_id=id",
+                params![
+                    limits.token_limit,
+                    limits.cost_limit_nanos_usd,
+                    limits.deadline_at_ms,
+                    execution_config_json,
+                    time::format_rfc3339_micros(time::now_millis()),
+                    run_id,
+                ],
+            )?;
+            if updated != 1 {
+                return Err(DbError::Invalid(
+                    "ROOT_BUDGET_INITIALIZATION_FAILED".to_owned(),
+                ));
+            }
+            tx.commit()?;
+            Ok(())
+        })
+        .await
+    }
+
     /// 写入根/子 Run 记录（旧 `RunTracker.startRun` L43-44 → `control.start`）。
     ///
     /// **Run 必须先落库，工具阶段的授权祖先链才能解析**：`zk-authz` 的
@@ -739,6 +914,37 @@ impl Db {
                 &model,
             )?;
             tx.commit()?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Persist the latest observed turn count while a Run is still active.
+    /// Terminalization remains owned by the atomic `TaskResult` commit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DbError::Invalid`] for a negative count or [`DbError`] when
+    /// the database update fails.
+    pub async fn update_run_turn_count(
+        &self,
+        run_id: &str,
+        turn_count: i64,
+    ) -> Result<(), DbError> {
+        if turn_count < 0 {
+            return Err(DbError::Invalid("RUN_TURN_COUNT_NEGATIVE".to_owned()));
+        }
+        let run_id = run_id.to_owned();
+        self.with_writer(move |conn| {
+            conn.execute(
+                "UPDATE run_envelopes SET turn_count=?1,updated_at=?2,version=version+1
+                 WHERE id=?3 AND status NOT IN ('completed','failed','cancelled','interrupted')",
+                params![
+                    turn_count,
+                    time::format_rfc3339_micros(time::now_millis()),
+                    run_id
+                ],
+            )?;
             Ok(())
         })
         .await
@@ -825,43 +1031,6 @@ impl Db {
         })
         .await
     }
-
-    /// 旧 `@PostConstruct interruptStaleRuns()`（`RunControlService.java:321-327`）。
-    ///
-    /// 启动期恢复：把进程崩溃/重启后滞留在非终态（`queued` / `running` /
-    /// `waiting_interaction` / `cancelling`）的 Run 统一中断为 `interrupted` +
-    /// [`EXIT_SERVICE_RESTART`]（经 [`interrupt_in_current_write`]，即旧
-    /// `interrupt(id, SERVICE_RESTART)`：`exit_reason` 与 `abort_reason` 同取
-    /// `service_restart`，落 `finished_at` / `terminal_at`，追加
-    /// `run_status_changed` 事件）。旧源逐 id 调 `interrupt`（各自独立
-    /// `write()` 事务）；此处同构——SELECT 后每个 id 单独开事务提交，单个
-    /// Run 恢复失败不回滚已恢复的 Run。
-    ///
-    /// 返回被中断的 run id 列表（旧源以 `ids.size()` 打启动 warn/info 日志，
-    /// zkcode 由 zk-server 组装根按返回值打同语义日志）。
-    ///
-    /// # Errors
-    /// 查询或状态迁移失败时返回 [`DbError`]。
-    pub async fn interrupt_stale_runs(&self) -> Result<Vec<String>, DbError> {
-        self.with_writer(|conn| {
-            // 旧源 L323 的字面量状态集：终态四种之外的全部非终态。
-            let ids = {
-                let mut stmt = conn.prepare(
-                    "SELECT id FROM run_envelopes \
-                     WHERE status IN ('queued','running','waiting_interaction','cancelling')",
-                )?;
-                stmt.query_map([], |row| row.get::<_, String>(0))?
-                    .collect::<Result<Vec<_>, _>>()?
-            };
-            for id in &ids {
-                let tx = conn.transaction()?;
-                interrupt_in_current_write(&tx, id, EXIT_SERVICE_RESTART)?;
-                tx.commit()?;
-            }
-            Ok(ids)
-        })
-        .await
-    }
 }
 
 // ─── Run 只读视图查询（M-RUN 读端：`RunController` 三读端点的 SQL 权威）───
@@ -875,9 +1044,8 @@ impl Db {
 /// 字段序与 JSON 键名逐字对齐）。
 ///
 /// - Jackson `NON_NULL`：null 字段整体剥离（`skip_serializing_if`）。
-/// - `status` / `exit_reason` / `requested_exit_reason` / `verification_status`
-///   读小写 `dbValue` 后 `to_uppercase()` 还原枚举 `name()`（旧
-///   `RunStatus.fromDbValue` 等的等价）。
+/// - `status` / `verification_status` / 退出原因均按 V4 公共契约原样返回
+///   lowerCamelCase。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunEnvelopeView {
@@ -885,10 +1053,19 @@ pub struct RunEnvelopeView {
     pub id: String,
     /// 归属会话。
     pub session_id: String,
+    /// Stable logical task across attempts.
+    pub task_id: String,
+    /// One-based execution attempt.
+    pub attempt: i64,
+    /// Service-start generation that claimed this attempt.
+    pub startup_epoch: i64,
+    /// Latest typed checkpoint, when one has been committed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checkpoint_id: Option<String>,
     /// 父 Run（子代理场景，null 剥离）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_run_id: Option<String>,
-    /// 状态枚举 `name()`（大写）。
+    /// Canonical lower-camel Run status.
     pub status: String,
     /// 代理类型（`query` / `subagent`，null 剥离）。
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -923,14 +1100,28 @@ pub struct RunEnvelopeView {
     pub updated_at: String,
     /// 乐观锁版本。
     pub version: i64,
-    /// 退出原因枚举 `name()`（大写，null 剥离）。
+    /// Canonical lower-camel exit reason（null 剥离）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exit_reason: Option<String>,
-    /// 请求的退出原因枚举 `name()`（大写，null 剥离）。
+    /// Canonical lower-camel requested exit reason（null 剥离）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requested_exit_reason: Option<String>,
-    /// 校验状态枚举 `name()`（大写）。
+    /// Canonical lower-camel verification status.
     pub verification_status: String,
+    /// Orthogonal external-resource cleanup state.
+    pub cleanup_status: String,
+    /// Direct physical model input tokens attributed to this run.
+    pub input_tokens: i64,
+    /// Direct physical model output tokens attributed to this run.
+    pub output_tokens: i64,
+    /// Direct cache-read tokens.
+    pub cache_read_tokens: i64,
+    /// Direct cache-create tokens.
+    pub cache_create_tokens: i64,
+    /// Exact cost ledger projection in billionths of one USD.
+    pub cost_nanos_usd: i64,
+    /// False when any physical call omitted usage or pricing.
+    pub usage_complete: bool,
     /// 终态落定时刻（null 剥离）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub terminal_at: Option<String>,
@@ -942,11 +1133,9 @@ pub struct RunEnvelopeView {
 impl RunEnvelopeView {
     /// 是否已达终态（旧 `RunStatus.terminal()`）。
     ///
-    /// 视图 `status` 为枚举 `name()`（大写），库内 [`TERMINAL_STATUSES`] 用小写
-    /// 存储态，故先归一再判。
     #[must_use]
     pub fn is_terminal(&self) -> bool {
-        is_terminal(&self.status.to_lowercase())
+        is_terminal(&self.status)
     }
 }
 
@@ -971,8 +1160,54 @@ pub struct RunEventView {
     pub ts: i64,
 }
 
+/// Durable ownership returned after one outbound WS event has been inserted.
+/// `id` is the global `run_event_log` cursor and is therefore the only valid
+/// `eventId` for a Run-attributed production frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WsOutboxEvent {
+    /// Global auto-increment outbox cursor.
+    pub id: i64,
+    /// Sequence local to the source Run.
+    pub seq: i64,
+    /// Persisted event time in epoch milliseconds.
+    pub ts: i64,
+    /// Visible root Session receiving the frame.
+    pub root_session_id: String,
+    /// Root Task owning the projection.
+    pub root_task_id: String,
+    /// Current Run of the root Task.
+    pub root_run_id: String,
+    /// Task that physically produced the event.
+    pub source_task_id: String,
+    /// Run that physically produced the event.
+    pub source_run_id: String,
+}
+
+/// One replayable websocket outbox row with its original runtime ownership.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WsReplayEvent {
+    /// Global `run_event_log.id`, used verbatim as the v4 `eventId`.
+    pub id: i64,
+    /// Persisted event time in epoch milliseconds.
+    pub ts: i64,
+    /// Visible root Session receiving the frame.
+    pub root_session_id: String,
+    /// Root Task owning the projection.
+    pub root_task_id: String,
+    /// Root Run owning the projection.
+    pub root_run_id: String,
+    /// Task that physically produced the event.
+    pub source_task_id: String,
+    /// Run that physically produced the event.
+    pub source_run_id: String,
+    /// Related tool invocation when present.
+    pub tool_use_id: Option<String>,
+    /// Original flattened [`ServerMessage`](zk_protocol::ServerMessage) payload.
+    pub payload: Value,
+}
+
 /// 行 → [`RunEnvelopeView`]（旧 `RunEnvelopeRepository.ROW_MAPPER`）。
-fn map_envelope_row(row: &Row<'_>) -> rusqlite::Result<RunEnvelopeView> {
+pub(crate) fn map_envelope_row(row: &Row<'_>) -> rusqlite::Result<RunEnvelopeView> {
     let status: String = row.get("status")?;
     let verification_status: String = row.get("verification_status")?;
     let exit_reason: Option<String> = row.get("exit_reason")?;
@@ -980,8 +1215,12 @@ fn map_envelope_row(row: &Row<'_>) -> rusqlite::Result<RunEnvelopeView> {
     Ok(RunEnvelopeView {
         id: row.get("id")?,
         session_id: row.get("session_id")?,
+        task_id: row.get("task_id")?,
+        attempt: row.get("attempt")?,
+        startup_epoch: row.get("startup_epoch")?,
+        checkpoint_id: row.get("checkpoint_id")?,
         parent_run_id: row.get("parent_run_id")?,
-        status: status.to_uppercase(),
+        status,
         agent_type: row.get("agent_type")?,
         model: row.get("model")?,
         prompt_hash: row.get("prompt_hash")?,
@@ -996,9 +1235,16 @@ fn map_envelope_row(row: &Row<'_>) -> rusqlite::Result<RunEnvelopeView> {
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
         version: row.get("version")?,
-        exit_reason: exit_reason.map(|value| value.to_uppercase()),
-        requested_exit_reason: requested_exit_reason.map(|value| value.to_uppercase()),
-        verification_status: verification_status.to_uppercase(),
+        exit_reason,
+        requested_exit_reason,
+        verification_status,
+        cleanup_status: row.get("cleanup_status")?,
+        input_tokens: row.get("input_tokens")?,
+        output_tokens: row.get("output_tokens")?,
+        cache_read_tokens: row.get("cache_read_tokens")?,
+        cache_create_tokens: row.get("cache_create_tokens")?,
+        cost_nanos_usd: row.get("cost_nanos_usd")?,
+        usage_complete: row.get::<_, i64>("usage_complete")? != 0,
         terminal_at: row.get("terminal_at")?,
         waiting_reason: row.get("waiting_reason")?,
     })
@@ -1017,6 +1263,270 @@ fn map_event_row(row: &Row<'_>) -> rusqlite::Result<RunEventView> {
 }
 
 impl Db {
+    /// Resolve a source Session/Task/Run, insert the outbound payload into the
+    /// transactional Run outbox, and return its global row identity.
+    ///
+    /// Explicit Run/Task hints win over the source Session. This is required
+    /// for terminal events, which are emitted after their Run stops being
+    /// active. A route mismatch fails closed rather than leaking a child event
+    /// into an unrelated root Session.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DbError`] when attribution is invalid, the payload cannot be
+    /// persisted, or the outbox transaction fails.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub async fn append_ws_outbox_event(
+        &self,
+        root_session_id: &str,
+        source_session_id: &str,
+        source_task_id_hint: Option<&str>,
+        source_run_id_hint: Option<&str>,
+        event_type: &str,
+        tool_use_id: Option<&str>,
+        payload: &Value,
+    ) -> Result<Option<WsOutboxEvent>, DbError> {
+        let root_session_id = root_session_id.to_owned();
+        let source_session_id = source_session_id.to_owned();
+        let source_task_id_hint = source_task_id_hint.map(str::to_owned);
+        let source_run_id_hint = source_run_id_hint.map(str::to_owned);
+        let event_type = event_type.to_owned();
+        let tool_use_id = tool_use_id.map(str::to_owned);
+        let payload = payload.clone();
+        self.with_writer(move |conn| {
+            let tx = conn.transaction()?;
+            let source: Option<(String, String, String)> = if let Some(run_id) =
+                source_run_id_hint.as_deref()
+            {
+                tx.query_row(
+                    "SELECT r.id,r.task_id,t.root_task_id
+                     FROM run_envelopes r JOIN tasks t ON t.id=r.task_id
+                     WHERE r.id=?1",
+                    params![run_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()?
+            } else if let Some(task_id) = source_task_id_hint.as_deref() {
+                tx.query_row(
+                    "SELECT r.id,t.id,t.root_task_id
+                     FROM tasks t JOIN run_envelopes r ON r.id=t.current_run_id
+                     WHERE t.id=?1",
+                    params![task_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()?
+            } else {
+                let invocation_source = if let Some(tool_use_id) = tool_use_id.as_deref() {
+                    // Tool payloads may contain taskId/runId fields describing the
+                    // object operated on (Agent and Task* are the important cases).
+                    // Once admitted, resolve the actor exclusively from the durable
+                    // invocation ledger scoped to the emitting transcript Session.
+                    tx.query_row(
+                        "SELECT r.id,r.task_id,t.root_task_id
+                         FROM tool_invocations invocation
+                         JOIN run_envelopes r ON r.id=invocation.run_id
+                         JOIN tasks t ON t.id=invocation.task_id
+                         WHERE invocation.tool_use_id=?1 AND r.session_id=?2
+                         ORDER BY invocation.created_at DESC,invocation.invocation_id DESC LIMIT 1",
+                        params![tool_use_id, source_session_id],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .optional()?
+                } else {
+                    None
+                };
+                if invocation_source.is_some() {
+                    invocation_source
+                } else {
+                    // `tool_use_start` is the preparing phase and intentionally
+                    // precedes invocation admission. Its actor is nevertheless
+                    // provable from the source transcript's current Run. Falling
+                    // back here keeps start/input/result in one caller partition.
+                    tx.query_row(
+                        "SELECT r.id,r.task_id,t.root_task_id
+                         FROM run_envelopes r JOIN tasks t ON t.id=r.task_id
+                         WHERE r.session_id=?1
+                         ORDER BY CASE WHEN r.status IN
+                             ('queued','running','waitingDependencies','waitingInteraction','cancelling')
+                             THEN 0 ELSE 1 END, r.started_at DESC, r.id DESC LIMIT 1",
+                        params![source_session_id],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .optional()?
+                }
+            };
+            let Some((source_run_id, source_task_id, root_task_id)) = source else {
+                return Ok(None);
+            };
+            let root: Option<(String, Option<String>)> = tx
+                .query_row(
+                    "SELECT session_id,current_run_id FROM tasks WHERE id=?1",
+                    params![root_task_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            let Some((owned_session_id, root_run_id)) = root else {
+                return Err(DbError::Invalid("WS_OUTBOX_ROOT_TASK_NOT_FOUND".to_owned()));
+            };
+            if owned_session_id != root_session_id {
+                return Err(DbError::Invalid("WS_OUTBOX_ROUTE_MISMATCH".to_owned()));
+            }
+            let Some(root_run_id) = root_run_id else {
+                return Err(DbError::Invalid("WS_OUTBOX_ROOT_RUN_NOT_FOUND".to_owned()));
+            };
+
+            // WS rows are a replay outbox rather than a diagnostic preview. Keep the
+            // complete payload: applying the generic 10 KiB diagnostic truncation
+            // would turn a successfully published tool result into an unreplayable row.
+            let seq: i64 = tx.query_row(
+                "SELECT COALESCE(MAX(seq),0)+1 FROM run_event_log WHERE run_id=?1",
+                params![source_run_id],
+                |row| row.get(0),
+            )?;
+            let mut envelope = Map::new();
+            envelope.insert("schemaVersion".to_owned(), json!(4));
+            envelope.insert("entityId".to_owned(), json!(source_run_id));
+            if let Some(tool_use_id) = tool_use_id.as_deref() {
+                envelope.insert("toolUseId".to_owned(), json!(tool_use_id));
+            }
+            envelope.insert("data".to_owned(), payload);
+            let ts = time::now_millis();
+            tx.execute(
+                "INSERT INTO run_event_log(run_id,seq,event_type,event_data,ts)
+                 VALUES(?1,?2,?3,?4,?5)",
+                params![
+                    source_run_id,
+                    seq,
+                    event_type,
+                    Value::Object(envelope).to_string(),
+                    ts
+                ],
+            )?;
+            let id = tx.last_insert_rowid();
+            tx.commit()?;
+            Ok(Some(WsOutboxEvent {
+                id,
+                seq,
+                ts,
+                root_session_id,
+                root_task_id,
+                root_run_id,
+                source_task_id,
+                source_run_id,
+            }))
+        })
+        .await
+    }
+
+    /// Read the finite websocket outbox delta committed after `after_event_id`.
+    ///
+    /// The high-water mark and rows are selected in one read transaction. Events
+    /// committed after that snapshot are delivered through the already-bound live
+    /// connection, so reconnect recovery neither chases an unbounded stream nor
+    /// leaves a bind-time gap. Only the latest root Run tree is included because
+    /// `session_restored` already materializes all earlier attempts.
+    ///
+    /// # Errors
+    /// Returns [`DbError`] for invalid persisted payloads or `SQLite` failures.
+    pub async fn get_ws_outbox_events_after(
+        &self,
+        root_session_id: &str,
+        after_event_id: i64,
+    ) -> Result<Vec<WsReplayEvent>, DbError> {
+        let root_session_id = root_session_id.to_owned();
+        self.with_reader(move |conn| {
+            let tx = conn.transaction()?;
+            let root: Option<(String, String)> = tx
+                .query_row(
+                    "SELECT r.id,r.task_id FROM run_envelopes r
+                     WHERE r.session_id=?1 AND r.parent_run_id IS NULL
+                     ORDER BY r.started_at DESC,r.id DESC LIMIT 1",
+                    params![root_session_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            let Some((root_run_id, root_task_id)) = root else {
+                tx.commit()?;
+                return Ok(Vec::new());
+            };
+            let through_event_id: i64 = tx.query_row(
+                "WITH RECURSIVE tree(id) AS (
+                     SELECT ?1
+                     UNION ALL
+                     SELECT child.id FROM run_envelopes child
+                     JOIN tree parent ON child.parent_run_id=parent.id
+                 )
+                 SELECT COALESCE(MAX(event.id),0) FROM run_event_log event
+                 JOIN tree ON tree.id=event.run_id
+                 WHERE event.event_type LIKE 'ws_%'",
+                params![root_run_id],
+                |row| row.get(0),
+            )?;
+            if through_event_id <= after_event_id {
+                tx.commit()?;
+                return Ok(Vec::new());
+            }
+            let mut stmt = tx.prepare(
+                "WITH RECURSIVE tree(id) AS (
+                     SELECT ?1
+                     UNION ALL
+                     SELECT child.id FROM run_envelopes child
+                     JOIN tree parent ON child.parent_run_id=parent.id
+                 )
+                 SELECT event.id,event.ts,run.task_id,run.id,event.event_data
+                 FROM run_event_log event
+                 JOIN tree ON tree.id=event.run_id
+                 JOIN run_envelopes run ON run.id=event.run_id
+                 WHERE event.event_type LIKE 'ws_%'
+                   AND event.id>?2 AND event.id<=?3
+                 ORDER BY event.id",
+            )?;
+            let rows = stmt
+                .query_map(
+                    params![root_run_id, after_event_id.max(0), through_event_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, String>(4)?,
+                        ))
+                    },
+                )?
+                .collect::<Result<Vec<_>, _>>()?;
+            drop(stmt);
+            let mut events = Vec::with_capacity(rows.len());
+            for (id, ts, source_task_id, source_run_id, event_data) in rows {
+                let mut envelope: Value = serde_json::from_str(&event_data).map_err(|error| {
+                    DbError::Invalid(format!("WS_OUTBOX_PAYLOAD_INVALID:{id}:{error}"))
+                })?;
+                let tool_use_id = envelope
+                    .get("toolUseId")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                let payload = envelope
+                    .get_mut("data")
+                    .map(Value::take)
+                    .ok_or_else(|| DbError::Invalid(format!("WS_OUTBOX_PAYLOAD_MISSING:{id}")))?;
+                events.push(WsReplayEvent {
+                    id,
+                    ts,
+                    root_session_id: root_session_id.clone(),
+                    root_task_id: root_task_id.clone(),
+                    root_run_id: root_run_id.clone(),
+                    source_task_id,
+                    source_run_id,
+                    tool_use_id,
+                    payload,
+                });
+            }
+            tx.commit()?;
+            Ok(events)
+        })
+        .await
+    }
+
     /// 旧 `RunEnvelopeRepository.findById`（`SELECT * ... WHERE id = ?`）：
     /// 命中返回视图，未命中返回 `None`。只读路径。
     ///
@@ -1057,6 +1567,38 @@ impl Db {
                 .query_map(params![session_id, limit], map_envelope_row)?
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(rows)
+        })
+        .await
+    }
+
+    /// Read a complete recursive run tree, including child runs whose
+    /// transcripts live in internal sessions. Session-scoped queries cannot
+    /// provide this projection because internal child runs intentionally use a
+    /// different `session_id` from the root transcript.
+    ///
+    /// # Errors
+    /// Returns [`DbError`] when the recursive `SQLite` query fails.
+    pub async fn find_run_tree(&self, root_run_id: &str) -> Result<Vec<RunEnvelopeView>, DbError> {
+        let root_run_id = root_run_id.to_owned();
+        self.with_reader(move |conn| {
+            let mut stmt = conn.prepare(
+                "WITH RECURSIVE run_tree(id, depth) AS (
+                     SELECT id, 0 FROM run_envelopes WHERE id = ?1
+                     UNION ALL
+                     SELECT child.id, parent.depth + 1
+                     FROM run_envelopes child
+                     JOIN run_tree parent ON child.parent_run_id = parent.id
+                 )
+                 SELECT run_envelopes.*
+                 FROM run_envelopes
+                 JOIN run_tree ON run_tree.id = run_envelopes.id
+                 ORDER BY run_tree.depth ASC,
+                          run_envelopes.started_at ASC,
+                          run_envelopes.id ASC",
+            )?;
+            stmt.query_map([root_run_id], map_envelope_row)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(Into::into)
         })
         .await
     }
@@ -1146,8 +1688,8 @@ impl Db {
 #[cfg(test)]
 mod tests {
     use super::{
-        AGENT_TYPE_QUERY, EXIT_INTERNAL_ERROR, EXIT_MODEL_FINISHED, EXIT_SERVICE_RESTART,
-        EXIT_USER_CANCELLED, TransitionResult,
+        AGENT_TYPE_QUERY, EXIT_INTERNAL_ERROR, EXIT_MODEL_FINISHED, EXIT_USER_CANCELLED,
+        STATUS_RUNNING, TransitionResult,
     };
     use crate::Db;
 
@@ -1252,7 +1794,7 @@ mod tests {
         assert!(row.total_cost_usd.abs() < f64::EPSILON);
         assert_eq!(row.tool_call_count, 0);
         assert_eq!(row.turn_count, 0);
-        assert_eq!(row.verification_status, "not_requested");
+        assert_eq!(row.verification_status, "notRequested");
         assert_eq!(row.exit_reason, None);
         assert_eq!(row.terminal_at, None);
         // 旧 RunEnvelope.start 用单一 Instant now 填三个时间戳。
@@ -1327,7 +1869,7 @@ mod tests {
         );
     }
 
-    /// 旧 `complete` L124-128：`running` → `completed` / `model_finished` /
+    /// 旧 `complete` L124-128：`running` → `completed` / `modelFinished` /
     /// 累计三列覆盖（`CASE WHEN ?>0`）/ 终态时间戳非空 / version+1。
     #[tokio::test]
     async fn complete_run_records_totals_and_terminal_stamp() {
@@ -1358,6 +1900,16 @@ mod tests {
             event_types(&db, "run-2"),
             vec!["run_started".to_owned(), "run_status_changed".to_owned()]
         );
+
+        let public = db
+            .find_run_by_id("run-2")
+            .await
+            .expect("public projection")
+            .expect("completed run");
+        let json = serde_json::to_value(public).expect("serialize public projection");
+        assert_eq!(json["status"], "completed");
+        assert_eq!(json["verificationStatus"], "notRequested");
+        assert_eq!(json["exitReason"], EXIT_MODEL_FINISHED);
 
         // 终态后再 complete 不改状态（旧 ALREADY_TERMINAL）。
         assert_eq!(
@@ -1402,7 +1954,7 @@ mod tests {
     }
 
     /// 旧 `terminate` 用户取消分支（L71）→ `runs.cancel`：`cancelled` /
-    /// `user_cancelled` 退出原因 + 同值 `abort_reason`（旧 L138 字面量）。
+    /// `userCancelled` 退出原因 + 同值 `abort_reason`。
     #[tokio::test]
     async fn terminate_run_user_cancel_path_matches_java_literals() {
         let (db, session_id) = seeded().await;
@@ -1430,8 +1982,40 @@ mod tests {
                 .map_err(Into::into)
             })
             .expect("reasons");
-        assert_eq!(abort.as_deref(), Some("user_cancelled"));
-        assert_eq!(requested.as_deref(), Some("user_cancelled"));
+        assert_eq!(abort.as_deref(), Some(EXIT_USER_CANCELLED));
+        assert_eq!(requested.as_deref(), Some(EXIT_USER_CANCELLED));
+    }
+
+    #[tokio::test]
+    async fn snake_case_exit_reason_is_rejected_without_mutating_the_run() {
+        let (db, session_id) = seeded().await;
+        db.start_run(
+            "run-invalid-exit",
+            &session_id,
+            None,
+            Some(AGENT_TYPE_QUERY),
+            "m",
+        )
+        .await
+        .expect("start");
+
+        let error = db
+            .terminate_run(
+                "run-invalid-exit",
+                "internal_error",
+                Some("legacy spelling"),
+            )
+            .await
+            .expect_err("snake_case exit reason must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("RUN_EXIT_REASON_INVALID:internal_error")
+        );
+        let row = read_row(&db, "run-invalid-exit");
+        assert_eq!(row.status, STATUS_RUNNING);
+        assert_eq!(row.version, 0);
+        assert!(row.exit_reason.is_none());
     }
 
     /// 旧 `transition` 首条 SELECT 空结果 → `NOT_FOUND`；终态后再终止 →
@@ -1498,6 +2082,77 @@ mod tests {
         assert_eq!(read_row(&db, "run-6").tool_call_count, 1);
     }
 
+    #[tokio::test]
+    async fn production_root_run_requires_a_deadline_but_not_spend_limits() {
+        let (db, session_id) = seeded().await;
+        let run_id = uuid::Uuid::new_v4().to_string();
+        let limits = crate::TaskBudgetLimits {
+            token_limit: Some(500_000),
+            cost_limit_nanos_usd: Some(4_000_000_000),
+            deadline_at_ms: Some(crate::time::now_millis() + 60_000),
+        };
+        db.start_root_run_with_budget(
+            &run_id,
+            &session_id,
+            Some(AGENT_TYPE_QUERY),
+            "qwen3.8-max-0902",
+            &limits,
+        )
+        .await
+        .expect("atomic root start");
+
+        let budget = db
+            .read_task_budget(&run_id)
+            .await
+            .expect("budget query")
+            .expect("root task");
+        assert_eq!(budget.token_limit, limits.token_limit);
+        assert_eq!(budget.cost_limit_nanos_usd, limits.cost_limit_nanos_usd);
+        assert_eq!(budget.deadline_at_ms, limits.deadline_at_ms);
+        let task = db
+            .find_runtime_task_by_id(&run_id)
+            .await
+            .expect("task query")
+            .expect("task");
+        assert!(task.execution_config_json.contains("\"budget\""));
+
+        let unlimited_id = uuid::Uuid::new_v4().to_string();
+        let unlimited = crate::TaskBudgetLimits {
+            token_limit: None,
+            cost_limit_nanos_usd: None,
+            deadline_at_ms: Some(crate::time::now_millis() + 60_000),
+        };
+        db.start_root_run_with_budget(
+            &unlimited_id,
+            &session_id,
+            Some(AGENT_TYPE_QUERY),
+            "qwen3.8-max-0902",
+            &unlimited,
+        )
+        .await
+        .expect("spend-unlimited root with deadline");
+        let persisted = db
+            .read_task_budget(&unlimited_id)
+            .await
+            .expect("unlimited budget query")
+            .expect("unlimited root task");
+        assert_eq!(persisted.token_limit, None);
+        assert_eq!(persisted.cost_limit_nanos_usd, None);
+        assert_eq!(persisted.deadline_at_ms, unlimited.deadline_at_ms);
+
+        let missing = db
+            .start_root_run_with_budget(
+                &uuid::Uuid::new_v4().to_string(),
+                &session_id,
+                Some(AGENT_TYPE_QUERY),
+                "qwen3.8-max-0902",
+                &crate::TaskBudgetLimits::default(),
+            )
+            .await
+            .expect_err("production root without deadline must fail");
+        assert!(missing.to_string().contains("ROOT_BUDGET_NOT_CONFIGURED"));
+    }
+
     /// 旧 `serializeEvent` L288-300：超 `MAX_EVENT_BYTES` 时 `data` 换为截断
     /// 摘要（`payloadSha256` + 前 2048 字节预览），信封 `schemaVersion=2`。
     #[test]
@@ -1528,92 +2183,5 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&small).expect("json");
         assert_eq!(parsed["data"]["a"], 1);
         assert!(parsed.get("toolUseId").is_none());
-    }
-
-    /// 旧 `@PostConstruct interruptStaleRuns`（L321-327）：启动恢复把
-    /// `queued` / `running` / `waiting_interaction` / `cancelling` 四种非终态
-    /// Run 全部中断为 `interrupted` + `service_restart`（`exit_reason` 与
-    /// `abort_reason` 同值，旧 `interrupt` L144），已终态 Run 不受影响；
-    /// 无滞留 Run 时再次执行为幂等空操作。
-    #[tokio::test]
-    async fn interrupt_stale_runs_recovers_all_non_terminal_states() {
-        let (db, session_id) = seeded().await;
-        let stale = [
-            "stale-queued",
-            "stale-running",
-            "stale-waiting",
-            "stale-cancelling",
-        ];
-        for id in [
-            "stale-queued",
-            "stale-running",
-            "stale-waiting",
-            "stale-cancelling",
-            "done-completed",
-        ] {
-            db.start_run(id, &session_id, None, Some(AGENT_TYPE_QUERY), "m")
-                .await
-                .expect("start");
-        }
-        db.with_conn_blocking(|conn| {
-            let tx = conn.transaction()?;
-            // start_run 起始态即 running；其余三种非终态各自摆位（`queued`
-            // 无生产迁移入口，直接落库摆位）。
-            tx.execute(
-                "UPDATE run_envelopes SET status='queued' WHERE id='stale-queued'",
-                [],
-            )?;
-            super::mark_waiting_in_current_write(&tx, "stale-waiting", "permission")?;
-            super::request_cancel_in_current_write(&tx, "stale-cancelling", EXIT_USER_CANCELLED)?;
-            tx.commit()?;
-            Ok(())
-        })
-        .expect("seed states");
-        db.complete_run("done-completed", 7, 0.0, 1)
-            .await
-            .expect("complete");
-
-        let mut interrupted = db.interrupt_stale_runs().await.expect("recover");
-        interrupted.sort();
-        let mut expected = stale.map(str::to_owned).to_vec();
-        expected.sort();
-        assert_eq!(interrupted, expected, "四种非终态 Run 全部被恢复");
-
-        for id in stale {
-            let row = read_row(&db, id);
-            assert_eq!(row.status, "interrupted", "{id}");
-            assert_eq!(
-                row.exit_reason.as_deref(),
-                Some(EXIT_SERVICE_RESTART),
-                "{id}"
-            );
-            assert!(row.terminal_at.is_some(), "{id} 终态必须落 terminal_at");
-            let abort: Option<String> = db
-                .with_conn_blocking(|conn| {
-                    conn.query_row(
-                        "SELECT abort_reason FROM run_envelopes WHERE id=?1",
-                        rusqlite::params![id],
-                        |row| row.get(0),
-                    )
-                    .map_err(Into::into)
-                })
-                .expect("abort_reason");
-            assert_eq!(abort.as_deref(), Some(EXIT_SERVICE_RESTART), "{id}");
-            assert_eq!(
-                event_types(&db, id).last().map(String::as_str),
-                Some("run_status_changed"),
-                "{id}"
-            );
-        }
-
-        let done = read_row(&db, "done-completed");
-        assert_eq!(done.status, "completed", "已终态 Run 不受启动恢复影响");
-        assert_eq!(done.exit_reason.as_deref(), Some(EXIT_MODEL_FINISHED));
-        assert_eq!(done.version, 1);
-
-        assert!(
-            db.interrupt_stale_runs().await.expect("rerun").is_empty(),
-            "无滞留 Run 时为幂等空操作"
-        );
     }
 }

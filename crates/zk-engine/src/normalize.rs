@@ -54,7 +54,17 @@ pub fn normalize(messages: &mut Vec<ChatMessage>) {
 
 /// Step 1：移除 `System` 角色消息（系统提示经独立参数传入）。
 fn filter_system_messages(messages: &mut Vec<ChatMessage>) {
-    messages.retain(|msg| msg.role != Role::System);
+    // Compact summaries are part of the durable conversation state. They are
+    // deliberately represented as a system message so providers keep the
+    // summary's authority after older turns have been removed. Dropping them
+    // here made every successful compaction effectively erase the history it
+    // had just summarized.
+    messages.retain(|msg| {
+        msg.role != Role::System
+            || msg
+                .content
+                .starts_with(crate::context::COMPACT_SUMMARY_MARKER)
+    });
 }
 
 /// Step 2：合并相邻且 role 相同的 `Assistant` 消息。
@@ -160,6 +170,25 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].role, Role::User);
         assert_eq!(messages[0].content, "hi");
+    }
+
+    #[test]
+    fn preserves_compact_summary_boundary() {
+        let summary = format!(
+            "{}\n用户要求修复持久化；已经完成 schema 设计。",
+            crate::context::COMPACT_SUMMARY_MARKER
+        );
+        let mut messages = vec![
+            ChatMessage::system("ephemeral system prompt"),
+            ChatMessage::system(summary.clone()),
+            ChatMessage::user("继续"),
+        ];
+
+        normalize(&mut messages);
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, Role::System);
+        assert_eq!(messages[0].content, summary);
     }
 
     #[test]

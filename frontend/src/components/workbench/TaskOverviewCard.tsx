@@ -1,4 +1,4 @@
-import { Folder, History, MessageSquareText } from 'lucide-react';
+import { AlertTriangle, Folder, MessageSquareText } from 'lucide-react';
 import type { SessionDetail, WorkbenchMessage } from '@/hooks/useSimpleWorkbenchData';
 import { taskTitle } from '@/utils/workbenchPresentation';
 
@@ -7,7 +7,7 @@ export function TaskOverviewCard({
 }: {
     session: SessionDetail | null;
     request: WorkbenchMessage | null;
-    correlationMode: 'EXACT' | 'LEGACY_FALLBACK';
+    correlationMode: 'EXACT' | 'EMPTY' | 'UNBOUND';
     loading: boolean;
     error: string | null;
 }) {
@@ -22,9 +22,9 @@ export function TaskOverviewCard({
                 <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2">
                         <p className="text-xs font-medium uppercase tracking-wide text-blue-500">当前任务</p>
-                        {correlationMode === 'LEGACY_FALLBACK' && (
+                        {correlationMode === 'UNBOUND' && (
                             <span className="inline-flex items-center gap-1 rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[11px] text-amber-400">
-                                <History className="h-3 w-3" />历史记录
+                                <AlertTriangle className="h-3 w-3" />运行绑定缺失
                             </span>
                         )}
                     </div>

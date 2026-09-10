@@ -12,13 +12,34 @@ const session = (id: string, title: string) => ({
 });
 const current = (id: string) => ({
     correlationMode: 'EXACT', requestMessageId: 'u-1', resultMessageId: 'a-1',
-    rootRun: { id: 'r-1', sessionId: id, parentRunId: null, status: 'COMPLETED', agentType: 'query', startedAt: null, finishedAt: null, updatedAt: '2026-01-01T00:00:00Z', verificationStatus: 'NOT_REQUESTED', errorSummary: null },
+    rootTask: null, taskTree: [],
+    rootRun: { id: 'r-1', sessionId: id, parentRunId: null, status: 'completed', agentType: 'query', startedAt: null, finishedAt: null, updatedAt: '2026-01-01T00:00:00Z', verificationStatus: 'notRequested', errorSummary: null },
+    runTree: [{ id: 'r-1', sessionId: id, parentRunId: null, status: 'completed', agentType: 'query', startedAt: null, finishedAt: null, updatedAt: '2026-01-01T00:00:00Z', verificationStatus: 'notRequested', errorSummary: null }],
+    usage: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheCreateTokens: 0, costNanosUsd: 1000, complete: true },
+    eventHighWater: 42,
+    activeTools: [{ invocationId: 'inv-1', taskId: 'task-1', runId: 'r-1', toolUseId: 'tool-1', toolName: 'Read', status: 'running', input: { filePath: 'a' }, sideEffectClass: 'read', cleanupStatus: 'notRequired', startedAt: null, createdAt: '2026-01-01T00:00:00Z' }],
     request: { messageId: 'u-1', text: '新要求', timestamp: '2026-01-01T00:00:00Z' },
     result: { messageId: 'a-1', text: '新结果', timestamp: '2026-01-01T00:01:00Z' },
     structuredSummary: { conclusion: '新结果', completed: [], issues: [], nextSteps: [] },
     delivery: { manifests: [], files: [], totalFiles: 0, primaryArtifactPath: null },
     verification: { businessCriteria: [], technicalChecks: [], evidence: [], overallStatus: 'NOT_VERIFIED' },
-    pendingActionCount: 0, pendingActions: [], activities: [], previousAvailableDelivery: null, currentFailure: null,
+    pendingActionCount: 0, pendingActions: [], activities: [],
+    research: { rootTaskId: 'r-1', truncated: false, captures: [], sources: [], findings: [], conflicts: [], openQuestions: [], requirementCoverage: [] },
+    previousAvailableDelivery: null, currentFailure: null,
+});
+const emptyCurrent = () => ({
+    correlationMode: 'EMPTY', requestMessageId: null, resultMessageId: null,
+    rootTask: null, taskTree: [],
+    rootRun: null, runTree: [],
+    usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreateTokens: 0, costNanosUsd: 0, complete: true },
+    eventHighWater: 0, activeTools: [],
+    request: null, result: null,
+    structuredSummary: { conclusion: null, completed: [], issues: [], nextSteps: [] },
+    delivery: { manifests: [], files: [], totalFiles: 0, primaryArtifactPath: null },
+    verification: { businessCriteria: [], technicalChecks: [], evidence: [], overallStatus: 'NOT_VERIFIED' },
+    pendingActionCount: 0, pendingActions: [], activities: [],
+    research: { rootTaskId: '', truncated: false, captures: [], sources: [], findings: [], conflicts: [], openQuestions: [], requirementCoverage: [] },
+    previousAvailableDelivery: null, currentFailure: null,
 });
 
 describe('useSimpleWorkbenchData', () => {
@@ -64,5 +85,37 @@ describe('useSimpleWorkbenchData', () => {
         resolveOld(await jsonResponse(session('session-a', 'Old')));
         await Promise.resolve();
         expect(result.current.session.data?.title).toBe('New');
+    });
+
+    it('replaces a populated run tree and usage with an authoritative empty projection', async () => {
+        vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+            const url = String(input);
+            if (url === '/api/sessions/session-a') return jsonResponse(session('session-a', 'Populated'));
+            if (url === '/api/sessions/session-a/workbench/current') return jsonResponse(current('session-a'));
+            if (url === '/api/sessions/session-b') return jsonResponse(session('session-b', 'Empty'));
+            if (url === '/api/sessions/session-b/workbench/current') return jsonResponse(emptyCurrent());
+            throw new Error(`Unexpected request: ${url}`);
+        }));
+        const { result, rerender } = renderHook(
+            ({ sessionId }) => useSimpleWorkbenchData(sessionId),
+            { initialProps: { sessionId: 'session-a' } },
+        );
+        await waitFor(() => expect(result.current.current.data?.runTree).toHaveLength(1));
+
+        rerender({ sessionId: 'session-b' });
+        await waitFor(() => expect(result.current.current.loading).toBe(false));
+        expect(result.current.current.data?.rootRun).toBeNull();
+        expect(result.current.current.data?.runTree).toEqual([]);
+        expect(result.current.current.data?.taskTree).toEqual([]);
+        expect(result.current.current.data?.activeTools).toEqual([]);
+        expect(result.current.current.data?.eventHighWater).toBe(0);
+        expect(result.current.current.data?.usage).toEqual({
+            inputTokens: 0,
+            outputTokens: 0,
+            cacheReadTokens: 0,
+            cacheCreateTokens: 0,
+            costNanosUsd: 0,
+            complete: true,
+        });
     });
 });

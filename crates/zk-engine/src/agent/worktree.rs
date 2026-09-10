@@ -149,35 +149,6 @@ impl WorktreeManager {
         Ok(!output.stdout.trim().is_empty())
     }
 
-    /// Commit isolated changes and merge the recorded branch into the root.
-    ///
-    /// # Errors
-    /// Returns an error when validation or any command fails; no failure is treated as success.
-    pub async fn merge_back(&self, worktree_path: &Path) -> Result<(), String> {
-        let canonical = self.validate_active(worktree_path)?;
-        let branch_name = self
-            .active
-            .get(&canonical)
-            .map(|entry| entry.value().clone())
-            .ok_or_else(|| "WORKTREE_NOT_ACTIVE".to_owned())?;
-        self.exec(&canonical, vec!["add".to_owned(), "-A".to_owned()])
-            .await?;
-        self.exec(
-            &canonical,
-            vec![
-                "commit".to_owned(),
-                "-m".to_owned(),
-                format!("Agent work: {branch_name}"),
-            ],
-        )
-        .await?;
-        self.exec(
-            &self.repo_root,
-            vec!["merge".to_owned(), branch_name, "--no-edit".to_owned()],
-        )
-        .await
-    }
-
     /// Remove a validated active worktree and its temporary branch.
     ///
     /// # Errors

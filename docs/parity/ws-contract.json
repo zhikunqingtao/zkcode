@@ -1,5 +1,5 @@
 {
-  "version": 3,
+  "version": 4,
   "upstreamTargetCount": 15,
   "removedUpstream": ["evidence_decision"],
   "upstream": [

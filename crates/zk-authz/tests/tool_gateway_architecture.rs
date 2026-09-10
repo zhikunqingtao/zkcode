@@ -11,9 +11,9 @@
 //! 1. 旧 `Tool.call` 只许 `ToolExecutionGateway` 调 → zkcode `Tool::execute` 只许
 //!    `zk-tools/src/executor.rs` 调（授权拦截在 `ToolAdmission`，见 §3）。
 //! 2. 旧 `ToolExecutionPipeline.execute` 只许 `StreamingToolExecutor`（+ MCP 适配器）
-//!    调 → zkcode `ToolExecutor::spawn_call{,_in}` 只许 `zk-engine/src/engine.rs` 与
-//!    reverse MCP 适配器调用，且两处都**恒先**执行 PRE hook 与
-//!    `admission.admit(...)`。
+//!    调 → zkcode `ToolExecutor::spawn_call{,_in}` 只许 Engine 与唯一的
+//!    `ExecutionSupervisor` 封装调用。HTTP/MCP 等适配器只能调用 Supervisor，
+//!    且必须在调用点附近完成 PRE hook、admission 与持久 invocation 装配。
 //! 3. 旧 `HookRegistry.register` 必须带显式 role → zkcode 尚无 hook 子系统（Phase 3
 //!    才移植），此条记 DEFERRED，本测试留断言占位以便 hook 落地时自动生效。
 
@@ -21,11 +21,16 @@ use std::path::{Path, PathBuf};
 
 /// `Tool::execute` 唯一合法调用点（旧源 L35-38 的 `ToolExecutionGateway` 位置）。
 const TOOL_EXECUTE_CALLER: &str = "crates/zk-tools/src/executor.rs";
-/// `spawn_call{,_in}` 的唯一合法调用点 + 定义点（旧源 L39-46）。
-const SPAWN_CALL_SITES: &[&str] = &[
+/// Raw `ToolExecutor::spawn_call{,_in}` 的唯一合法调用点 + 定义点。
+const RAW_SPAWN_CALL_SITES: &[&str] = &[
     "crates/zk-tools/src/executor.rs",
     "crates/zk-engine/src/engine.rs",
+    "crates/zk-engine/src/execution_resources.rs",
+];
+/// Production surfaces allowed to enter the process-wide `ExecutionSupervisor`.
+const SUPERVISOR_CALL_SITES: &[&str] = &[
     "crates/zk-server/src/api/mcp_server.rs",
+    "crates/zk-server/src/api/verify.rs",
 ];
 
 /// 旧源 `ToolGatewayArchitectureTest.java:17-59` `bytecodeHasNoExecutionBypass`。
@@ -64,9 +69,33 @@ fn source_has_no_execution_bypass() {
                 violations.push(format!("{relative}:{number} invokes Tool::execute"));
             }
 
-            // L39-46：绕过 `ToolExecutor` 的派发入口。
-            if trimmed.contains("spawn_call") && !SPAWN_CALL_SITES.contains(&relative.as_str()) {
-                violations.push(format!("{relative}:{number} bypasses ToolExecutor"));
+            // L39-46：原始 ToolExecutor 只能被 Engine 或唯一 Supervisor 封装调用。
+            if trimmed.contains("spawn_call")
+                && !trimmed.contains("execution_supervisor.spawn_call_in")
+                && !RAW_SPAWN_CALL_SITES.contains(&relative.as_str())
+            {
+                violations.push(format!("{relative}:{number} bypasses ExecutionSupervisor"));
+            }
+
+            // API surface 只能调用 AppState 中的 process-wide Supervisor；这里按
+            // 精确接收者扫描，避免把任意名为 spawn_call 的旁路整体加入白名单。
+            if trimmed.contains("execution_supervisor.spawn_call_in")
+                && !SUPERVISOR_CALL_SITES.contains(&relative.as_str())
+            {
+                violations.push(format!(
+                    "{relative}:{number} is not an approved ExecutionSupervisor surface"
+                ));
+            }
+
+            // server 组装根之外不得再构造独立 ToolExecutor；否则即使调用点经过
+            // hook/admission，也会绕过全局并发、资源 owner 和 cleanup 台账。
+            if relative.starts_with("crates/zk-server/src/")
+                && (trimmed.contains("ToolExecutor::new(")
+                    || trimmed.contains("static TOOL_EXECUTOR"))
+            {
+                violations.push(format!(
+                    "{relative}:{number} constructs a process-local ToolExecutor"
+                ));
             }
 
             // L47-51：hook 注册必须带显式 role。zkcode 无 hook 子系统，一旦引入

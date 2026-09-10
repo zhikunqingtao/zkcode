@@ -333,17 +333,20 @@ mod tests {
     }
 
     /// 每个用例前把存储复位到默认值——进程级单例在测试间共享。
-    fn reset_store() {
+    async fn reset_store() -> tokio::sync::MutexGuard<'static, ()> {
+        static TEST_STORE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        let guard = TEST_STORE_LOCK.lock().await;
         let mut store = lock();
         store.clear();
         for (key, value) in defaults() {
             store.insert((*key).to_owned(), value.clone());
         }
+        guard
     }
 
     #[tokio::test]
     async fn list_prints_every_setting_in_stable_key_order() {
-        reset_store();
+        let _guard = reset_store().await;
         let output = call(&ConfigTool::new(), json!({ "action": "list" })).await;
         assert!(!output.is_error);
         assert_eq!(
@@ -361,7 +364,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_defaults_to_the_get_action_and_renders_scalars_bare() {
-        reset_store();
+        let _guard = reset_store().await;
         let tool = ConfigTool::new();
         let theme = call(&tool, json!({ "key": "theme" })).await;
         assert_eq!(theme.content, "Setting 'theme' = system");
@@ -373,7 +376,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_coerces_booleans_and_integers_and_reports_the_transition() {
-        reset_store();
+        let _guard = reset_store().await;
         let tool = ConfigTool::new();
         let tokens = call(
             &tool,
@@ -403,7 +406,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_default_resets_to_the_builtin_value() {
-        reset_store();
+        let _guard = reset_store().await;
         let tool = ConfigTool::new();
         call(
             &tool,
@@ -424,7 +427,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_validates_enumerated_values_and_dynamic_model_options() {
-        reset_store();
+        let _guard = reset_store().await;
         let tool = ConfigTool::new();
         let bad_theme = call(
             &tool,
@@ -476,7 +479,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_unknown_settings_actions_and_missing_parameters() {
-        reset_store();
+        let _guard = reset_store().await;
         let tool = ConfigTool::new();
         let unknown_get = call(&tool, json!({ "key": "nope" })).await;
         assert_eq!(

@@ -21,28 +21,46 @@ import { useMcpStore } from '@/store/mcpStore';
  * dispatchServerMessage — 将 ServerMessage 分发到对应的 Store
  */
 export function dispatchServerMessage(message: ServerMessage): void {
+    const partitionKey = message.eventContext.sourceRunId
+        ? `sourceRun:${message.eventContext.sourceRunId}`
+        : message.eventContext.sourceTaskId
+            ? `sourceTask:${message.eventContext.sourceTaskId}`
+            : message.eventContext.runId
+                ? `run:${message.eventContext.runId}`
+                : message.eventContext.taskId
+                    ? `task:${message.eventContext.taskId}` : 'root';
     switch (message.type) {
         // ===== messageStore (5) =====
         case 'stream_delta':
-            useMessageStore.getState().appendStreamDelta(message.delta);
+            useMessageStore.getState().appendStreamDelta(message.delta, partitionKey);
             break;
 
         case 'thinking_delta':
-            useMessageStore.getState().appendThinkingDelta(message.delta);
+            useMessageStore.getState().appendThinkingDelta(message.delta, partitionKey);
             break;
 
         case 'tool_use_start':
             useMessageStore.getState().startToolCall(
                 message.toolUseId,
                 message.toolName,
-                message.input
+                message.input,
+                partitionKey,
+            );
+            break;
+
+        case 'tool_use_input':
+            useMessageStore.getState().updateToolCallInput(
+                message.toolUseId,
+                message.input,
+                partitionKey,
             );
             break;
 
         case 'tool_use_progress':
             useMessageStore.getState().updateToolCallProgress(
                 message.toolUseId,
-                message.progress
+                message.progress,
+                partitionKey,
             );
             break;
 
@@ -50,7 +68,7 @@ export function dispatchServerMessage(message: ServerMessage): void {
             useMessageStore.getState().completeToolCall(message.toolUseId, (message as unknown as { result?: { content: string; isError: boolean } }).result ?? {
                 content: message.content,
                 isError: message.isError,
-            });
+            }, partitionKey);
             break;
 
         // ===== sessionStore (3) =====
@@ -183,7 +201,7 @@ export function dispatchServerMessage(message: ServerMessage): void {
             break;
 
         case 'message_complete':
-            useMessageStore.getState().finalizeStream(message.usage);
+            useMessageStore.getState().finalizeStream(message.usage, partitionKey);
             useSessionStore.getState().setStatus('idle');
             break;
 

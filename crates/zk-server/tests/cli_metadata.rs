@@ -11,9 +11,22 @@ fn version_does_not_initialize_database_or_runtime() {
         .expect("run zk-server --version");
 
     assert!(output.status.success());
+    let expected = format!(
+        "zk-server {} (git {}, built {}, schema {}, ws {})\n",
+        env!("CARGO_PKG_VERSION"),
+        zk_server::BUILD_GIT_SHA,
+        zk_server::BUILD_UNIX_SECONDS,
+        zk_server::DB_SCHEMA_VERSION,
+        zk_protocol::WS_PROTOCOL_VERSION,
+    );
     assert_eq!(
         String::from_utf8(output.stdout).expect("utf8 stdout"),
-        format!("zk-server {}\n", env!("CARGO_PKG_VERSION"))
+        expected,
+    );
+    assert!(!zk_server::BUILD_GIT_SHA.trim().is_empty());
+    assert!(
+        zk_server::BUILD_UNIX_SECONDS.parse::<u64>().is_ok(),
+        "build timestamp must be Unix seconds"
     );
     assert!(output.stderr.is_empty());
 }

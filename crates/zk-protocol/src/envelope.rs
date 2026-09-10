@@ -1,4 +1,4 @@
-//! WebSocket 消息信封（U1 扁平格式，`docs/architecture.md` 决策 #1）。
+//! WebSocket v4 消息信封。
 //!
 //! ## 下行形状（与旧系统线上格式逐字段一致）
 //!
@@ -7,6 +7,16 @@
 //!   "type": "...",          // 顶层 type（ServerMessage serde tag）
 //!   "ts": 1755000000000,    // 毫秒时间戳
 //!   "seq": 42,              // [zkcode 新增] 顶层递增序列号（增量兼容，前端不消费不报错）
+//!   "eventContext": {       // v4 必须的运行时归属与去重信息
+//!     "protocolVersion": 4,
+//!     "eventId": "...",
+//!     "sessionId": "...",
+//!     "taskId": "...",
+//!     "runId": "...",
+//!     "sourceTaskId": "...",
+//!     "sourceRunId": "...",
+//!     "toolUseId": "..."
+//!   },
 //!   ...其余字段平铺...,      // variant 字段直接放顶层（serde flatten）
 //!   "_sessionId": "...",       // 会话路由标记（可缺省）
 //!   "_bindingEpoch": 0         // 连接绑定纪元（可缺省）
@@ -46,7 +56,101 @@
 //!   `payload` 键；本信封统一平铺（见 `server_message` 模块文档差异 1）。
 
 use crate::{ClientMessage, ServerMessage};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// 当前 WebSocket 信封协议版本。v4 是一次性切换，不再生成 v3 信封。
+pub const WS_PROTOCOL_VERSION: u16 = 4;
+
+static EPHEMERAL_EVENT_ID: AtomicU64 = AtomicU64::new(1);
+
+/// 一条下行事件的稳定身份和运行时归属。
+///
+/// 字段始终被序列化；对不属于 Task/Run/工具的控制事件，相应字段为
+/// `null`。投递层应使用事务 outbox ID 构造 `event_id`；
+/// [`RuntimeEventContext::ephemeral`] 只是为尚未进入 outbox 的进程内控制事件提供
+/// 不重复的降级 ID。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeEventContext {
+    /// 信封协议版本，恒为 [`WS_PROTOCOL_VERSION`]。
+    #[serde(deserialize_with = "deserialize_v4")]
+    pub protocol_version: u16,
+    /// 全局去重 ID；持久事件使用 outbox ID。
+    pub event_id: String,
+    /// 对话所属的根 Session。
+    pub session_id: Option<String>,
+    /// 对话当前投影的 Task。
+    pub task_id: Option<String>,
+    /// 对话当前投影的 Run。
+    pub run_id: Option<String>,
+    /// 真正产生该事件的 Task；根 Task 事件与 `task_id` 相同。
+    pub source_task_id: Option<String>,
+    /// 真正产生该事件的 Run；根 Run 事件与 `run_id` 相同。
+    pub source_run_id: Option<String>,
+    /// 相关工具调用 ID；非工具事件为 `None`。
+    pub tool_use_id: Option<String>,
+}
+
+fn deserialize_v4<'de, D>(deserializer: D) -> Result<u16, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let version = u16::deserialize(deserializer)?;
+    if version == WS_PROTOCOL_VERSION {
+        Ok(version)
+    } else {
+        Err(de::Error::custom(format!(
+            "unsupported websocket protocol version {version}; expected {WS_PROTOCOL_VERSION}",
+        )))
+    }
+}
+
+impl RuntimeEventContext {
+    /// 使用持久化 outbox ID 构造权威事件上下文。
+    #[must_use]
+    pub fn durable(event_id: impl Into<String>) -> Self {
+        Self {
+            protocol_version: WS_PROTOCOL_VERSION,
+            event_id: event_id.into(),
+            session_id: None,
+            task_id: None,
+            run_id: None,
+            source_task_id: None,
+            source_run_id: None,
+            tool_use_id: None,
+        }
+    }
+
+    /// 构造进程内、不会被重放的控制事件上下文。
+    #[must_use]
+    pub fn ephemeral(ts: i64, seq: Option<u64>) -> Self {
+        let nonce = EPHEMERAL_EVENT_ID.fetch_add(1, Ordering::Relaxed);
+        let seq = seq.map_or_else(|| "direct".to_owned(), |value| value.to_string());
+        Self::durable(format!("ephemeral:{ts}:{seq}:{nonce}"))
+    }
+
+    /// 填充运行时归属。
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_actor(
+        mut self,
+        session_id: Option<String>,
+        task_id: Option<String>,
+        run_id: Option<String>,
+        source_task_id: Option<String>,
+        source_run_id: Option<String>,
+        tool_use_id: Option<String>,
+    ) -> Self {
+        self.session_id = session_id;
+        self.task_id = task_id;
+        self.run_id = run_id;
+        self.source_task_id = source_task_id;
+        self.source_run_id = source_run_id;
+        self.tool_use_id = tool_use_id;
+        self
+    }
+}
 
 /// 下行信封——U1 扁平格式。
 ///
@@ -63,6 +167,9 @@ pub struct ServerEnvelope {
     /// 顶层递增序列号（**zkcode 新增**，U1；None 时不出现在 JSON 中）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seq: Option<u64>,
+    /// v4 必须的事件身份和 Task/Run 归属。
+    #[serde(rename = "eventContext")]
+    pub event_context: RuntimeEventContext,
     /// 会话路由标记（`/user/queue/messages` 会话定向路径携带）。
     #[serde(rename = "_sessionId", skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
@@ -91,13 +198,24 @@ impl ServerEnvelope {
     /// `_sessionId` / `_bindingEpoch`）。
     #[must_use]
     pub fn new(msg: ServerMessage, ts: i64, seq: Option<u64>) -> Self {
+        let tool_use_id = msg.tool_use_id().map(ToOwned::to_owned);
+        let mut event_context = RuntimeEventContext::ephemeral(ts, seq);
+        event_context.tool_use_id = tool_use_id;
         Self {
             msg,
             ts,
             seq,
+            event_context,
             session_id: None,
             binding_epoch: None,
         }
+    }
+
+    /// 用持久化运行时事件上下文替换构造器生成的进程内上下文。
+    #[must_use]
+    pub fn with_event_context(mut self, event_context: RuntimeEventContext) -> Self {
+        self.event_context = event_context;
+        self
     }
 }
 

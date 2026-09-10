@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 from urllib.parse import unquote
@@ -27,6 +28,33 @@ def quoted_kinds(path: Path, pattern: str) -> set[str]:
 def fail(message: str) -> None:
     print(f"parity-contract: {message}", file=sys.stderr)
     raise SystemExit(1)
+
+
+def rust_u16_constant(path: Path, name: str) -> int:
+    match = re.search(
+        rf"^pub const {re.escape(name)}:\s*u16\s*=\s*(\d+);$",
+        path.read_text(encoding="utf-8"),
+        re.MULTILINE,
+    )
+    if match is None:
+        fail(f"cannot read Rust constant {name} from {path.relative_to(ROOT)}")
+    return int(match.group(1))
+
+
+def check_generated_task_runtime_contract() -> None:
+    generator = ROOT / "scripts" / "contracts" / "generate_task_runtime.py"
+    completed = subprocess.run(
+        [sys.executable, str(generator), "--check"],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        detail = "\n".join(
+            part.strip() for part in (completed.stdout, completed.stderr) if part.strip()
+        )
+        fail(f"TaskRuntime V4 generated contracts are stale:\n{detail}")
 
 
 def parse_env_example(path: Path) -> dict[str, str]:
@@ -122,8 +150,11 @@ def check_supported_env() -> None:
         "ZK_PYTHON_UDS": ".runtime/python.sock",
         "ZK_DEV_ALLOW_DEMO_CREDENTIAL": "0",
         "ZK_AGENT_ENABLED": "true",
-        "ZK_AGENT_WRITE_ENABLED": "true",
-        "ZK_SWARM_ENABLED": "true",
+        "ZK_AGENT_WRITE_ENABLED": "false",
+        "ZK_SHARED_WORKSPACE_ENABLED": "false",
+        "ZK_AUTO_RESUME_SAFE_TASKS": "false",
+        "ZK_CRON_ENABLED": "false",
+        "ZK_SWARM_ENABLED": "false",
         "ZK_WORKTREE_ENABLED": "false",
         "ZK_FEATURE_THINKING_MODE": "true",
         "ZK_FEATURE_COORDINATOR_MODE": "true",
@@ -322,6 +353,7 @@ def check_local_markdown_links() -> None:
 
 
 def main() -> None:
+    check_generated_task_runtime_contract()
     check_release_metadata()
     check_supported_env()
     check_source_toolchain_policy()
@@ -332,6 +364,15 @@ def main() -> None:
     tools = load("tool-contract.json")
     ddl = load("ddl-consumers.json")
 
+    ws_protocol_version = rust_u16_constant(
+        ROOT / "crates" / "zk-protocol" / "src" / "envelope.rs",
+        "WS_PROTOCOL_VERSION",
+    )
+    if ws["version"] != ws_protocol_version:
+        fail(
+            "WebSocket contract version differs from WS_PROTOCOL_VERSION: "
+            f"contract={ws['version']}, rust={ws_protocol_version}"
+        )
     if len(ws["upstream"]) != ws["upstreamTargetCount"]:
         fail("upstream count does not match contract")
     if len(ws["downstream"]) != ws["downstreamTargetCount"]:
@@ -348,8 +389,38 @@ def main() -> None:
     ).read_text(encoding="utf-8")
     if f'"{tool_schema_hash}"' not in engine_bridge:
         fail("frozen tool schema digest differs from the Rust gate")
+    task_runtime = json.loads(
+        (ROOT / "contracts" / "task-runtime-v4.json").read_text(encoding="utf-8")
+    )
+    expected_agent_tools = set(task_runtime["tools"])
+    actual_agent_tools = set(tools["featureGates"]["ZK_AGENT_ENABLED"])
+    if actual_agent_tools != expected_agent_tools:
+        fail(
+            "ZK_AGENT_ENABLED tool inventory differs from TaskRuntime V4: "
+            f"missing={sorted(expected_agent_tools - actual_agent_tools)}, "
+            f"unexpected={sorted(actual_agent_tools - expected_agent_tools)}"
+        )
     if len(ddl["tables"]) != ddl["tableCount"] or ddl["databaseCount"] != 1:
         fail("DDL consumer inventory is inconsistent")
+    migration_source = (
+        ROOT / "crates" / "zk-db" / "migrations" / "V2__init_session_message.sql"
+    ).read_text(encoding="utf-8")
+    schema_tables = set(
+        re.findall(
+            r"^CREATE TABLE(?: IF NOT EXISTS)?\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(",
+            migration_source,
+            re.MULTILINE,
+        )
+    )
+    inventory_tables = set(ddl["tables"])
+    if len(inventory_tables) != len(ddl["tables"]):
+        fail("DDL consumer inventory contains duplicate tables")
+    if inventory_tables != schema_tables:
+        fail(
+            "DDL consumer inventory differs from the V2 schema: "
+            f"missing={sorted(schema_tables - inventory_tables)}, "
+            f"unexpected={sorted(inventory_tables - schema_tables)}"
+        )
     if not rest["requiredEndpoints"]:
         fail("REST contract is empty")
 
@@ -374,11 +445,6 @@ def main() -> None:
     missing_downstream = set(ws["downstream"]) - server_kinds
     if missing_downstream:
         fail(f"server message kinds missing: {sorted(missing_downstream)}")
-
-    migration = (ROOT / "crates" / "zk-db" / "migrations" / "V2__init_session_message.sql").read_text(encoding="utf-8")
-    missing_tables = [name for name in ddl["tables"] if not re.search(rf"CREATE TABLE IF NOT EXISTS\s+{re.escape(name)}\b", migration)]
-    if missing_tables:
-        fail(f"DDL tables missing: {missing_tables}")
 
     print("parity-contract: ok")
 

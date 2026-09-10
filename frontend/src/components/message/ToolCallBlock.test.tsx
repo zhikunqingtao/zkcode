@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import ToolCallBlock from './ToolCallBlock';
 
@@ -38,8 +38,29 @@ describe('ToolCallBlock structured result renderer', () => {
             }}
         />);
 
+        fireEvent.click(screen.getByRole('button', { name: 'Result' }));
         expect(screen.getByTestId('external-resource-card')).toBeInTheDocument();
         expect(screen.getByTestId('external-resource-download').getAttribute('href')).toBe(url);
         expect(screen.queryByText(url)).not.toBeInTheDocument();
+    });
+
+    it('keeps successful diagnostic output collapsed by default', () => {
+        render(<ToolCallBlock
+            toolUseId="search-1"
+            toolCall={{
+                toolName: 'WebSearch',
+                input: { query: 'example' },
+                status: 'completed',
+                startTime: 1,
+                duration: 10,
+                result: {
+                    content: 'large raw search payload',
+                    isError: false,
+                },
+            }}
+        />);
+
+        expect(screen.getByRole('button', { name: 'Result' })).toBeInTheDocument();
+        expect(screen.queryByText('large raw search payload')).not.toBeInTheDocument();
     });
 });

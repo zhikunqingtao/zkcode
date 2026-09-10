@@ -20,8 +20,9 @@ use std::collections::BTreeSet;
 use serde_json::{Value, json};
 use zk_protocol::{
     Attachment, ClientEnvelope, ClientMessage, ContentBlock, ElicitationOption, FlexEpoch,
-    InteractionView, McpToolInfo, Message, Reference, ServerEnvelope, ServerMessage,
-    SessionMetadata, ToolResultContent, Usage, VALID_SERVER_MESSAGE_TYPES, WorkerSnapshot,
+    InteractionView, McpToolInfo, Message, Reference, RuntimeEventContext, ServerEnvelope,
+    ServerMessage, SessionMetadata, ToolResultContent, Usage, VALID_SERVER_MESSAGE_TYPES,
+    WS_PROTOCOL_VERSION, WorkerSnapshot,
 };
 
 const TS: i64 = 1_755_000_000_000;
@@ -206,11 +207,12 @@ fn server_samples() -> Vec<ServerEnvelope> {
             activities: Some(vec![json!({"id": "a1"})]),
             total_activity_count: Some(1),
             has_more: Some(false),
-            protocol_version: 3,
+            protocol_version: i64::from(WS_PROTOCOL_VERSION),
             bind_request_id: Some("br1".into()),
             binding_epoch: Some(2),
             server_now: Some(TS),
             run_snapshot: None,
+            task_tree: json!([]),
             snapshot_event_seq: None,
             active_tool_calls: None,
             cost_summary: None,
@@ -351,7 +353,7 @@ fn server_samples() -> Vec<ServerEnvelope> {
         }),
         env(ServerMessage::ProtocolError {
             code: "SESSION_NOT_FOUND".into(),
-            supported_version: 3,
+            supported_version: i64::from(WS_PROTOCOL_VERSION),
             bind_request_id: Some("br1".into()),
             binding_epoch: Some(1),
         }),
@@ -392,6 +394,9 @@ fn server_samples() -> Vec<ServerEnvelope> {
             progress: 0.5,
             total: 1.0,
             message: "查询中".into(),
+            run_id: Some("run-1".into()),
+            tool_use_id: Some("tool-1".into()),
+            terminal: false,
         }),
     ]
 }
@@ -494,7 +499,8 @@ fn client_samples() -> Vec<ClientEnvelope> {
             session_id: "s1".into(),
             bind_request_id: "br1".into(),
             binding_epoch: 1,
-            protocol_version: 3,
+            protocol_version: 4,
+            after_event_id: Some(42),
         }),
         ClientEnvelope::new(ClientMessage::InteractionAck {
             interaction_id: "i1".into(),
@@ -583,10 +589,26 @@ fn shape_assertions_on_activation_set() {
                 msg: ServerMessage::StreamDelta { delta: "x".into() },
                 ts: TS,
                 seq: Some(42),
+                event_context: RuntimeEventContext::durable("event-42").with_actor(
+                    Some("s1".into()),
+                    Some("task-root".into()),
+                    Some("run-root".into()),
+                    Some("task-child".into()),
+                    Some("run-child".into()),
+                    None,
+                ),
                 session_id: Some("s1".into()),
                 binding_epoch: Some(3),
             },
-            set(&["type", "delta", "ts", "seq", "_sessionId", "_bindingEpoch"]),
+            set(&[
+                "type",
+                "delta",
+                "ts",
+                "seq",
+                "eventContext",
+                "_sessionId",
+                "_bindingEpoch",
+            ]),
         ),
         (
             env(ServerMessage::ThinkingDelta { delta: "y".into() }),
@@ -664,11 +686,12 @@ fn shape_assertions_on_activation_set() {
                 activities: None,
                 total_activity_count: None,
                 has_more: None,
-                protocol_version: 3,
+                protocol_version: i64::from(WS_PROTOCOL_VERSION),
                 bind_request_id: Some("br".into()),
                 binding_epoch: Some(1),
                 server_now: None,
                 run_snapshot: None,
+                task_tree: json!([]),
                 snapshot_event_seq: None,
                 active_tool_calls: None,
                 cost_summary: None,
@@ -677,6 +700,7 @@ fn shape_assertions_on_activation_set() {
                 "type",
                 "messages",
                 "metadata",
+                "taskTree",
                 "protocolVersion",
                 "bindRequestId",
                 "bindingEpoch",
@@ -698,7 +722,7 @@ fn shape_assertions_on_activation_set() {
         (
             env(ServerMessage::ProtocolError {
                 code: "BIND_FAILED".into(),
-                supported_version: 3,
+                supported_version: i64::from(WS_PROTOCOL_VERSION),
                 bind_request_id: Some("br".into()),
                 binding_epoch: Some(1),
             }),
@@ -785,7 +809,8 @@ fn shape_assertions_on_activation_set() {
             ]),
         ),
     ];
-    for (e, want) in cases {
+    for (e, mut want) in cases {
+        want.insert("eventContext".to_owned());
         let s = serde_json::to_string(&e).unwrap();
         assert_eq!(
             keys_of(&s),
@@ -796,7 +821,8 @@ fn shape_assertions_on_activation_set() {
     }
 }
 
-/// 5）真实样例对照（15 条）：`from_str` 成功 + `to_string` 后 JSON 值相等（null 归一化）。
+/// 5）真实 payload 样例嵌入 v4 信封后：`from_str` 成功 + `to_string`
+/// 后 JSON 值相等（null 归一化）。
 #[test]
 fn real_world_samples_parse_and_reemit_equal() {
     let samples: Vec<&str> = vec![
@@ -811,7 +837,7 @@ fn real_world_samples_parse_and_reemit_equal() {
         // dispatch.test.ts L74-77
         r#"{"type":"error","ts":1,"message":"Rate limited","code":"RATE_LIMIT","retryable":true}"#,
         // dispatch.test.ts L48-53（session_restored 恢复门形状）
-        r#"{"type":"session_restored","ts":1,"bindRequestId":"br-1","protocolVersion":3,"bindingEpoch":1,"messages":[{"type":"user","uuid":"1","timestamp":1,"content":[{"type":"text","text":"hi"}]}],"metadata":{"sessionId":"s1","model":"gpt-4o","permissionMode":"AUTO_APPROVE","status":"idle"}}"#,
+        r#"{"type":"session_restored","ts":1,"bindRequestId":"br-1","protocolVersion":4,"bindingEpoch":1,"messages":[{"type":"user","uuid":"1","timestamp":1,"content":[{"type":"text","text":"hi"}]}],"metadata":{"sessionId":"s1","model":"gpt-4o","permissionMode":"AUTO_APPROVE","status":"idle"},"taskTree":[]}"#,
         // dispatch.test.ts L135-140
         r#"{"type":"permission_mode_changed","mode":"AUTO_APPROVE","previous":"DEFAULT","ts":1}"#,
         // dispatch.test.ts L121
@@ -832,18 +858,50 @@ fn real_world_samples_parse_and_reemit_equal() {
         // WebSocketController L361-370（tool_result 嵌套 result 形状）
         r#"{"type":"tool_result","ts":1,"toolUseId":"tu-1","result":{"content":"ok","isError":false,"metadata":{"structuredResult":{"exitCode":0}}}}"#,
     ];
-    for raw in samples {
-        let parsed: ServerEnvelope = serde_json::from_str(raw).unwrap_or_else(|e| {
-            panic!("真实样例解析失败: {e}\nraw={raw}");
+    for raw_payload in samples {
+        let mut raw_value = serde_json::from_str::<Value>(raw_payload).unwrap();
+        let event_kind = raw_value["type"].as_str().unwrap().to_owned();
+        let tool_use_id = raw_value.get("toolUseId").cloned().unwrap_or(Value::Null);
+        raw_value.as_object_mut().unwrap().insert(
+            "eventContext".to_owned(),
+            json!({
+                "protocolVersion": WS_PROTOCOL_VERSION,
+                "eventId": format!("fixture-{event_kind}"),
+                "sessionId": null,
+                "taskId": null,
+                "runId": null,
+                "sourceTaskId": null,
+                "sourceRunId": null,
+                "toolUseId": tool_use_id,
+            }),
+        );
+        let raw = serde_json::to_string(&raw_value).unwrap();
+        let parsed: ServerEnvelope = serde_json::from_str(&raw).unwrap_or_else(|e| {
+            panic!("v4 样例解析失败: {e}\nraw={raw}");
         });
         let reemit = serde_json::to_string(&parsed).unwrap();
         assert_eq!(
             normalize(&serde_json::from_str::<Value>(&reemit).unwrap()),
-            normalize(&serde_json::from_str::<Value>(raw).unwrap()),
+            normalize(&serde_json::from_str::<Value>(&raw).unwrap()),
             "值保真失败: kind={} raw={raw} reemit={reemit}",
             parsed.kind()
         );
     }
+}
+
+#[test]
+fn v4_envelope_rejects_missing_event_context() {
+    let raw = r#"{"type":"stream_delta","ts":1,"delta":"legacy"}"#;
+    assert!(serde_json::from_str::<ServerEnvelope>(raw).is_err());
+}
+
+#[test]
+fn v4_envelope_rejects_other_protocol_versions() {
+    let raw = r#"{"type":"stream_delta","ts":1,"delta":"legacy","eventContext":{"protocolVersion":3,"eventId":"legacy-1","sessionId":null,"taskId":null,"runId":null,"sourceTaskId":null,"sourceRunId":null,"toolUseId":null}}"#;
+    let error = serde_json::from_str::<ServerEnvelope>(raw)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("expected 4"), "unexpected error: {error}");
 }
 
 /// 递归剔除值为 null 的键（zkcode 序列化省略 None 键，与显式 null 语义等价）。
@@ -865,7 +923,7 @@ fn normalize(v: &Value) -> Value {
 /// 6）未知 type：反序列化为 Err，且错误信息包含原始字符串。
 #[test]
 fn unknown_type_is_error_containing_raw_string() {
-    let raw = r#"{"type":"definitely_unknown","ts":1}"#;
+    let raw = r#"{"type":"definitely_unknown","ts":1,"eventContext":{"protocolVersion":4,"eventId":"unknown-1","sessionId":null,"taskId":null,"runId":null,"sourceTaskId":null,"sourceRunId":null,"toolUseId":null}}"#;
     let err = serde_json::from_str::<ServerEnvelope>(raw).expect_err("未知 type 必须反序列化失败");
     let msg = err.to_string();
     assert!(

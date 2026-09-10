@@ -38,6 +38,9 @@ export interface McpToolProgressPayload {
     progress: number;
     total: number;
     message: string;
+    runId?: string;
+    toolUseId?: string;
+    terminal: boolean;
     ts?: number;
 }
 
@@ -115,6 +118,10 @@ export const useMcpStore = create<McpStoreState>()(
         }),
         updateMcpProgress: (data) => set(d => {
             if (!data.progressToken) return;
+            if (data.terminal) {
+                d.inflightMcpCalls.delete(data.progressToken);
+                return;
+            }
             d.inflightMcpCalls.set(data.progressToken, {
                 progressToken: data.progressToken,
                 serverName: data.serverName,

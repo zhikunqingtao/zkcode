@@ -25,6 +25,10 @@ pub enum DbError {
     /// 打开/创建数据库文件及父目录的 IO 错误。
     #[error("io failure: {0}")]
     Io(#[from] std::io::Error),
+    /// 数据库并非本二进制的一次性 greenfield 最终 schema。zkcode 明确不做
+    /// 历史回填或原地升级，调用方应保留旧库取证后改用全新数据库。
+    #[error("incompatible database schema: {0}")]
+    IncompatibleSchema(String),
     /// 目标会话不存在（写入路径外键违例 / 显式判空）。
     #[error("session not found: {0}")]
     SessionNotFound(String),

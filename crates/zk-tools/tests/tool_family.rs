@@ -17,9 +17,42 @@ use serde_json::json;
 use tokio_util::sync::CancellationToken;
 use zk_tools::{
     AskUserQuestionTool, BashTool, CallEnv, ConfigTool, EditFileTool, ElicitationOutcome,
-    ElicitationRequest, ElicitationSink, GlobTool, GrepTool, ListDirectoryTool, ReadFileTool,
-    SyntheticOutputTool, TodoWriteTool, Tool, ToolEvent, ToolExecutor, ToolOutput, WriteFileTool,
+    ElicitationRequest, ElicitationSink, ExecutionResourceAllocation, ExecutionResourceLease,
+    ExecutionResourceObserver, ExecutionResourceOwner, ExecutionResourceTerminal, GlobTool,
+    GrepTool, ListDirectoryTool, ReadFileTool, SyntheticOutputTool, TodoWriteTool, Tool, ToolEvent,
+    ToolExecutor, ToolOutput, WriteFileTool,
 };
+
+#[derive(Default)]
+struct TestResourceObserver;
+
+impl ExecutionResourceObserver for TestResourceObserver {
+    fn register(
+        &self,
+        _owner: ExecutionResourceOwner,
+        allocation: ExecutionResourceAllocation,
+    ) -> BoxFuture<'static, Result<ExecutionResourceLease, String>> {
+        Box::pin(std::future::ready(Ok(ExecutionResourceLease {
+            resource_id: allocation.resource_id,
+        })))
+    }
+
+    fn bind_external(
+        &self,
+        _lease: ExecutionResourceLease,
+        _external_id: String,
+    ) -> BoxFuture<'static, Result<(), String>> {
+        Box::pin(std::future::ready(Ok(())))
+    }
+
+    fn finish(
+        &self,
+        _lease: ExecutionResourceLease,
+        _terminal: ExecutionResourceTerminal,
+    ) -> BoxFuture<'static, Result<(), String>> {
+        Box::pin(std::future::ready(Ok(())))
+    }
+}
 
 /// 独占测试目录（同名冲突下先清空重建）。
 fn workspace(tag: &str) -> PathBuf {
@@ -44,16 +77,39 @@ async fn call_as(
 ) -> ToolOutput {
     let executor = ToolExecutor::new();
     let cancel = CancellationToken::new();
-    let mut rx = executor.spawn_call_in(
-        tool,
-        "toolu_it".to_owned(),
-        input,
-        &cancel,
-        CallEnv::new()
-            .with_session_id(session_id)
-            .with_run_id("run-it")
-            .with_working_dir(working_dir),
-    );
+    let task_id = uuid::Uuid::new_v4().to_string();
+    let run_id = uuid::Uuid::new_v4().to_string();
+    let invocation_id = uuid::Uuid::new_v4().to_string();
+    let authorized_write_path = if tool.is_read_only(&input) {
+        None
+    } else {
+        tool.path_of(&input).map(|path| {
+            let path = PathBuf::from(path);
+            if path.is_absolute() {
+                path
+            } else {
+                working_dir.join(path)
+            }
+        })
+    };
+    let mut env = CallEnv::new()
+        .with_session_id(session_id)
+        .with_run_id(&run_id)
+        .with_working_dir(working_dir)
+        .with_execution_resources(
+            ExecutionResourceOwner {
+                task_id,
+                run_id,
+                invocation_id: invocation_id.clone(),
+            },
+            Arc::new(TestResourceObserver),
+        );
+    if let Some(path) = authorized_write_path
+        && let Some(path) = zk_tools::atomic::canonical_write_target(&path).await
+    {
+        env = env.with_authorized_write_path(path);
+    }
+    let mut rx = executor.spawn_call_in(tool, invocation_id.clone(), input, &cancel, env);
     while let Some(event) = rx.recv().await {
         if let ToolEvent::Finished { output, .. } = event {
             return output;
@@ -208,10 +264,19 @@ async fn file_family_write_read_and_search() {
 async fn write_reports_update_on_existing_file() {
     let root = workspace("file-update");
     std::fs::write(root.join("a.txt"), "old").expect("seed");
-    let output = call(
+    let read = call_as(
+        Arc::new(ReadFileTool),
+        json!({ "file_path": "a.txt" }),
+        &root,
+        "session-update",
+    )
+    .await;
+    assert!(!read.is_error, "content: {}", read.content);
+    let output = call_as(
         Arc::new(WriteFileTool::new()),
         json!({ "file_path": "a.txt", "content": "brand-new" }),
         &root,
+        "session-update",
     )
     .await;
     assert!(!output.is_error, "content: {}", output.content);
@@ -378,13 +443,15 @@ async fn ask_user_question_blocks_per_question_and_collects_answers() {
     assert_eq!(structured["answers"]["q1"], "rust");
 
     let seen = sink.seen.lock().expect("lock").clone();
-    assert_eq!(
-        seen,
-        vec![
-            ("session-ask".to_owned(), Some("run-it".to_owned()), 2),
-            ("session-ask".to_owned(), Some("run-it".to_owned()), 2),
-        ]
+    assert_eq!(seen.len(), 2);
+    assert!(
+        seen.iter()
+            .all(|(session, _, options)| { session == "session-ask" && *options == 2 })
     );
+    let run_id = seen[0].1.as_deref().expect("durable Run identity");
+    let parsed = uuid::Uuid::parse_str(run_id).expect("Run ID must be a UUID");
+    assert_eq!(parsed.get_version(), Some(uuid::Version::Random));
+    assert_eq!(seen[1].1.as_deref(), Some(run_id));
     let _ = std::fs::remove_dir_all(&root);
 }
 

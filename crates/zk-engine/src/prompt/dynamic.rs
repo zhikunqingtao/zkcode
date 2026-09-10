@@ -26,7 +26,7 @@
 //! |---|------|--------|----------|--------------|----------|
 //! | 0 | `skill_discovery` | L717-728 / L764 | `SKILL_DISCOVERY` flag 且启用 `DiscoverSkills` 工具 | `Global` | 已实现（Step 1-4） |
 //! | 1 | `session_guidance` | L177-178, L965-992 | 按启用工具集拼装（`shell` 项无条件） | `Session` | 已实现 |
-//! | 2 | `memory` | L179-180, L1102-1107 | 项目根有 `zhikun.md` / `zhikun.local.md` | `Session` | 已实现（Batch 5 Step 3） |
+//! | 2 | `memory` | L179-180, L1102-1107 | `SQLite` 中存在当前 project scope 记录 | `Session` | 已实现（SQLite 权威 + 请求级预算） |
 //! | 3 | `env_info` | L181-182 | —— | `Session` | 静态组装已承接（Step 1-1） |
 //! | 4 | `language` | L183-184, L1058-1075 | locale 非空且非 `en` | `Session` | 已实现 |
 //! | 5 | `output_style` | L185-186, L1109-1111 | 旧恒返回 `null` | `Global` | 已实现（忠实还原为恒 `None`） |
@@ -42,7 +42,7 @@
 //! # 段状态留痕
 //!
 //! `mcp_instructions` 已从当前启用的 `mcp__<server>__<tool>` 工具身份动态生成；
-//! `memory` 段的数据源 [`crate::project_memory`] 已落地并接线；`env_info` /
+//! `memory` 段只消费引擎从 `SQLite` 按项目隔离、转义和限额后的投影；`env_info` /
 //! `scratchpad` 已由 [`crate::system_prompt`] 静态组装承接（Step 1-1），本框架不
 //! 重复产出；动态 `frc` 段（与静态 `FUNCTION_RESULT_CLEARING_SECTION` 同名不同物）
 //! 不在本步 8 段之内。[`render_all`] 只渲染 [`SectionState::Implemented`] 段位，其
@@ -50,6 +50,9 @@
 //!
 //! # 刻意偏差（留痕）
 //!
+//! - **生产工具名优先**：`session_guidance` 使用当前 V4 目录中的 `Agent`、
+//!   `Glob`、`Grep`、`Skill` 与字段 `subagentType`，不再复述旧 Java 名称；
+//!   这避免生成模型调用生产 schema 中不存在的工具或字段。
 //! - **`project_context` 数据源替换**：旧仓该段取 `ProjectContextService`（git 快
 //!   照：`projectType` / `gitRoot` / `branch` / 近期提交 / 文件树，旧
 //!   `ProjectContextService.formatProjectContext` L128-160）。Rust 侧 git 快照子系
@@ -223,14 +226,14 @@ const SESSION_ITEM_ASK: &str =
 /// `session_guidance` 项——shell 命令（旧 L972-974，无条件）。
 const SESSION_ITEM_SHELL: &str = r"如果你需要用户自己运行一个 shell 命令（例如交互式登录如 `gcloud auth login`），建议他们在提示符中输入 `! <command>`。";
 
-/// `session_guidance` 项——子代理价值（旧 L976-978，门控 `AgentTool`）。
-const SESSION_ITEM_AGENT_SUBAGENT: &str = r"当任务与代理描述匹配时，使用 AgentTool 和专业代理。子代理对于并行化独立查询或保护主上下文窗口免受过多结果影响很有价值，但不应过度使用。";
+/// `session_guidance` 项——子代理价值（门控生产工具 `Agent`）。
+const SESSION_ITEM_AGENT_SUBAGENT: &str = r"当任务与代理描述匹配时，使用 Agent 和专业代理。子代理对于并行化独立查询或保护主上下文窗口免受过多结果影响很有价值，但不应过度使用。";
 
-/// `session_guidance` 项——搜索工具选型（旧 L979-981，门控 `AgentTool`）。
-const SESSION_ITEM_AGENT_SEARCH: &str = r"对于简单、直接的代码库搜索，直接使用 GlobTool 或 GrepTool。对于更广泛的代码库探索和深度研究，使用 AgentTool subagent_type=explore。";
+/// `session_guidance` 项——搜索工具选型（门控生产工具 `Agent`）。
+const SESSION_ITEM_AGENT_SEARCH: &str = r"对于简单、直接的代码库搜索，直接使用 Glob 或 Grep。对于更广泛的代码库探索和深度研究，使用 Agent，并设置 subagentType=explore。";
 
-/// `session_guidance` 项——技能简写（旧 L984-986，门控 `SkillTool`）。
-const SESSION_ITEM_SKILL_TOOL: &str = r"/<skill-name>（例如 /commit）是用户调用技能的简写。使用 SkillTool 执行它们。重要：只对其用户可调用技能部分中列出的技能使用 SkillTool。";
+/// `session_guidance` 项——技能简写（门控生产工具 `Skill`）。
+const SESSION_ITEM_SKILL_TOOL: &str = r"/<skill-name>（例如 /commit）是用户调用技能的简写。使用 Skill 执行它们。重要：只对其用户可调用技能部分中列出的技能使用 Skill。";
 
 /// `token_budget` 段正文（旧 `getTokenBudgetSection`，L1140-1144）。
 const TOKEN_BUDGET_SECTION: &str = r#"当用户指定 token 目标时（例如 "+500k"、"花费 2M tokens"、"使用 1B tokens"），你的输出 token 数将在每个回合显示。继续工作直到接近目标——规划你的工作以充分利用它。目标是硬性最低限制，不是建议。如果你提前停止，系统将自动继续你。"#;
@@ -291,6 +294,7 @@ pub struct DynamicSectionContext<'a> {
     urgent_summarize: bool,
     project_loader: Option<&'a ProjectPromptLoader>,
     durable_project_context: Option<&'a str>,
+    durable_memory: Option<&'a str>,
 }
 
 impl<'a> DynamicSectionContext<'a> {
@@ -310,6 +314,7 @@ impl<'a> DynamicSectionContext<'a> {
             urgent_summarize: false,
             project_loader: None,
             durable_project_context: None,
+            durable_memory: None,
         }
     }
 
@@ -344,6 +349,16 @@ impl<'a> DynamicSectionContext<'a> {
         self
     }
 
+    /// Inject the already-scoped and token-bounded `SQLite` memory projection.
+    ///
+    /// The prompt renderer deliberately has no filesystem fallback: the database
+    /// is the sole memory authority and the engine owns isolation and budgeting.
+    #[must_use]
+    pub fn with_durable_memory(mut self, memory: Option<&'a str>) -> Self {
+        self.durable_memory = memory;
+        self
+    }
+
     /// feature flag 表（供静态前缀与动态段同源取值）。
     #[must_use]
     pub fn flags(&self) -> &FeatureFlags {
@@ -370,11 +385,11 @@ pub fn session_guidance_section(enabled_tools: &BTreeSet<String>) -> Option<Stri
         items.push(SESSION_ITEM_ASK);
     }
     items.push(SESSION_ITEM_SHELL);
-    if enabled_tools.contains("AgentTool") || enabled_tools.contains("Agent") {
+    if enabled_tools.contains("Agent") {
         items.push(SESSION_ITEM_AGENT_SUBAGENT);
         items.push(SESSION_ITEM_AGENT_SEARCH);
     }
-    if enabled_tools.contains("SkillTool") || enabled_tools.contains("Skill") {
+    if enabled_tools.contains("Skill") {
         items.push(SESSION_ITEM_SKILL_TOOL);
     }
     if items.is_empty() {
@@ -503,17 +518,16 @@ pub fn mcp_instructions_section(enabled_tools: &BTreeSet<String>) -> Option<Stri
     ))
 }
 
-/// `memory` 段（旧 `loadMemoryPrompt`，L179-180 / L1102-1107）。
+/// SQLite-backed `memory` section prepared by the engine.
 ///
-/// 数据源为 [`crate::project_memory::load_memory`]（项目根 `zhikun.md` /
-/// `zhikun.local.md`）。`working_dir` 空串视作未设置工作目录（旧 `workingDir ==
-/// null`）→ 返回 `None`。产出串保留旧仓字面量的前导 `\n\n` 与尾随 `\n`。
+/// Scoping, escaping and token budgeting happen before this renderer is called.
+/// Keeping this function projection-only prevents a missing database row from
+/// silently reviving the former `zhikun.md` filesystem authority.
 #[must_use]
-pub fn memory_section(working_dir: &str) -> Option<String> {
-    if working_dir.trim().is_empty() {
-        return None;
-    }
-    crate::project_memory::memory_prompt_section(Some(std::path::Path::new(working_dir)))
+pub fn memory_section(durable_memory: Option<&str>) -> Option<String> {
+    durable_memory
+        .filter(|memory| !memory.trim().is_empty())
+        .map(str::to_owned)
 }
 
 /// `project_context` 段（旧 `projectContextService.formatProjectContext`，L241-243 /
@@ -548,7 +562,7 @@ fn render_section(name: &str, ctx: &DynamicSectionContext<'_>) -> Option<String>
     match name {
         "skill_discovery" => skill_discovery_guidance_section(ctx.flags, ctx.enabled_tools),
         "session_guidance" => session_guidance_section(ctx.enabled_tools),
-        "memory" => memory_section(ctx.working_dir),
+        "memory" => memory_section(ctx.durable_memory),
         "language" => language_section(ctx.language),
         "output_style" => output_style_section(),
         "mcp_instructions" => mcp_instructions_section(ctx.enabled_tools),
@@ -598,17 +612,18 @@ mod tests {
     // ---------- 逐字互锁：字符数与旧仓运行期值一致 ----------
 
     #[test]
-    fn dynamic_text_constants_match_java_runtime_char_counts() {
+    fn unchanged_dynamic_text_constants_match_java_runtime_char_counts() {
         assert_eq!(TOKEN_BUDGET_SECTION.chars().count(), 136);
         assert_eq!(ANT_SPECIFIC_GUIDANCE.chars().count(), 338);
         assert_eq!(NUMERIC_LENGTH_ANCHORS.chars().count(), 119);
         assert_eq!(SKILL_DISCOVERY_GUIDANCE.chars().count(), 239);
-        // session_guidance 各项字符数（旧运行期拼接值，不含 " - " 前缀）。
+        // 未迁移契约的 session_guidance 项仍逐字互锁。
         assert_eq!(SESSION_ITEM_ASK.chars().count(), 47);
         assert_eq!(SESSION_ITEM_SHELL.chars().count(), 79);
-        assert_eq!(SESSION_ITEM_AGENT_SUBAGENT.chars().count(), 73);
-        assert_eq!(SESSION_ITEM_AGENT_SEARCH.chars().count(), 91);
-        assert_eq!(SESSION_ITEM_SKILL_TOOL.chars().count(), 88);
+        assert!(SESSION_ITEM_AGENT_SUBAGENT.contains("使用 Agent 和专业代理"));
+        assert!(SESSION_ITEM_AGENT_SEARCH.contains("Glob 或 Grep"));
+        assert!(SESSION_ITEM_AGENT_SEARCH.contains("subagentType=explore"));
+        assert!(SESSION_ITEM_SKILL_TOOL.contains("使用 Skill 执行"));
     }
 
     #[test]
@@ -639,20 +654,19 @@ mod tests {
         assert_eq!(section.chars().count(), 91);
         assert!(section.starts_with("# 会话特定指导\n - 如果你需要用户自己运行"));
         assert!(!section.contains("AskUserQuestion"));
-        assert!(!section.contains("AgentTool"));
-        assert!(!section.contains("SkillTool"));
+        assert!(!section.contains("subagentType"));
+        assert!(!section.contains("/<skill-name>"));
     }
 
     #[test]
     fn session_guidance_full_tool_set_orders_items_like_java() {
-        let all = tools(&["AskUserQuestion", "AgentTool", "SkillTool"]);
+        let all = tools(&["AskUserQuestion", "Agent", "Skill"]);
         let section = session_guidance_section(&all).expect("非空");
-        assert_eq!(section.chars().count(), 406);
-        // 段序：ask → shell → agent(子代理) → agent(搜索) → skilltool（旧 L968-987）。
+        // 段序：ask → shell → agent(子代理) → agent(搜索) → skill。
         let ask = section.find("AskUserQuestion 工具询问").expect("ask");
         let shell = section.find("gcloud auth login").expect("shell");
-        let sub = section.find("使用 AgentTool 和专业代理").expect("subagent");
-        let search = section.find("subagent_type=explore").expect("search");
+        let sub = section.find("使用 Agent 和专业代理").expect("subagent");
+        let search = section.find("subagentType=explore").expect("search");
         let skill = section.find("/<skill-name>").expect("skill");
         assert!(ask < shell && shell < sub && sub < search && search < skill);
         // 每项以 " - " 前缀。
@@ -669,18 +683,23 @@ mod tests {
 
     #[test]
     fn session_guidance_agent_items_gated_together() {
-        let with_agent = session_guidance_section(&tools(&["AgentTool"])).expect("非空");
-        assert!(with_agent.contains("使用 AgentTool 和专业代理"));
-        assert!(with_agent.contains("subagent_type=explore"));
-        let without = session_guidance_section(&tools(&["SkillTool"])).expect("非空");
-        assert!(!without.contains("使用 AgentTool 和专业代理"));
-        assert!(!without.contains("subagent_type=explore"));
+        let with_agent = session_guidance_section(&tools(&["Agent"])).expect("非空");
+        assert!(with_agent.contains("使用 Agent 和专业代理"));
+        assert!(with_agent.contains("subagentType=explore"));
+        let without = session_guidance_section(&tools(&["Skill"])).expect("非空");
+        assert!(!without.contains("使用 Agent 和专业代理"));
+        assert!(!without.contains("subagentType=explore"));
     }
 
     #[test]
     fn session_guidance_recognizes_production_registry_names() {
         let section = session_guidance_section(&tools(&["Agent", "Skill"])).expect("non-empty");
-        assert!(section.contains("使用 AgentTool 和专业代理"));
+        assert!(section.contains("使用 Agent 和专业代理"));
+        assert!(!section.contains("AgentTool"));
+        assert!(!section.contains("subagent_type"));
+        assert!(!section.contains("GlobTool"));
+        assert!(!section.contains("GrepTool"));
+        assert!(!section.contains("SkillTool"));
         assert!(section.contains("/<skill-name>"));
     }
 
@@ -820,6 +839,16 @@ mod tests {
         assert!(section.contains("DB-backed coordinator context"));
     }
 
+    #[test]
+    fn memory_section_projects_only_prepared_sqlite_content() {
+        assert!(memory_section(None).is_none());
+        assert!(memory_section(Some("   ")).is_none());
+        assert_eq!(
+            memory_section(Some("<project_memory>durable</project_memory>")),
+            Some("<project_memory>durable</project_memory>".to_owned())
+        );
+    }
+
     // ---------- 注册表：段序、三态缓存分界、状态 ----------
 
     #[test]
@@ -904,12 +933,7 @@ mod tests {
             ("ZK_FEATURE_INTERNAL_USER_MODE", "true"),
             ("ZK_FEATURE_NUMERIC_LENGTH_ANCHORS", "true"),
         ]);
-        let tset = tools(&[
-            "AskUserQuestion",
-            "AgentTool",
-            "SkillTool",
-            "DiscoverSkills",
-        ]);
+        let tset = tools(&["AskUserQuestion", "Agent", "Skill", "DiscoverSkills"]);
         let ctx = DynamicSectionContext::new(&flags, "/nonexistent_proj_dir", &tset)
             .with_language(Some("zh"))
             .with_urgent_summarize(true);

@@ -259,6 +259,9 @@ fn count_messages_core(
         let mut tokens: u64 = 0;
         for message in messages {
             tokens = tokens.saturating_add(encoded_len(encoder, &message.content));
+            if let Some(thinking) = message.thinking.as_deref() {
+                tokens = tokens.saturating_add(encoded_len(encoder, thinking));
+            }
             for call in &message.tool_calls {
                 tokens = tokens
                     .saturating_add(encoded_len(encoder, &call.name))
@@ -625,6 +628,24 @@ mod tests {
             + encoder.encode_ordinary("Read").len()
             + encoder
                 .encode_ordinary(r#"{"file_path":"/tmp/a.rs"}"#)
+                .len()
+            + 4;
+        assert_eq!(u64::from(tokens), expected as u64);
+    }
+
+    #[test]
+    fn tier_l1_precise_includes_replayed_assistant_reasoning() {
+        let encoder = precise_encoder().expect("cl100k_base encoder");
+        let assistant = ChatMessage::assistant("answer")
+            .with_thinking(Some("reasoning that is sent again".to_owned()));
+        let (tokens, _) = count_messages_core(
+            std::slice::from_ref(&assistant),
+            Some(encoder),
+            RatioSource::Detect,
+        );
+        let expected = encoder.encode_ordinary("answer").len()
+            + encoder
+                .encode_ordinary("reasoning that is sent again")
                 .len()
             + 4;
         assert_eq!(u64::from(tokens), expected as u64);

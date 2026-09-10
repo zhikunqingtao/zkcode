@@ -36,6 +36,7 @@ use std::sync::Arc;
 use zk_llm::{ChatMessage, Role};
 
 use super::{estimate_message_tokens, estimate_tokens, scale_tokens};
+use crate::llm_summarizer::SummaryExecution;
 
 /// 压缩边界标记（旧 `SystemMessageType.COMPACT_SUMMARY` 的内容前缀等价物；
 /// 字面量取自旧 `CompactService` 关键消息选择分支的边界文案）。
@@ -125,6 +126,19 @@ pub trait Summarizer: Send + Sync {
     ///
     /// `target_tokens` 为期望摘要长度（旧 `plan.targetSummaryTokens()`）。
     fn summarize(&self, messages: &[ChatMessage], target_tokens: u32) -> Option<String>;
+
+    /// Generate a summary for an explicitly attributed durable Run. Legacy and
+    /// deterministic implementations may ignore the scope; the production LLM
+    /// adapter overrides this method and attaches it to the provider request.
+    fn summarize_scoped(
+        &self,
+        messages: &[ChatMessage],
+        target_tokens: u32,
+        execution: &SummaryExecution,
+    ) -> Option<String> {
+        let _ = execution;
+        self.summarize(messages, target_tokens)
+    }
 }
 
 /// 不产出摘要的占位实现（缺省装配）。
@@ -312,6 +326,31 @@ pub fn compact_messages(
     is_reactive: bool,
     summarizer: &dyn Summarizer,
 ) -> Result<CompactResult, CompactSkip> {
+    compact_messages_scoped(
+        messages,
+        model,
+        context_window,
+        is_reactive,
+        summarizer,
+        None,
+    )
+}
+
+/// [`compact_messages`] with explicit durable attribution for any physical
+/// summary request it emits.
+///
+/// # Errors
+///
+/// Returns [`CompactSkip`] when compaction is unnecessary or none of the
+/// bounded strategies can reduce the estimated context size.
+pub fn compact_messages_scoped(
+    messages: &[ChatMessage],
+    model: &str,
+    context_window: u32,
+    is_reactive: bool,
+    summarizer: &dyn Summarizer,
+    execution: Option<&SummaryExecution>,
+) -> Result<CompactResult, CompactSkip> {
     let preserve_turns = if is_reactive {
         REACTIVE_PRESERVED_TURNS
     } else {
@@ -324,7 +363,7 @@ pub fn compact_messages(
     let plan = ensure_tool_pair_integrity(plan, model);
     let before_tokens = estimate_tokens(messages, model);
 
-    if let Some(result) = try_llm_summary(&plan, model, before_tokens, summarizer) {
+    if let Some(result) = try_llm_summary(&plan, model, before_tokens, summarizer, execution) {
         return Ok(result);
     }
     if let Some(result) = try_key_message_selection(&plan, model, context_window, before_tokens) {
@@ -360,8 +399,14 @@ fn try_llm_summary(
     model: &str,
     before_tokens: u32,
     summarizer: &dyn Summarizer,
+    execution: Option<&SummaryExecution>,
 ) -> Option<CompactResult> {
-    let raw = summarizer.summarize(&plan.compaction, plan.target_summary_tokens)?;
+    let raw = match execution {
+        Some(execution) => {
+            summarizer.summarize_scoped(&plan.compaction, plan.target_summary_tokens, execution)
+        }
+        None => summarizer.summarize(&plan.compaction, plan.target_summary_tokens),
+    }?;
     let summary = extract_structured_summary(&raw);
     if !validate_summary_quality(&summary, &plan.compaction) {
         tracing::warn!("LLM 摘要质量不足，降级到关键消息选择");

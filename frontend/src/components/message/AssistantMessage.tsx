@@ -18,6 +18,7 @@ import type { Message, ContentBlock, ToolCallState } from '@/types';
 import TextBlock from './TextBlock';
 import ThinkingBlock from './ThinkingBlock';
 import ToolCallBlock from './ToolCallBlock';
+import GroupedToolUseBlock from './GroupedToolUseBlock';
 import ImageBlock from './ImageBlock';
 import TtsPlayButton from './TtsPlayButton';
 import { useStreamingText } from '@/hooks/useStreamingText';
@@ -98,6 +99,10 @@ const StreamingContent: React.FC<StreamingContentProps> = ({
     // 使用外部高性能 streaming store 获取实时文本（绕过 Immer 开销）
     const externalStreamingText = useStreamingText();
     const displayText = externalStreamingText || streamingContent;
+    const groupedToolCalls = useMemo(
+        () => Object.fromEntries(activeToolCalls?.entries() ?? []),
+        [activeToolCalls],
+    );
 
     return (
     <div className="text-sm text-[var(--text-primary)]">
@@ -114,9 +119,7 @@ const StreamingContent: React.FC<StreamingContentProps> = ({
         {/* Active tool calls */}
         {activeToolCalls && activeToolCalls.size > 0 && (
             <div className="mt-1">
-                {Array.from(activeToolCalls.entries()).map(([id, tc]) => (
-                    <ToolCallBlock key={id} toolUseId={id} toolCall={tc} />
-                ))}
+                <GroupedToolUseBlock toolCalls={groupedToolCalls} />
             </div>
         )}
 
@@ -138,17 +141,53 @@ interface FinalizedContentProps {
     activeToolCalls?: Map<string, ToolCallState>;
 }
 
-const FinalizedContent: React.FC<FinalizedContentProps> = ({ blocks, activeToolCalls }) => (
-    <div className="text-sm text-[var(--text-primary)]">
-        {blocks.map((block, i) => (
-            <AssistantBlockRenderer
-                key={i}
-                block={block}
-                activeToolCalls={activeToolCalls}
-            />
-        ))}
-    </div>
-);
+const FinalizedContent: React.FC<FinalizedContentProps> = ({ blocks, activeToolCalls }) => {
+    const rendered: React.ReactNode[] = [];
+    for (let index = 0; index < blocks.length;) {
+        const block = blocks[index];
+        if (block.type !== 'tool_use') {
+            rendered.push(
+                <AssistantBlockRenderer
+                    key={`${block.type}-${index}`}
+                    block={block}
+                    activeToolCalls={activeToolCalls}
+                />,
+            );
+            index += 1;
+            continue;
+        }
+
+        const toolCalls: Record<string, ToolCallState> = {};
+        const firstIndex = index;
+        while (index < blocks.length && blocks[index].type === 'tool_use') {
+            const toolBlock = blocks[index] as Extract<ContentBlock, { type: 'tool_use' }>;
+            toolCalls[toolBlock.toolUseId] = toolCallState(toolBlock, activeToolCalls);
+            index += 1;
+        }
+        rendered.push(
+            <GroupedToolUseBlock
+                key={`tool-group-${firstIndex}`}
+                toolCalls={toolCalls}
+            />,
+        );
+    }
+
+    return <div className="text-sm text-[var(--text-primary)]">{rendered}</div>;
+};
+
+function toolCallState(
+    block: Extract<ContentBlock, { type: 'tool_use' }>,
+    activeToolCalls?: Map<string, ToolCallState>,
+): ToolCallState {
+    return activeToolCalls?.get(block.toolUseId) ?? {
+        toolUseId: block.toolUseId,
+        toolName: block.toolName,
+        input: block.input,
+        status: block.result?.isError ? 'error' : 'completed',
+        result: block.result,
+        startTime: 0,
+    };
+}
 
 // ==================== Block Router ====================
 
@@ -166,16 +205,10 @@ const AssistantBlockRenderer: React.FC<AssistantBlockRendererProps> = ({ block, 
         case 'redacted_thinking':
             return <ThinkingBlock content="" redacted />;
         case 'tool_use': {
-            // Try to find state from activeToolCalls, fallback to basic info
-            const state = activeToolCalls?.get(block.toolUseId);
-            const tc: ToolCallState = state ?? {
-                toolName: block.toolName,
-                input: block.input,
-                status: block.result?.isError ? 'error' : 'completed',
-                result: block.result,
-                startTime: 0,
-            };
-            return <ToolCallBlock toolUseId={block.toolUseId} toolCall={tc} />;
+            return <ToolCallBlock
+                toolUseId={block.toolUseId}
+                toolCall={toolCallState(block, activeToolCalls)}
+            />;
         }
         case 'tool_result': {
             // Tool results are displayed within their ToolCallBlock

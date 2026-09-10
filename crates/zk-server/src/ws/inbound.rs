@@ -13,7 +13,7 @@
 //!
 //! # bind 握手校验链（对齐旧 `handleBindSession` L1571-1726 顺序）
 //!
-//! `UPGRADE_REQUIRED`（协议版本过旧）→ `BIND_REQUEST_ID_REQUIRED` →
+//! `UNSUPPORTED_PROTOCOL_VERSION`（必须精确为 v4）→ `BIND_REQUEST_ID_REQUIRED` →
 //! `BINDING_EPOCH_REQUIRED`（<1）→ `SESSION_NOT_FOUND` / `BIND_RECOVERY_FAILED`
 //! （DB 读失败）→ `STALE_BINDING_EPOCH`（hub 单调校验）→ 成功：
 //! `session_restored` 直发 + pending 按序重放。
@@ -125,6 +125,7 @@ async fn dispatch(state: &AppState, conn_id: &str, msg: ClientMessage) {
             bind_request_id,
             binding_epoch,
             protocol_version,
+            after_event_id,
         } => {
             handle_bind(
                 state,
@@ -133,6 +134,7 @@ async fn dispatch(state: &AppState, conn_id: &str, msg: ClientMessage) {
                 &bind_request_id,
                 binding_epoch,
                 protocol_version,
+                after_event_id,
             )
             .await;
         }
@@ -701,6 +703,7 @@ async fn handle_bind(
     bind_request_id: &str,
     binding_epoch: i64,
     protocol_version: i64,
+    after_event_id: Option<i64>,
 ) {
     let Some(client_epoch) = validate_bind_request(
         state,
@@ -712,8 +715,8 @@ async fn handle_bind(
         return;
     };
     // 4. 会话存在性（DB 读失败 → BIND_RECOVERY_FAILED，对齐旧 catch 路径）。
-    let mut detail = match state.db.get_session(session_id).await {
-        Ok(Some(detail)) => detail,
+    let mut restore_snapshot = match state.db.get_session_runtime_restore(session_id).await {
+        Ok(Some(snapshot)) => snapshot,
         Ok(None) => {
             reply_protocol_error(
                 state,
@@ -741,7 +744,7 @@ async fn handle_bind(
         return;
     }
     // 6. 存量会话若引用已下线模型，恢复到当前有效默认模型并持久化。
-    if let Err(err) = recover_retired_session_model(state, &mut detail).await {
+    if let Err(err) = recover_retired_session_model(state, &mut restore_snapshot.detail).await {
         tracing::error!(conn_id, session_id, error = %err, "bind session model recovery failed");
         reply_protocol_error(
             state,
@@ -776,13 +779,26 @@ async fn handle_bind(
     };
     // 8. 成功：session_restored 直发（pushToPrincipal 语义，不带路由字段）
     //    + pending critical 按序重放（对齐旧 getPrincipalsForSession 语义）。
+    let snapshot_event_id = restore_snapshot.snapshot_event_seq;
     let restored = restore::build_session_restored(
-        detail,
+        restore_snapshot,
         Some(bind_request_id.to_owned()),
         epoch,
         state.authz.modes.get_mode(session_id),
     );
     state.hub.push_direct(conn_id, restored);
+    if after_event_id.is_some_and(|cursor| cursor < 0) {
+        tracing::warn!(
+            conn_id,
+            session_id,
+            ?after_event_id,
+            "negative WS replay cursor ignored"
+        );
+    }
+    // The authoritative snapshot covers every event through this high-water
+    // mark. Replaying only the snapshot-to-bind delta prevents duplicate state
+    // application even when an untrusted client cursor is ahead of the server.
+    replay_persisted_events(state, conn_id, session_id, snapshot_event_id).await;
     let replayed = state.hub.replay_pending(session_id).await;
     if replayed > 0 {
         tracing::info!(
@@ -798,6 +814,54 @@ async fn handle_bind(
     replay_pending_interactions(state, conn_id, session_id).await;
 }
 
+async fn replay_persisted_events(
+    state: &AppState,
+    conn_id: &str,
+    session_id: &str,
+    after_event_id: i64,
+) {
+    let events = match state
+        .db
+        .get_ws_outbox_events_after(session_id, after_event_id.max(0))
+        .await
+    {
+        Ok(events) => events,
+        Err(error) => {
+            tracing::error!(conn_id, session_id, %error, "durable WS replay query failed");
+            return;
+        }
+    };
+    for event in events {
+        let message: ServerMessage = match serde_json::from_value(event.payload) {
+            Ok(message) => message,
+            Err(error) => {
+                tracing::error!(event_id = event.id, %error, "invalid durable WS replay payload");
+                continue;
+            }
+        };
+        let context = zk_protocol::RuntimeEventContext::durable(event.id.to_string()).with_actor(
+            Some(event.root_session_id),
+            Some(event.root_task_id),
+            Some(event.root_run_id),
+            Some(event.source_task_id),
+            Some(event.source_run_id),
+            event.tool_use_id,
+        );
+        if !state
+            .hub
+            .push_replay_direct(conn_id, message, event.ts, context)
+        {
+            tracing::warn!(
+                conn_id,
+                session_id,
+                event_id = event.id,
+                "durable WS replay stopped"
+            );
+            break;
+        }
+    }
+}
+
 /// 校验 bind 的协议版本、请求 ID 与 epoch 基本形状。
 fn validate_bind_request(
     state: &AppState,
@@ -806,11 +870,12 @@ fn validate_bind_request(
     binding_epoch: i64,
     protocol_version: i64,
 ) -> Option<u64> {
-    if protocol_version < WS_PROTOCOL_VERSION {
+    // v4 是一次性硬切：未来版本也不能被当前服务端误当成兼容版本接受。
+    if protocol_version != i64::from(WS_PROTOCOL_VERSION) {
         reply_protocol_error(
             state,
             conn_id,
-            "UPGRADE_REQUIRED".to_owned(),
+            "UNSUPPORTED_PROTOCOL_VERSION".to_owned(),
             Some(bind_request_id.to_owned()),
             None,
         );
@@ -911,7 +976,12 @@ async fn replay_pending_interactions(state: &AppState, conn_id: &str, session_id
             Ok(view) => {
                 state
                     .hub
-                    .push(session_id, ServerMessage::InteractionCreated { view })
+                    .push_runtime_event(
+                        &state.db,
+                        session_id,
+                        session_id,
+                        ServerMessage::InteractionCreated { view },
+                    )
                     .await;
             }
             Err(error) => tracing::warn!(
@@ -1140,7 +1210,7 @@ fn reply_protocol_error(
         conn_id,
         ServerMessage::ProtocolError {
             code,
-            supported_version: WS_PROTOCOL_VERSION,
+            supported_version: i64::from(WS_PROTOCOL_VERSION),
             bind_request_id,
             binding_epoch,
         },
@@ -1189,6 +1259,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bind_requires_exact_v4_protocol() {
+        let state = strict_state();
+        let mut receiver = register_test_connection(&state, "conn-v4-only");
+
+        assert!(validate_bind_request(&state, "conn-v4-only", "old", 1, 3).is_none());
+        let crate::ws::hub::OutboundFrame::Text(old_error) =
+            receiver.recv().await.expect("v3 protocol error")
+        else {
+            panic!("expected text frame");
+        };
+        let old_error: serde_json::Value = serde_json::from_str(&old_error).expect("v3 error json");
+        assert_eq!(old_error["code"], "UNSUPPORTED_PROTOCOL_VERSION");
+        assert_eq!(old_error["supportedVersion"], 4);
+
+        assert!(validate_bind_request(&state, "conn-v4-only", "future", 1, 5).is_none());
+        let crate::ws::hub::OutboundFrame::Text(future_error) =
+            receiver.recv().await.expect("future protocol error")
+        else {
+            panic!("expected text frame");
+        };
+        let future_error: serde_json::Value =
+            serde_json::from_str(&future_error).expect("future error json");
+        assert_eq!(future_error["code"], "UNSUPPORTED_PROTOCOL_VERSION");
+
+        assert_eq!(
+            validate_bind_request(
+                &state,
+                "conn-v4-only",
+                "current",
+                1,
+                i64::from(WS_PROTOCOL_VERSION),
+            ),
+            Some(1)
+        );
+    }
+
+    #[tokio::test]
     async fn bind_replaces_and_persists_a_retired_session_model() {
         let state = strict_state();
         let session = state
@@ -1204,7 +1311,8 @@ mod tests {
             &session.id,
             "bind-1",
             1,
-            WS_PROTOCOL_VERSION,
+            i64::from(WS_PROTOCOL_VERSION),
+            None,
         )
         .await;
 
@@ -1247,7 +1355,8 @@ mod tests {
             &session.id,
             "bind-1",
             2,
-            WS_PROTOCOL_VERSION,
+            i64::from(WS_PROTOCOL_VERSION),
+            None,
         )
         .await;
         receiver.recv().await.expect("initial restore");
@@ -1263,7 +1372,8 @@ mod tests {
             &session.id,
             "bind-2",
             2,
-            WS_PROTOCOL_VERSION,
+            i64::from(WS_PROTOCOL_VERSION),
+            None,
         )
         .await;
 
@@ -1381,7 +1491,8 @@ mod tests {
                 session_id: empty(),
                 bind_request_id: empty(),
                 binding_epoch: 1,
-                protocol_version: 3,
+                protocol_version: i64::from(WS_PROTOCOL_VERSION),
+                after_event_id: None,
             }
             .kind(),
             M::InteractionAck {

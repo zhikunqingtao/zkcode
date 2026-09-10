@@ -47,7 +47,7 @@ use crate::error::McpProtocolError;
 use crate::jsonrpc::{
     IncomingMessage, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, RequestId,
 };
-use crate::transport::{McpTransport, NotificationHandler, timeout_or_default};
+use crate::transport::{DisconnectCallback, McpTransport, NotificationHandler, timeout_or_default};
 
 /// SIGTERM → SIGKILL 宽限期（对照 Java `process.waitFor(5, SECONDS)`）。
 const TERMINATE_GRACE: Duration = Duration::from_secs(5);
@@ -61,6 +61,7 @@ struct StdioShared {
     connected: AtomicBool,
     pending: Mutex<HashMap<String, Pending>>,
     notification_handler: RwLock<Option<NotificationHandler>>,
+    disconnect_callback: RwLock<Option<DisconnectCallback>>,
 }
 
 impl StdioShared {
@@ -82,6 +83,41 @@ impl StdioShared {
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    fn mark_disconnected(&self, message: &str, notify: bool) {
+        let was_connected = self.connected.swap(false, Ordering::AcqRel);
+        self.fail_all_pending(message);
+        if was_connected && notify {
+            let callback = self
+                .disconnect_callback
+                .read()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
+            if let Some(callback) = callback {
+                callback();
+            }
+        }
+    }
+}
+
+/// Drop cleanup covers task cancellation in addition to the explicit
+/// response/error/timeout branches.
+struct PendingGuard<'a> {
+    shared: &'a StdioShared,
+    key: String,
+}
+
+impl<'a> PendingGuard<'a> {
+    fn insert(shared: &'a StdioShared, key: String, sender: Pending) -> Self {
+        lock(&shared.pending).insert(key.clone(), sender);
+        Self { shared, key }
+    }
+}
+
+impl Drop for PendingGuard<'_> {
+    fn drop(&mut self) {
+        self.shared.take_pending(&self.key);
     }
 }
 
@@ -148,6 +184,10 @@ impl StdioTransport {
 }
 
 impl McpTransport for StdioTransport {
+    fn next_request_id(&self) -> RequestId {
+        RequestId::Number(self.request_id.fetch_add(1, Ordering::SeqCst))
+    }
+
     fn connect(&self) -> BoxFuture<'_, Result<(), McpProtocolError>> {
         Box::pin(async move {
             let mut builder = Command::new(&self.command);
@@ -190,6 +230,7 @@ impl McpTransport for StdioTransport {
 
     fn send_request<'a>(
         &'a self,
+        request_id: RequestId,
         method: &'a str,
         params: Option<Value>,
         timeout: Duration,
@@ -198,18 +239,16 @@ impl McpTransport for StdioTransport {
             if !self.shared.connected.load(Ordering::SeqCst) {
                 return Err(McpProtocolError::not_initialized("STDIO not connected"));
             }
-            let id = self.request_id.fetch_add(1, Ordering::SeqCst);
-            let key = id.to_string();
-            let request = JsonRpcRequest::new(RequestId::Number(id), method, params);
+            let key = request_id.as_key();
+            let request = JsonRpcRequest::new(request_id, method, params);
             let payload = serde_json::to_string(&request).map_err(|error| {
                 McpProtocolError::wrapped(format!("STDIO communication error: {error}"))
             })?;
 
             let (tx, rx) = oneshot::channel();
-            lock(&self.shared.pending).insert(key.clone(), tx);
+            let _pending = PendingGuard::insert(&self.shared, key, tx);
 
             if let Err(error) = self.write_line(&payload).await {
-                self.shared.take_pending(&key);
                 return Err(McpProtocolError::wrapped(format!(
                     "STDIO communication error: {error}"
                 )));
@@ -220,12 +259,9 @@ impl McpTransport for StdioTransport {
                 Ok(Err(_)) => Err(McpProtocolError::wrapped(
                     "STDIO communication error: response channel closed",
                 )),
-                Err(_) => {
-                    self.shared.take_pending(&key);
-                    Err(McpProtocolError::timeout(format!(
-                        "STDIO timeout: {method}"
-                    )))
-                }
+                Err(_) => Err(McpProtocolError::timeout(format!(
+                    "STDIO timeout: {method}"
+                ))),
             }
         })
     }
@@ -291,9 +327,17 @@ impl McpTransport for StdioTransport {
             .unwrap_or_else(PoisonError::into_inner) = Some(handler);
     }
 
+    fn set_disconnect_callback(&self, callback: DisconnectCallback) {
+        *self
+            .shared
+            .disconnect_callback
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = Some(callback);
+    }
+
     fn close(&self) -> BoxFuture<'_, ()> {
         Box::pin(async move {
-            self.shared.connected.store(false, Ordering::SeqCst);
+            self.shared.mark_disconnected("Transport closed", false);
             let child = self.child_slot().take();
             if let Some(mut child) = child {
                 terminate(&mut child).await;
@@ -302,7 +346,6 @@ impl McpTransport for StdioTransport {
             for task in lock(&self.tasks).drain(..) {
                 task.abort();
             }
-            self.shared.fail_all_pending("Transport closed");
         })
     }
 }
@@ -330,8 +373,7 @@ async fn read_loop(stdout: Option<ChildStdout>, shared: Arc<StdioShared>) {
     }
     // stdout 关闭 = 再也收不到响应（进程退出或自行关流）：立刻置断连并失败掉
     // 全部等待者，而非让每个请求各等满自己的超时。
-    shared.connected.store(false, Ordering::SeqCst);
-    shared.fail_all_pending("STDIO stream closed");
+    shared.mark_disconnected("STDIO stream closed", true);
 }
 
 /// 分发一行 JSON-RPC 文本。
@@ -463,7 +505,12 @@ mod tests {
         assert!(transport.is_connected());
 
         let result = transport
-            .send_request("tools/list", Some(json!({})), Duration::from_secs(5))
+            .send_request(
+                transport.next_request_id(),
+                "tools/list",
+                Some(json!({})),
+                Duration::from_secs(5),
+            )
             .await
             .expect("request");
         assert_eq!(result, Some(json!({"tools": []})));
@@ -472,10 +519,16 @@ mod tests {
 
         // 第二次请求的 id 自增，仍能正确匹配。
         let second = transport
-            .send_request("tools/list", None, Duration::from_secs(5))
+            .send_request(
+                transport.next_request_id(),
+                "tools/list",
+                None,
+                Duration::from_secs(5),
+            )
             .await
             .expect("request");
         assert_eq!(second, Some(json!({"tools": []})));
+        assert!(lock(&transport.shared.pending).is_empty());
 
         transport.close().await;
         assert!(!transport.is_connected());
@@ -485,7 +538,12 @@ mod tests {
     async fn request_before_connect_is_server_not_initialized() {
         let transport = StdioTransport::new(&script_config("cat"));
         let error = transport
-            .send_request("tools/list", None, Duration::from_secs(1))
+            .send_request(
+                transport.next_request_id(),
+                "tools/list",
+                None,
+                Duration::from_secs(1),
+            )
             .await
             .expect_err("must fail");
         assert_eq!(error.code(), SERVER_NOT_INITIALIZED);
@@ -497,11 +555,45 @@ mod tests {
         let transport = StdioTransport::new(&script_config("cat > /dev/null"));
         transport.connect().await.expect("connect");
         let error = transport
-            .send_request("tools/list", None, Duration::from_millis(150))
+            .send_request(
+                transport.next_request_id(),
+                "tools/list",
+                None,
+                Duration::from_millis(150),
+            )
             .await
             .expect_err("must time out");
         assert_eq!(error.code(), REQUEST_TIMEOUT);
         assert_eq!(error.message(), "STDIO timeout: tools/list");
+        assert!(lock(&transport.shared.pending).is_empty());
+        transport.close().await;
+    }
+
+    #[tokio::test]
+    async fn cancelling_request_future_removes_pending_entry() {
+        let transport = Arc::new(StdioTransport::new(&script_config("cat > /dev/null")));
+        transport.connect().await.expect("connect");
+        let caller = Arc::clone(&transport);
+        let handle = tokio::spawn(async move {
+            caller
+                .send_request(
+                    caller.next_request_id(),
+                    "tools/list",
+                    None,
+                    Duration::from_secs(30),
+                )
+                .await
+        });
+        for _ in 0..50 {
+            if lock(&transport.shared.pending).len() == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(lock(&transport.shared.pending).len(), 1);
+        handle.abort();
+        let _ = handle.await;
+        assert!(lock(&transport.shared.pending).is_empty());
         transport.close().await;
     }
 
@@ -514,11 +606,17 @@ mod tests {
         let transport = StdioTransport::new(&script_config(&script));
         transport.connect().await.expect("connect");
         let error = transport
-            .send_request("nope", None, Duration::from_secs(5))
+            .send_request(
+                transport.next_request_id(),
+                "nope",
+                None,
+                Duration::from_secs(5),
+            )
             .await
             .expect_err("must fail");
         assert_eq!(error.code(), -32601);
         assert_eq!(error.message(), "Method not found: nope");
+        assert!(lock(&transport.shared.pending).is_empty());
         transport.close().await;
     }
 
@@ -551,10 +649,41 @@ mod tests {
         }
         assert!(!transport.is_connected());
         let error = transport
-            .send_request("tools/list", None, Duration::from_secs(1))
+            .send_request(
+                transport.next_request_id(),
+                "tools/list",
+                None,
+                Duration::from_secs(1),
+            )
             .await
             .expect_err("must fail");
         assert_eq!(error.code(), SERVER_NOT_INITIALIZED);
+        transport.close().await;
+    }
+
+    #[tokio::test]
+    async fn process_exit_fails_and_cleans_inflight_request() {
+        let transport = StdioTransport::new(&script_config("IFS= read -r line; exit 0"));
+        let disconnects = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&disconnects);
+        transport.set_disconnect_callback(Arc::new(move || {
+            seen.fetch_add(1, Ordering::SeqCst);
+        }));
+        transport.connect().await.expect("connect");
+
+        let error = transport
+            .send_request(
+                transport.next_request_id(),
+                "tools/list",
+                None,
+                Duration::from_secs(5),
+            )
+            .await
+            .expect_err("process exit must fail request");
+
+        assert_eq!(error.code(), crate::error::INTERNAL_ERROR);
+        assert!(lock(&transport.shared.pending).is_empty());
+        assert_eq!(disconnects.load(Ordering::SeqCst), 1);
         transport.close().await;
     }
 

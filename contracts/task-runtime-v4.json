@@ -1,0 +1,304 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "contract": "zkcode.taskRuntime",
+  "protocolVersion": 4,
+  "fieldNaming": "lowerCamelCase",
+  "statuses": {
+    "taskStatus": {
+      "type": "string",
+      "rustType": "TaskStatus",
+      "typescriptType": "RuntimeTaskStatus",
+      "invalidCode": "TASK_STATUS_CORRUPT",
+      "enum": ["queued", "running", "waitingDependencies", "waitingInteraction", "cancelling", "needsAttention", "succeeded", "partial", "failed", "cancelled"],
+      "values": [
+        { "wire": "queued", "rust": "Queued" },
+        { "wire": "running", "rust": "Running" },
+        { "wire": "waitingDependencies", "rust": "WaitingDependencies" },
+        { "wire": "waitingInteraction", "rust": "WaitingInteraction" },
+        { "wire": "cancelling", "rust": "Cancelling" },
+        { "wire": "needsAttention", "rust": "NeedsAttention" },
+        { "wire": "succeeded", "rust": "Succeeded", "terminal": true },
+        { "wire": "partial", "rust": "Partial", "terminal": true },
+        { "wire": "failed", "rust": "Failed", "terminal": true },
+        { "wire": "cancelled", "rust": "Cancelled", "terminal": true }
+      ]
+    },
+    "runStatus": {
+      "type": "string",
+      "rustType": "RunStatus",
+      "typescriptType": "RuntimeRunStatus",
+      "invalidCode": "RUN_STATUS_CORRUPT",
+      "enum": ["queued", "running", "waitingDependencies", "waitingInteraction", "cancelling", "completed", "failed", "cancelled", "interrupted"],
+      "values": [
+        { "wire": "queued", "rust": "Queued" },
+        { "wire": "running", "rust": "Running" },
+        { "wire": "waitingDependencies", "rust": "WaitingDependencies" },
+        { "wire": "waitingInteraction", "rust": "WaitingInteraction" },
+        { "wire": "cancelling", "rust": "Cancelling" },
+        { "wire": "completed", "rust": "Completed", "terminal": true },
+        { "wire": "failed", "rust": "Failed", "terminal": true },
+        { "wire": "cancelled", "rust": "Cancelled", "terminal": true },
+        { "wire": "interrupted", "rust": "Interrupted", "terminal": true }
+      ]
+    },
+    "resultStatus": {
+      "type": "string",
+      "rustType": "ResultStatus",
+      "typescriptType": "RuntimeResultStatus",
+      "invalidCode": "RESULT_STATUS_CORRUPT",
+      "enum": ["complete", "partial", "error", "cancelled"],
+      "values": [
+        { "wire": "complete", "rust": "Complete" },
+        { "wire": "partial", "rust": "Partial" },
+        { "wire": "error", "rust": "Error" },
+        { "wire": "cancelled", "rust": "Cancelled" }
+      ]
+    },
+    "cleanupStatus": {
+      "type": "string",
+      "rustType": "CleanupStatus",
+      "typescriptType": "RuntimeCleanupStatus",
+      "invalidCode": "CLEANUP_STATUS_CORRUPT",
+      "enum": ["notRequired", "pending", "confirmed", "unconfirmed"],
+      "values": [
+        { "wire": "notRequired", "rust": "NotRequired" },
+        { "wire": "pending", "rust": "Pending" },
+        { "wire": "confirmed", "rust": "Confirmed" },
+        { "wire": "unconfirmed", "rust": "Unconfirmed" }
+      ]
+    },
+    "verificationStatus": {
+      "type": "string",
+      "rustType": "VerificationStatus",
+      "typescriptType": "RuntimeVerificationStatus",
+      "invalidCode": "VERIFICATION_STATUS_CORRUPT",
+      "enum": ["notRequested", "pending", "passed", "failed", "stale", "blocked"],
+      "values": [
+        { "wire": "notRequested", "rust": "NotRequested" },
+        { "wire": "pending", "rust": "Pending" },
+        { "wire": "passed", "rust": "Passed" },
+        { "wire": "failed", "rust": "Failed" },
+        { "wire": "stale", "rust": "Stale" },
+        { "wire": "blocked", "rust": "Blocked" }
+      ]
+    },
+    "exitReason": {
+      "type": "string",
+      "rustType": "ExitReason",
+      "typescriptType": "RuntimeExitReason",
+      "invalidCode": "RUN_EXIT_REASON_INVALID",
+      "enum": ["modelFinished", "timeout", "maxTurns", "budgetExhausted", "providerError", "toolError", "userCancelled", "parentCancelled", "serviceRestart", "internalError"],
+      "values": [
+        { "wire": "modelFinished", "rust": "ModelFinished" },
+        { "wire": "timeout", "rust": "Timeout" },
+        { "wire": "maxTurns", "rust": "MaxTurns" },
+        { "wire": "budgetExhausted", "rust": "BudgetExhausted" },
+        { "wire": "providerError", "rust": "ProviderError" },
+        { "wire": "toolError", "rust": "ToolError" },
+        { "wire": "userCancelled", "rust": "UserCancelled" },
+        { "wire": "parentCancelled", "rust": "ParentCancelled" },
+        { "wire": "serviceRestart", "rust": "ServiceRestart" },
+        { "wire": "internalError", "rust": "InternalError" }
+      ]
+    }
+  },
+  "$defs": {
+    "taskId": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      "description": "Canonical UUID v4 task ID"
+    }
+  },
+  "responses": {
+    "success": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "taskId": { "$ref": "#/$defs/taskId" },
+        "runId": { "type": ["string", "null"] },
+        "parentTaskId": { "type": ["string", "null"] },
+        "status": { "$ref": "#/statuses/taskStatus" },
+        "reason": { "type": ["string", "null"] },
+        "resultVersion": { "type": ["integer", "null"], "minimum": 1 },
+        "partial": { "type": "boolean" },
+        "resultRef": { "type": ["string", "null"] },
+        "usageSummary": { "type": "object", "additionalProperties": true },
+        "cleanupStatus": { "$ref": "#/statuses/cleanupStatus" },
+        "waitExpired": { "type": "boolean" }
+      },
+      "required": [
+        "taskId",
+        "runId",
+        "parentTaskId",
+        "status",
+        "reason",
+        "resultVersion",
+        "partial",
+        "resultRef",
+        "usageSummary",
+        "cleanupStatus",
+        "waitExpired"
+      ]
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "code": { "type": "string" },
+        "message": { "type": "string" },
+        "retryable": { "type": "boolean" },
+        "details": { "type": "object", "additionalProperties": true }
+      },
+      "required": ["code", "message", "retryable", "details"]
+    }
+  },
+  "tools": {
+    "Agent": {
+      "legacyFields": ["run_in_background", "runInBackground", "block", "timeout"],
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "prompt": {
+            "type": "string",
+            "description": "Complete task description for the sub-agent"
+          },
+          "description": {
+            "type": "string",
+            "description": "Short 3-5 word description of the task"
+          },
+          "subagentType": {
+            "type": "string",
+            "enum": ["explore", "verification", "plan", "general-purpose", "guide"],
+            "description": "Type of sub-agent to use"
+          },
+          "model": {
+            "type": "string",
+            "description": "Model override for the sub-agent"
+          },
+          "waitMode": {
+            "type": "string",
+            "enum": ["terminal", "background"],
+            "default": "terminal",
+            "description": "Wait for the immutable terminal result or return a durable handle"
+          },
+          "isolation": {
+            "type": "string",
+            "enum": ["readOnly", "worktree", "sharedWorkspace"],
+            "default": "readOnly",
+            "description": "Filesystem isolation; sharedWorkspace is capability-gated"
+          }
+        },
+        "required": ["prompt"]
+      }
+    },
+    "TaskCreate": {
+      "legacyFields": ["run_in_background", "runInBackground", "block", "timeout"],
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "description": { "type": "string", "description": "Task description" },
+          "prompt": { "type": "string", "description": "Task prompt / instructions" },
+          "taskType": {
+            "type": "string",
+            "enum": ["agent"],
+            "default": "agent",
+            "description": "V4 currently supports attached agent tasks only"
+          }
+        },
+        "required": ["description", "prompt", "taskType"]
+      }
+    },
+    "TaskGet": {
+      "legacyFields": [],
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "taskId": { "$ref": "#/$defs/taskId" }
+        },
+        "required": ["taskId"]
+      }
+    },
+    "TaskList": {
+      "legacyFields": [],
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "status": { "$ref": "#/statuses/taskStatus" }
+        }
+      }
+    },
+    "TaskOutput": {
+      "legacyFields": ["block", "timeout"],
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "taskId": { "$ref": "#/$defs/taskId" },
+          "waitMs": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 30000,
+            "default": 0,
+            "description": "Maximum wait in milliseconds; expiry is a successful read"
+          },
+          "resultVersion": { "type": "integer", "minimum": 1 },
+          "cursor": { "type": "string", "description": "Opaque pagination cursor" },
+          "maxBytes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65536,
+            "default": 65536
+          }
+        },
+        "required": ["taskId"]
+      }
+    },
+    "TaskStop": {
+      "legacyFields": ["reason"],
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "taskId": { "$ref": "#/$defs/taskId" }
+        },
+        "required": ["taskId"]
+      }
+    },
+    "TaskUpdate": {
+      "legacyFields": ["status", "output", "error"],
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "taskId": { "$ref": "#/$defs/taskId" },
+          "description": { "type": "string", "description": "Updated task description" },
+          "plan": { "type": "string", "description": "Advisory execution plan" },
+          "reportedProgress": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description": "Advisory progress only; cannot change lifecycle state"
+          }
+        },
+        "required": ["taskId"]
+      }
+    },
+    "SendMessage": {
+      "legacyFields": ["to"],
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "taskId": { "$ref": "#/$defs/taskId" },
+          "message": { "type": "string", "maxLength": 32768 }
+        },
+        "required": ["taskId", "message"]
+      }
+    }
+  }
+}

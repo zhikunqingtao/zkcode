@@ -42,10 +42,14 @@ pub const METHOD_INITIALIZED: &str = "notifications/initialized";
 pub const METHOD_TOOLS_LIST: &str = "tools/list";
 /// `tools/call` — 工具调用。
 pub const METHOD_TOOLS_CALL: &str = "tools/call";
+/// `notifications/tools/list_changed` — 服务端工具目录失效通知（入站）。
+pub const METHOD_TOOLS_LIST_CHANGED: &str = "notifications/tools/list_changed";
 /// `resources/list` — 资源发现。
 pub const METHOD_RESOURCES_LIST: &str = "resources/list";
 /// `resources/read` — 资源读取。
 pub const METHOD_RESOURCES_READ: &str = "resources/read";
+/// `notifications/resources/list_changed` — 服务端资源目录失效通知（入站）。
+pub const METHOD_RESOURCES_LIST_CHANGED: &str = "notifications/resources/list_changed";
 /// `prompts/list` — prompt 模板发现。
 pub const METHOD_PROMPTS_LIST: &str = "prompts/list";
 /// `prompts/get` — prompt 模板渲染。
@@ -239,6 +243,23 @@ impl RootsProvider {
 pub trait ProgressTracker: Send + Sync {
     /// 注册 progressToken 与会话/服务器/工具的关联（token 为空则忽略）。
     fn register_progress(&self, token: &str, session_id: &str, server_name: &str, tool_name: &str);
+
+    /// Register progress with the durable execution identity of the physical
+    /// tool invocation. Implementations that do not project progress events can
+    /// keep the compatibility hook above; production trackers override this so
+    /// notifications cannot lose Run/tool ownership.
+    fn register_progress_with_context(
+        &self,
+        token: &str,
+        session_id: &str,
+        server_name: &str,
+        tool_name: &str,
+        run_id: Option<&str>,
+        tool_use_id: Option<&str>,
+    ) {
+        let _ = (run_id, tool_use_id);
+        self.register_progress(token, session_id, server_name, tool_name);
+    }
 
     /// 注销 progressToken（调用结束，无论成败）。
     fn unregister_progress(&self, token: &str);

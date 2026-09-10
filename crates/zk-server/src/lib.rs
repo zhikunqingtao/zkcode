@@ -65,6 +65,7 @@ pub mod authz;
 pub mod command;
 pub mod config;
 pub mod cost;
+pub mod cron_runtime;
 mod demo_credentials;
 pub mod engine_bridge;
 pub mod error;
@@ -73,9 +74,11 @@ pub mod http_fetch;
 pub mod http_search;
 pub mod interaction;
 pub mod iso;
+pub mod logging;
 pub mod mcp;
 pub mod mcp_search;
 pub mod mcp_tools;
+mod memory_store;
 pub mod metrics_recorder;
 pub mod middleware;
 pub mod network;
@@ -83,6 +86,7 @@ pub mod oss_trust;
 pub mod python;
 pub mod routes;
 pub mod run_termination;
+pub mod runtime_health_metrics;
 pub mod session_access;
 pub mod skill;
 pub mod snapshot_sink;
@@ -92,9 +96,23 @@ pub mod tool_catalog;
 pub mod workspace;
 pub mod ws;
 
+/// Git revision embedded into this exact backend/frontend protocol build.
+pub const BUILD_GIT_SHA: &str = env!("ZK_BUILD_GIT_SHA");
+/// Build timestamp as Unix seconds.
+pub const BUILD_UNIX_SECONDS: &str = env!("ZK_BUILD_UNIX_SECONDS");
+/// Greenfield database schema baseline shipped by this binary.
+pub const DB_SCHEMA_VERSION: u16 = zk_db::GREENFIELD_SCHEMA_VERSION;
+
 /// 打印 zk-server 版本号（取 `CARGO_PKG_VERSION`，随 workspace 版本统一）。
 pub fn print_version() {
-    println!("zk-server {}", env!("CARGO_PKG_VERSION"));
+    println!(
+        "zk-server {} (git {}, built {}, schema {}, ws {})",
+        env!("CARGO_PKG_VERSION"),
+        BUILD_GIT_SHA,
+        BUILD_UNIX_SECONDS,
+        DB_SCHEMA_VERSION,
+        zk_protocol::WS_PROTOCOL_VERSION,
+    );
 }
 
 /// 占位冒烟：验证 crate 编译、workspace lints 接线与 test harness 加载。

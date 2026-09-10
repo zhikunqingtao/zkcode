@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { runtimeEnvelope } from '@/test/runtimeEnvelope';
 import { bindSessionAndWait, dispatch, resetBoundSession } from '@/api/dispatch';
 import { useAppUiStore } from '@/store/appUiStore';
 import { useCostStore } from '@/store/costStore';
@@ -21,7 +22,8 @@ async function bindSession(sessionId: string): Promise<void> {
     let payload: BindPayload | undefined;
     const bound = bindSessionAndWait(sessionId, value => { payload = value; });
     dispatch({
-        type: 'session_restored', bindRequestId: payload!.bindRequestId, protocolVersion: 3,
+            ...runtimeEnvelope(),
+        type: 'session_restored', bindRequestId: payload!.bindRequestId, protocolVersion: 4,
         bindingEpoch: payload!.bindingEpoch, messages: [],
         metadata: { sessionId, model: 'model', permissionMode: 'DEFAULT', status: 'idle' },
     } as never);
@@ -69,6 +71,7 @@ describe('interaction_updated / interaction_terminal dispatch', () => {
 
             // 非豁免消息被恢复门暂存，不立即生效。
             dispatch({
+            ...runtimeEnvelope(),
                 type: 'cost_update', sessionCost: 7, totalCost: 9,
                 usage: { inputTokens: 1, outputTokens: 1, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 },
             } as never);
@@ -78,6 +81,7 @@ describe('interaction_updated / interaction_terminal dispatch', () => {
             const serverNow = Date.now();
             const before = Date.now();
             dispatch({
+            ...runtimeEnvelope(),
                 type: 'interaction_updated', interactionId: 'perm-1',
                 decisionDeadlineAt: serverNow + 30_000, serverNow, version: 2,
             } as never);
@@ -90,7 +94,8 @@ describe('interaction_updated / interaction_terminal dispatch', () => {
 
             // 关门后暂存帧按序重放，证明上面的 cost_update 是被暂存而非丢弃。
             dispatch({
-                type: 'session_restored', bindRequestId: gatePayload!.bindRequestId, protocolVersion: 3,
+            ...runtimeEnvelope(),
+                type: 'session_restored', bindRequestId: gatePayload!.bindRequestId, protocolVersion: 4,
                 bindingEpoch: gatePayload!.bindingEpoch, messages: [],
                 metadata: { sessionId: 'session-live', model: 'model', permissionMode: 'DEFAULT', status: 'idle' },
             } as never);
@@ -110,6 +115,7 @@ describe('interaction_updated / interaction_terminal dispatch', () => {
         const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
         try {
             dispatch({
+            ...runtimeEnvelope(),
                 type: 'interaction_updated', interactionId: 'perm-1',
                 decisionDeadlineAt: 'not-a-timestamp', serverNow: Date.now(), version: 5,
             } as never);
@@ -134,6 +140,7 @@ describe('interaction_updated / interaction_terminal dispatch', () => {
         const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
         try {
             dispatch({
+            ...runtimeEnvelope(),
                 type: 'interaction_updated', interactionId: 'perm-1',
                 serverNow: Date.now(), version: 6,
             } as never);
@@ -156,6 +163,7 @@ describe('interaction_updated / interaction_terminal dispatch', () => {
         });
 
         dispatch({
+            ...runtimeEnvelope(),
             type: 'interaction_terminal', interactionId: 'perm-1', interactionType: 'permission',
         } as never);
 
@@ -169,24 +177,66 @@ describe('interaction_updated / interaction_terminal dispatch', () => {
         });
 
         dispatch({
+            ...runtimeEnvelope(),
             type: 'interaction_terminal', interactionId: 'elic-other', interactionType: 'elicitation',
         } as never);
         expect(useAppUiStore.getState().elicitationDialog?.interactionId).toBe('elic-1');
 
         dispatch({
+            ...runtimeEnvelope(),
             type: 'interaction_terminal', interactionId: 'elic-1', interactionType: 'elicitation',
         } as never);
         expect(useAppUiStore.getState().elicitationDialog).toBeNull();
+    });
+
+    it('restores only root tools while attached child diagnostics stay out of chat', async () => {
+        let payload: BindPayload | undefined;
+        const bound = bindSessionAndWait('session-waiting', value => { payload = value; });
+        dispatch({
+            ...runtimeEnvelope(),
+            type: 'session_restored', bindRequestId: payload!.bindRequestId, protocolVersion: 4,
+            bindingEpoch: payload!.bindingEpoch, messages: [],
+            metadata: { sessionId: 'session-waiting', model: 'model', permissionMode: 'DEFAULT', status: 'idle' },
+            runSnapshot: {
+                id: 'root-run', status: 'waitingDependencies', verificationStatus: 'notRequested',
+            },
+            snapshotEventSeq: 8,
+            activeToolCalls: [
+                {
+                    toolUseId: 'root-agent', toolName: 'Agent', input: {},
+                    eventContext: {
+                        protocolVersion: 4, eventId: 'snapshot:root-run:root-agent',
+                        sessionId: 'session-waiting', taskId: 'root-task', runId: 'root-run',
+                        sourceTaskId: 'root-task', sourceRunId: 'root-run', toolUseId: 'root-agent',
+                    },
+                },
+                {
+                    toolUseId: 'child-tool', toolName: 'WebFetch', input: { url: 'https://example.com' },
+                    eventContext: {
+                        protocolVersion: 4, eventId: 'snapshot:child-run:child-tool',
+                        sessionId: 'session-waiting', taskId: 'root-task', runId: 'root-run',
+                        sourceTaskId: 'child-task', sourceRunId: 'child-run', toolUseId: 'child-tool',
+                    },
+                },
+            ],
+        } as never);
+        await expect(bound).resolves.toBe(true);
+
+        const restored = Array.from(useMessageStore.getState().activeToolCalls.values());
+        expect(restored).toHaveLength(1);
+        expect(restored[0]?.toolUseId).toBe('root-agent');
+        expect(restored[0]?.runtimePartitionKey).toBe('sourceRun:root-run');
     });
 
     it('does not restore activeToolCalls when the run snapshot status is terminal', async () => {
         let payload: BindPayload | undefined;
         const bound = bindSessionAndWait('session-done', value => { payload = value; });
         dispatch({
-            type: 'session_restored', bindRequestId: payload!.bindRequestId, protocolVersion: 3,
+            ...runtimeEnvelope(),
+            type: 'session_restored', bindRequestId: payload!.bindRequestId, protocolVersion: 4,
             bindingEpoch: payload!.bindingEpoch, messages: [],
             metadata: { sessionId: 'session-done', model: 'model', permissionMode: 'DEFAULT', status: 'idle' },
-            runSnapshot: { id: 'run-done', status: 'COMPLETED' },
+            runSnapshot: { id: 'run-done', status: 'completed', verificationStatus: 'notRequested' },
             snapshotEventSeq: 7,
             activeToolCalls: [{ toolUseId: 'tool-done', toolName: 'Bash', input: { command: 'ls' } }],
         } as never);

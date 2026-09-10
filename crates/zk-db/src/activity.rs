@@ -56,6 +56,30 @@ fn row_to_json_object(row: &Row<'_>, columns: &[String]) -> rusqlite::Result<Val
     Ok(Value::Object(object))
 }
 
+/// Load one bounded activity page on an existing read transaction.
+///
+/// Keeping this helper inside the database crate lets compound projections (for
+/// example the Workbench snapshot) reuse the exact legacy row shape without
+/// opening a second reader and observing a different WAL snapshot.
+pub(crate) fn load_activities_by_session_paged_in_snapshot(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+    offset: i64,
+    limit: i64,
+) -> Result<Vec<Value>, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT * FROM activities WHERE session_id = ?1 \
+         ORDER BY timestamp DESC LIMIT ?2 OFFSET ?3",
+    )?;
+    let columns: Vec<String> = stmt.column_names().into_iter().map(str::to_owned).collect();
+    let rows = stmt
+        .query_map(params![session_id, limit, offset], |row| {
+            row_to_json_object(row, &columns)
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
 impl Db {
     /// 旧 `ActivityRepository.countBySessionId`（`SELECT COUNT(*) FROM
     /// activities WHERE session_id = ?`）：会话活动总数。只读路径。
@@ -92,17 +116,7 @@ impl Db {
     ) -> Result<Vec<Value>, DbError> {
         let session_id = session_id.to_owned();
         self.with_reader(move |conn| {
-            let mut stmt = conn.prepare(
-                "SELECT * FROM activities WHERE session_id = ?1 \
-                 ORDER BY timestamp DESC LIMIT ?2 OFFSET ?3",
-            )?;
-            let columns: Vec<String> = stmt.column_names().into_iter().map(str::to_owned).collect();
-            let rows = stmt
-                .query_map(params![session_id, limit, offset], |row| {
-                    row_to_json_object(row, &columns)
-                })?
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(rows)
+            load_activities_by_session_paged_in_snapshot(conn, &session_id, offset, limit)
         })
         .await
     }

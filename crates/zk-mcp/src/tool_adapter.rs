@@ -28,11 +28,10 @@
 //! - Caffeine `Cache` → [`ResultCache`]（`HashMap` + 惰性过期清理 + 满时淘汰
 //!   最早写入项）。Caffeine 的 W-TinyLFU 按访问频率淘汰，此处按写入时间淘汰
 //!   （200 条量级的降级缓存，淘汰策略差异无行为意义）；
-//! - `AbortContext.onAbortDo(...)` → [`ToolContext::cancel`] 的旁路监听任务：
-//!   取消触发时发 `notifications/cancelled`，**不**中断正在等待的请求
-//!   （与 Java 一致——Java 也只是发通知，等服务端回错误或请求超时）。
-//!   Java 因 `abortContextLookup` 是 `sessionId → AbortContext` 的查找而必须
-//!   `sessionId != null` 才注册；Rust 的取消令牌恒在上下文内，故无此门槛。
+//! - `AbortContext.onAbortDo(...)` → [`ToolContext::cancel`] 与请求 future 的
+//!   `select`：取消时以 transport 分配的真实 JSON-RPC id 发送
+//!   `notifications/cancelled`，随后立即丢弃请求 future。transport 的 pending
+//!   析构守卫与本模块的进度析构守卫同步清理两张在途表。
 //!
 //! 行为偏离（在 `docs/compatibility.md` 留痕）：
 //! 1. **错误码进正文**：Java `ToolResult.networkError(code, msg, NEVER, UNKNOWN)`
@@ -61,7 +60,10 @@ use std::time::{Duration, Instant};
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use zk_tools::{McpToolIdentity, Tool, ToolContext, ToolOutput};
+use zk_tools::{
+    ChildToolAccess, ExecutionResourceLease, ExecutionResourceTerminal, McpToolIdentity, Tool,
+    ToolContext, ToolOutput,
+};
 
 use crate::connection::{McpConnectionStatus, McpServerConnection};
 use crate::error::{McpProtocolError, REQUEST_TIMEOUT};
@@ -96,6 +98,10 @@ const CODE_CONNECTION_UNAVAILABLE: &str = "MCP_CONNECTION_UNAVAILABLE";
 const CODE_DEADLINE_EXCEEDED: &str = "MCP_CALL_DEADLINE_EXCEEDED";
 /// 协议错误的错误码（对照 Java `"MCP_PROTOCOL_ERROR"`）。
 const CODE_PROTOCOL_ERROR: &str = "MCP_PROTOCOL_ERROR";
+/// 服务端成功响应中明确标记的工具执行错误。
+const CODE_TOOL_ERROR: &str = "MCP_TOOL_ERROR";
+/// 本地取消码。
+const CODE_CALL_CANCELLED: &str = "MCP_CALL_CANCELLED";
 
 /// 实时性工具的名字关键词（对照 Java `isRealtimeTool()` 的六个 `contains`）。
 const REALTIME_KEYWORDS: [&str; 6] = ["search", "web", "fetch", "browse", "realtime", "live"];
@@ -238,6 +244,9 @@ pub struct McpToolAdapter {
     cache: Arc<ResultCache>,
     /// 授权链消费的 MCP 专属身份。
     identity: McpToolIdentity,
+    /// Trusted local policy for child-Agent exposure. Remote discovery cannot
+    /// opt itself in; the capability registry must set this explicitly.
+    child_access: ChildToolAccess,
 }
 
 impl std::fmt::Debug for McpToolAdapter {
@@ -290,6 +299,7 @@ impl McpToolAdapter {
                 domain_scope: None,
                 config_hash,
             },
+            child_access: ChildToolAccess::Denied,
         };
         adapter.description = adapter.resolve_description();
         adapter
@@ -329,6 +339,13 @@ impl McpToolAdapter {
         self.identity.domain_scope.clone_from(&domain);
         self.identity.resource_scope =
             domain.map(|domain| format!("mcp://{}/{}", self.identity.server_id, domain));
+        self
+    }
+
+    /// Apply the trusted local child-Agent exposure classification.
+    #[must_use]
+    pub fn with_child_access(mut self, access: ChildToolAccess) -> Self {
+        self.child_access = access;
         self
     }
 
@@ -482,6 +499,20 @@ impl McpToolAdapter {
         outcome: Result<Option<Value>, McpProtocolError>,
     ) -> ToolOutput {
         match outcome {
+            Ok(Some(result)) if result.get("isError").and_then(Value::as_bool) == Some(true) => {
+                // A JSON-RPC success envelope can still carry a failed MCP
+                // tool result.  It must never warm (or fall back through) the
+                // success cache.
+                ToolOutput {
+                    content: truncate_result(extract_text_content(Some(&result))),
+                    is_error: true,
+                    metadata: Some(json!({
+                        "mcpServer": self.connection.name(),
+                        "mcpTool": self.original_tool_name,
+                        "errorCode": CODE_TOOL_ERROR,
+                    })),
+                }
+            }
             Ok(result) => {
                 let content = truncate_result(extract_text_content(result.as_ref()));
                 if !self.is_realtime_tool() && !content.is_empty() {
@@ -528,6 +559,74 @@ impl McpToolAdapter {
         }
     }
 
+    async fn register_outbound_request(
+        &self,
+        ctx: &ToolContext,
+        request_id: &crate::jsonrpc::RequestId,
+    ) -> Result<Option<ExecutionResourceLease>, ToolOutput> {
+        ctx.register_execution_resource(
+            "stream",
+            Some(request_id.as_key()),
+            json!({
+                "protocol": "mcp-jsonrpc",
+                "server": self.connection.name(),
+                "tool": self.original_tool_name,
+                "requestId": request_id,
+            }),
+        )
+        .await
+        .map_err(|error| {
+            self.request_resource_error(error, "MCP_REQUEST_RESOURCE_REGISTER_FAILED", request_id)
+        })
+    }
+
+    async fn finish_outbound_request(
+        &self,
+        ctx: &ToolContext,
+        resource: Option<ExecutionResourceLease>,
+        request_id: &crate::jsonrpc::RequestId,
+        response_received: bool,
+    ) -> Result<(), ToolOutput> {
+        let Some(resource) = resource else {
+            return Ok(());
+        };
+        // A successful response proves the request left the transport's pending
+        // table. Cancellation, timeout and disconnect cannot prove the remote
+        // side stopped, so they remain durably unconfirmed.
+        let terminal = if response_received {
+            ExecutionResourceTerminal::Released
+        } else {
+            ExecutionResourceTerminal::Unconfirmed
+        };
+        ctx.finish_execution_resource(resource, terminal)
+            .await
+            .map_err(|error| {
+                self.request_resource_error(
+                    error,
+                    "MCP_REQUEST_RESOURCE_TERMINAL_FAILED",
+                    request_id,
+                )
+            })
+    }
+
+    fn request_resource_error(
+        &self,
+        content: String,
+        error_code: &str,
+        request_id: &crate::jsonrpc::RequestId,
+    ) -> ToolOutput {
+        ToolOutput {
+            content,
+            is_error: true,
+            metadata: Some(json!({
+                "mcpServer": self.connection.name(),
+                "mcpTool": self.original_tool_name,
+                "errorCode": error_code,
+                "requestId": request_id,
+            })),
+        }
+    }
+
     /// 单次调用主体（对照 Java `call(input, context)` 的方法体）。
     async fn invoke(&self, input: Value, ctx: ToolContext) -> ToolOutput {
         let cache_key = self.cache_key(&input);
@@ -538,54 +637,94 @@ impl McpToolAdapter {
         }
 
         // progressToken 注册 + 取消旁路监听（对照 Java M4 段）。
-        let progress_token = uuid::Uuid::new_v4().to_string();
-        let tracked = if let (Some(tracker), Some(session_id)) =
+        let progress = if let (Some(tracker), Some(session_id)) =
             (self.progress_tracker.as_ref(), ctx.session_id())
         {
-            tracker.register_progress(
+            let progress_token = uuid::Uuid::new_v4().to_string();
+            tracker.register_progress_with_context(
                 &progress_token,
                 session_id,
                 self.connection.name(),
                 &self.original_tool_name,
+                ctx.run_id(),
+                ctx.tool_use_id(),
             );
-            true
+            Some(ProgressRegistration {
+                tracker: Arc::clone(tracker),
+                token: progress_token.clone(),
+            })
         } else {
-            false
+            None
         };
-        let cancel_watcher = if ctx.cancel.is_cancelled() {
-            // 对照 Java `AbortContext.register`：注册时已 aborted 则回调**立即同步
-            // 执行**（早于 `tools/call` 发出）。
+        let progress_token = progress
+            .as_ref()
+            .map(|registration| registration.token.as_str());
+
+        let (request_id, transport, call) = match self.connection.start_tool_call(
+            &self.original_tool_name,
+            Some(input),
+            self.request_timeout,
+            progress_token,
+        ) {
+            Ok(call) => call,
+            Err(error) => return self.finish(cache_key, Err(error)),
+        };
+        // The transport's real JSON-RPC ID is reserved before its request future
+        // is polled. Persist it now so cancellation, disconnect and process
+        // shutdown can never leave an outbound request known only to logs.
+        let request_resource = match self.register_outbound_request(&ctx, &request_id).await {
+            Ok(resource) => resource,
+            Err(output) => return output,
+        };
+
+        let outcome = if ctx.cancel.is_cancelled() {
             self.connection
-                .send_cancel_notification(&progress_token, Some("user_cancelled"))
+                .send_cancel_notification_on(&transport, &request_id, Some("user_cancelled"))
                 .await;
             None
         } else {
-            spawn_cancel_watcher(
-                Arc::clone(&self.connection),
-                progress_token.clone(),
-                ctx.cancel.clone(),
-            )
+            tokio::select! {
+                outcome = call => Some(outcome),
+                () = ctx.cancel.cancelled() => {
+                    self.connection
+                        .send_cancel_notification_on(
+                            &transport,
+                            &request_id,
+                            Some("user_cancelled"),
+                        )
+                        .await;
+                    None
+                }
+            }
         };
+        // Explicit drop makes cleanup happen before result mapping; Drop also
+        // covers cancellation of this invoke future itself.
+        drop(progress);
 
-        let outcome = self
-            .connection
-            .call_tool(
-                &self.original_tool_name,
-                Some(input),
-                self.request_timeout,
-                Some(&progress_token),
+        if let Err(output) = self
+            .finish_outbound_request(
+                &ctx,
+                request_resource,
+                &request_id,
+                matches!(&outcome, Some(Ok(_))),
             )
-            .await;
-
-        // finally：无论成败都注销进度并撤下取消监听。
-        if let Some(watcher) = cancel_watcher {
-            watcher.abort();
-        }
-        if tracked && let Some(tracker) = self.progress_tracker.as_ref() {
-            tracker.unregister_progress(&progress_token);
+            .await
+        {
+            return output;
         }
 
-        self.finish(cache_key, outcome)
+        match outcome {
+            Some(outcome) => self.finish(cache_key, outcome),
+            None => ToolOutput {
+                content: format!("{CODE_CALL_CANCELLED}: MCP tool call cancelled"),
+                is_error: true,
+                metadata: Some(json!({
+                    "mcpServer": self.connection.name(),
+                    "mcpTool": self.original_tool_name,
+                    "errorCode": CODE_CALL_CANCELLED,
+                })),
+            },
+        }
     }
 }
 
@@ -610,8 +749,20 @@ impl Tool for McpToolAdapter {
         Box::pin(self.invoke(input, ctx))
     }
 
+    fn child_access(&self) -> ChildToolAccess {
+        self.child_access
+    }
+
     fn mcp_identity(&self) -> Option<&McpToolIdentity> {
         Some(&self.identity)
+    }
+
+    fn connection_generation(&self) -> Option<u64> {
+        self.connection.current_transport_generation()
+    }
+
+    fn is_connection_generation_current(&self, generation: u64) -> bool {
+        self.connection.is_transport_generation_current(generation)
     }
 }
 
@@ -634,25 +785,15 @@ pub(crate) fn mcp_config_hash(config: &crate::config::McpServerConfig) -> String
         })
 }
 
-/// 取消旁路监听（对照 Java `abortCtx.onAbortDo(() -> sendCancelNotification(...))`）。
-///
-/// 仅用于「发起时尚未取消」的情形；无 tokio 运行时（同步上下文的单元测试）
-/// 返回 `None`。发出通知后**不**中断正在等待的请求——与 Java 一致（等服务
-/// 端回错误或请求自行超时）。
-fn spawn_cancel_watcher(
-    connection: Arc<McpServerConnection>,
-    progress_token: String,
-    cancel: tokio_util::sync::CancellationToken,
-) -> Option<tokio::task::JoinHandle<()>> {
-    if tokio::runtime::Handle::try_current().is_err() {
-        return None;
+struct ProgressRegistration {
+    tracker: Arc<dyn ProgressTracker>,
+    token: String,
+}
+
+impl Drop for ProgressRegistration {
+    fn drop(&mut self) {
+        self.tracker.unregister_progress(&self.token);
     }
-    Some(tokio::spawn(async move {
-        cancel.cancelled().await;
-        connection
-            .send_cancel_notification(&progress_token, Some("user_cancelled"))
-            .await;
-    }))
 }
 
 /// 入参 Schema 归一（缺失 / `null` → `{"type":"object"}`，对照 Java
@@ -824,6 +965,10 @@ mod tests {
 
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
+    use zk_tools::{
+        ExecutionResourceAllocation, ExecutionResourceLease, ExecutionResourceObserver,
+        ExecutionResourceOwner,
+    };
 
     use super::*;
     use crate::config::McpServerConfig;
@@ -834,11 +979,49 @@ mod tests {
     type Responder =
         Arc<dyn Fn(&str, Option<Value>) -> Result<Option<Value>, McpProtocolError> + Send + Sync>;
 
+    #[derive(Default)]
+    struct RecordingResourceObserver {
+        allocations: Mutex<Vec<(ExecutionResourceOwner, ExecutionResourceAllocation)>>,
+        terminals: Mutex<Vec<(String, ExecutionResourceTerminal)>>,
+    }
+
+    impl ExecutionResourceObserver for RecordingResourceObserver {
+        fn register(
+            &self,
+            owner: ExecutionResourceOwner,
+            allocation: ExecutionResourceAllocation,
+        ) -> BoxFuture<'static, Result<ExecutionResourceLease, String>> {
+            let lease = ExecutionResourceLease {
+                resource_id: allocation.resource_id.clone(),
+            };
+            lock(&self.allocations).push((owner, allocation));
+            Box::pin(std::future::ready(Ok(lease)))
+        }
+
+        fn bind_external(
+            &self,
+            _lease: ExecutionResourceLease,
+            _external_id: String,
+        ) -> BoxFuture<'static, Result<(), String>> {
+            Box::pin(std::future::ready(Ok(())))
+        }
+
+        fn finish(
+            &self,
+            lease: ExecutionResourceLease,
+            terminal: ExecutionResourceTerminal,
+        ) -> BoxFuture<'static, Result<(), String>> {
+            lock(&self.terminals).push((lease.resource_id, terminal));
+            Box::pin(std::future::ready(Ok(())))
+        }
+    }
+
     /// 可编程传输替身 — 记录 `tools/call` 入参与出站通知。
     struct StubTransport {
         responder: Responder,
         connected: AtomicBool,
         delay: Duration,
+        request_ids: Mutex<Vec<RequestId>>,
         requests: Mutex<Vec<(String, Option<Value>)>>,
         notifications: Mutex<Vec<(String, Option<Value>)>>,
     }
@@ -849,6 +1032,7 @@ mod tests {
                 responder,
                 connected: AtomicBool::new(true),
                 delay: Duration::ZERO,
+                request_ids: Mutex::new(Vec::new()),
                 requests: Mutex::new(Vec::new()),
                 notifications: Mutex::new(Vec::new()),
             })
@@ -864,6 +1048,7 @@ mod tests {
                 responder: Arc::new(move |_, _| Ok(Some(result.clone()))),
                 connected: AtomicBool::new(true),
                 delay,
+                request_ids: Mutex::new(Vec::new()),
                 requests: Mutex::new(Vec::new()),
                 notifications: Mutex::new(Vec::new()),
             })
@@ -877,22 +1062,35 @@ mod tests {
             lock(&self.requests).clone()
         }
 
+        fn request_ids(&self) -> Vec<RequestId> {
+            lock(&self.request_ids).clone()
+        }
+
         fn notifications(&self) -> Vec<(String, Option<Value>)> {
             lock(&self.notifications).clone()
         }
     }
 
     impl McpTransport for StubTransport {
+        fn next_request_id(&self) -> RequestId {
+            let mut ids = lock(&self.request_ids);
+            let id = RequestId::Number(i64::try_from(ids.len() + 1).unwrap());
+            ids.push(id.clone());
+            id
+        }
+
         fn connect(&self) -> BoxFuture<'_, Result<(), McpProtocolError>> {
             Box::pin(async { Ok(()) })
         }
 
         fn send_request<'a>(
             &'a self,
+            request_id: RequestId,
             method: &'a str,
             params: Option<Value>,
             _timeout: Duration,
         ) -> BoxFuture<'a, Result<Option<Value>, McpProtocolError>> {
+            let _ = request_id;
             lock(&self.requests).push((method.to_owned(), params.clone()));
             let outcome = (self.responder)(method, params);
             let delay = self.delay;
@@ -957,6 +1155,21 @@ mod tests {
         ToolContext::new(CancellationToken::new(), tx)
     }
 
+    fn resource_ctx(
+        cancel: CancellationToken,
+        observer: Arc<RecordingResourceObserver>,
+    ) -> ToolContext {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        ToolContext::new(cancel, tx).with_execution_resources(
+            ExecutionResourceOwner {
+                task_id: uuid::Uuid::new_v4().to_string(),
+                run_id: uuid::Uuid::new_v4().to_string(),
+                invocation_id: uuid::Uuid::new_v4().to_string(),
+            },
+            observer,
+        )
+    }
+
     #[test]
     fn name_description_and_schema_follow_java_fallbacks() {
         let connection = connected(StubTransport::ok(json!({})));
@@ -997,7 +1210,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn successful_call_extracts_text_content_and_injects_progress_token() {
+    async fn successful_call_without_tracker_does_not_inject_progress_token() {
         let transport = StubTransport::ok(json!({
             "content": [
                 { "type": "text", "text": "sunny" },
@@ -1023,11 +1236,83 @@ mod tests {
         assert_eq!(params["name"], json!("forecast"));
         assert_eq!(params["arguments"], json!({ "city": "hz" }));
         assert!(
-            params["_meta"]["progressToken"]
-                .as_str()
-                .is_some_and(|token| token.len() == 36),
-            "progressToken should be a UUIDv4 string: {params}"
+            params.get("_meta").is_none(),
+            "an untracked progress token must not be sent: {params}"
         );
+    }
+
+    #[tokio::test]
+    async fn outbound_request_id_is_registered_and_success_is_released() {
+        let transport = StubTransport::ok(json!({
+            "content": [{ "type": "text", "text": "ok" }]
+        }));
+        let connection = connected(Arc::clone(&transport) as Arc<dyn McpTransport>);
+        let adapter = adapter(connection, "forecast");
+        let observer = Arc::new(RecordingResourceObserver::default());
+
+        let output = adapter
+            .execute(
+                json!({ "city": "hz" }),
+                resource_ctx(CancellationToken::new(), Arc::clone(&observer)),
+            )
+            .await;
+        assert!(!output.is_error);
+
+        let allocations = lock(&observer.allocations);
+        assert_eq!(allocations.len(), 1);
+        assert_eq!(allocations[0].1.resource_kind, "stream");
+        assert_eq!(allocations[0].1.external_id.as_deref(), Some("1"));
+        assert_eq!(allocations[0].1.metadata["requestId"], json!(1));
+        let resource_id = allocations[0].1.resource_id.clone();
+        drop(allocations);
+        assert_eq!(
+            lock(&observer.terminals).as_slice(),
+            [(resource_id, ExecutionResourceTerminal::Released)]
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_outbound_request_remains_durably_unconfirmed() {
+        let transport = StubTransport::delayed(json!({}), Duration::from_secs(5));
+        let connection = connected(Arc::clone(&transport) as Arc<dyn McpTransport>);
+        let adapter = adapter(connection, "forecast");
+        let observer = Arc::new(RecordingResourceObserver::default());
+        let cancel = CancellationToken::new();
+        let context = resource_ctx(cancel.clone(), Arc::clone(&observer));
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            cancel.cancel();
+        });
+
+        let output = adapter.execute(json!({}), context).await;
+        assert!(output.is_error);
+        assert_eq!(
+            lock(&observer.allocations)[0].1.external_id.as_deref(),
+            Some("1")
+        );
+        assert!(matches!(
+            lock(&observer.terminals).as_slice(),
+            [(_, ExecutionResourceTerminal::Unconfirmed)]
+        ));
+        assert_eq!(
+            transport.notifications()[0].1.as_ref().unwrap()["requestId"],
+            json!(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn adapter_exposes_and_revalidates_transport_generation() {
+        let transport = StubTransport::ok(json!({}));
+        let connection = connected(transport as Arc<dyn McpTransport>);
+        let adapter = adapter(Arc::clone(&connection), "forecast");
+        let generation = adapter
+            .connection_generation()
+            .expect("connected transport generation");
+        assert!(adapter.is_connection_generation_current(generation));
+
+        connection.close().await;
+        assert!(!adapter.is_connection_generation_current(generation));
+        assert_eq!(adapter.connection_generation(), None);
     }
 
     #[tokio::test]
@@ -1078,9 +1363,8 @@ mod tests {
             registered: Mutex::new(Vec::new()),
             unregistered: Mutex::new(Vec::new()),
         });
-        let connection = connected(
-            StubTransport::failing(McpProtocolError::internal("boom")) as Arc<dyn McpTransport>
-        );
+        let transport = StubTransport::failing(McpProtocolError::internal("boom"));
+        let connection = connected(Arc::clone(&transport) as Arc<dyn McpTransport>);
         let adapter = adapter(connection, "forecast")
             .with_progress_tracker(Arc::clone(&tracker) as Arc<dyn ProgressTracker>);
 
@@ -1099,6 +1383,39 @@ mod tests {
             lock(&tracker.unregistered).clone(),
             vec![registered[0].0.clone()]
         );
+        let params = transport.requests()[0].1.clone().expect("params");
+        assert_eq!(
+            params["_meta"]["progressToken"],
+            json!(registered[0].0),
+            "the wire token must be the exact registered token"
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_invoke_future_unregisters_progress() {
+        struct ActiveTracker(AtomicUsize);
+        impl ProgressTracker for ActiveTracker {
+            fn register_progress(&self, _t: &str, _s: &str, _sv: &str, _tn: &str) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+            fn unregister_progress(&self, _token: &str) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+            fn handle_progress_notification(&self, _notification: &Value) {}
+        }
+
+        let tracker = Arc::new(ActiveTracker(AtomicUsize::new(0)));
+        let transport = StubTransport::delayed(json!({}), Duration::from_secs(5));
+        let connection = connected(transport as Arc<dyn McpTransport>);
+        let adapter = adapter(connection, "forecast")
+            .with_progress_tracker(Arc::clone(&tracker) as Arc<dyn ProgressTracker>);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let ctx = ToolContext::new(CancellationToken::new(), tx).with_session_id("sess-1");
+
+        let timed_out =
+            tokio::time::timeout(Duration::from_millis(20), adapter.execute(json!({}), ctx)).await;
+        assert!(timed_out.is_err());
+        assert_eq!(tracker.0.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -1130,7 +1447,12 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
         let ctx = ToolContext::new(cancel.clone(), tx);
         cancel.cancel();
-        adapter.execute(json!({}), ctx).await;
+        let output = adapter.execute(json!({}), ctx).await;
+        assert!(output.is_error);
+        assert_eq!(
+            output.content,
+            "MCP_CALL_CANCELLED: MCP tool call cancelled"
+        );
 
         // 对照 Java `AbortContext.register`：已 aborted 时回调立即执行，故取消通知
         // 先于 `tools/call` 到达传输层。
@@ -1139,13 +1461,11 @@ mod tests {
         assert_eq!(notifications[0].0, "notifications/cancelled");
         let params = notifications[0].1.clone().expect("params");
         assert_eq!(params["reason"], json!("user_cancelled"));
-        let request_id = params["requestId"].as_str().expect("requestId");
-        assert_eq!(request_id.len(), 36);
-        // 取消 token 与本次调用的 progressToken 同一个值。
-        let call = transport.requests();
-        assert_eq!(
-            call[0].1.clone().expect("params")["_meta"]["progressToken"],
-            json!(request_id)
+        assert_eq!(params["requestId"], json!(1));
+        assert_eq!(transport.request_ids(), vec![RequestId::Number(1)]);
+        assert!(
+            transport.requests().is_empty(),
+            "a pre-cancelled call must not enter the transport pending table"
         );
     }
 
@@ -1164,13 +1484,60 @@ mod tests {
                 cancel.cancel();
             }
         });
-        // 取消只发通知、不中断等待（与 Java 一致）——调用仍等到服务端应答。
+        let started = tokio::time::Instant::now();
         let output = adapter.execute(json!({}), ctx).await;
-        assert!(!output.is_error);
+        assert!(output.is_error);
+        assert_eq!(
+            output.content,
+            "MCP_CALL_CANCELLED: MCP tool call cancelled"
+        );
+        assert!(started.elapsed() < Duration::from_millis(250));
 
         let notifications = transport.notifications();
         assert_eq!(notifications.len(), 1);
         assert_eq!(notifications[0].0, "notifications/cancelled");
+        assert_eq!(notifications[0].1.as_ref().unwrap()["requestId"], json!(1));
+        let call = transport.requests();
+        assert_eq!(call.len(), 1);
+        assert!(
+            call[0].1.as_ref().unwrap().get("_meta").is_none(),
+            "without a tracker the call must carry no orphan progress token"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_after_reconnect_targets_the_owning_transport() {
+        let old = StubTransport::delayed(json!({}), Duration::from_secs(5));
+        let connection = connected(Arc::clone(&old) as Arc<dyn McpTransport>);
+        let adapter = adapter(Arc::clone(&connection), "forecast");
+        let replacement = StubTransport::ok(json!({}));
+        let cancel = CancellationToken::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let ctx = ToolContext::new(cancel.clone(), tx);
+
+        let task = tokio::spawn(async move { adapter.execute(json!({}), ctx).await });
+        for _ in 0..100 {
+            if !old.requests().is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(old.requests().len(), 1, "old request must be in flight");
+        connection.set_transport_for_test(Arc::clone(&replacement) as Arc<dyn McpTransport>);
+        connection.set_status(McpConnectionStatus::Connected);
+        cancel.cancel();
+
+        let output = task.await.expect("invoke joins");
+        assert!(output.is_error);
+        assert_eq!(old.notifications().len(), 1);
+        assert_eq!(
+            old.notifications()[0].1.as_ref().unwrap()["requestId"],
+            json!(1)
+        );
+        assert!(
+            replacement.notifications().is_empty(),
+            "an old request ID must never be sent to the replacement session"
+        );
     }
 
     #[tokio::test]
@@ -1262,6 +1629,29 @@ mod tests {
         let realtime = adapter(ok, "web_search").with_result_cache(Arc::clone(&realtime_cache));
         assert_eq!(realtime.execute(json!({}), ctx()).await.content, "fresh");
         assert_eq!(realtime_cache.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn tool_level_is_error_never_enters_success_cache() {
+        let cache = Arc::new(ResultCache::new());
+        let transport = StubTransport::ok(json!({
+            "isError": true,
+            "content": [{"type": "text", "text": "remote validation failed"}]
+        }));
+        let connection = connected(transport as Arc<dyn McpTransport>);
+        let adapter = adapter(connection, "compute").with_result_cache(Arc::clone(&cache));
+
+        let output = adapter.execute(json!({"q": 1}), ctx()).await;
+        assert!(output.is_error);
+        assert_eq!(output.content, "remote validation failed");
+        assert_eq!(
+            output.metadata.as_ref().unwrap()["errorCode"],
+            json!(CODE_TOOL_ERROR)
+        );
+        assert!(
+            cache.is_empty(),
+            "isError=true must never warm fallback cache"
+        );
     }
 
     #[test]

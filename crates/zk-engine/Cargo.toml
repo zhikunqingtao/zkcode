@@ -60,7 +60,7 @@ thiserror = { workspace = true }
 # test_failure_parser）逐字移植旧 CompileErrorParser / TestFailureParser 的
 # 正则集。走 workspace 池（已声明 `regex = "1"`），不写死版本。
 regex = { workspace = true }
-# Batch 6: concurrent hash map for WorktreeManager / BackgroundAgentTracker / TaskCoordinator
+# Concurrent execution acceleration only; SQLite remains the Task state authority.
 dashmap = { workspace = true }
 # Batch 8B（Hook 系统）：HTTP 通道 hook（http_executor，POST JSON + SSRF 防护）
 # 复用 workspace reqwest（json feature）；DNS 解析后钉 IP 走 resolve_to_addrs

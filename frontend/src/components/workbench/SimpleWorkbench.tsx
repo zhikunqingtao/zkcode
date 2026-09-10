@@ -17,6 +17,8 @@ import { DeliverablesSummary } from './DeliverablesSummary';
 import { AcceptanceCriteriaView } from './AcceptanceCriteriaView';
 import { TaskMilestoneStrip } from './TaskMilestoneStrip';
 import { FilePreviewDialog } from './FilePreviewDialog';
+import { AgentRunTree } from './AgentRunTree';
+import { ResearchQualitySummary } from './ResearchQualitySummary';
 
 export function SimpleWorkbench({ sessionId, messages: _messages, status: _status }: {
     sessionId: string | null; messages: Message[]; status: SessionStoreState['status'];
@@ -84,9 +86,11 @@ export function SimpleWorkbench({ sessionId, messages: _messages, status: _statu
 
     return <div className="h-full overflow-y-auto bg-[var(--bg-primary)]"><div className="mx-auto max-w-6xl space-y-4 p-4 md:p-6">
         <TaskOverviewCard session={data.session.data} request={current?.request ?? null}
-            correlationMode={current?.correlationMode ?? 'LEGACY_FALLBACK'}
+            correlationMode={current?.correlationMode ?? 'EMPTY'}
             loading={data.session.loading || data.current.loading} error={data.session.error ?? data.current.error} />
         <TaskMilestoneStrip current={current} />
+        <AgentRunTree current={current} />
+        <ResearchQualitySummary research={current?.research} />
         {primaryAction && <section className={`flex flex-wrap items-center justify-between gap-3 rounded-2xl border p-4 ${primaryAction.tone === 'amber' ? 'border-amber-500/30 bg-amber-500/5' : 'border-blue-500/25 bg-blue-500/5'}`}>
             <div><p className="text-xs font-medium text-[var(--text-muted)]">现在最值得做的事</p><p className="mt-1 text-sm font-medium text-[var(--text-primary)]">{primaryAction.label}</p></div>
             <button type="button" onClick={primaryAction.action} className={`inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-white ${primaryAction.tone === 'amber' ? 'bg-amber-600 hover:bg-amber-500' : 'bg-blue-600 hover:bg-blue-500'}`}><primaryAction.icon className="h-4 w-4" />{primaryAction.label}<ArrowRight className="h-4 w-4" /></button>

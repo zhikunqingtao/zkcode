@@ -68,6 +68,31 @@ const ENDPOINT_EVENT_TYPE: &str = "endpoint";
 /// 在途请求的一次性应答通道。
 pub(crate) type PendingResponse = oneshot::Sender<Result<Option<Value>, McpProtocolError>>;
 
+/// Removes an in-flight request when its waiting future is dropped.  Response,
+/// timeout and I/O-error paths already converge here; importantly, so does
+/// executor cancellation, where code after an `.await` would never run.
+pub(crate) struct PendingRequestGuard<'a> {
+    pending: &'a Mutex<HashMap<String, PendingResponse>>,
+    key: String,
+}
+
+impl<'a> PendingRequestGuard<'a> {
+    pub(crate) fn insert(
+        pending: &'a Mutex<HashMap<String, PendingResponse>>,
+        key: String,
+        sender: PendingResponse,
+    ) -> Self {
+        lock(pending).insert(key.clone(), sender);
+        Self { pending, key }
+    }
+}
+
+impl Drop for PendingRequestGuard<'_> {
+    fn drop(&mut self) {
+        lock(self.pending).remove(&self.key);
+    }
+}
+
 /// 中毒降级取锁 — 传输层状态是「已断连 / 待回填」这类可重建信息，毒化后继续
 /// 使用比 panic 传播更安全（与 [`crate::stdio`] 同一范式）。
 pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -473,6 +498,10 @@ fn base_origin(base_url: &str) -> Result<String, McpProtocolError> {
 }
 
 impl McpTransport for SseTransport {
+    fn next_request_id(&self) -> RequestId {
+        RequestId::Number(self.request_id.fetch_add(1, Ordering::Relaxed))
+    }
+
     fn connect(&self) -> BoxFuture<'_, Result<(), McpProtocolError>> {
         Box::pin(async move {
             let (sender, receiver) = oneshot::channel();
@@ -496,6 +525,7 @@ impl McpTransport for SseTransport {
 
     fn send_request<'a>(
         &'a self,
+        request_id: RequestId,
         method: &'a str,
         params: Option<Value>,
         timeout: Duration,
@@ -504,16 +534,12 @@ impl McpTransport for SseTransport {
             if !self.shared.connected.load(Ordering::Acquire) {
                 return Err(McpProtocolError::not_initialized("SSE not connected"));
             }
-            let id = self.request_id.fetch_add(1, Ordering::Relaxed);
-            let key = id.to_string();
+            let key = request_id.as_key();
             let (sender, receiver) = oneshot::channel();
-            lock(&self.shared.pending).insert(key.clone(), sender);
-            let request = JsonRpcRequest::new(RequestId::Number(id), method, params);
-            let outcome = self
-                .await_response(&request, receiver, timeout_or_default(timeout))
-                .await;
-            lock(&self.shared.pending).remove(&key);
-            outcome
+            let _pending = PendingRequestGuard::insert(&self.shared.pending, key, sender);
+            let request = JsonRpcRequest::new(request_id, method, params);
+            self.await_response(&request, receiver, timeout_or_default(timeout))
+                .await
         })
     }
 
@@ -906,7 +932,12 @@ mod tests {
     async fn request_before_connect_reports_not_initialized() {
         let transport = transport("http://127.0.0.1:1");
         let error = transport
-            .send_request("tools/list", None, Duration::from_millis(50))
+            .send_request(
+                transport.next_request_id(),
+                "tools/list",
+                None,
+                Duration::from_millis(50),
+            )
             .await
             .expect_err("must fail");
         assert_eq!(error.code(), error::SERVER_NOT_INITIALIZED);
@@ -927,7 +958,12 @@ mod tests {
         let caller = Arc::clone(&transport);
         let handle = tokio::spawn(async move {
             caller
-                .send_request("tools/list", Some(json!({})), Duration::from_secs(5))
+                .send_request(
+                    caller.next_request_id(),
+                    "tools/list",
+                    Some(json!({})),
+                    Duration::from_secs(5),
+                )
                 .await
         });
 
@@ -946,6 +982,7 @@ mod tests {
 
         let result = handle.await.expect("join").expect("result");
         assert_eq!(result, Some(json!({"tools": []})));
+        assert!(lock(&transport.shared.pending).is_empty());
         transport.close().await;
         assert!(!transport.is_connected());
     }
@@ -959,7 +996,12 @@ mod tests {
         let caller = Arc::clone(&transport);
         let handle = tokio::spawn(async move {
             caller
-                .send_request("tools/call", None, Duration::from_secs(5))
+                .send_request(
+                    caller.next_request_id(),
+                    "tools/call",
+                    None,
+                    Duration::from_secs(5),
+                )
                 .await
         });
         let (_, payload) = server.requests.recv().await.expect("request");
@@ -978,6 +1020,7 @@ mod tests {
         let error = handle.await.expect("join").expect_err("must fail");
         assert_eq!(error.code(), error::METHOD_NOT_FOUND);
         assert_eq!(error.message(), "Method not found: tools/call");
+        assert!(lock(&transport.shared.pending).is_empty());
         transport.close().await;
     }
 
@@ -1024,11 +1067,17 @@ mod tests {
         let transport = transport(&server.base_url);
         transport.connect().await.expect("connect");
         let error = transport
-            .send_request("tools/list", None, Duration::from_millis(150))
+            .send_request(
+                transport.next_request_id(),
+                "tools/list",
+                None,
+                Duration::from_millis(150),
+            )
             .await
             .expect_err("must fail");
         assert_eq!(error.code(), error::REQUEST_TIMEOUT);
         assert_eq!(error.message(), "Request timeout: tools/list");
+        assert!(lock(&transport.shared.pending).is_empty());
         transport.close().await;
     }
 
@@ -1041,7 +1090,12 @@ mod tests {
         let caller = Arc::clone(&transport);
         let handle = tokio::spawn(async move {
             caller
-                .send_request("tools/list", None, Duration::from_secs(10))
+                .send_request(
+                    caller.next_request_id(),
+                    "tools/list",
+                    None,
+                    Duration::from_secs(10),
+                )
                 .await
         });
         // 等请求登记进 pending 后再关闭。
@@ -1051,6 +1105,36 @@ mod tests {
         let error = handle.await.expect("join").expect_err("must fail");
         assert_eq!(error.code(), error::INTERNAL_ERROR);
         assert_eq!(error.message(), "Transport closed");
+        assert!(lock(&transport.shared.pending).is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancelling_request_future_removes_pending_entry() {
+        let mut server = start_server("/messages").await;
+        let transport = transport(&server.base_url);
+        transport.connect().await.expect("connect");
+
+        let caller = Arc::clone(&transport);
+        let handle = tokio::spawn(async move {
+            caller
+                .send_request(
+                    caller.next_request_id(),
+                    "tools/list",
+                    None,
+                    Duration::from_secs(30),
+                )
+                .await
+        });
+        server
+            .requests
+            .recv()
+            .await
+            .expect("request reached server");
+        assert_eq!(lock(&transport.shared.pending).len(), 1);
+        handle.abort();
+        let _ = handle.await;
+        assert!(lock(&transport.shared.pending).is_empty());
+        transport.close().await;
     }
 
     #[tokio::test]

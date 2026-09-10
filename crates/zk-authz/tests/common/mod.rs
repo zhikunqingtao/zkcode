@@ -781,10 +781,14 @@ impl Harness {
         }
     }
 
-    /// 建一条会话 + 一条 running run（授权主体解析的最小前置）。
+    /// 建一条根会话 + 一条根 Task + 一条 running Run（授权主体解析的最小前置）。
+    ///
+    /// 最终版运行时以 Task 为权威，Run 必须归属于同一根会话中的合法 Task。
+    /// 测试 fixture 也遵守生产 schema 的关联约束，避免通过放宽 trigger 掩盖问题。
     pub async fn seed_run(&self, session_id: &str, run_id: &str) {
         let workspace = self.workspace.to_string_lossy().to_string();
         let (session_id, run_id) = (session_id.to_owned(), run_id.to_owned());
+        let task_id = uuid::Uuid::new_v4().to_string();
         self.db
             .with_writer(move |conn| {
                 let now = zk_db::time::format_rfc3339_micros(zk_db::time::now_millis());
@@ -794,10 +798,22 @@ impl Harness {
                     rusqlite::params![session_id, workspace, now],
                 )?;
                 conn.execute(
-                    "INSERT INTO run_envelopes(id,session_id,parent_run_id,status,model,\
+                    "INSERT INTO tasks(\
+                       id,session_id,parent_task_id,root_task_id,current_run_id,\
+                       description,status,created_at,updated_at) \
+                     VALUES(?1,?2,NULL,?1,NULL,'authorization test root task','running',?3,?3)",
+                    rusqlite::params![task_id, session_id, now],
+                )?;
+                conn.execute(
+                    "INSERT INTO run_envelopes(\
+                       id,session_id,task_id,parent_run_id,status,model,\
                        started_at,created_at,updated_at) \
-                     VALUES(?1,?2,NULL,'running','test-model',?3,?3,?3)",
-                    rusqlite::params![run_id, session_id, now],
+                     VALUES(?1,?2,?3,NULL,'running','test-model',?4,?4,?4)",
+                    rusqlite::params![run_id, session_id, task_id, now],
+                )?;
+                conn.execute(
+                    "UPDATE tasks SET current_run_id=?1 WHERE id=?2",
+                    rusqlite::params![run_id, task_id],
                 )?;
                 Ok(())
             })

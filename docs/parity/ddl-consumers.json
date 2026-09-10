@@ -1,14 +1,20 @@
 {
   "version": 2,
   "databaseCount": 1,
-  "tableCount": 25,
+  "tableCount": 45,
   "tables": [
     "sessions", "messages", "config", "project_config", "file_snapshots", "tasks",
     "project_context", "activities", "anomaly_events", "run_envelopes", "run_event_log",
     "evidence_bundles", "evidence_items", "regression_scripts", "agent_checkpoints",
     "artifact_manifests", "artifact_entries", "interaction_requests",
     "websocket_session_binding", "permission_grants", "run_workbench_bindings",
-    "run_acceptance_criteria", "memories", "projects", "auth_tokens"
+    "run_acceptance_criteria", "memories", "projects", "auth_tokens",
+    "task_dependencies", "task_budget_reservations", "task_result_blobs", "task_results",
+    "task_result_receipts", "task_inbox_messages", "tool_invocations",
+    "tool_result_postprocessing", "research_captures", "research_sources",
+    "research_findings", "research_conflicts", "research_open_questions",
+    "research_requirement_coverage", "execution_resources", "llm_calls",
+    "evidence_verdict_events", "cron_jobs", "cron_occurrences", "zk_schema_metadata"
   ],
   "rule": "A production table must have a repository, a production consumer, and a restart test before its feature is enabled.",
   "wp11VerifiedConsumers": {

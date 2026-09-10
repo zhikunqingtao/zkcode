@@ -151,6 +151,14 @@ pub struct McpCapabilityDefinition {
     /// 是否启用。
     #[serde(default)]
     pub enabled: bool,
+    /// Trusted local child-Agent exposure policy. Omission is fail-closed;
+    /// remote MCP metadata can never populate or widen this field.
+    #[serde(
+        default,
+        rename = "childAgentAccess",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub child_agent_access: Option<zk_tools::ChildToolAccess>,
     /// 视频通话场景是否启用。
     #[serde(default, rename = "videoCallEnabled")]
     pub video_call_enabled: bool,
@@ -178,6 +186,7 @@ impl McpCapabilityDefinition {
             output: None,
             timeout_ms: 0,
             enabled: false,
+            child_agent_access: None,
             video_call_enabled: false,
         }
     }
@@ -1052,6 +1061,25 @@ mod tests {
         assert_eq!(
             McpCapabilityDefinition::new("cap").resolved_transport_type(),
             McpTransportType::Sse
+        );
+    }
+
+    #[test]
+    fn child_agent_access_is_explicit_and_fail_closed_by_default() {
+        let omitted: McpCapabilityDefinition =
+            serde_json::from_str(r#"{"id":"cap"}"#).expect("parse omitted policy");
+        assert_eq!(omitted.child_agent_access, None);
+
+        let read_only: McpCapabilityDefinition =
+            serde_json::from_str(r#"{"id":"cap","childAgentAccess":"readOnly"}"#)
+                .expect("parse explicit read-only policy");
+        assert_eq!(
+            read_only.child_agent_access,
+            Some(zk_tools::ChildToolAccess::ReadOnly)
+        );
+        assert_eq!(
+            serde_json::to_value(&read_only).expect("serialize policy")["childAgentAccess"],
+            Value::from("readOnly")
         );
     }
 

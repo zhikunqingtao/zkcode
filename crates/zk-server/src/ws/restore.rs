@@ -20,8 +20,8 @@
 //!   `DEFAULT`）、`status` 取库内小写状态。
 
 use zk_authz::model::PermissionMode;
+use zk_db::SessionRuntimeRestore;
 use zk_db::convert::record_to_ws_message;
-use zk_db::model::SessionDetail;
 use zk_protocol::model::Message as WsMessage;
 use zk_protocol::{ServerMessage, SessionMetadata};
 
@@ -31,11 +31,19 @@ use crate::iso::now_millis;
 /// 组装 `session_restored`（bind 成功路径的响应体；直发不带路由字段）。
 #[must_use]
 pub(crate) fn build_session_restored(
-    detail: SessionDetail,
+    restore: SessionRuntimeRestore,
     bind_request_id: Option<String>,
     binding_epoch: u64,
     permission_mode: PermissionMode,
 ) -> ServerMessage {
+    let SessionRuntimeRestore {
+        detail,
+        run_snapshot,
+        task_tree,
+        snapshot_event_seq,
+        active_tool_calls,
+        cost_summary,
+    } = restore;
     let messages: Vec<WsMessage> = detail
         .messages
         .into_iter()
@@ -49,18 +57,18 @@ pub(crate) fn build_session_restored(
             permission_mode: permission_mode.as_str().to_owned(),
             status: detail.status,
         },
-        // 活动列表 / run 快照 / 工具调用投影：Phase 2+（S5 双表无对应存储）。
         activities: None,
         total_activity_count: None,
         has_more: None,
-        protocol_version: WS_PROTOCOL_VERSION,
+        protocol_version: i64::from(WS_PROTOCOL_VERSION),
         bind_request_id,
         binding_epoch: Some(i64::try_from(binding_epoch).unwrap_or(i64::MAX)),
         server_now: Some(now_millis()),
-        run_snapshot: None,
-        snapshot_event_seq: None,
-        active_tool_calls: None,
-        cost_summary: None,
+        run_snapshot: run_snapshot.and_then(|run| serde_json::to_value(run).ok()),
+        task_tree: serde_json::json!(task_tree),
+        snapshot_event_seq: Some(snapshot_event_seq),
+        active_tool_calls: Some(serde_json::json!(active_tool_calls)),
+        cost_summary: Some(serde_json::json!(cost_summary)),
     }
 }
 
@@ -68,7 +76,24 @@ pub(crate) fn build_session_restored(
 mod tests {
     use super::*;
     use zk_db::model::{MessageRecord, MessageRole, StoredBlock};
+    use zk_db::{RestoreCostSummary, SessionDetail, SessionRuntimeRestore};
     use zk_protocol::model::Usage;
+
+    fn runtime(detail: zk_db::SessionDetail) -> SessionRuntimeRestore {
+        SessionRuntimeRestore {
+            detail,
+            run_snapshot: None,
+            task_tree: Vec::new(),
+            snapshot_event_seq: 0,
+            active_tool_calls: Vec::new(),
+            cost_summary: RestoreCostSummary {
+                session_cost: 0.0,
+                total_cost: 0.0,
+                usage: Usage::default(),
+                usage_complete: true,
+            },
+        }
+    }
 
     /// 最小 `SessionDetail` 构造（消息与状态可注入）。
     fn detail(messages: Vec<MessageRecord>, status: &str) -> SessionDetail {
@@ -91,22 +116,27 @@ mod tests {
     #[test]
     fn restored_carries_bind_fields_and_default_permission_mode() {
         let restored = build_session_restored(
-            detail(Vec::new(), "active"),
+            runtime(detail(Vec::new(), "active")),
             Some("br-1".into()),
             4,
             PermissionMode::Default,
         );
         let value = serde_json::to_value(&restored).expect("json");
         assert_eq!(value["type"], "session_restored");
-        assert_eq!(value["protocolVersion"], 3);
+        assert_eq!(value["protocolVersion"], 4);
         assert_eq!(value["bindRequestId"], "br-1");
         assert_eq!(value["bindingEpoch"], 4);
         assert_eq!(value["metadata"]["permissionMode"], "DEFAULT");
         assert_eq!(value["metadata"]["status"], "active");
         assert_eq!(value["metadata"]["model"], "qwen3.8-max-0902");
         assert!(value["serverNow"].as_i64().is_some());
-        assert!(value.get("activities").is_none(), "phase2 fields absent");
+        assert!(value.get("activities").is_none());
         assert!(value.get("runSnapshot").is_none());
+        assert_eq!(value["taskTree"], serde_json::json!([]));
+        assert_eq!(value["snapshotEventSeq"], 0);
+        assert_eq!(value["activeToolCalls"], serde_json::json!([]));
+        assert_eq!(value["costSummary"]["sessionCost"], 0.0);
+        assert_eq!(value["costSummary"]["usageComplete"], true);
     }
 
     #[test]
@@ -151,7 +181,7 @@ mod tests {
             created_at: 1_234,
         };
         let restored = build_session_restored(
-            detail(vec![record], "active"),
+            runtime(detail(vec![record], "active")),
             None,
             1,
             PermissionMode::Default,
@@ -203,7 +233,7 @@ mod tests {
             created_at: 1_234,
         };
         let restored = build_session_restored(
-            detail(vec![record], "active"),
+            runtime(detail(vec![record], "active")),
             None,
             1,
             PermissionMode::Default,
@@ -253,7 +283,7 @@ mod tests {
             created_at: 3_000,
         };
         let restored = build_session_restored(
-            detail(vec![assistant, system], "closed"),
+            runtime(detail(vec![assistant, system], "closed")),
             None,
             1,
             PermissionMode::Default,

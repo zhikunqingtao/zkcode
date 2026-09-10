@@ -7,8 +7,11 @@ use base64::Engine as _;
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
 use zk_authz::sensitive::SensitiveDataFilter;
-use zk_db::{Db, EvidenceBundleRecord, EvidenceItemRecord};
-use zk_tools::{Tool, ToolContext, ToolOutput};
+use zk_db::Db;
+use zk_tools::{
+    ChildToolAccess, EVIDENCE_RECEIPT_SCHEMA_VERSION, EvidenceReceipt, EvidenceReceiptItem,
+    EvidenceReceiptVerdict, Tool, ToolContext, ToolOutput,
+};
 
 use super::{BROWSER_AUTOMATION, failure};
 use crate::python::client::{Correlation, HEAVY_READ_TIMEOUT, PythonClient};
@@ -36,6 +39,10 @@ impl Tool for BrowserVerifyJourneyTool {
     fn description(&self) -> &'static str {
         "Run a bounded browser or HTTP user journey through the Python sidecar and return \
          deterministic step evidence. Use VerifyPlanExecution for compile/test/lint checks."
+    }
+
+    fn child_access(&self) -> ChildToolAccess {
+        ChildToolAccess::WriteGated
     }
 
     fn parameters(&self) -> Value {
@@ -104,8 +111,8 @@ impl Tool for BrowserVerifyJourneyTool {
                 return failure("VERIFY_CONTEXT_REQUIRED", "run context is required");
             };
             let correlation = Correlation {
-                run_id: ctx.run_id().map(str::to_owned),
-                session_id: ctx.session_id().map(str::to_owned),
+                run_id: Some(run_id.to_owned()),
+                session_id: Some(session_id.to_owned()),
             };
             let response: Option<Value> = self
                 .client
@@ -131,10 +138,9 @@ impl Tool for BrowserVerifyJourneyTool {
                 .get("step_results")
                 .and_then(Value::as_array)
                 .map_or(0, Vec::len);
-            let evidence = match persist_journey_evidence(
+            let evidence = match build_journey_evidence_receipt(
                 &self.db,
                 session_id,
-                run_id,
                 body.get("claim").and_then(Value::as_str),
                 &response,
                 passed,
@@ -143,37 +149,40 @@ impl Tool for BrowserVerifyJourneyTool {
             {
                 Ok(evidence) => evidence,
                 Err(error) => {
-                    tracing::error!(%error, "browser journey evidence persistence failed");
+                    tracing::error!(%error, "browser journey evidence receipt failed");
                     return failure(
                         "VERIFY_EVIDENCE_STORE_FAILED",
-                        "Browser journey finished but evidence could not be persisted",
+                        "Browser journey finished but its bounded evidence receipt could not be built",
                     );
                 }
             };
-            let structured_result = sanitize_structured_response(&response);
+            let mut structured_result = sanitize_structured_response(&response);
+            let Some(object) = structured_result.as_object_mut() else {
+                return failure(
+                    "VERIFY_RESPONSE_INVALID",
+                    "Browser journey returned a non-object response",
+                );
+            };
+            object.insert("evidence".into(), json!(evidence));
             ToolOutput {
                 content: format!(
                     "Browser journey {} ({step_count} steps)",
                     if passed { "passed" } else { "failed" }
                 ),
                 is_error: !passed,
-                metadata: Some(json!({
-                    "structuredResult": structured_result,
-                    "evidenceBundleId": evidence.bundle_id,
-                })),
+                metadata: Some(json!({"structuredResult": structured_result})),
             }
         })
     }
 }
 
-async fn persist_journey_evidence(
+async fn build_journey_evidence_receipt(
     db: &Db,
     session_id: &str,
-    run_id: &str,
     claim: Option<&str>,
     response: &Value,
     passed: bool,
-) -> Result<EvidenceBundleRecord, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<EvidenceReceipt, Box<dyn std::error::Error + Send + Sync>> {
     let session = db
         .get_session(session_id)
         .await?
@@ -208,32 +217,34 @@ async fn persist_journey_evidence(
             "failed"
         };
         let error = step.get("error").and_then(Value::as_str).unwrap_or("");
-        items.push(EvidenceItemRecord {
-            id: uuid::Uuid::new_v4().to_string(),
+        items.push(EvidenceReceiptItem {
             item_type: "browser_journey_step".into(),
             summary: Some(SensitiveDataFilter::filter(&format!(
                 "{action}: {status} {error}"
             ))),
             blob_sha256,
             meta: Some(meta),
-            sort_order: i64::try_from(sort_order).unwrap_or(i64::MAX),
+            sort_order: u32::try_from(sort_order).unwrap_or(u32::MAX),
         });
     }
-    let bundle = EvidenceBundleRecord {
-        bundle_id: uuid::Uuid::new_v4().to_string(),
-        session_id: session_id.to_owned(),
-        agent_id: None,
+    let receipt = EvidenceReceipt {
+        schema_version: EVIDENCE_RECEIPT_SCHEMA_VERSION,
         kind: "browser_journey".into(),
         claim: Some(SensitiveDataFilter::filter(
             claim.unwrap_or("Browser journey verification"),
         )),
-        verdict: if passed { "verified" } else { "failed" }.into(),
-        created_at: crate::iso::format_rfc3339_micros(crate::iso::now_millis()),
-        run_id: Some(run_id.to_owned()),
+        verdict: if passed {
+            EvidenceReceiptVerdict::Verified
+        } else {
+            EvidenceReceiptVerdict::Failed
+        },
+        observed_at: crate::iso::format_rfc3339_micros(crate::iso::now_millis()),
         items,
     };
-    db.save_evidence_bundle(&bundle).await?;
-    Ok(bundle)
+    if !receipt.is_valid() {
+        return Err("browser journey produced an invalid evidence receipt".into());
+    }
+    Ok(receipt)
 }
 
 fn sanitize_structured_response(response: &Value) -> Value {
@@ -287,7 +298,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn journey_steps_and_screenshots_become_durable_evidence() {
+    async fn journey_steps_and_screenshots_become_a_bounded_uncommitted_receipt() {
         let db = Db::open_in_memory().expect("db");
         let workspace =
             std::env::temp_dir().join(format!("zkcode-browser-evidence-{}", uuid::Uuid::new_v4()));
@@ -311,30 +322,25 @@ mod tests {
                 "error": null
             }]
         });
-        let bundle = persist_journey_evidence(
-            &db,
-            &session.id,
-            "journey-run",
-            Some("page renders"),
-            &response,
-            true,
-        )
-        .await
-        .expect("evidence");
-        assert_eq!(bundle.verdict, "verified");
-        assert_eq!(bundle.items.len(), 1);
-        assert!(bundle.items[0].blob_sha256.is_some());
+        let receipt =
+            build_journey_evidence_receipt(&db, &session.id, Some("page renders"), &response, true)
+                .await
+                .expect("receipt");
+        assert_eq!(receipt.verdict, EvidenceReceiptVerdict::Verified);
+        assert_eq!(receipt.items.len(), 1);
+        assert!(receipt.items[0].blob_sha256.is_some());
         assert!(
-            bundle.items[0]
+            receipt.items[0]
                 .meta
                 .as_ref()
                 .is_some_and(|meta| meta.get("screenshot_base64").is_none())
         );
         assert!(
-            db.find_evidence_bundle(&bundle.bundle_id)
+            db.find_evidence_by_session(&session.id)
                 .await
                 .expect("query")
-                .is_some()
+                .is_empty(),
+            "the tool must not commit machine evidence before its invocation succeeds"
         );
         let sanitized = sanitize_structured_response(&response);
         assert_eq!(

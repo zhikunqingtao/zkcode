@@ -39,7 +39,9 @@ const GroupedToolUseBlock: React.FC<GroupedToolUseBlockProps> = ({
         );
     }
 
-    const completedCount = entries.filter(([, tc]) => tc.status === 'completed').length;
+    // Cancelled tool results are normalized to `error` by the message store.
+    const completedCount = entries.filter(([, tc]) => ['completed', 'error'].includes(tc.status)).length;
+    const failedCount = entries.filter(([, tc]) => tc.status === 'error').length;
     const runningCount = entries.filter(([, tc]) => tc.status === 'running').length;
     const toolNames = [...new Set(entries.map(([, tc]) => tc.toolName))];
 
@@ -63,6 +65,7 @@ const GroupedToolUseBlock: React.FC<GroupedToolUseBlockProps> = ({
                 </span>
                 <span className="ml-auto text-xs text-gray-500">
                     {completedCount}/{entries.length} done
+                    {failedCount > 0 && ` · ${failedCount} failed`}
                     {runningCount > 0 && ` · ${runningCount} running`}
                 </span>
             </button>

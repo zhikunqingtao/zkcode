@@ -13,7 +13,7 @@ use serde_json::json;
 use tokio_util::sync::CancellationToken;
 use zk_db::Db;
 use zk_server::snapshot_sink::DbSnapshotSink;
-use zk_tools::{CallEnv, ToolEvent, ToolExecutor, ToolOutput, WriteFileTool};
+use zk_tools::{CallEnv, ReadFileTool, ToolEvent, ToolExecutor, ToolOutput, WriteFileTool};
 
 /// 独占测试目录（库文件 + 工作区同根，便于单次清理）。
 fn fixture(tag: &str) -> PathBuf {
@@ -41,10 +41,41 @@ async fn write_via_executor(
 ) -> ToolOutput {
     let executor = ToolExecutor::new();
     let cancel = CancellationToken::new();
+    let raw_path = input["file_path"].as_str().expect("file path");
+    let target = if Path::new(raw_path).is_absolute() {
+        PathBuf::from(raw_path)
+    } else {
+        working_dir.join(raw_path)
+    };
+    let authorized = zk_tools::atomic::canonical_write_target(&target)
+        .await
+        .expect("canonical authorization target");
     let mut rx = executor.spawn_call_in(
         tool,
         "toolu_snap".to_owned(),
         input,
+        &cancel,
+        CallEnv::new()
+            .with_session_id(session_id)
+            .with_working_dir(working_dir)
+            .with_authorized_write_path(authorized),
+    );
+    while let Some(event) = rx.recv().await {
+        if let ToolEvent::Finished { output, .. } = event {
+            return output;
+        }
+    }
+    panic!("executor closed without Finished");
+}
+
+/// 经相同会话和工作目录完整读取文件，为后续覆盖写登记内容 hash。
+async fn read_via_executor(session_id: &str, working_dir: &Path, file_path: &str) -> ToolOutput {
+    let executor = ToolExecutor::new();
+    let cancel = CancellationToken::new();
+    let mut rx = executor.spawn_call_in(
+        Arc::new(ReadFileTool),
+        "toolu_read".to_owned(),
+        json!({ "file_path": file_path }),
         &cancel,
         CallEnv::new()
             .with_session_id(session_id)
@@ -93,7 +124,13 @@ async fn write_tool_persists_pre_write_snapshot() {
         "new file must not snapshot"
     );
 
-    // 2) 覆盖写：旧内容 `v1\n` 落库。
+    // 2) 完整 Read 登记版本 hash 后覆盖写：旧内容 `v1\n` 落库。
+    let read = read_via_executor(&session.id, &root, "notes.md").await;
+    assert!(!read.is_error, "content: {}", read.content);
+    assert_eq!(
+        read.metadata.as_ref().expect("metadata")["structuredResult"]["overwriteEligible"],
+        true
+    );
     let updated = write_via_executor(
         Arc::clone(&tool),
         &session.id,
@@ -123,10 +160,10 @@ async fn write_tool_persists_pre_write_snapshot() {
     cleanup(&root);
 }
 
-/// 无会话 ID（如 REST 侧直调工具）时写入照常成功，仅不产快照——快照是
-/// best-effort 旁路，不得影响文件效果。
+/// 无会话 ID 时无法持有已有文件的 Read/CAS 授权，覆盖必须失败关闭，且不得
+/// 修改文件或伪造快照。
 #[tokio::test]
-async fn write_without_session_still_succeeds() {
+async fn existing_file_write_without_session_fails_closed() {
     let root = fixture("no-session");
     let db = Db::open(root.join("data.db")).expect("open file db");
     std::fs::write(root.join("a.txt"), "old").expect("seed");
@@ -150,14 +187,23 @@ async fn write_without_session_still_succeeds() {
         }
     }
     let output = output.expect("Finished");
-    assert!(!output.is_error, "content: {}", output.content);
-    assert_eq!(
-        output.metadata.as_ref().expect("metadata")["structuredResult"]["snapshot"],
-        false
+    assert!(output.is_error, "content: {}", output.content);
+    assert!(
+        output.content.starts_with("FILE_READ_REQUIRED:"),
+        "content: {}",
+        output.content
     );
     assert_eq!(
         std::fs::read_to_string(root.join("a.txt")).expect("read"),
-        "new"
+        "old",
+        "failed overwrite must leave the existing file unchanged"
+    );
+    assert!(
+        db.list_file_snapshots("missing-session")
+            .await
+            .expect("list")
+            .is_empty(),
+        "denied overwrite must not create a snapshot"
     );
 
     drop(db);

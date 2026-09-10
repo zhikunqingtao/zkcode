@@ -12,7 +12,7 @@
 - 内置工具：Read、Edit、Write、Bash、Notebook、搜索、可视化、验证
 - 统一授权准入：路径、命令、敏感数据、PRE Hook
 - 持久化：Session、Run、Task、Snapshot、Evidence、Artifact、Workbench（单库 SQLite）
-- 多 Agent 协作：子 Agent、Team、只读 Swarm
+- 多 Agent 协作：可靠的 attached 子 Agent；Team/Swarm 在统一运行时门禁通过前失败关闭
 - MCP Client/Server、Python UDS sidecar、Playwright 浏览器回放
 - 多 LLM Provider：DashScope、DeepSeek、Moonshot、Zhipu、MiniMax、Anthropic、OpenAI 等
 - 默认模型：`qwen3.8-max-0902`（普通 DashScope）；另内置百炼订阅模型 `qwen3.8-max`、`qwen3.8-flash`，以及智谱模型 `glm-5.3-flash`
@@ -50,6 +50,10 @@ Rust workspace 成员：`zk-core`、`zk-db`、`zk-llm`、`zk-protocol`、`zk-eng
 > 这是面向 Apple Silicon macOS 15+ 的源码开发 Beta 入口。它会在 CI 中走同一套依赖同步、
 > 构建和 Headless Browser 诊断；“完全没有 CLT/Homebrew/语言工具链”的干净机器安装仍属于
 > 正式公开保证前的独立验收矩阵。
+
+> **升级说明：** 当前版本只接受 greenfield 最终数据库 schema，不兼容旧版
+> `.zk/data.db`，也不会原地迁移或回填。升级前请停止服务并备份旧数据库；随后移动或删除
+> `ZK_DB_PATH` 指向的数据库文件，让服务创建新库。不要直接删除整个 `.zk/` 目录。
 
 **系统要求**：Apple Silicon Mac、macOS 15+、可访问 Homebrew/npm/PyPI/Rust/Playwright
 官方源或受信代理的网络。若未安装 Homebrew，当前 macOS 账户还必须具有管理员权限。
@@ -164,7 +168,7 @@ sudo 缓存、免密授权或 `SUDO_ASKPASS` 时使用。
 | LLM Provider | `LLM_PROVIDER_{NAME}_API_KEY`（DashScope / DeepSeek / Moonshot / Zhipu / MiniMax / Anthropic / OpenAI） |
 | 默认模型 | `ZK_DEFAULT_MODEL`（默认 `qwen3.8-max-0902`） |
 | Python 侧车 | `ZK_PYTHON_ENABLED`、`BROWSER_TYPE` |
-| 功能门控 | `ZK_AGENT_ENABLED`、`ZK_SWARM_ENABLED` |
+| 功能门控 | `ZK_AGENT_ENABLED`、`ZK_AGENT_WRITE_ENABLED`、`ZK_SHARED_WORKSPACE_ENABLED`、`ZK_AUTO_RESUME_SAFE_TASKS`、`ZK_SWARM_ENABLED` |
 | Feature Flags | `ZK_FEATURE_THINKING_MODE`、`ZK_FEATURE_COORDINATOR_MODE` 等 |
 
 完整变量与注释见 [`.env.example`](.env.example)，详细说明见 [配置参考](docs/configuration.md)。

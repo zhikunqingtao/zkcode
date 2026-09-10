@@ -53,7 +53,7 @@ test.describe('Local simple workbench', () => {
     await page.goto('/', { waitUntil: 'domcontentloaded' });
 
     await expect(page.getByRole('tablist', { name: '工作台视图' })).toHaveCount(0);
-    await expect(page.getByText('AI Assistant', { exact: true })).toBeVisible();
+    await expect(page.getByText('zkcode', { exact: true })).toBeVisible();
     await expect(page.getByText('开始对话', { exact: true })).toBeVisible();
   });
 });

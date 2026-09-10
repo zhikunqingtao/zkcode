@@ -21,10 +21,12 @@ use futures::future::BoxFuture;
 use futures::stream::{self, BoxStream};
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
-use zk_db::Db;
+use zk_db::{Db, TaskStatus};
 use zk_engine::admission::{Admission, AdmissionRequest, ToolAdmission};
 use zk_engine::{Engine, MessageSink};
-use zk_llm::{ChatProvider, ChatRequest, FinishReason, ProviderError, ProviderEvent};
+use zk_llm::{
+    ChatProvider, ChatRequest, FinishReason, ProviderError, ProviderEvent, ProviderRegistry,
+};
 use zk_protocol::model::Usage;
 use zk_protocol::{ClientMessage, ServerMessage};
 use zk_tools::{EchoTool, Tool, ToolContext, ToolOutput, ToolRegistry};
@@ -187,7 +189,7 @@ impl ToolAdmission for AncestryAdmission {
 /// 装配：内存库 + 会话 + 祖先链准入端口。
 async fn setup(
     scripts: Vec<Result<BoxStream<'static, ProviderEvent>, ProviderError>>,
-    registry: ToolRegistry,
+    tool_registry: ToolRegistry,
 ) -> (
     Arc<Engine>,
     Arc<RecordingSink>,
@@ -202,11 +204,17 @@ async fn setup(
         .expect("create session");
     let sink = Arc::new(RecordingSink::default());
     let admission = AncestryAdmission::new(db.clone());
+    let mut providers = ProviderRegistry::new();
+    providers.register(
+        "mock",
+        Arc::new(MockProvider::new(scripts)),
+        vec!["qwen3.8-max-0902".to_owned()],
+    );
     let engine = Arc::new(Engine::with_admission(
         db.clone(),
-        Arc::new(MockProvider::new(scripts)) as Arc<dyn ChatProvider>,
+        Arc::new(providers) as Arc<dyn ChatProvider>,
         Arc::clone(&sink) as Arc<dyn MessageSink>,
-        Arc::new(registry),
+        Arc::new(tool_registry),
         Arc::clone(&admission) as Arc<dyn ToolAdmission>,
     ));
     (engine, sink, admission, db, session.id)
@@ -343,9 +351,9 @@ async fn tool_phase_resolves_run_ancestry_and_executes() {
     assert!(kinds.contains(&"tool_result"), "kinds: {kinds:?}");
     assert!(kinds.contains(&"message_complete"), "kinds: {kinds:?}");
 
-    // Run 终态：completed / model_finished / 跨轮累计 tokens / 轮数 2。
+    // Run 终态：completed / modelFinished / 跨轮累计 tokens / 轮数 2。
     assert_eq!(status, "completed");
-    assert_eq!(exit_reason.as_deref(), Some("model_finished"));
+    assert_eq!(exit_reason.as_deref(), Some("modelFinished"));
     assert_eq!(error_summary, None);
     assert_eq!(tokens, 17, "7+3+5+2 跨轮累计 totalTokens");
     assert_eq!(turns, 2);
@@ -354,7 +362,7 @@ async fn tool_phase_resolves_run_ancestry_and_executes() {
     assert!(terminal, "终态必须落 terminal_at");
     assert_eq!(
         tool_events(&db, &run_id),
-        vec!["run_started".to_owned(), "run_status_changed".to_owned()]
+        vec!["run_started".to_owned(), "task_result_available".to_owned()]
     );
 }
 
@@ -414,13 +422,13 @@ async fn plain_turn_starts_and_completes_run() {
     let (_id, status, exit_reason, _err, _abort, tokens, turns, _parent, _agent, terminal) =
         read_run(&db, &sid);
     assert_eq!(status, "completed");
-    assert_eq!(exit_reason.as_deref(), Some("model_finished"));
+    assert_eq!(exit_reason.as_deref(), Some("modelFinished"));
     assert_eq!(tokens, 10);
     assert_eq!(turns, 1);
     assert!(terminal);
 }
 
-/// Provider 建立期失败 → `failed` / `internal_error` + `error_summary`
+/// Provider 建立期失败 → `failed` / `internalError` + `error_summary`
 /// （旧 `RunTracker.failRun(e.getMessage())`）。
 #[tokio::test]
 async fn provider_failure_marks_run_failed_with_summary() {
@@ -438,7 +446,7 @@ async fn provider_failure_marks_run_failed_with_summary() {
     let (_id, status, exit_reason, error_summary, _abort, _tokens, _turns, _p, _a, terminal) =
         read_run(&db, &sid);
     assert_eq!(status, "failed");
-    assert_eq!(exit_reason.as_deref(), Some("internal_error"));
+    assert_eq!(exit_reason.as_deref(), Some("internalError"));
     assert!(
         error_summary
             .as_deref()
@@ -469,7 +477,8 @@ impl Tool for NeverendingTool {
     }
 }
 
-/// 用户中断 → `cancelled` / `user_cancelled`（旧 `abortRun` → `cancelByUser`）。
+/// 用户中断保留 `userCancelled` 因果；资源停止无法确认时，正交 cleanup
+/// 维度要求 Task 降为 partial，因而物理 Run 以 completed 收口。
 #[tokio::test]
 async fn user_interrupt_marks_run_cancelled() {
     let mut registry = ToolRegistry::new();
@@ -483,6 +492,13 @@ async fn user_interrupt_marks_run_cancelled() {
             ProviderEvent::Finish {
                 finish_reason: FinishReason::ToolUse,
                 usage: None,
+            },
+            ProviderEvent::UsageUpdate {
+                usage: Usage {
+                    input_tokens: 2,
+                    output_tokens: 1,
+                    ..Usage::default()
+                },
             },
         ])],
         registry,
@@ -503,10 +519,26 @@ async fn user_interrupt_marks_run_cancelled() {
         .expect("run must terminate within 500ms")
         .expect("run task joins");
 
-    let (_id, status, exit_reason, _err, abort_reason, _tokens, _turns, _p, _a, terminal) =
+    let (id, status, exit_reason, _err, abort_reason, _tokens, _turns, _p, _a, terminal) =
         read_run(&db, &sid);
-    assert_eq!(status, "cancelled");
-    assert_eq!(exit_reason.as_deref(), Some("user_cancelled"));
-    assert_eq!(abort_reason.as_deref(), Some("user_cancelled"));
+    assert_eq!(status, "completed");
+    assert_eq!(exit_reason.as_deref(), Some("userCancelled"));
+    assert_eq!(abort_reason.as_deref(), Some("userCancelled"));
     assert!(terminal);
+    assert_eq!(
+        db.find_run_by_id(&id)
+            .await
+            .expect("run")
+            .expect("run row")
+            .cleanup_status,
+        "unconfirmed"
+    );
+    assert_eq!(
+        db.find_runtime_task_by_id(&id)
+            .await
+            .expect("task")
+            .expect("task row")
+            .status,
+        TaskStatus::Partial
+    );
 }

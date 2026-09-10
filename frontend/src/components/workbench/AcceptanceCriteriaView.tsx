@@ -1,11 +1,12 @@
 import { AlertTriangle, CheckCircle2, CircleDashed, MinusCircle } from 'lucide-react';
 import type { CriterionStatus, WorkbenchCriterion } from '@/hooks/useSimpleWorkbenchData';
 
-const labels: Record<CriterionStatus, string> = { PASSED: '已通过', FAILED: '有问题', PARTIAL: '部分通过', NOT_VERIFIED: '未验证' };
+const labels: Record<CriterionStatus, string> = { PASSED: '已通过', FAILED: '有问题', PARTIAL: '部分通过', STALE: '验证已过期', NOT_VERIFIED: '未验证' };
 const meta = {
     PASSED: { icon: CheckCircle2, color: 'text-green-500' },
     FAILED: { icon: AlertTriangle, color: 'text-red-500' },
     PARTIAL: { icon: MinusCircle, color: 'text-amber-500' },
+    STALE: { icon: CircleDashed, color: 'text-amber-500' },
     NOT_VERIFIED: { icon: CircleDashed, color: 'text-[var(--text-muted)]' },
 } as const;
 

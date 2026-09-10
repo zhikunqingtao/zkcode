@@ -11,17 +11,44 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::cursor::{decode_message_cursor, encode_message_cursor};
 use crate::error::{DbError, map_fk_violation};
-use crate::model::{MessagePage, MessageRecord, MessageRole, NewMessage, parse_blocks};
+use crate::model::{
+    MessagePage, MessageRecord, MessageRole, NewMessage, StoredBlock, parse_blocks,
+};
 use crate::time::{format_rfc3339_micros, now_millis, parse_rfc3339_millis};
 
 /// 追加消息 SQL：`INSERT OR IGNORE`（主键幂等）+ `seq_num` 子查询原子分配 +
 /// `RETURNING seq_num`（见 [`insert_message`]）。
 const INSERT_MESSAGE_SQL: &str = "INSERT OR IGNORE INTO messages (
     id, session_id, role, content_json, stop_reason,
-    input_tokens, output_tokens, created_at, seq_num)
- VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
+    input_tokens, output_tokens, task_id, run_id, origin, source_task_id, created_at, seq_num)
+ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
     (SELECT COALESCE(MAX(seq_num), 0) + 1 FROM messages WHERE session_id = ?2))
  RETURNING seq_num";
+
+/// Runtime ownership attached to a persisted message. Conversation messages use
+/// [`Default::default`]; tool/task/runtime messages carry explicit Task/Run identity.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MessageAttribution {
+    /// Logical task that consumes this message.
+    pub task_id: Option<String>,
+    /// Run attempt that consumes or produced this message.
+    pub run_id: Option<String>,
+    /// `conversation`, `tool_result`, `task_result`, or `runtime`.
+    pub origin: String,
+    /// Producing child task for a parent-visible task result.
+    pub source_task_id: Option<String>,
+}
+
+impl MessageAttribution {
+    /// Attribution for a regular human/assistant/system conversation message.
+    #[must_use]
+    pub fn conversation() -> Self {
+        Self {
+            origin: "conversation".to_owned(),
+            ..Self::default()
+        }
+    }
+}
 
 /// 事务内追加消息并 touch 会话（`append_message*` 的 blocking 主体）。
 ///
@@ -32,17 +59,17 @@ const INSERT_MESSAGE_SQL: &str = "INSERT OR IGNORE INTO messages (
 ///   `addMessageWithId` 的 `rows > 0` 判定；`append_message` 的全新 UUID
 ///   不会触发该分支）；
 /// - 外键违例归一为 [`DbError::SessionNotFound`]（会话不存在）。
-fn insert_message(
-    conn: &mut Connection,
+pub(crate) fn insert_message_in_current_write(
+    conn: &Connection,
     message_id: &str,
     session_id: &str,
     msg: &NewMessage,
+    attribution: &MessageAttribution,
 ) -> Result<Option<MessageRecord>, DbError> {
     let now_ms = now_millis();
     let now_iso = format_rfc3339_micros(now_ms);
     let content_json = serde_json::to_string(&msg.content)?;
-    let tx = conn.transaction()?;
-    let seq_num: Option<i64> = tx
+    let seq_num: Option<i64> = conn
         .query_row(
             INSERT_MESSAGE_SQL,
             params![
@@ -53,6 +80,14 @@ fn insert_message(
                 msg.stop_reason,
                 msg.input_tokens,
                 msg.output_tokens,
+                attribution.task_id,
+                attribution.run_id,
+                if attribution.origin.is_empty() {
+                    "conversation"
+                } else {
+                    attribution.origin.as_str()
+                },
+                attribution.source_task_id,
                 now_iso
             ],
             |row| row.get(0),
@@ -64,14 +99,12 @@ fn insert_message(
             other => Err(map_fk_violation(session_id, other)),
         })?;
     let Some(seq_num) = seq_num else {
-        tx.commit()?;
         return Ok(None);
     };
-    tx.execute(
+    conn.execute(
         "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
         params![now_iso, session_id],
     )?;
-    tx.commit()?;
     Ok(Some(MessageRecord {
         id: message_id.to_owned(),
         session_id: session_id.to_owned(),
@@ -85,12 +118,25 @@ fn insert_message(
     }))
 }
 
+fn insert_message(
+    conn: &mut Connection,
+    message_id: &str,
+    session_id: &str,
+    msg: &NewMessage,
+    attribution: &MessageAttribution,
+) -> Result<Option<MessageRecord>, DbError> {
+    let tx = conn.transaction()?;
+    let inserted = insert_message_in_current_write(&tx, message_id, session_id, msg, attribution)?;
+    tx.commit()?;
+    Ok(inserted)
+}
+
 /// 同步加载会话全量消息（`seq_num` 升序；供详情与消息分页复用）。
 ///
 /// 未知 role 的行跳过（对齐 `mapRowToMessage` 的 catch→empty 语义）；
 /// `content_json` 宽容解析见 [`parse_blocks`]。
 pub(super) fn load_message_rows(
-    conn: &mut Connection,
+    conn: &Connection,
     session_id: &str,
 ) -> Result<Vec<MessageRecord>, DbError> {
     let mut stmt = conn.prepare(
@@ -178,8 +224,154 @@ impl crate::Db {
         msg: NewMessage,
     ) -> Result<Option<MessageRecord>, DbError> {
         let (message_id, session_id) = (message_id.to_owned(), session_id.to_owned());
-        self.with_writer(move |conn| insert_message(conn, &message_id, &session_id, &msg))
-            .await
+        self.with_writer(move |conn| {
+            insert_message(
+                conn,
+                &message_id,
+                &session_id,
+                &msg,
+                &MessageAttribution::conversation(),
+            )
+        })
+        .await
+    }
+
+    /// Append a message carrying structured Task/Run ownership.
+    ///
+    /// The repository verifies the referenced task and run belong to `session_id`'s root
+    /// task tree before the insert, then persists attribution and session touch atomically.
+    ///
+    /// # Errors
+    /// Returns [`DbError`] when ownership validation, JSON encoding, or the atomic insert fails.
+    pub async fn append_attributed_message(
+        &self,
+        session_id: &str,
+        msg: NewMessage,
+        attribution: MessageAttribution,
+    ) -> Result<MessageRecord, DbError> {
+        let message_id = uuid::Uuid::new_v4().to_string();
+        let message_id_for_insert = message_id.clone();
+        let session_id = session_id.to_owned();
+        let inserted = self
+            .with_writer(move |conn| {
+                if !matches!(
+                    attribution.origin.as_str(),
+                    "conversation" | "tool_result" | "task_result" | "runtime"
+                ) {
+                    return Err(DbError::Invalid("MESSAGE_ORIGIN_INVALID".to_owned()));
+                }
+                if let Some(task_id) = attribution.task_id.as_deref() {
+                    let owned: i64 = conn.query_row(
+                        "SELECT COUNT(*) FROM tasks t
+                         JOIN sessions s ON s.id=?1
+                         WHERE t.id=?2 AND (t.session_id=s.id OR s.parent_session_id=t.session_id)",
+                        params![session_id, task_id],
+                        |row| row.get(0),
+                    )?;
+                    if owned != 1 {
+                        return Err(DbError::Invalid("MESSAGE_TASK_NOT_OWNED".to_owned()));
+                    }
+                }
+                if let Some(run_id) = attribution.run_id.as_deref() {
+                    let owned: i64 = conn.query_row(
+                        "SELECT COUNT(*) FROM run_envelopes r
+                         WHERE r.id=?1 AND (?2 IS NULL OR r.task_id=?2)",
+                        params![run_id, attribution.task_id],
+                        |row| row.get(0),
+                    )?;
+                    if owned != 1 {
+                        return Err(DbError::Invalid("MESSAGE_RUN_NOT_OWNED".to_owned()));
+                    }
+                }
+                insert_message(
+                    conn,
+                    &message_id_for_insert,
+                    &session_id,
+                    &msg,
+                    &attribution,
+                )
+            })
+            .await?;
+        inserted.ok_or_else(|| DbError::Invalid(format!("MESSAGE_ID_COLLISION:{message_id}")))
+    }
+
+    /// Ensure a successful Task/Run has one durable final Assistant message.
+    ///
+    /// Executors that already persisted their streamed Assistant output are left
+    /// untouched. A non-streaming executor may return its final content directly to
+    /// `TaskRuntime`; in that case this method persists that actual output before the
+    /// immutable `TaskResult` is committed. The writer actor serializes the lookup and
+    /// insert, preventing duplicate fallback messages for one execution driver.
+    ///
+    /// # Errors
+    /// Returns [`DbError`] when the Task/Run identity is invalid or persistence fails.
+    pub async fn ensure_task_final_assistant(
+        &self,
+        task_id: &str,
+        run_id: &str,
+        content: &str,
+    ) -> Result<String, DbError> {
+        let task_id = task_id.to_owned();
+        let run_id = run_id.to_owned();
+        let content = content.to_owned();
+        self.with_writer(move |conn| {
+            let session_id: String = conn
+                .query_row(
+                    "SELECT session_id FROM run_envelopes WHERE id=?1 AND task_id=?2",
+                    params![run_id, task_id],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .ok_or_else(|| DbError::Invalid("TASK_RUN_NOT_FOUND".to_owned()))?;
+            if let Some((message_id, content_json)) = conn
+                .query_row(
+                    "SELECT id,content_json FROM messages
+                     WHERE task_id=?1 AND run_id=?2 AND role='assistant'
+                     ORDER BY seq_num DESC LIMIT 1",
+                    params![task_id, run_id],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional()?
+            {
+                let persisted = parse_blocks(&content_json)
+                    .iter()
+                    .filter_map(|block| match block {
+                        StoredBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if persisted != content {
+                    return Err(DbError::Invalid(
+                        "FINAL_ASSISTANT_CONTENT_MISMATCH".to_owned(),
+                    ));
+                }
+                return Ok(message_id);
+            }
+            let message_id = uuid::Uuid::new_v4().to_string();
+            let inserted = insert_message(
+                conn,
+                &message_id,
+                &session_id,
+                &NewMessage {
+                    role: MessageRole::Assistant,
+                    content: vec![StoredBlock::Text { text: content }],
+                    stop_reason: Some("end_turn".to_owned()),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                },
+                &MessageAttribution {
+                    task_id: Some(task_id),
+                    run_id: Some(run_id),
+                    origin: "runtime".to_owned(),
+                    source_task_id: None,
+                },
+            )?;
+            inserted
+                .map(|record| record.id)
+                .ok_or_else(|| DbError::Invalid(format!("MESSAGE_ID_COLLISION:{message_id}")))
+        })
+        .await
     }
 
     /// 消息列表游标分页（`GET /api/sessions/{id}/messages` 数据源）。

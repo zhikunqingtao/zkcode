@@ -12,7 +12,8 @@
 use futures::future::BoxFuture;
 use serde_json::json;
 
-use crate::file_state::{self, session_key};
+use crate::atomic::sha256_hex;
+use crate::file_state::{self, ReadObservation, session_key};
 use crate::input::{failure, optional_usize, required_str, resolve_path};
 use crate::tool::{Tool, ToolContext, ToolOutput};
 
@@ -125,33 +126,42 @@ async fn run(input: serde_json::Value, ctx: ToolContext) -> ToolOutput {
             format!("{display} looks like a binary file"),
         );
     }
+    let content_sha256 = sha256_hex(&bytes);
     let text = String::from_utf8_lossy(&bytes).into_owned();
-    finish(&display, &text, &input, &ctx)
+    finish(&display, &text, &content_sha256, &input, &ctx)
 }
 
 /// 结果组装（行切片 + 已读台账记账 + `structuredResult` 元数据，对照旧
 /// metadata 七元组）。
-fn finish(display: &str, text: &str, input: &serde_json::Value, ctx: &ToolContext) -> ToolOutput {
+fn finish(
+    display: &str,
+    text: &str,
+    content_sha256: &str,
+    input: &serde_json::Value,
+    ctx: &ToolContext,
+) -> ToolOutput {
     let total_lines = text.lines().count();
     let start_line = optional_usize(input, "offset").unwrap_or(1).max(1);
     let limit = optional_usize(input, "limit")
         .unwrap_or(MAX_READ_OUTPUT_LINES)
         .clamp(1, MAX_READ_OUTPUT_LINES);
     let slice = render(text, start_line, limit);
-    // 已读台账（对照旧 `cache.markRead(filePath, content, offset > 0 ? offset :
-    // null, limit > 0 ? limit : null, selectedLines.size() >= MAX_OUTPUT_LINES)`）；
-    // 本实现额外把「1 MiB 字节截断」也计作截断视图（旧实现无字节截断面）。
-    let is_partial = slice.truncated || slice.lines >= MAX_READ_OUTPUT_LINES;
-    file_state::global().mark_read(
+    let next_offset = start_line + slice.lines;
+    let has_more = next_offset <= total_lines;
+    // Only a complete read starting at line one may authorize a later full-file
+    // overwrite. Ranged or byte/line-limited views intentionally carry no hash.
+    let is_partial = start_line != 1 || slice.truncated || has_more;
+    file_state::global().mark_read_with_hash(
         session_key(ctx.session_id()),
         display,
         &slice.raw,
-        Some(start_line),
-        Some(limit),
-        is_partial,
+        ReadObservation {
+            offset: Some(start_line),
+            limit: Some(limit),
+            is_partial,
+            content_sha256: (!is_partial).then(|| content_sha256.to_owned()),
+        },
     );
-    let next_offset = start_line + slice.lines;
-    let has_more = next_offset <= total_lines;
     let mut output = ToolOutput::ok(slice.body);
     output.metadata = Some(json!({
         "structuredResult": {
@@ -163,6 +173,8 @@ fn finish(display: &str, text: &str, input: &serde_json::Value, ctx: &ToolContex
             "truncated": slice.truncated,
             "hasMore": has_more,
             "nextOffset": if has_more { Some(next_offset) } else { None },
+            "contentSha256": content_sha256,
+            "overwriteEligible": !is_partial,
         }
     }));
     output

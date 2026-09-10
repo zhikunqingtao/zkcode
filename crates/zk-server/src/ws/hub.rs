@@ -21,12 +21,10 @@
 //!      └──────────── bind_session（degraded 重置）◄──────────┘
 //! ```
 //!
-//! degraded 连接的后续 critical 直接入 pending（不再尝试 send），delta 丢弃；
-//! pending 为 per-session FIFO **无上界**（对齐旧 `WebSocketSessionManager` 侧
-//! Java `List` 的无限追加语义：critical 永不因积压被丢弃；深度经
-//! `zk_ws_pending_depth` gauge 监控），bind 成功后按序重放（多订阅者场景重放可能
-//! 对已收到的连接重复投递，Phase 1 单用户单连接不构成问题，幂等由前端
-//! interaction ACK 层吸收——Phase 2 多端接入时引入按连接去重）。
+//! degraded 连接的后续 critical 直接入 pending（不再尝试 send），delta 丢弃。
+//! pending 是有界的 per-session FIFO 投递缓存；持久 `run_event_log` 才是重放
+//! 权威。缓存达到单会话或全局上限时淘汰旧副本并计数，客户端重连按 `eventId`
+//! 从 outbox 恢复。多订阅者收到重复持久事件时同样按 `eventId` 去重。
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -35,7 +33,8 @@ use std::time::Instant;
 
 use tokio::sync::mpsc;
 use tokio::time::timeout;
-use zk_protocol::{ServerEnvelope, ServerMessage};
+use zk_db::Db;
+use zk_protocol::{RuntimeEventContext, ServerEnvelope, ServerMessage};
 
 use super::config::WsConfig;
 use super::metrics as ws_metrics;
@@ -46,6 +45,130 @@ use crate::iso::now_millis;
 pub type ConnId = String;
 /// 会话标识（应用层 sessionId）。
 pub type SessionId = String;
+
+/// 从消息本体可证明得到的 Task/Run 归属。
+///
+/// Hub 本身刻意不持有数据库，因此这里只提取协议载荷已经携带的身份；缺失字段
+/// 保持 `None`，绝不根据显示名或短 ID 猜测。持久 outbox 调用方通过
+/// [`WsHub::push_with_event_context`] 传入完整、权威的上下文。
+#[derive(Default)]
+#[allow(clippy::struct_field_names)] // Mirrors the v4 ownership field names exactly.
+struct MessageActor {
+    session_id: Option<String>,
+    task_id: Option<String>,
+    run_id: Option<String>,
+    source_task_id: Option<String>,
+    source_run_id: Option<String>,
+    tool_use_id: Option<String>,
+}
+
+impl MessageActor {
+    fn for_task(task_id: &str) -> Self {
+        Self {
+            task_id: Some(task_id.to_owned()),
+            source_task_id: Some(task_id.to_owned()),
+            ..Self::default()
+        }
+    }
+
+    fn for_run(run_id: &str) -> Self {
+        Self {
+            run_id: Some(run_id.to_owned()),
+            source_run_id: Some(run_id.to_owned()),
+            ..Self::default()
+        }
+    }
+}
+
+fn message_actor(msg: &ServerMessage) -> MessageActor {
+    match msg {
+        ServerMessage::AgentSpawn { task_id, .. }
+        | ServerMessage::AgentUpdate { task_id, .. }
+        | ServerMessage::AgentComplete { task_id, .. }
+        | ServerMessage::TaskUpdate { task_id, .. } => MessageActor::for_task(task_id),
+        // V4 Agent IDs are Task IDs. Keeping the mapping here also makes any remaining
+        // legacy producer visible as an attribution defect instead of losing ownership.
+        ServerMessage::AgentStarted { agent_id, .. }
+        | ServerMessage::AgentCompleted { agent_id, .. }
+        | ServerMessage::AgentFailed { agent_id, .. } => MessageActor::for_task(agent_id),
+        ServerMessage::MessageComplete {
+            session_id, run_id, ..
+        } => {
+            let mut actor = run_id
+                .as_deref()
+                .map_or_else(MessageActor::default, MessageActor::for_run);
+            actor.session_id.clone_from(session_id);
+            actor
+        }
+        ServerMessage::SessionRestored { metadata, .. } => MessageActor {
+            session_id: Some(metadata.session_id.clone()),
+            ..MessageActor::default()
+        },
+        ServerMessage::VerifyAttention { session_id, .. } => MessageActor {
+            session_id: Some(session_id.clone()),
+            ..MessageActor::default()
+        },
+        ServerMessage::InteractionCreated { view }
+        | ServerMessage::InteractionTerminal { view }
+        | ServerMessage::InteractionUpdated { view } => {
+            let source_run_id = view.actor_run_id.clone().or_else(|| view.run_id.clone());
+            let tool_use_id = view.correlation_key.clone().or_else(|| {
+                view.prompt
+                    .as_ref()
+                    .and_then(|prompt| prompt.get("toolUseId"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned)
+            });
+            MessageActor {
+                session_id: view.session_id.clone(),
+                run_id: view.run_id.clone(),
+                source_run_id,
+                tool_use_id,
+                ..MessageActor::default()
+            }
+        }
+        ServerMessage::McpToolProgress { run_id, .. } => run_id
+            .as_deref()
+            .map_or_else(MessageActor::default, MessageActor::for_run),
+        // A tool's structured result is business data, never execution identity.
+        // Agent/Task ToolResult legitimately returns the target child taskId/runId;
+        // it therefore falls through here. `push_runtime_event` supplies toolUseId
+        // to SQLite, which resolves the authoritative caller from the persisted
+        // tool_invocations row. Other unowned control messages fall through too.
+        _ => MessageActor::default(),
+    }
+}
+
+fn attribute_envelope(envelope: &mut ServerEnvelope, routed_session_id: Option<&str>) {
+    let actor = message_actor(&envelope.msg);
+    if envelope.event_context.session_id.is_none() {
+        envelope.event_context.session_id = routed_session_id
+            .map(ToOwned::to_owned)
+            .or(actor.session_id);
+    }
+    if envelope.event_context.task_id.is_none() {
+        envelope.event_context.task_id = actor.task_id;
+    }
+    if envelope.event_context.run_id.is_none() {
+        envelope.event_context.run_id = actor.run_id;
+    }
+    if envelope.event_context.source_task_id.is_none() {
+        envelope.event_context.source_task_id = actor.source_task_id;
+    }
+    if envelope.event_context.source_run_id.is_none() {
+        envelope.event_context.source_run_id = actor.source_run_id;
+    }
+    if envelope.event_context.tool_use_id.is_none() {
+        envelope.event_context.tool_use_id = actor.tool_use_id;
+    }
+}
+
+fn is_critical_envelope_message(message: &ServerMessage) -> bool {
+    matches!(
+        message,
+        ServerMessage::McpToolProgress { terminal: true, .. }
+    ) || is_critical_message(message.kind())
+}
 
 /// 写循环出站帧（协议层心跳 Ping 由写循环定时器直接发，不经此通道）。
 pub(crate) enum OutboundFrame {
@@ -93,6 +216,7 @@ struct HubStats {
     delta_dropped: AtomicU64,
     critical_timeouts: AtomicU64,
     pending_replayed: AtomicU64,
+    pending_evicted: AtomicU64,
 }
 
 /// hub 可变状态全集。
@@ -446,11 +570,143 @@ impl WsHub {
     ///
     /// 本方法对调用方承诺**永不阻塞、永不失败**（背压由档位策略消化）。
     pub async fn push(&self, session_id: &str, msg: ServerMessage) {
-        let critical = is_critical_message(msg.kind());
+        let critical = is_critical_envelope_message(&msg);
         let seq = self.next_seq(session_id);
         let mut envelope = ServerEnvelope::new(msg, now_millis(), Some(seq));
+        // `ServerEnvelope::new` intentionally creates an ephemeral event ID because this
+        // call site has no durable outbox row. The same envelope is retained for pending
+        // replay, so reconnect dedup remains stable within the server lifetime.
+        attribute_envelope(&mut envelope, Some(session_id));
         envelope.session_id = Some(session_id.to_owned());
         self.deliver(session_id, envelope, critical).await;
+    }
+
+    /// Persist and publish one Run-attributed v4 event.
+    ///
+    /// The database row is committed before delivery and its global ID becomes
+    /// the wire `eventId`. Messages emitted before any Run exists are control
+    /// events and deliberately fall back to the ephemeral path. Persistence
+    /// failures fail closed so the UI never observes an unrecoverable state fact.
+    pub async fn push_runtime_event(
+        &self,
+        db: &Db,
+        route_session_id: &str,
+        source_session_id: &str,
+        msg: ServerMessage,
+    ) {
+        let actor = message_actor(&msg);
+        let source_task_id = actor.source_task_id.as_deref().or(actor.task_id.as_deref());
+        let source_run_id = actor.source_run_id.as_deref().or(actor.run_id.as_deref());
+        let tool_use_id = msg.tool_use_id().map(str::to_owned).or(actor.tool_use_id);
+        let payload = match serde_json::to_value(&msg) {
+            Ok(payload) => payload,
+            Err(error) => {
+                tracing::error!(%error, kind = msg.kind(), "WS outbox payload serialization failed");
+                return;
+            }
+        };
+        match db
+            .append_ws_outbox_event(
+                route_session_id,
+                source_session_id,
+                source_task_id,
+                source_run_id,
+                &format!("ws_{}", msg.kind()),
+                tool_use_id.as_deref(),
+                &payload,
+            )
+            .await
+        {
+            Ok(Some(event)) => {
+                let context = RuntimeEventContext::durable(event.id.to_string()).with_actor(
+                    Some(event.root_session_id),
+                    Some(event.root_task_id),
+                    Some(event.root_run_id),
+                    Some(event.source_task_id),
+                    Some(event.source_run_id),
+                    tool_use_id,
+                );
+                self.push_with_event_context(route_session_id, msg, context)
+                    .await;
+            }
+            Ok(None) => self.push(route_session_id, msg).await,
+            Err(error) => {
+                tracing::error!(
+                    %error,
+                    route_session_id,
+                    source_session_id,
+                    kind = msg.kind(),
+                    "durable WS outbox append failed; frame suppressed"
+                );
+            }
+        }
+    }
+
+    /// 推送一条已经拥有持久 outbox 身份的事件。
+    ///
+    /// `event_context.event_id` 应使用 `run_event_log.id`；Hub 只补齐上下文中缺失
+    /// 且能从路由或消息载荷证明的归属字段，不覆盖调用方给出的 Task/Run 身份。
+    pub async fn push_with_event_context(
+        &self,
+        session_id: &str,
+        msg: ServerMessage,
+        event_context: RuntimeEventContext,
+    ) {
+        let critical = is_critical_envelope_message(&msg);
+        let seq = self.next_seq(session_id);
+        let mut envelope =
+            ServerEnvelope::new(msg, now_millis(), Some(seq)).with_event_context(event_context);
+        attribute_envelope(&mut envelope, Some(session_id));
+        envelope.session_id = Some(session_id.to_owned());
+        self.deliver(session_id, envelope, critical).await;
+    }
+
+    /// Deliver one persisted replay event only to the connection performing
+    /// bind recovery. The persisted timestamp and event identity are preserved;
+    /// a fresh transport sequence and the current binding epoch are attached.
+    pub fn push_replay_direct(
+        &self,
+        conn_id: &str,
+        msg: ServerMessage,
+        persisted_ts: i64,
+        event_context: RuntimeEventContext,
+    ) -> bool {
+        let Some((session_id, binding_epoch)) = self.bound_session(conn_id) else {
+            return false;
+        };
+        if event_context.session_id.as_deref() != Some(session_id.as_str()) {
+            tracing::error!(
+                conn_id,
+                session_id,
+                event_session_id = ?event_context.session_id,
+                "cross-session WS replay rejected"
+            );
+            return false;
+        }
+        let seq = self.next_seq(&session_id);
+        let mut envelope =
+            ServerEnvelope::new(msg, persisted_ts, Some(seq)).with_event_context(event_context);
+        attribute_envelope(&mut envelope, Some(&session_id));
+        envelope.session_id = Some(session_id);
+        envelope.binding_epoch = Some(binding_epoch);
+        let Some(entry) = self.connection(conn_id) else {
+            return false;
+        };
+        match serde_json::to_string(&envelope) {
+            Ok(text) => {
+                if entry.tx.try_send(OutboundFrame::Text(text)).is_ok() {
+                    ws_metrics::count_message("out", envelope.kind());
+                    true
+                } else {
+                    tracing::warn!(conn_id, event_id = %envelope.event_context.event_id, "WS replay dropped by connection backpressure");
+                    false
+                }
+            }
+            Err(error) => {
+                tracing::error!(conn_id, %error, "WS replay envelope serialization failed");
+                false
+            }
+        }
     }
 
     /// 直发单连接（旧 `pushToPrincipal` 语义：不带 `_sessionId` /
@@ -460,7 +716,11 @@ impl WsHub {
     /// `try_send` 满即丢弃 + debug 日志（握手响应是连接自身请求的答复，
     /// 连接濒死时无需暂存）。
     pub fn push_direct(&self, conn_id: &str, msg: ServerMessage) {
-        let envelope = ServerEnvelope::new(msg, now_millis(), None);
+        let routed_session_id = self
+            .bound_session(conn_id)
+            .map(|(session_id, _)| session_id);
+        let mut envelope = ServerEnvelope::new(msg, now_millis(), None);
+        attribute_envelope(&mut envelope, routed_session_id.as_deref());
         let Some(entry) = self.connection(conn_id) else {
             return;
         };
@@ -503,7 +763,7 @@ impl WsHub {
         ws_metrics::count_pending_replayed(u64::try_from(count).unwrap_or(u64::MAX));
         tracing::info!(session_id, count, "ws pending replay started");
         for envelope in drained {
-            let critical = is_critical_message(envelope.kind());
+            let critical = is_critical_envelope_message(&envelope.msg);
             self.deliver(session_id, envelope, critical).await;
         }
         count
@@ -534,6 +794,12 @@ impl WsHub {
     #[must_use]
     pub fn critical_timeouts_total(&self) -> u64 {
         self.inner.stats.critical_timeouts.load(Ordering::Relaxed)
+    }
+
+    /// critical 内存缓存累计淘汰数；持久事件仍可从 `SQLite` outbox 恢复。
+    #[must_use]
+    pub fn pending_evicted_total(&self) -> u64 {
+        self.inner.stats.pending_evicted.load(Ordering::Relaxed)
     }
 
     /// 当前连接总数。
@@ -764,14 +1030,45 @@ impl WsHub {
         tracing::debug!(session_id, reason, "delta message dropped");
     }
 
-    /// critical 入 pending 队（FIFO **无界**追加：对齐旧 Java `List` 语义，
-    /// 不截断不淘汰；深度只上报 gauge 供监控）。
+    /// critical 入有界 pending 队。持久事件的权威副本已经在 `SQLite` outbox；
+    /// 此处只保留有限的低延迟重放缓存，避免离线或背压连接耗尽进程内存。
     fn enqueue_pending(&self, session_id: &str, envelope: ServerEnvelope) {
         let mut pending = self.inner.pending.lock().expect("pending lock");
-        pending
-            .entry(session_id.to_owned())
-            .or_default()
-            .push_back(envelope);
+        let per_session_limit = self.inner.config.pending_capacity_per_session.max(1);
+        let total_limit = self.inner.config.pending_capacity_total.max(1);
+        let mut evicted = 0_u64;
+        {
+            let queue = pending.entry(session_id.to_owned()).or_default();
+            if queue.len() >= per_session_limit {
+                queue.pop_front();
+                evicted += 1;
+            }
+            queue.push_back(envelope);
+        }
+        while pending.values().map(VecDeque::len).sum::<usize>() > total_limit {
+            let victim = pending
+                .iter()
+                .filter(|(candidate, queue)| candidate.as_str() != session_id && !queue.is_empty())
+                .max_by_key(|(_, queue)| queue.len())
+                .map(|(candidate, _)| candidate.clone())
+                .or_else(|| {
+                    pending
+                        .get_key_value(session_id)
+                        .filter(|(_, queue)| !queue.is_empty())
+                        .map(|(candidate, _)| candidate.clone())
+                });
+            let Some(victim) = victim else {
+                break;
+            };
+            let empty = pending.get_mut(&victim).is_some_and(|queue| {
+                queue.pop_front();
+                queue.is_empty()
+            });
+            if empty {
+                pending.remove(&victim);
+            }
+            evicted += 1;
+        }
         // 持锁期间直接求和：不可经 `pending_depth_total` 重入取同一把锁
         //（std `Mutex` 不可重入，重入即死锁——首次集成跑测实测命中）。
         let depth =
@@ -779,6 +1076,18 @@ impl WsHub {
         self.inner.pending_depth.store(depth, Ordering::Relaxed);
         ws_metrics::set_pending_depth(depth);
         drop(pending);
+        if evicted > 0 {
+            self.inner
+                .stats
+                .pending_evicted
+                .fetch_add(evicted, Ordering::Relaxed);
+            ws_metrics::count_pending_evicted(evicted);
+            tracing::warn!(
+                session_id,
+                evicted,
+                "bounded WS pending cache evicted old envelopes; durable replay remains authoritative"
+            );
+        }
         tracing::debug!(session_id, "critical message pended");
     }
 
@@ -838,6 +1147,31 @@ mod tests {
         ServerMessage::StreamDelta {
             delta: text.to_owned(),
         }
+    }
+
+    #[test]
+    fn tool_result_business_identity_is_never_used_as_the_event_actor() {
+        let message = ServerMessage::ToolResult {
+            tool_use_id: "agent-tool-use".to_owned(),
+            result: zk_protocol::ToolResultContent {
+                content: "submitted child".to_owned(),
+                is_error: false,
+                metadata: Some(serde_json::json!({
+                    "structuredResult": {
+                        "taskId": "child-task",
+                        "runId": "child-run",
+                        "sessionId": "child-session"
+                    }
+                })),
+            },
+        };
+
+        let actor = message_actor(&message);
+        assert!(actor.task_id.is_none());
+        assert!(actor.run_id.is_none());
+        assert!(actor.source_task_id.is_none());
+        assert!(actor.source_run_id.is_none());
+        assert_eq!(message.tool_use_id(), Some("agent-tool-use"));
     }
 
     /// `unbind` 先摘绑定、后摘订阅，两步之间存在窗口：该窗口内投递的 critical
@@ -907,6 +1241,15 @@ mod tests {
         assert_eq!(value["_bindingEpoch"], 7);
         assert_eq!(value["seq"], 1);
         assert!(value["ts"].as_i64().is_some());
+        assert_eq!(value["eventContext"]["protocolVersion"], 4);
+        assert_eq!(value["eventContext"]["sessionId"], "session-a");
+        assert!(
+            value["eventContext"]["eventId"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("ephemeral:"))
+        );
+        assert!(value["eventContext"].get("taskId").is_some());
+        assert!(value["eventContext"].get("runId").is_some());
     }
 
     #[tokio::test]
@@ -1008,24 +1351,41 @@ mod tests {
         assert_eq!(hub.pending_len("session-a"), 0);
     }
 
-    /// pending 无上界（对齐旧 Java `List` 无限追加）：远超历史 1024 上界
-    /// 后仍全量保留，重放条数等于入队条数、队首仍为最旧一条。
+    /// pending 只作有界加速缓存。超过单会话上限时保留最新窗口；已持久化的
+    /// 旧事件由 bind 的 `SQLite` outbox 路径恢复。
     #[tokio::test]
-    async fn pending_queue_is_unbounded() {
-        let (hub, _rx) = setup(test_config());
-        for i in 0..1500 {
+    async fn pending_queue_is_bounded_and_keeps_latest_window() {
+        let mut config = test_config();
+        config.pending_capacity_per_session = 4;
+        config.pending_capacity_total = 8;
+        let (hub, _rx) = setup(config);
+        for i in 0..10 {
             hub.push("offline", critical_msg(&format!("P{i}"))).await;
         }
-        assert_eq!(hub.pending_len("offline"), 1500);
-        let (tx, mut rx2) = mpsc::channel(2048);
+        assert_eq!(hub.pending_len("offline"), 4);
+        assert_eq!(hub.pending_evicted_total(), 6);
+        let (tx, mut rx2) = mpsc::channel(8);
         hub.register("conn-2", tx);
         hub.bind("conn-2", "offline", 1).expect("bind");
-        assert_eq!(hub.replay_pending("offline").await, 1500);
+        assert_eq!(hub.replay_pending("offline").await, 4);
         let OutboundFrame::Text(first) = rx2.recv().await.expect("replayed frame") else {
             panic!("unexpected control frame in test");
         };
         let value: serde_json::Value = serde_json::from_str(&first).expect("json");
-        assert_eq!(value["code"], "P0", "最旧一条未被淘汰");
+        assert_eq!(value["code"], "P6", "oldest cached envelope was evicted");
+    }
+
+    #[tokio::test]
+    async fn pending_queue_has_a_global_bound_across_sessions() {
+        let mut config = test_config();
+        config.pending_capacity_per_session = 8;
+        config.pending_capacity_total = 3;
+        let (hub, _rx) = setup(config);
+        for session in ["a", "b", "c", "d"] {
+            hub.push(session, critical_msg(session)).await;
+        }
+        assert_eq!(hub.pending_depth_total(), 3);
+        assert_eq!(hub.pending_evicted_total(), 1);
     }
 
     #[tokio::test]
@@ -1065,5 +1425,72 @@ mod tests {
         );
         assert!(value.get("_bindingEpoch").is_none());
         assert_eq!(value["type"], "error");
+        assert_eq!(value["eventContext"]["protocolVersion"], 4);
+        assert!(value["eventContext"]["sessionId"].is_null());
+    }
+
+    #[tokio::test]
+    async fn v4_context_attributes_task_and_direct_bound_session() {
+        let (hub, mut rx) = setup(test_config());
+        bind_ok(&hub, 3);
+
+        hub.push(
+            "session-a",
+            ServerMessage::TaskUpdate {
+                task_id: "8d4b7c16-0880-482e-a074-c74c256f8601".to_owned(),
+                status: "running".to_owned(),
+                progress: None,
+                output: None,
+            },
+        )
+        .await;
+        let OutboundFrame::Text(task_frame) = rx.recv().await.expect("task frame") else {
+            panic!("unexpected control frame in test");
+        };
+        let task: serde_json::Value = serde_json::from_str(&task_frame).expect("task json");
+        assert_eq!(
+            task["eventContext"]["taskId"],
+            "8d4b7c16-0880-482e-a074-c74c256f8601"
+        );
+        assert_eq!(
+            task["eventContext"]["sourceTaskId"],
+            "8d4b7c16-0880-482e-a074-c74c256f8601"
+        );
+
+        hub.push_direct("conn-1", critical_msg("D2"));
+        let OutboundFrame::Text(direct_frame) = rx.recv().await.expect("direct frame") else {
+            panic!("unexpected control frame in test");
+        };
+        let direct: serde_json::Value = serde_json::from_str(&direct_frame).expect("direct json");
+        assert!(direct.get("_sessionId").is_none());
+        assert!(direct.get("_bindingEpoch").is_none());
+        assert_eq!(direct["eventContext"]["sessionId"], "session-a");
+    }
+
+    #[tokio::test]
+    async fn durable_event_context_is_preserved_and_completed() {
+        let (hub, mut rx) = setup(test_config());
+        bind_ok(&hub, 1);
+        let context = RuntimeEventContext::durable("run_event_log:42").with_actor(
+            None,
+            Some("root-task".to_owned()),
+            Some("root-run".to_owned()),
+            Some("child-task".to_owned()),
+            Some("child-run".to_owned()),
+            None,
+        );
+
+        hub.push_with_event_context("session-a", delta_msg("durable"), context)
+            .await;
+        let OutboundFrame::Text(frame) = rx.recv().await.expect("durable frame") else {
+            panic!("unexpected control frame in test");
+        };
+        let value: serde_json::Value = serde_json::from_str(&frame).expect("durable json");
+        assert_eq!(value["eventContext"]["eventId"], "run_event_log:42");
+        assert_eq!(value["eventContext"]["sessionId"], "session-a");
+        assert_eq!(value["eventContext"]["taskId"], "root-task");
+        assert_eq!(value["eventContext"]["runId"], "root-run");
+        assert_eq!(value["eventContext"]["sourceTaskId"], "child-task");
+        assert_eq!(value["eventContext"]["sourceRunId"], "child-run");
     }
 }

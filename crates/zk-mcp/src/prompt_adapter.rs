@@ -162,6 +162,14 @@ impl Tool for McpPromptAdapter {
     fn mcp_identity(&self) -> Option<&McpToolIdentity> {
         Some(&self.identity)
     }
+
+    fn connection_generation(&self) -> Option<u64> {
+        self.connection.current_transport_generation()
+    }
+
+    fn is_connection_generation_current(&self, generation: u64) -> bool {
+        self.connection.is_transport_generation_current(generation)
+    }
 }
 
 #[cfg(test)]

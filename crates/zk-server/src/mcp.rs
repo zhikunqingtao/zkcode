@@ -25,11 +25,13 @@ use std::time::UNIX_EPOCH;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
+use tokio::sync::mpsc;
+use zk_db::Db;
 use zk_mcp::{
     ApprovalPort, McpClientManager, McpConnectionStatus, McpHealthObserver, McpServerConfig,
     McpToolSink, ProgressTracker,
 };
-use zk_protocol::ServerMessage;
+use zk_protocol::{McpToolInfo, ServerMessage};
 use zk_tools::{Tool, ToolRegistry};
 
 use crate::ws::WsHub;
@@ -313,23 +315,31 @@ impl RegistryToolSink {
 impl McpToolSink for RegistryToolSink {
     fn register_dynamic(&self, tool: Arc<dyn Tool>) {
         self.tools.register_dynamic(tool);
+        crate::engine_bridge::refresh_tool_search_catalog(&self.tools);
     }
 
     fn unregister_by_prefix(&self, prefix: &str) {
         self.tools.unregister_by_prefix(prefix);
-        if let Some(server_id) = prefix
-            .strip_prefix("mcp__")
-            .and_then(|rest| rest.strip_suffix("__"))
-        {
-            broadcast_to_active_sessions(
-                &self.hub,
-                ServerMessage::McpToolUpdate {
-                    server_id: server_id.to_owned(),
-                    tools: Vec::new(),
-                },
-                "mcp tool removal",
-            );
-        }
+        crate::engine_bridge::refresh_tool_search_catalog(&self.tools);
+    }
+
+    fn publish_server_tools(&self, server_id: &str, tools: Vec<zk_mcp::ToolDefinition>) {
+        let tools = tools
+            .into_iter()
+            .map(|tool| McpToolInfo {
+                name: tool.name,
+                description: tool.description,
+                input_schema: tool.input_schema,
+            })
+            .collect();
+        broadcast_to_active_sessions(
+            &self.hub,
+            ServerMessage::McpToolUpdate {
+                server_id: server_id.to_owned(),
+                tools,
+            },
+            "mcp tool directory update",
+        );
     }
 }
 
@@ -378,6 +388,7 @@ impl McpHealthObserver for HubHealthObserver {
 /// （旧 `McpProgressTracker`）。
 pub struct HubProgressTracker {
     hub: WsHub,
+    db: Db,
     /// `progressToken` → 归属元数据（旧 `activeProgress` `ConcurrentHashMap`）。
     active: Mutex<HashMap<String, ProgressInfo>>,
 }
@@ -388,14 +399,25 @@ struct ProgressInfo {
     session_id: String,
     server_name: String,
     tool_name: String,
+    run_id: Option<String>,
+    tool_use_id: Option<String>,
+    sender: mpsc::Sender<ProgressEvent>,
+}
+
+struct ProgressEvent {
+    progress: f64,
+    total: f64,
+    message: String,
+    terminal: bool,
 }
 
 impl HubProgressTracker {
     /// 绑定下行出口。
     #[must_use]
-    pub fn new(hub: WsHub) -> Self {
+    pub fn new(hub: WsHub, db: Db) -> Self {
         Self {
             hub,
+            db,
             active: Mutex::new(HashMap::new()),
         }
     }
@@ -412,21 +434,83 @@ impl HubProgressTracker {
             poisoned.into_inner()
         })
     }
+
+    fn register(
+        &self,
+        token: &str,
+        session_id: &str,
+        server_name: &str,
+        tool_name: &str,
+        run_id: Option<&str>,
+        tool_use_id: Option<&str>,
+    ) {
+        if token.is_empty() {
+            return;
+        }
+        let (sender, mut receiver) = mpsc::channel(32);
+        let info = ProgressInfo {
+            session_id: session_id.to_owned(),
+            server_name: server_name.to_owned(),
+            tool_name: tool_name.to_owned(),
+            run_id: run_id.map(ToOwned::to_owned),
+            tool_use_id: tool_use_id.map(ToOwned::to_owned),
+            sender,
+        };
+        let worker_session_id = info.session_id.clone();
+        let worker_server_name = info.server_name.clone();
+        let worker_tool_name = info.tool_name.clone();
+        let worker_run_id = info.run_id.clone();
+        let worker_tool_use_id = info.tool_use_id.clone();
+        self.table().insert(token.to_owned(), info);
+
+        let hub = self.hub.clone();
+        let db = self.db.clone();
+        let progress_token = token.to_owned();
+        spawn_or_drop("mcp tool progress worker", async move {
+            while let Some(event) = receiver.recv().await {
+                let payload = ServerMessage::McpToolProgress {
+                    progress_token: progress_token.clone(),
+                    server_name: worker_server_name.clone(),
+                    tool_name: worker_tool_name.clone(),
+                    progress: event.progress,
+                    total: event.total,
+                    message: event.message,
+                    run_id: worker_run_id.clone(),
+                    tool_use_id: worker_tool_use_id.clone(),
+                    terminal: event.terminal,
+                };
+                hub.push_runtime_event(&db, &worker_session_id, &worker_session_id, payload)
+                    .await;
+                if event.terminal {
+                    break;
+                }
+            }
+        });
+    }
 }
 
 impl ProgressTracker for HubProgressTracker {
     /// 旧 `registerProgress`：空 token 直接忽略。
     fn register_progress(&self, token: &str, session_id: &str, server_name: &str, tool_name: &str) {
-        if token.is_empty() {
-            return;
-        }
-        self.table().insert(
-            token.to_owned(),
-            ProgressInfo {
-                session_id: session_id.to_owned(),
-                server_name: server_name.to_owned(),
-                tool_name: tool_name.to_owned(),
-            },
+        self.register(token, session_id, server_name, tool_name, None, None);
+    }
+
+    fn register_progress_with_context(
+        &self,
+        token: &str,
+        session_id: &str,
+        server_name: &str,
+        tool_name: &str,
+        run_id: Option<&str>,
+        tool_use_id: Option<&str>,
+    ) {
+        self.register(
+            token,
+            session_id,
+            server_name,
+            tool_name,
+            run_id,
+            tool_use_id,
         );
     }
 
@@ -435,7 +519,19 @@ impl ProgressTracker for HubProgressTracker {
         if token.is_empty() {
             return;
         }
-        self.table().remove(token);
+        if let Some(info) = self.table().remove(token) {
+            spawn_or_drop("mcp tool progress cleanup", async move {
+                let _ = info
+                    .sender
+                    .send(ProgressEvent {
+                        progress: 0.0,
+                        total: 0.0,
+                        message: String::new(),
+                        terminal: true,
+                    })
+                    .await;
+            });
+        }
     }
 
     /// 旧 `handleProgressNotification`：未知 token 静默丢弃（迟到通知或服务器
@@ -461,15 +557,18 @@ impl ProgressTracker for HubProgressTracker {
             .and_then(|params| params.get("message"))
             .and_then(json_as_text)
             .unwrap_or_default();
-        let payload = ServerMessage::McpToolProgress {
-            progress_token: token,
-            server_name: info.server_name,
-            tool_name: info.tool_name,
-            progress: number("progress"),
-            total: number("total"),
-            message,
-        };
-        push_to_session(&self.hub, info.session_id, payload, "mcp tool progress");
+        if info
+            .sender
+            .try_send(ProgressEvent {
+                progress: number("progress"),
+                total: number("total"),
+                message,
+                terminal: false,
+            })
+            .is_err()
+        {
+            tracing::debug!(%token, "Dropped intermediate MCP progress due to bounded queue");
+        }
     }
 }
 
@@ -502,19 +601,6 @@ pub(crate) fn broadcast_to_active_sessions(
     });
 }
 
-/// 定向推送到单会话（旧 `convertAndSendToUser(principal, ..)`）。
-pub(crate) fn push_to_session(
-    hub: &WsHub,
-    session_id: String,
-    message: ServerMessage,
-    what: &'static str,
-) {
-    let hub = hub.clone();
-    spawn_or_drop(what, async move {
-        hub.push(&session_id, message).await;
-    });
-}
-
 /// 把异步推送移交当前运行时；无运行时（纯单测）则 debug 丢弃（旧端推送异常
 /// 亦仅 `log.debug`，不得让 MCP 健康检查/进度通知反噬主流程）。
 fn spawn_or_drop<F>(what: &'static str, future: F)
@@ -533,7 +619,10 @@ mod tests {
     use std::sync::Arc;
 
     use serde_json::json;
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
     use zk_mcp::{McpConfigScope, McpTransportType};
+    use zk_tools::ToolContext;
 
     use super::*;
 
@@ -634,24 +723,59 @@ mod tests {
         assert!(!approval.is_trusted(&tampered));
     }
 
-    /// sink 把工具接进真实注册表，前缀摘除亦生效。
-    #[test]
-    fn tool_sink_writes_through_to_registry() {
+    /// sink 把工具接进生产注册表，目录代际、执行绑定与 `ToolSearch` 快照同步变化。
+    #[tokio::test]
+    async fn tool_sink_updates_generation_binding_and_search_catalog() {
         let registry = Arc::new(ToolRegistry::new());
         let sink = RegistryToolSink::new(
             Arc::clone(&registry),
             WsHub::new(crate::ws::WsConfig::default()),
         );
+        let initial_generation = registry.generation();
         sink.register_dynamic(Arc::new(crate::mcp::tests::support::NoopTool));
-        assert_eq!(registry.len(), 1);
+        assert!(registry.generation() > initial_generation);
+        assert!(registry.get("mcp__weather__forecast").is_some());
+        assert!(registry.get("ToolSearch").is_some());
+
+        let binding = registry
+            .resolve("mcp__weather__forecast")
+            .expect("dynamic tool binding");
+        assert!(registry.is_binding_current(&binding));
+        let tool_search = registry.get("ToolSearch").expect("ToolSearch");
+        let (progress, _receiver) = mpsc::unbounded_channel();
+        let found = tool_search
+            .execute(
+                json!({"query": "select:mcp__weather__forecast"}),
+                ToolContext::new(CancellationToken::new(), progress),
+            )
+            .await;
+        assert!(!found.is_error, "{}", found.content);
+        assert!(found.content.contains("mcp__weather__forecast"));
+
         sink.unregister_by_prefix("mcp__weather__");
-        assert!(registry.is_empty());
+        assert!(registry.get("mcp__weather__forecast").is_none());
+        assert!(!registry.is_binding_current(&binding));
+        assert!(registry.get("ToolSearch").is_some());
+
+        let tool_search = registry.get("ToolSearch").expect("refreshed ToolSearch");
+        let (progress, _receiver) = mpsc::unbounded_channel();
+        let missing = tool_search
+            .execute(
+                json!({"query": "select:mcp__weather__forecast"}),
+                ToolContext::new(CancellationToken::new(), progress),
+            )
+            .await;
+        assert!(!missing.is_error, "{}", missing.content);
+        assert!(missing.content.starts_with("No tools found matching:"));
     }
 
     /// 未注册 token 的进度通知不得推送（否则脏 token 可跨会话投递）。
     #[test]
     fn unknown_progress_token_is_silently_dropped() {
-        let tracker = HubProgressTracker::new(WsHub::new(crate::ws::WsConfig::default()));
+        let tracker = HubProgressTracker::new(
+            WsHub::new(crate::ws::WsConfig::default()),
+            Db::open_in_memory().expect("database"),
+        );
         tracker.handle_progress_notification(&json!({
             "params": { "progressToken": "ghost", "progress": 1 }
         }));
@@ -661,7 +785,10 @@ mod tests {
     /// 注册/注销的空 token 守卫与计数（旧 `registerProgress` 首行 guard）。
     #[test]
     fn progress_registration_guards_empty_token() {
-        let tracker = HubProgressTracker::new(WsHub::new(crate::ws::WsConfig::default()));
+        let tracker = HubProgressTracker::new(
+            WsHub::new(crate::ws::WsConfig::default()),
+            Db::open_in_memory().expect("database"),
+        );
         tracker.register_progress("", "s1", "weather", "forecast");
         assert_eq!(tracker.active_count(), 0);
         tracker.register_progress("t1", "s1", "weather", "forecast");
@@ -670,6 +797,78 @@ mod tests {
         assert_eq!(tracker.active_count(), 1);
         tracker.unregister_progress("t1");
         assert_eq!(tracker.active_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn progress_and_terminal_cleanup_are_durable_and_run_attributed() {
+        let db = Db::open_in_memory().expect("database");
+        let session = db
+            .create_session("qwen3.8-max-0902", "/tmp/zkcode-mcp-progress")
+            .await
+            .expect("session");
+        let run_id = uuid::Uuid::new_v4().to_string();
+        db.start_run(
+            &run_id,
+            &session.id,
+            None,
+            Some("query"),
+            "qwen3.8-max-0902",
+        )
+        .await
+        .expect("run");
+        let tracker =
+            HubProgressTracker::new(WsHub::new(crate::ws::WsConfig::default()), db.clone());
+        tracker.register_progress_with_context(
+            "progress-1",
+            &session.id,
+            "research",
+            "search",
+            Some(&run_id),
+            Some("tool-1"),
+        );
+        tracker.handle_progress_notification(&json!({
+            "params": {
+                "progressToken": "progress-1",
+                "progress": 1,
+                "total": 2,
+                "message": "working"
+            }
+        }));
+        tracker.unregister_progress("progress-1");
+        assert_eq!(tracker.active_count(), 0);
+
+        let mut rows = Vec::new();
+        for _ in 0..100 {
+            let query_run_id = run_id.clone();
+            rows = db
+                .with_conn_blocking(move |conn| {
+                    let mut statement = conn.prepare(
+                        "SELECT event_data FROM run_event_log \
+                         WHERE run_id=?1 AND event_type='ws_mcp_tool_progress' ORDER BY seq",
+                    )?;
+                    statement
+                        .query_map([query_run_id], |row| row.get::<_, String>(0))?
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(Into::into)
+                })
+                .expect("progress outbox query");
+            if rows.len() == 2 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            rows.len(),
+            2,
+            "progress and cleanup must both reach the outbox"
+        );
+        let first: Value = serde_json::from_str(&rows[0]).expect("progress event");
+        let terminal: Value = serde_json::from_str(&rows[1]).expect("terminal event");
+        assert_eq!(first["toolUseId"], "tool-1");
+        assert_eq!(first["data"]["runId"], run_id);
+        assert_eq!(first["data"]["toolUseId"], "tool-1");
+        assert_eq!(first["data"]["terminal"], false);
+        assert_eq!(terminal["data"]["terminal"], true);
     }
 
     /// 信任表 `approvedAt` 走与其他 REST 出口同一时间形制（恒 6 位微秒 + `Z`）。

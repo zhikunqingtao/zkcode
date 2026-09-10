@@ -58,6 +58,7 @@ pub mod cache;
 mod clock;
 pub mod config;
 pub mod error;
+pub mod ledger;
 pub mod models;
 pub mod openai_compat;
 pub mod provider;
@@ -79,6 +80,9 @@ pub use config::{
     has_provider_env, provider_configs_from_env,
 };
 pub use error::ProviderError;
+pub use ledger::{
+    LlmCallFinished, LlmCallObserver, LlmCallStarted, LlmCallStatus, LlmExecutionAttribution,
+};
 pub use models::{
     BUILTIN_MODELS, DEFAULT_CAPABILITIES, ModelCapabilities, capabilities_for, is_known_model,
     max_output_tokens_for,

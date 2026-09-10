@@ -6,10 +6,10 @@
 //! 启动自动执行、PRAGMA 全套（WAL / `busy_timeout=5s` / `foreign_keys` / NORMAL /
 //! `cache_size` / `temp_store`，逐项照抄旧系统 `SqliteConfig` 的 Xerial 属性集）。
 //!
-//! # Phase 2 子阶段 2.0
+//! # Greenfield final schema
 //!
-//! - schema：绿地基线扩至全量 25 张业务表（§12.8 清单 + 多路核查，见
-//!   `migrations/V2__init_session_message.sql` 与 docs/phase2-schema-checklist.md）。
+//! - schema：单份绿地基线一步创建 Session/Task/Run/Result/Invocation/
+//!   Resource/Usage 最终模型；不保留历史数据迁移或双写路径。
 //! - 并发模型（D-P2-4）：读写分离——单 writer `Mutex<Connection>` 串行化全部
 //!   写入 + 只读 reader 连接池（数量 = CPU 核数，轮转分发），全部走 WAL；
 //!   [`Db::with_reader`] / [`Db::with_writer`] 取代 Phase 1 的单一 `with_conn`
@@ -36,15 +36,23 @@ mod anomaly;
 mod artifact;
 mod checkpoint;
 mod config;
+mod cron;
 mod evidence;
 mod memory;
 mod message;
 mod project;
 mod project_context;
+mod research;
+mod restart_reconciliation;
+mod runtime_health;
+mod runtime_ledger;
+mod safe_recovery;
 mod session;
 mod snapshot;
 mod swarm;
-mod task;
+mod task_budget;
+mod task_diagnostic;
+mod task_runtime;
 mod workbench;
 
 pub mod convert;
@@ -55,30 +63,137 @@ pub mod run;
 pub mod time;
 
 pub use anomaly::AnomalyEventRecord;
-pub use artifact::{ArtifactEntryRecord, ArtifactManifestRecord};
+pub use artifact::{ArtifactEntryRecord, ArtifactManifestRecord, ProducedFileArtifactRecord};
 pub use checkpoint::{AgentCheckpointRecord, new_agent_checkpoint};
+pub use cron::{
+    ClaimCronOccurrence, CronClaimOutcome, CronJobRecord, CronOccurrenceRecord, MAX_CRON_JOBS,
+    NewCronJob,
+};
 pub use error::DbError;
-pub use evidence::{EvidenceBundleRecord, EvidenceItemRecord};
-pub use memory::{MemoryRecord, MemoryUpsert};
+pub use evidence::{
+    EvidenceBundleRecord, EvidenceItemRecord, EvidenceOrigin, EvidenceVerdictEventRecord,
+};
+pub use memory::{MemoryRecord, MemoryScope, MemoryTarget, MemoryUpsert};
+pub use message::MessageAttribution;
 pub use model::{
     ImageSource, MessagePage, MessageRecord, MessageRole, NewMessage, SessionDetail, SessionPage,
     SessionSummary, StoredBlock, goal_preview,
 };
 pub use project::{ProjectRecord, find_project_by_workspace_root_in_current_write};
 pub use project_context::ProjectContextRecord;
-pub use run::{RunEnvelopeView, RunEventView};
-pub use session::SnapshotRestoreOutcome;
+pub use research::{
+    MAX_RESEARCH_EXCERPT_BYTES, MAX_RESEARCH_PROJECTION_ROWS, MAX_RESEARCH_PROVIDER_BYTES,
+    MAX_RESEARCH_QUERY_BYTES, MAX_RESEARCH_RECEIPT_ENTRIES, MAX_RESEARCH_TITLE_BYTES,
+    MAX_RESEARCH_URL_BYTES, ProducedResearchCapture, ProducedResearchEntry, ProducedResearchKind,
+    ResearchCaptureRecord, ResearchConflictRecord, ResearchFindingRecord,
+    ResearchOpenQuestionRecord, ResearchProjection, ResearchRequirementCoverageRecord,
+    ResearchSourceRecord,
+};
+pub use restart_reconciliation::{RestartReconciliationReport, RuntimeShutdownIntentReport};
+pub use run::{RunEnvelopeView, RunEventView, WsOutboxEvent, WsReplayEvent};
+pub use runtime_health::RuntimeHealthSnapshot;
+pub use runtime_ledger::{
+    CommitToolInvocationResult, CommitToolInvocationResultOutcome, CommittedToolInvocationResult,
+    ExecutionResourceStatus, LlmCallBudgetReservation, LlmUsageCompletion, LlmUsageIntegrity,
+    NewExecutionResource, NewLlmCall, NewToolInvocation, ToolInvocationRecord,
+    ToolInvocationStatus,
+};
+pub use safe_recovery::{
+    CreateSafeRecoveryAttempt, RecoveryEligibility, SafeRecoveryAttempt, SafeRecoveryCandidate,
+};
+pub use session::{
+    RestoreCostSummary, RestoredToolCall, SessionRuntimeRestore, SnapshotRestoreOutcome,
+};
 pub use snapshot::FileSnapshotRecord;
 pub use swarm::SwarmRecord;
-pub use task::{TaskRecord, new_task_record};
-pub use workbench::{AcceptanceCriterionRecord, WorkbenchBindingRecord, WorkbenchRecord};
+pub use task_budget::{
+    BudgetReservationStatus, DIRECT_CHILD_BUDGET_PERCENT, ROOT_BUDGET_RESERVE_PERCENT,
+    TaskBudgetLimits, TaskBudgetReservationRecord, TaskBudgetSnapshot,
+};
+pub use task_diagnostic::{
+    TaskDiagnostic, TaskDiagnosticCheckpoint, TaskDiagnosticExecutionResource,
+    TaskDiagnosticLlmCall, TaskDiagnosticReceipt, TaskDiagnosticResult, TaskDiagnosticRun,
+    TaskDiagnosticTask, TaskDiagnosticToolInvocation, TaskResumeEligibility,
+    TaskResumeIneligibilityReason,
+};
+pub use task_runtime::{
+    CasOutcome, CleanupStatus, CommitTaskResult, CommitTaskResultOutcome, CreateTaskWithRun,
+    CreateTaskWithRunOutcome, ExitReason, INLINE_RESULT_LIMIT, InboxStatus,
+    MarkTaskNeedsAttentionOutcome, RESULT_HARD_LIMIT, ResultStatus, RunStatus, RunUsageFallback,
+    RuntimeTaskRecord, TaskInboxMessage, TaskResultChunk, TaskResultReceiptRecord,
+    TaskResultRecord, TaskStatus, VerificationStatus,
+};
+pub use workbench::{
+    AcceptanceCriterionRecord, CurrentWorkbenchProjection, PreviousWorkbenchDelivery,
+    WorkbenchActiveTool, WorkbenchBindingRecord, WorkbenchRecord, WorkbenchSubtreeUsage,
+};
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
+
+/// Database baseline compiled into this binary.
+pub const GREENFIELD_SCHEMA_VERSION: u16 = 2;
+/// Immutable identity stored with the one-shot final schema.
+pub const GREENFIELD_SCHEMA_KIND: &str = "greenfieldFinal";
+/// Existing databases are accepted only when they already match the final schema.
+pub const DATABASE_MIGRATION_MODE: &str = "greenfieldOnly";
+/// Old write protocols and backfill adapters are not part of the database contract.
+pub const LEGACY_WRITE_COMPATIBILITY: bool = false;
+
+const SCHEMA_METADATA_TABLE: &str = "zk_schema_metadata";
+const REFINERY_HISTORY_TABLE: &str = "refinery_schema_history";
+const FINAL_SCHEMA_TABLES: &[&str] = &[
+    "activities",
+    "agent_checkpoints",
+    "anomaly_events",
+    "artifact_entries",
+    "artifact_manifests",
+    "auth_tokens",
+    "config",
+    "cron_jobs",
+    "cron_occurrences",
+    "evidence_bundles",
+    "evidence_items",
+    "evidence_verdict_events",
+    "execution_resources",
+    "file_snapshots",
+    "interaction_requests",
+    "llm_calls",
+    "memories",
+    "messages",
+    "permission_grants",
+    "project_config",
+    "project_context",
+    "projects",
+    "research_captures",
+    "research_conflicts",
+    "research_findings",
+    "research_open_questions",
+    "research_requirement_coverage",
+    "research_sources",
+    "regression_scripts",
+    "run_acceptance_criteria",
+    "run_envelopes",
+    "run_event_log",
+    "run_workbench_bindings",
+    "sessions",
+    "task_budget_reservations",
+    "task_dependencies",
+    "task_inbox_messages",
+    "task_result_blobs",
+    "task_result_receipts",
+    "task_results",
+    "tasks",
+    "tool_invocations",
+    "tool_result_postprocessing",
+    "websocket_session_binding",
+    SCHEMA_METADATA_TABLE,
+];
 
 /// 内嵌迁移（refinery `embed_migrations!`，编译期打入二进制，无需外部
 /// 迁移文件即可在任意环境启动自迁移）。
@@ -180,16 +295,17 @@ impl Db {
         })
     }
 
-    /// writer 连接初始化：`busy_timeout` 先行（迁移写入亦需锁兜底），再其余
-    /// PRAGMA，最后跑 refinery 迁移（`embed_migrations!` 内嵌，见
-    /// `migrations` 模块）。
+    /// writer 连接初始化：`busy_timeout` 后先执行 greenfield 身份门禁，再施加
+    /// 其余 PRAGMA 并运行单份 refinery 基线。已有业务表但缺少最终 schema
+    /// identity 的数据库会失败关闭；不会尝试回填或叠加建表。
     ///
     /// # Errors
     /// PRAGMA 执行失败、迁移失败或打开连接失败时返回。
     fn init_writer(conn: &mut Connection) -> Result<(), DbError> {
-        // 对齐旧系统 SqliteConfig：busy_timeout=5s、WAL、NORMAL、
-        // cache_size=-8000（8MB）、temp_store=MEMORY、enforceForeignKeys。
         conn.busy_timeout(Duration::from_secs(5))?;
+        Self::ensure_greenfield_startup_eligible(conn)?;
+        // busy_timeout=5s、WAL、NORMAL、cache_size=-8000（8MB）、
+        // temp_store=MEMORY、enforceForeignKeys。
         // journal_mode 为「有返回值」的 PRAGMA，须走查询而非 execute。
         let _mode: String = conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
@@ -197,7 +313,99 @@ impl Db {
         conn.pragma_update(None, "cache_size", -8000)?;
         conn.pragma_update(None, "temp_store", "MEMORY")?;
         migrations::migrations::runner().run(conn)?;
+        Self::validate_greenfield_schema(conn)?;
         Ok(())
+    }
+
+    /// Refuse to run the baseline over any unidentified existing application DB.
+    /// An empty file (and refinery's empty bookkeeping table) is eligible for the
+    /// one-shot migration; a previously initialized DB must already be exact.
+    fn ensure_greenfield_startup_eligible(conn: &Connection) -> Result<(), DbError> {
+        let tables = Self::application_tables(conn)?;
+        if tables.is_empty() {
+            return Ok(());
+        }
+        if !tables.contains(SCHEMA_METADATA_TABLE) {
+            return Err(DbError::IncompatibleSchema(
+                "GREENFIELD_DATABASE_REQUIRED: existing application tables have no final-schema \
+                 identity; in-place upgrade and legacy backfill are disabled"
+                    .to_owned(),
+            ));
+        }
+        Self::validate_schema_identity(conn)?;
+        Self::validate_final_table_set(&tables)
+    }
+
+    fn validate_greenfield_schema(conn: &Connection) -> Result<(), DbError> {
+        Self::validate_schema_identity(conn)?;
+        let tables = Self::application_tables(conn)?;
+        Self::validate_final_table_set(&tables)
+    }
+
+    fn validate_schema_identity(conn: &Connection) -> Result<(), DbError> {
+        let marker = conn
+            .query_row(
+                "SELECT schema_version,schema_kind,migration_mode,legacy_write_compatibility \
+                   FROM zk_schema_metadata WHERE singleton=1",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| {
+                DbError::IncompatibleSchema(format!("SCHEMA_IDENTITY_UNREADABLE: {error}"))
+            })?;
+        let Some((version, kind, mode, legacy_writes)) = marker else {
+            return Err(DbError::IncompatibleSchema(
+                "SCHEMA_IDENTITY_MISSING: final-schema marker row is absent".to_owned(),
+            ));
+        };
+        if version != i64::from(GREENFIELD_SCHEMA_VERSION)
+            || kind != GREENFIELD_SCHEMA_KIND
+            || mode != DATABASE_MIGRATION_MODE
+            || legacy_writes != i64::from(LEGACY_WRITE_COMPATIBILITY)
+        {
+            return Err(DbError::IncompatibleSchema(format!(
+                "SCHEMA_IDENTITY_MISMATCH: expected version={GREENFIELD_SCHEMA_VERSION}, \
+                 kind={GREENFIELD_SCHEMA_KIND}, mode={DATABASE_MIGRATION_MODE}, legacyWrites=0"
+            )));
+        }
+        Ok(())
+    }
+
+    fn application_tables(conn: &Connection) -> Result<BTreeSet<String>, DbError> {
+        let mut statement =
+            conn.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        let mut tables = BTreeSet::new();
+        for row in rows {
+            let table = row?;
+            if !table.starts_with("sqlite_") && table != REFINERY_HISTORY_TABLE {
+                tables.insert(table);
+            }
+        }
+        Ok(tables)
+    }
+
+    fn validate_final_table_set(tables: &BTreeSet<String>) -> Result<(), DbError> {
+        let expected: BTreeSet<String> = FINAL_SCHEMA_TABLES
+            .iter()
+            .map(|table| (*table).to_owned())
+            .collect();
+        if tables == &expected {
+            return Ok(());
+        }
+        let missing: Vec<&str> = expected.difference(tables).map(String::as_str).collect();
+        let unexpected: Vec<&str> = tables.difference(&expected).map(String::as_str).collect();
+        Err(DbError::IncompatibleSchema(format!(
+            "FINAL_SCHEMA_TABLE_SET_MISMATCH: missing={missing:?}, unexpected={unexpected:?}"
+        )))
     }
 
     /// 打开一条只读 reader 连接并施加读侧 PRAGMA。
@@ -379,6 +587,143 @@ impl Db {
 fn crate_boots() {
     let db = crate::Db::open_in_memory().expect("in-memory db boots with migrations");
     drop(db);
+}
+
+#[cfg(test)]
+mod greenfield_schema_tests {
+    use super::{
+        DATABASE_MIGRATION_MODE, Db, GREENFIELD_SCHEMA_KIND, GREENFIELD_SCHEMA_VERSION,
+        LEGACY_WRITE_COMPATIBILITY,
+    };
+    use crate::DbError;
+    use rusqlite::Connection;
+    use std::path::PathBuf;
+
+    struct TestDatabase {
+        root: PathBuf,
+        path: PathBuf,
+    }
+
+    impl TestDatabase {
+        fn new(label: &str) -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "zk-db-greenfield-{label}-{}-{}",
+                std::process::id(),
+                uuid::Uuid::new_v4()
+            ));
+            std::fs::create_dir(&root).expect("create test database directory");
+            let path = root.join("data.db");
+            Self { root, path }
+        }
+    }
+
+    impl Drop for TestDatabase {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn expect_incompatible(error: DbError, code: &str) {
+        match error {
+            DbError::IncompatibleSchema(message) => assert!(
+                message.contains(code),
+                "expected {code} in schema failure, got {message}"
+            ),
+            other => panic!("expected incompatible schema, got {other}"),
+        }
+    }
+
+    #[test]
+    fn fresh_database_records_exact_greenfield_identity() {
+        let db = Db::open_in_memory().expect("fresh database migrates");
+        db.with_conn_blocking(|conn| {
+            let identity: (i64, String, String, i64) = conn.query_row(
+                "SELECT schema_version,schema_kind,migration_mode,legacy_write_compatibility \
+                   FROM zk_schema_metadata WHERE singleton=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )?;
+            assert_eq!(identity.0, i64::from(GREENFIELD_SCHEMA_VERSION));
+            assert_eq!(identity.1, GREENFIELD_SCHEMA_KIND);
+            assert_eq!(identity.2, DATABASE_MIGRATION_MODE);
+            assert_eq!(identity.3, i64::from(LEGACY_WRITE_COMPATIBILITY));
+            Ok(())
+        })
+        .expect("read schema identity");
+    }
+
+    #[test]
+    fn existing_legacy_database_is_rejected_without_being_overlaid() {
+        let database = TestDatabase::new("legacy");
+        let connection = Connection::open(&database.path).expect("open legacy fixture");
+        connection
+            .execute_batch(
+                "CREATE TABLE sessions(id TEXT PRIMARY KEY);\
+                 INSERT INTO sessions(id) VALUES('legacy-session');",
+            )
+            .expect("seed legacy fixture");
+        drop(connection);
+
+        let Err(error) = Db::open(&database.path) else {
+            panic!("legacy database must not be upgraded in place");
+        };
+        expect_incompatible(error, "GREENFIELD_DATABASE_REQUIRED");
+
+        let connection = Connection::open(&database.path).expect("reopen legacy fixture");
+        let rows: i64 = connection
+            .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
+            .expect("legacy data remains readable");
+        let marker_tables: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type='table' AND name='zk_schema_metadata'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("inspect table set");
+        assert_eq!(rows, 1, "startup gate must preserve forensic data");
+        assert_eq!(
+            marker_tables, 0,
+            "baseline must not be layered onto legacy DB"
+        );
+    }
+
+    #[test]
+    fn forged_or_partial_schema_identity_is_rejected() {
+        let wrong = TestDatabase::new("wrong-identity");
+        let connection = Connection::open(&wrong.path).expect("open wrong marker fixture");
+        connection
+            .execute_batch(
+                "CREATE TABLE zk_schema_metadata(\
+                    singleton INTEGER PRIMARY KEY, schema_version INTEGER, schema_kind TEXT,\
+                    migration_mode TEXT, legacy_write_compatibility INTEGER);\
+                 INSERT INTO zk_schema_metadata VALUES(1,3,'legacy','upgrade',1);",
+            )
+            .expect("seed wrong marker");
+        drop(connection);
+        let Err(error) = Db::open(&wrong.path) else {
+            panic!("wrong schema identity must fail closed");
+        };
+        expect_incompatible(error, "SCHEMA_IDENTITY_MISMATCH");
+
+        let partial = TestDatabase::new("partial-schema");
+        let connection = Connection::open(&partial.path).expect("open partial fixture");
+        connection
+            .execute_batch(
+                "CREATE TABLE zk_schema_metadata(\
+                    singleton INTEGER PRIMARY KEY, schema_version INTEGER, schema_kind TEXT,\
+                    migration_mode TEXT, legacy_write_compatibility INTEGER);\
+                 INSERT INTO zk_schema_metadata \
+                    VALUES(1,2,'greenfieldFinal','greenfieldOnly',0);\
+                 CREATE TABLE sessions(id TEXT PRIMARY KEY);",
+            )
+            .expect("seed partial marker");
+        drop(connection);
+        let Err(error) = Db::open(&partial.path) else {
+            panic!("partial final schema must not be repaired implicitly");
+        };
+        expect_incompatible(error, "FINAL_SCHEMA_TABLE_SET_MISMATCH");
+    }
 }
 
 #[cfg(all(test, unix))]

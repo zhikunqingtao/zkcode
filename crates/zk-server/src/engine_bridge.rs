@@ -12,24 +12,28 @@ use futures::future::BoxFuture;
 use zk_engine::admission::ToolAdmission;
 use zk_engine::agent::{
     AgentDefinition, AgentMailboxMessage, AgentMailboxRouter, AgentRequest, AgentStatus,
-    AgentTimeoutConfig, BackgroundAgentTracker, ChildExecutionContext, IsolationMode,
-    RealSubAgentEngineFactory, SubAgentExecutor, SystemGitCommandRunner, WorktreeManager,
-    build_sub_agent_registry_with_policy,
+    AgentTimeoutConfig, ChildExecutionContext, IsolationMode, PersistedChildExecution,
+    READ_ONLY_CHILD_TOOLS, RealSubAgentEngineFactory, SubAgentExecutor, SystemGitCommandRunner,
+    WorktreeManager, build_sub_agent_registry_with_policy,
 };
 use zk_engine::concurrency::AgentConcurrencyController;
-use zk_engine::task::{TaskCoordinator, TaskStatus};
+use zk_engine::task::{
+    ChildTaskSubmission, TaskExecutionResult, TaskOutputRequest as RuntimeOutputRequest,
+    TaskRuntime, TaskRuntimeError,
+};
 use zk_engine::{ConversationService, CoordinatorEvent, Engine, LlmSummarizer, MessageSink};
 use zk_llm::ChatProvider;
 use zk_protocol::{ClientMessage, ServerMessage};
 use zk_tools::{
     AgentInvocation, AgentTool, AgentToolBackend, AskUserQuestionTool, BashTool, ConfigTool,
-    CronCreateTool, CronDeleteTool, CronListTool, CronTaskService, CtxInspectTool, EditFileTool,
+    CronCreateTool, CronDeleteTool, CronListTool, CronTaskPort, CtxInspectTool, EditFileTool,
     EnterPlanModeTool, ExitPlanModeTool, GitDiffTool, GitLogTool, GitStatusTool, GlobTool,
     GrepTool, ListDirectoryTool, MemoryTool, ModelCatalog, MonitorTool, NotebookEditTool, REPLTool,
-    ReadFileTool, ReplManager, SendMessageBackend, SendMessageInvocation, SendMessageTool,
-    SleepTool, SnipTool, StaticToolCatalog, SyntheticOutputTool, TaskCoordinatorPort,
-    TaskCreateTool, TaskGetTool, TaskInvocation, TaskListTool, TaskOutputTool, TaskSnapshot,
-    TaskStopTool, TaskUpdateTool, TerminalCaptureTool, TodoWriteTool, ToolDescriptor, ToolRegistry,
+    ReadFileTool, ReplManager, SendMessageBackend, SendMessageInvocation, SendMessageReceipt,
+    SendMessageTool, SleepTool, SnipTool, StaticToolCatalog, SyntheticOutputTool,
+    TaskCoordinatorPort, TaskCreateTool, TaskGetTool, TaskInvocation, TaskListTool, TaskOutputPage,
+    TaskOutputQuery, TaskOutputTool, TaskPortError, TaskSnapshot, TaskStopReceipt, TaskStopTool,
+    TaskUpdateTool, TerminalCaptureTool, TodoWriteTool, ToolDescriptor, ToolRegistry,
     ToolSearchTool, VerifyPlanExecutionTool, VisualizationTool, WebFetchTool, WebSearchTool,
     WorktreeTool, WriteFileTool,
 };
@@ -41,6 +45,7 @@ use crate::http_search::SearxngSearchBackend;
 use crate::interaction::DurableElicitationSink;
 use crate::mcp_search::McpSearchBackend;
 use crate::mcp_tools::{ListMcpResourcesTool, ReadMcpResourceTool};
+use crate::memory_store::DbMemoryStore;
 use crate::python::{
     BrowserVerifyJourneyTool, CodeIntelTool, GitEnhancedTool, PythonClient, WebBrowserTool,
 };
@@ -55,11 +60,39 @@ use crate::ws::{EngineHook, WsHub};
 /// 不经 `tokio::spawn` 转发——保住 deltas 的推送顺序（D-S9-3）。
 struct HubSink {
     hub: WsHub,
+    db: zk_db::Db,
+}
+
+/// Build the process-wide durable task runtime before any transport or tool
+/// adapter is assembled.
+pub(crate) fn build_task_runtime(
+    db: zk_db::Db,
+    hub: WsHub,
+    observability: Arc<dyn zk_engine::ObservabilityRecorder>,
+) -> Arc<TaskRuntime> {
+    Arc::new(
+        TaskRuntime::new(db.clone(), Arc::new(HubSink { hub, db }))
+            .with_observability(observability),
+    )
 }
 
 impl MessageSink for HubSink {
     fn push<'a>(&'a self, session_id: &'a str, message: ServerMessage) -> BoxFuture<'a, ()> {
-        Box::pin(self.hub.push(session_id, message))
+        self.push_from(session_id, session_id, message)
+    }
+
+    fn push_from<'a>(
+        &'a self,
+        route_session_id: &'a str,
+        source_session_id: &'a str,
+        message: ServerMessage,
+    ) -> BoxFuture<'a, ()> {
+        let hub = self.hub.clone();
+        let db = self.db.clone();
+        Box::pin(async move {
+            hub.push_runtime_event(&db, route_session_id, source_session_id, message)
+                .await;
+        })
     }
 }
 
@@ -123,10 +156,17 @@ pub fn wire_engine(state: &AppState) -> Arc<Engine> {
             provider,
             Arc::new(HubSink {
                 hub: state.hub.clone(),
+                db: state.db.clone(),
             }),
             tools,
             admission,
         )
+        .with_execution_supervisor(&state.execution_supervisor)
+        .with_task_runtime(Arc::clone(&state.task_runtime))
+        .with_coordinator(Arc::clone(&state.coordinator))
+        .with_run_cancellation(state.authz.terminations.clone())
+        .with_root_task_budget_policy(state.config.root_task_budget_policy.clone())
+        .with_startup_epoch(state.startup_epoch())
         .with_summarizers(compact_summarizer, tool_summarizer)
         .with_cost_tracker(cost_tracker)
         // Batch 5 Step 5：回合事务边界端口。实例上提到 `AppState`，与
@@ -188,11 +228,7 @@ impl ModelCatalog for RegistryModelCatalog {
 ///
 /// `AgentToolBackend` 的生产实现——桥接到 `SubAgentExecutor`。
 struct AgentBackendBridge {
-    executor: Arc<SubAgentExecutor>,
-    db: zk_db::Db,
-    providers: Arc<zk_llm::SwappableProvider>,
-    background_agents: Arc<BackgroundAgentTracker>,
-    worktree_enabled: bool,
+    task_port: Arc<TaskCoordinatorBridge>,
 }
 
 impl AgentToolBackend for AgentBackendBridge {
@@ -200,193 +236,225 @@ impl AgentToolBackend for AgentBackendBridge {
         &self,
         invocation: AgentInvocation,
         cancel: tokio_util::sync::CancellationToken,
-    ) -> BoxFuture<'_, (String, Option<String>, Option<String>)> {
-        Box::pin(async move {
-            if invocation.isolation == "worktree" && !self.worktree_enabled {
-                return (
-                    "failed".to_owned(),
-                    Some(
-                        "FEATURE_NOT_READY: Worktree isolation has not passed real Git acceptance"
-                            .to_owned(),
-                    ),
-                    None,
-                );
-            }
-            let inherited_model = match validate_agent_invocation(&self.db, &invocation).await {
-                Ok(model) => model,
-                Err(message) => return ("failed".to_owned(), Some(message), None),
-            };
-            let model = match resolve_agent_model(
-                &self.providers.load(),
-                invocation.model_override.as_deref(),
-                invocation.agent_type.as_deref(),
-                &inherited_model,
-            ) {
-                Ok(model) => model,
-                Err(message) => return ("failed".to_owned(), Some(message), None),
-            };
-            let agent_id = format!("agent-{}", &uuid::Uuid::new_v4().to_string()[..8]);
-            let iso = IsolationMode::parse(&invocation.isolation);
-            let request = AgentRequest::new(
-                agent_id.clone(),
-                invocation.prompt,
-                invocation.agent_type,
-                Some(model),
-                iso,
-                invocation.run_in_background,
-            );
-            let context = ChildExecutionContext {
-                parent_session_id: invocation.parent_session_id,
-                parent_run_id: invocation.parent_run_id,
-                working_directory: invocation.working_directory,
-                tool_use_id: invocation.tool_use_id,
-                allowed_tools: invocation.allowed_tools,
-            };
-            if request.run_in_background {
-                let executor = Arc::clone(&self.executor);
-                let tracker = Arc::clone(&self.background_agents);
-                let tracked_agent_id = agent_id.clone();
-                tracker.register(
-                    agent_id.clone(),
-                    context.parent_session_id.clone(),
-                    invocation.description,
-                    Some(format!("agent:{agent_id}")),
-                );
-                tokio::spawn(async move {
-                    let result = executor
-                        .execute_sync_with_cancel(&request, &context, cancel)
-                        .await;
-                    if result.status == AgentStatus::Completed {
-                        tracker.mark_completed(&tracked_agent_id, &result);
-                    } else {
-                        tracker.mark_failed(
-                            &tracked_agent_id,
-                            result.result.as_deref().unwrap_or("child execution failed"),
-                        );
-                    }
-                });
-                return (
-                    "async_launched".to_owned(),
-                    Some(agent_id.clone()),
-                    Some(format!("agent:{agent_id}")),
-                );
-            }
-            let result = self
-                .executor
-                .execute_sync_with_cancel(&request, &context, cancel)
-                .await;
-            (
-                result.status.as_str().to_owned(),
-                result.result,
-                result.output_file,
-            )
-        })
+    ) -> BoxFuture<'_, Result<TaskSnapshot, TaskPortError>> {
+        Box::pin(async move { self.task_port.submit_agent(invocation, cancel).await })
     }
 }
 
-/// Persist collaboration messages before live delivery and project them onto
-/// the native coordinator WebSocket stream.
+/// Persist collaboration messages in the `TaskRuntime` inbox before best-effort
+/// live mailbox delivery.
 struct SendMessageBackendBridge {
     router: Arc<AgentMailboxRouter>,
+    runtime: Arc<TaskRuntime>,
     db: zk_db::Db,
     event_bus: Arc<zk_engine::CoordinatorEventBus>,
 }
 
 impl SendMessageBackend for SendMessageBackendBridge {
-    fn send_message(&self, invocation: SendMessageInvocation) -> BoxFuture<'_, Result<(), String>> {
+    #[allow(clippy::too_many_lines)] // validates sender ownership before the durable inbox transaction
+    fn send_message(
+        &self,
+        invocation: SendMessageInvocation,
+    ) -> BoxFuture<'_, Result<SendMessageReceipt, TaskPortError>> {
         Box::pin(async move {
-            if !self.router.has_active_agent(&invocation.target_agent_id) {
-                return Err(format!("AGENT_NOT_FOUND: {}", invocation.target_agent_id));
+            let sender_run = self
+                .db
+                .find_run_by_id(&invocation.parent_run_id)
+                .await
+                .map_err(|error| {
+                    port_error(TaskRuntimeError::new(
+                        "TASK_STORAGE_ERROR",
+                        format!("parent run lookup failed: {error}"),
+                        true,
+                    ))
+                })?
+                .ok_or_else(|| {
+                    TaskPortError::new(
+                        "SEND_MESSAGE_CONTEXT_INVALID",
+                        "parent run not found",
+                        false,
+                    )
+                })?;
+            if sender_run.session_id != invocation.parent_session_id {
+                return Err(TaskPortError::new(
+                    "SEND_MESSAGE_CONTEXT_INVALID",
+                    "parent run/session mismatch",
+                    false,
+                ));
             }
-            let message_id = uuid::Uuid::new_v4().to_string();
-            let from_id = invocation.parent_session_id.clone();
-            let queued = serde_json::json!({
-                "messageId": message_id,
-                "targetAgentId": invocation.target_agent_id,
-                "fromId": from_id,
-                "content": invocation.message,
-            });
-            self.db
-                .append_run_event(
-                    &invocation.parent_run_id,
-                    "teammate_message_queued",
-                    Some(&invocation.tool_use_id),
-                    &queued,
+            if !matches!(
+                sender_run.status.as_str(),
+                "running" | "waitingDependencies" | "waitingInteraction"
+            ) {
+                return Err(TaskPortError::new(
+                    "SEND_MESSAGE_CONTEXT_INVALID",
+                    "parent run is terminal",
+                    false,
+                ));
+            }
+            let sender_task_id = sender_run.task_id;
+            let queued = match self
+                .runtime
+                .send_message(
+                    &invocation.parent_session_id,
+                    &invocation.target_task_id,
+                    Some(&sender_task_id),
+                    &invocation.message,
                 )
                 .await
-                .map_err(|_| {
-                    "SEND_MESSAGE_PERSIST_FAILED: queue event was not stored".to_owned()
-                })?;
+            {
+                Ok(message) => message,
+                Err(error) if error.code.starts_with("TASK_TERMINAL") => {
+                    let task = self
+                        .runtime
+                        .get_owned(&invocation.parent_session_id, &invocation.target_task_id)
+                        .await
+                        .map_err(port_error)?
+                        .ok_or_else(|| {
+                            TaskPortError::new(
+                                "TASK_NOT_FOUND",
+                                "target task is not owned by this root session",
+                                false,
+                            )
+                        })?;
+                    return Ok(SendMessageReceipt {
+                        message_id: None,
+                        delivery_status: "terminal".to_owned(),
+                        status: task.status.as_db().to_owned(),
+                    });
+                }
+                Err(error) => return Err(port_error(error)),
+            };
 
+            let from_id = sender_task_id.clone();
             let delivery = AgentMailboxMessage {
-                message_id: message_id.clone(),
+                message_id: queued.message_id.clone(),
                 parent_run_id: invocation.parent_run_id.clone(),
                 from_id: from_id.clone(),
                 content: invocation.message.clone(),
             };
-            if let Err(error) = self
+            let delivered = self
                 .router
-                .send_message(&invocation.target_agent_id, delivery)
-            {
-                let rejected = serde_json::json!({
-                    "messageId": message_id,
-                    "targetAgentId": invocation.target_agent_id,
-                    "reason": "target_terminal",
-                });
+                .send_message(&invocation.target_task_id, delivery)
+                .is_ok();
+            if delivered {
                 let _ = self
-                    .db
-                    .append_run_event(
-                        &invocation.parent_run_id,
-                        "teammate_message_rejected",
-                        Some(&invocation.tool_use_id),
-                        &rejected,
+                    .runtime
+                    .mark_inbox(
+                        &invocation.parent_session_id,
+                        &invocation.target_task_id,
+                        &queued.message_id,
+                        zk_db::InboxStatus::Queued,
+                        zk_db::InboxStatus::Delivered,
+                        None,
                     )
                     .await;
-                return Err(error);
+                let content = invocation.message.chars().take(512).collect();
+                let _ = self.event_bus.publish(CoordinatorEvent::TeammateMessage {
+                    session_id: invocation.parent_session_id.clone(),
+                    from_id,
+                    content,
+                });
             }
-
-            let content = invocation.message.chars().take(512).collect();
-            let _ = self.event_bus.publish(CoordinatorEvent::TeammateMessage {
-                session_id: invocation.parent_session_id,
-                from_id,
-                content,
-            });
-            Ok(())
+            let task = self
+                .runtime
+                .get_owned(&invocation.parent_session_id, &invocation.target_task_id)
+                .await
+                .map_err(port_error)?
+                .ok_or_else(|| {
+                    TaskPortError::new(
+                        "TASK_NOT_FOUND",
+                        "target task disappeared after inbox commit",
+                        false,
+                    )
+                })?;
+            Ok(SendMessageReceipt {
+                message_id: Some(queued.message_id),
+                delivery_status: if delivered { "delivered" } else { "queued" }.to_owned(),
+                status: task.status.as_db().to_owned(),
+            })
         })
     }
+}
+
+struct ParentExecutionIdentity {
+    model: String,
+    task_id: String,
 }
 
 async fn validate_agent_invocation(
     db: &zk_db::Db,
     invocation: &AgentInvocation,
-) -> Result<String, String> {
+) -> Result<ParentExecutionIdentity, TaskPortError> {
     let session = db
         .get_session(&invocation.parent_session_id)
         .await
-        .map_err(|_| "AGENT_CONTEXT_INVALID: parent session lookup failed".to_owned())?
-        .ok_or_else(|| "AGENT_CONTEXT_INVALID: parent session not found".to_owned())?;
+        .map_err(|_| {
+            TaskPortError::new(
+                "AGENT_CONTEXT_INVALID",
+                "parent session lookup failed",
+                true,
+            )
+        })?
+        .ok_or_else(|| {
+            TaskPortError::new("AGENT_CONTEXT_INVALID", "parent session not found", false)
+        })?;
     if session.status != "active" {
-        return Err("AGENT_CONTEXT_INVALID: parent session is not active".to_owned());
+        return Err(TaskPortError::new(
+            "AGENT_CONTEXT_INVALID",
+            "parent session is not active",
+            false,
+        ));
     }
     let run = db
         .find_run_by_id(&invocation.parent_run_id)
         .await
-        .map_err(|_| "AGENT_CONTEXT_INVALID: parent run lookup failed".to_owned())?
-        .ok_or_else(|| "AGENT_CONTEXT_INVALID: parent run not found".to_owned())?;
+        .map_err(|_| TaskPortError::new("AGENT_CONTEXT_INVALID", "parent run lookup failed", true))?
+        .ok_or_else(|| {
+            TaskPortError::new("AGENT_CONTEXT_INVALID", "parent run not found", false)
+        })?;
     if run.session_id != invocation.parent_session_id {
-        return Err("AGENT_CONTEXT_INVALID: parent run/session mismatch".to_owned());
+        return Err(TaskPortError::new(
+            "AGENT_CONTEXT_INVALID",
+            "parent run/session mismatch",
+            false,
+        ));
     }
-    if !matches!(run.status.as_str(), "RUNNING" | "WAITING") {
-        return Err("AGENT_CONTEXT_INVALID: parent run is terminal".to_owned());
+    if !matches!(
+        run.status.as_str(),
+        "running" | "waitingDependencies" | "waitingInteraction"
+    ) {
+        return Err(TaskPortError::new(
+            "AGENT_CONTEXT_INVALID",
+            "parent run is terminal",
+            false,
+        ));
     }
-    let authorized = std::fs::canonicalize(&session.working_dir)
-        .map_err(|_| "AGENT_CONTEXT_INVALID: authorized workspace is unavailable".to_owned())?;
-    let requested = std::fs::canonicalize(&invocation.working_directory)
-        .map_err(|_| "AGENT_CONTEXT_INVALID: invocation workspace is unavailable".to_owned())?;
+    let authorized = std::fs::canonicalize(&session.working_dir).map_err(|_| {
+        TaskPortError::new(
+            "AGENT_CONTEXT_INVALID",
+            "authorized workspace is unavailable",
+            false,
+        )
+    })?;
+    let requested = std::fs::canonicalize(&invocation.working_directory).map_err(|_| {
+        TaskPortError::new(
+            "AGENT_CONTEXT_INVALID",
+            "invocation workspace is unavailable",
+            false,
+        )
+    })?;
     if requested != authorized {
-        return Err("AGENT_CONTEXT_INVALID: workspace does not match parent session".to_owned());
+        return Err(TaskPortError::new(
+            "AGENT_CONTEXT_INVALID",
+            "workspace does not match parent session",
+            false,
+        ));
     }
-    Ok(run.model)
+    Ok(ParentExecutionIdentity {
+        model: run.model,
+        task_id: run.task_id,
+    })
 }
 
 fn resolve_agent_model(
@@ -415,12 +483,18 @@ fn resolve_agent_model(
     Ok(resolved.to_owned())
 }
 
-/// `TaskCoordinatorPort` 的生产实现——桥接到 `TaskCoordinator`。
+/// `TaskCoordinatorPort` 的生产实现——所有 Agent/TaskCreate 操作进入同一个
+/// DB-authoritative [`TaskRuntime`]。
 struct TaskCoordinatorBridge {
-    coordinator: Arc<TaskCoordinator>,
+    runtime: Arc<TaskRuntime>,
+    terminations: Arc<crate::run_termination::RunTerminationCoordinator>,
     executor: Arc<SubAgentExecutor>,
     db: zk_db::Db,
     providers: Arc<zk_llm::SwappableProvider>,
+    worktree_enabled: bool,
+    shared_workspace_enabled: bool,
+    child_write_enabled: bool,
+    startup_epoch: i64,
 }
 
 /// Single production Agent runtime shared by Agent tools, Task tools, and Swarm dispatch.
@@ -428,92 +502,282 @@ pub(crate) struct AgentRuntime {
     /// Production child-agent executor.
     pub(crate) executor: Arc<SubAgentExecutor>,
     /// DB-backed task coordinator.
-    pub(crate) tasks: Arc<TaskCoordinator>,
+    pub(crate) tasks: Arc<TaskRuntime>,
+}
+
+impl TaskCoordinatorBridge {
+    #[allow(clippy::too_many_lines)] // One lifecycle boundary: validate, persist, dispatch, then wait/cancel.
+    async fn submit_agent(
+        &self,
+        invocation: AgentInvocation,
+        caller_cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<TaskSnapshot, TaskPortError> {
+        if invocation.isolation == "worktree" && !self.worktree_enabled {
+            return Err(TaskPortError::new(
+                "FEATURE_NOT_READY",
+                "worktree isolation has not passed the production gate",
+                false,
+            ));
+        }
+        if invocation.isolation == "sharedWorkspace" && !self.shared_workspace_enabled {
+            return Err(TaskPortError::new(
+                "FEATURE_NOT_READY",
+                "sharedWorkspace writes are disabled until the write-lease gate passes",
+                false,
+            ));
+        }
+        let parent = validate_agent_invocation(&self.db, &invocation).await?;
+        let model = resolve_agent_model(
+            &self.providers.load(),
+            invocation.model_override.as_deref(),
+            invocation.subagent_type.as_deref(),
+            &parent.model,
+        )
+        .map_err(|message| TaskPortError::new("AGENT_MODEL_INVALID", message, false))?;
+
+        let (isolation, allow_write_tools) = match invocation.isolation.as_str() {
+            "worktree" => (
+                IsolationMode::Worktree,
+                self.child_write_enabled && self.worktree_enabled,
+            ),
+            "sharedWorkspace" => (
+                IsolationMode::None,
+                self.child_write_enabled && self.shared_workspace_enabled,
+            ),
+            "readOnly" => (IsolationMode::None, false),
+            _ => {
+                return Err(TaskPortError::new(
+                    "INVALID_ISOLATION",
+                    "unknown Agent isolation mode",
+                    false,
+                ));
+            }
+        };
+        if self.startup_epoch <= 0 {
+            return Err(TaskPortError::new(
+                "STARTUP_EPOCH_NOT_READY",
+                "durable process startup has not completed",
+                true,
+            ));
+        }
+        let persisted_allowed_tools = invocation.allowed_tools.clone().map_or_else(
+            || {
+                READ_ONLY_CHILD_TOOLS
+                    .iter()
+                    .map(|name| (*name).to_owned())
+                    .collect::<Vec<_>>()
+            },
+            |tools| tools.into_iter().collect::<Vec<_>>(),
+        );
+        let execution_config_json = serde_json::json!({
+            "isolation": invocation.isolation,
+            "subagentType": invocation.subagent_type,
+            "model": model,
+            "waitMode": invocation.wait_mode,
+            "lifecycle": "attached",
+            "allowWriteTools": allow_write_tools,
+            "allowedTools": persisted_allowed_tools,
+            "permissionPolicyVersion": 1,
+        })
+        .to_string();
+        let mut submission = ChildTaskSubmission::attached(
+            invocation.parent_session_id.clone(),
+            parent.task_id,
+            invocation.parent_run_id.clone(),
+            invocation.tool_use_id.clone(),
+            invocation.description.clone(),
+            invocation.prompt.clone(),
+            model.clone(),
+            invocation.working_directory.to_string_lossy(),
+        );
+        submission.execution_config_json = execution_config_json;
+        submission.startup_epoch = self.startup_epoch;
+        let wait_mode = invocation.wait_mode.clone();
+        let executor = Arc::clone(&self.executor);
+        let agent_type = invocation.subagent_type.clone();
+        let prompt = invocation.prompt.clone();
+        let parent_session_id = invocation.parent_session_id.clone();
+        let parent_run_id = invocation.parent_run_id.clone();
+        let working_directory = invocation.working_directory.clone();
+        let tool_use_id = invocation.tool_use_id.clone();
+        let allowed_tools = invocation.allowed_tools.clone();
+        let receipt = self
+            .runtime
+            .submit_child(submission, move |execution| async move {
+                let request = AgentRequest::new(
+                    execution.task_id.clone(),
+                    prompt,
+                    agent_type,
+                    Some(model),
+                    isolation,
+                    false,
+                );
+                let context = ChildExecutionContext {
+                    parent_session_id,
+                    parent_run_id,
+                    working_directory,
+                    tool_use_id,
+                    allowed_tools,
+                    allow_write_tools,
+                    write_tool_allowlist: None,
+                    include_project_prompt: true,
+                };
+                let budget = execution.budget.clone();
+                let persisted = match PersistedChildExecution::try_new(
+                    execution.task_id,
+                    execution.run_id,
+                    execution.transcript_session_id,
+                ) {
+                    Ok(identity) => identity,
+                    Err(error) => {
+                        return TaskExecutionResult::Failed {
+                            message: error,
+                            code: "PERSISTED_EXECUTION_INVALID".to_owned(),
+                        };
+                    }
+                };
+                let result = executor
+                    .execute_precreated_with_cancel(
+                        &request,
+                        &context,
+                        &persisted,
+                        budget,
+                        execution.cancel,
+                    )
+                    .await;
+                agent_result_to_task_result(result)
+            })
+            .await
+            .map_err(port_error)?;
+        let mut snapshot = runtime_snapshot(&self.db, receipt.task).await?;
+        if wait_mode == "background" {
+            return Ok(snapshot);
+        }
+        if snapshot_requires_attention(&snapshot) {
+            return Err(needs_attention_error(&snapshot));
+        }
+        if snapshot_is_terminal(&snapshot) {
+            return Ok(snapshot);
+        }
+
+        loop {
+            let request = RuntimeOutputRequest {
+                root_session_id: invocation.parent_session_id.clone(),
+                task_id: snapshot.task_id.clone(),
+                wait_ms: 30_000,
+                result_version: None,
+                cursor: 0,
+                max_bytes: zk_db::INLINE_RESULT_LIMIT,
+            };
+            tokio::select! {
+                () = caller_cancel.cancelled() => {
+                    let _ = self.runtime.cancel_attached_from_parent(
+                        &invocation.parent_session_id,
+                        &snapshot.task_id,
+                        "parentToolCancelled",
+                    ).await;
+                    return Err(TaskPortError::new(
+                        "AGENT_WAIT_CANCELLED",
+                        "waiting for child result was cancelled",
+                        false,
+                    ));
+                }
+                output = self.runtime.read_output(request) => {
+                    let output = output.map_err(port_error)?;
+                    snapshot = runtime_snapshot_with_result(&self.db, output.task, output.result).await?;
+                    if snapshot_requires_attention(&snapshot) {
+                        return Err(needs_attention_error(&snapshot));
+                    }
+                    if snapshot_is_terminal(&snapshot) {
+                        return Ok(snapshot);
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl TaskCoordinatorPort for TaskCoordinatorBridge {
-    fn submit_task(&self, invocation: TaskInvocation) -> BoxFuture<'_, Result<(), String>> {
-        let coordinator = Arc::clone(&self.coordinator);
-        let executor = Arc::clone(&self.executor);
-        let db = self.db.clone();
-        let providers = Arc::clone(&self.providers);
+    fn submit_task(
+        &self,
+        invocation: TaskInvocation,
+    ) -> BoxFuture<'_, Result<TaskSnapshot, TaskPortError>> {
         Box::pin(async move {
-            let validation = AgentInvocation {
-                prompt: invocation.prompt.clone(),
-                description: invocation.description.clone(),
-                agent_type: Some(invocation.task_type.clone()),
-                model_override: None,
-                isolation: "none".to_owned(),
-                run_in_background: true,
-                parent_session_id: invocation.session_id.clone(),
-                parent_run_id: invocation.parent_run_id.clone(),
-                working_directory: invocation.working_directory.clone(),
-                tool_use_id: invocation.tool_use_id.clone(),
-                allowed_tools: None,
-            };
-            let inherited_model = validate_agent_invocation(&db, &validation).await?;
-            let model = resolve_agent_model(
-                &providers.load(),
-                None,
-                Some(&invocation.task_type),
-                &inherited_model,
-            )?;
-            let request = AgentRequest::new(
-                invocation.task_id.clone(),
-                invocation.prompt,
-                Some(invocation.task_type),
-                Some(model),
-                IsolationMode::None,
-                false,
-            );
-            let context = ChildExecutionContext {
-                parent_session_id: invocation.session_id.clone(),
-                parent_run_id: invocation.parent_run_id,
-                working_directory: invocation.working_directory,
-                tool_use_id: invocation.tool_use_id,
-                allowed_tools: None,
-            };
-            coordinator
-                .submit_with_cancel(
-                    invocation.task_id,
-                    invocation.session_id,
-                    invocation.description,
-                    move |cancel| async move {
-                        let context = ChildExecutionContext {
-                            parent_session_id: context.parent_session_id,
-                            parent_run_id: context.parent_run_id,
-                            working_directory: context.working_directory,
-                            tool_use_id: context.tool_use_id,
-                            allowed_tools: context.allowed_tools,
-                        };
-                        let result = executor
-                            .execute_sync_with_cancel(&request, &context, cancel)
-                            .await;
-                        match result.status {
-                            AgentStatus::Completed | AgentStatus::MaxTurns => {
-                                Ok(result.result.unwrap_or_default())
-                            }
-                            _ => Err(result.result.unwrap_or_else(|| "Task failed".to_owned())),
-                        }
-                    },
-                )
-                .await
-                .map(|_| ())
+            self.submit_agent(
+                AgentInvocation {
+                    prompt: invocation.prompt,
+                    description: invocation.description,
+                    subagent_type: None,
+                    model_override: None,
+                    isolation: "readOnly".to_owned(),
+                    wait_mode: "background".to_owned(),
+                    parent_session_id: invocation.session_id,
+                    parent_run_id: invocation.parent_run_id,
+                    working_directory: invocation.working_directory,
+                    tool_use_id: invocation.tool_use_id,
+                    allowed_tools: None,
+                },
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
         })
     }
 
-    fn cancel_task(&self, task_id: String) -> BoxFuture<'_, bool> {
-        Box::pin(async move { self.coordinator.cancel_task(&task_id).await })
+    fn cancel_task(
+        &self,
+        task_id: String,
+        session_id: String,
+        reason: String,
+    ) -> BoxFuture<'_, Result<TaskStopReceipt, TaskPortError>> {
+        Box::pin(async move {
+            let task = self
+                .runtime
+                .get_owned(&session_id, &task_id)
+                .await
+                .map_err(port_error)?
+                .ok_or_else(|| {
+                    TaskPortError::new(
+                        "TASK_NOT_FOUND",
+                        "Task does not exist in the current root session",
+                        false,
+                    )
+                })?;
+            let run_id = task.current_run_id.ok_or_else(|| {
+                TaskPortError::new("TASK_RUN_NOT_FOUND", "Task has no current Run", false)
+            })?;
+            let transition = self
+                .terminations
+                .cancel_by_user(&run_id, Some(&reason))
+                .await
+                .map_err(|error| TaskPortError::new(error.code.clone(), error.to_string(), true))?;
+            let task = self
+                .runtime
+                .get_owned(&session_id, &task_id)
+                .await
+                .map_err(port_error)?
+                .ok_or_else(|| TaskPortError::new("TASK_NOT_FOUND", "Task disappeared", false))?;
+            Ok(TaskStopReceipt {
+                cancel_requested: transition == zk_db::run::TransitionResult::Applied,
+                task: runtime_snapshot(&self.db, task).await?,
+            })
+        })
     }
 
-    fn get_task(&self, task_id: String) -> BoxFuture<'_, Option<TaskSnapshot>> {
+    fn get_task(
+        &self,
+        task_id: String,
+        session_id: String,
+    ) -> BoxFuture<'_, Result<Option<TaskSnapshot>, TaskPortError>> {
         Box::pin(async move {
-            self.coordinator
-                .get_task(&task_id)
+            let task = self
+                .runtime
+                .get_owned(&session_id, &task_id)
                 .await
-                .ok()
-                .flatten()
-                .map(task_snapshot)
+                .map_err(port_error)?;
+            match task {
+                Some(task) => runtime_snapshot(&self.db, task).await.map(Some),
+                None => Ok(None),
+            }
         })
     }
 
@@ -521,59 +785,264 @@ impl TaskCoordinatorPort for TaskCoordinatorBridge {
         &self,
         session_id: String,
         filter_status: Option<String>,
-    ) -> BoxFuture<'_, Vec<TaskSnapshot>> {
+    ) -> BoxFuture<'_, Result<Vec<TaskSnapshot>, TaskPortError>> {
         Box::pin(async move {
-            let filter = filter_status.as_deref().and_then(TaskStatus::parse);
-            self.coordinator
-                .list_tasks(&session_id, filter)
+            let filter = filter_status
+                .as_deref()
+                .map(parse_task_status)
+                .transpose()?;
+            let tasks = self
+                .runtime
+                .list_owned(&session_id, filter)
                 .await
-                .unwrap_or_default()
-                .into_iter()
-                .map(task_snapshot)
-                .collect()
+                .map_err(port_error)?;
+            let mut snapshots = Vec::with_capacity(tasks.len());
+            for task in tasks {
+                snapshots.push(runtime_snapshot(&self.db, task).await?);
+            }
+            Ok(snapshots)
         })
     }
 
     fn update_task(
         &self,
         task_id: String,
-        status: Option<String>,
-        output: Option<String>,
-    ) -> BoxFuture<'_, Result<(), String>> {
+        session_id: String,
+        description: Option<String>,
+        plan: Option<String>,
+        reported_progress: Option<f64>,
+    ) -> BoxFuture<'_, Result<TaskSnapshot, TaskPortError>> {
         Box::pin(async move {
-            let Some(record) = self.coordinator.get_task(&task_id).await? else {
-                return Err("Task not found".to_owned());
-            };
-            let status = status
-                .as_deref()
-                .and_then(TaskStatus::parse)
-                .map_or(record.status, |status| status.as_str().to_owned());
-            self.db
-                .update_task_result(
+            let task = self
+                .runtime
+                .update_advisory(
+                    &session_id,
                     &task_id,
-                    &status,
-                    output.as_deref().or(record.output.as_deref()),
-                    record.error.as_deref(),
-                    record.progress,
+                    description.as_deref(),
+                    plan.as_deref(),
+                    reported_progress,
                 )
                 .await
-                .map_err(|error| format!("Task store unavailable: {error}"))
+                .map_err(port_error)?;
+            runtime_snapshot(&self.db, task).await
+        })
+    }
+
+    fn read_output(
+        &self,
+        query: TaskOutputQuery,
+    ) -> BoxFuture<'_, Result<TaskOutputPage, TaskPortError>> {
+        Box::pin(async move {
+            let cursor = query
+                .cursor
+                .as_deref()
+                .map(str::parse::<usize>)
+                .transpose()
+                .map_err(|_| {
+                    TaskPortError::new("RESULT_CURSOR_INVALID", "cursor is invalid", false)
+                })?
+                .unwrap_or(0);
+            let request = RuntimeOutputRequest {
+                root_session_id: query.session_id,
+                task_id: query.task_id,
+                wait_ms: query.wait_ms,
+                result_version: query.result_version,
+                cursor,
+                max_bytes: query.max_bytes,
+            };
+            let response = tokio::select! {
+                () = query.cancel.cancelled() => {
+                    return Err(TaskPortError::new("TASK_OUTPUT_CANCELLED", "result wait was cancelled", false));
+                }
+                response = self.runtime.read_output(request) => response.map_err(port_error)?,
+            };
+            let next_cursor = response
+                .result
+                .as_ref()
+                .and_then(|result| result.next_cursor)
+                .map(|cursor| cursor.to_string());
+            let content = response
+                .result
+                .as_ref()
+                .map(|result| result.content.clone());
+            let mut task =
+                runtime_snapshot_with_result(&self.db, response.task, response.result).await?;
+            task.wait_expired = response.wait_expired;
+            Ok(TaskOutputPage {
+                task,
+                content,
+                next_cursor,
+            })
         })
     }
 }
 
-fn task_snapshot(record: zk_db::TaskRecord) -> TaskSnapshot {
-    let created_at = record.created_at_millis();
-    TaskSnapshot {
-        task_id: record.id,
-        session_id: record.session_id,
-        status: record.status,
-        description: record.description,
-        output: record.output,
-        error: record.error,
-        created_at,
-        child_count: 0,
+fn port_error(error: TaskRuntimeError) -> TaskPortError {
+    TaskPortError::new(error.code, error.message, error.retryable)
+}
+
+fn parse_task_status(value: &str) -> Result<zk_db::TaskStatus, TaskPortError> {
+    match value {
+        "queued" => Ok(zk_db::TaskStatus::Queued),
+        "running" => Ok(zk_db::TaskStatus::Running),
+        "waitingDependencies" => Ok(zk_db::TaskStatus::WaitingDependencies),
+        "waitingInteraction" => Ok(zk_db::TaskStatus::WaitingInteraction),
+        "cancelling" => Ok(zk_db::TaskStatus::Cancelling),
+        "needsAttention" => Ok(zk_db::TaskStatus::NeedsAttention),
+        "succeeded" => Ok(zk_db::TaskStatus::Succeeded),
+        "partial" => Ok(zk_db::TaskStatus::Partial),
+        "failed" => Ok(zk_db::TaskStatus::Failed),
+        "cancelled" => Ok(zk_db::TaskStatus::Cancelled),
+        _ => Err(TaskPortError::new(
+            "INVALID_TASK_STATUS",
+            "unknown task status",
+            false,
+        )),
     }
+}
+
+fn agent_result_to_task_result(result: zk_engine::agent::AgentResult) -> TaskExecutionResult {
+    let error_code = result.error_code;
+    let content = result.result.unwrap_or_default();
+    if error_code.as_deref() == Some("SUBAGENT_STOPPED_PARTIAL") {
+        return TaskExecutionResult::Partial {
+            content,
+            code: "SUBAGENT_STOPPED_PARTIAL".to_owned(),
+        };
+    }
+    match result.status {
+        AgentStatus::Completed => TaskExecutionResult::Complete(content),
+        AgentStatus::MaxTurns => TaskExecutionResult::Partial {
+            content,
+            code: error_code.unwrap_or_else(|| "MAX_TURNS".to_owned()),
+        },
+        AgentStatus::BudgetExhausted => TaskExecutionResult::Partial {
+            content,
+            code: error_code.unwrap_or_else(|| "BUDGET_EXHAUSTED".to_owned()),
+        },
+        AgentStatus::Timeout => TaskExecutionResult::Failed {
+            message: content,
+            code: error_code.unwrap_or_else(|| "TIMEOUT".to_owned()),
+        },
+        AgentStatus::Interrupted => TaskExecutionResult::Cancelled { message: content },
+        AgentStatus::Failed | AgentStatus::AsyncLaunched => TaskExecutionResult::Failed {
+            message: content,
+            code: error_code.unwrap_or_else(|| "AGENT_EXECUTION_FAILED".to_owned()),
+        },
+    }
+}
+
+fn snapshot_is_terminal(snapshot: &TaskSnapshot) -> bool {
+    matches!(
+        snapshot.status.as_str(),
+        "succeeded" | "partial" | "failed" | "cancelled"
+    )
+}
+
+fn snapshot_requires_attention(snapshot: &TaskSnapshot) -> bool {
+    snapshot.status == "needsAttention"
+}
+
+fn needs_attention_error(snapshot: &TaskSnapshot) -> TaskPortError {
+    TaskPortError::new(
+        "AGENT_TASK_NEEDS_ATTENTION",
+        snapshot
+            .reason
+            .clone()
+            .unwrap_or_else(|| "child Task requires operator attention".to_owned()),
+        false,
+    )
+}
+
+async fn runtime_snapshot(
+    db: &zk_db::Db,
+    task: zk_db::RuntimeTaskRecord,
+) -> Result<TaskSnapshot, TaskPortError> {
+    let result = db
+        .read_task_result(&task.id, None, 0, zk_db::INLINE_RESULT_LIMIT)
+        .await
+        .map_err(|error| TaskPortError::new("TASK_STORAGE_ERROR", error.to_string(), true))?;
+    runtime_snapshot_with_result(db, task, result).await
+}
+
+async fn runtime_snapshot_with_result(
+    db: &zk_db::Db,
+    task: zk_db::RuntimeTaskRecord,
+    result: Option<zk_db::TaskResultChunk>,
+) -> Result<TaskSnapshot, TaskPortError> {
+    let tree = db
+        .find_task_tree_owned(&task.session_id)
+        .await
+        .map_err(|error| TaskPortError::new("TASK_STORAGE_ERROR", error.to_string(), true))?;
+    let child_count = tree
+        .iter()
+        .filter(|candidate| candidate.parent_task_id.as_deref() == Some(task.id.as_str()))
+        .count();
+    let run = match task.current_run_id.as_deref() {
+        Some(run_id) => db
+            .find_run_by_id(run_id)
+            .await
+            .map_err(|error| TaskPortError::new("TASK_STORAGE_ERROR", error.to_string(), true))?,
+        None => None,
+    };
+    let output = result
+        .as_ref()
+        .filter(|chunk| {
+            matches!(
+                chunk.result.status,
+                zk_db::ResultStatus::Complete | zk_db::ResultStatus::Partial
+            )
+        })
+        .map(|chunk| chunk.content.clone());
+    let error = result
+        .as_ref()
+        .filter(|chunk| {
+            matches!(
+                chunk.result.status,
+                zk_db::ResultStatus::Error | zk_db::ResultStatus::Cancelled
+            )
+        })
+        .map(|chunk| chunk.content.clone());
+    let result_version = result.as_ref().map(|chunk| chunk.result.result_version);
+    let result_ref = result.as_ref().map(|chunk| {
+        format!(
+            "task-result:{}:{}:{}",
+            task.id, chunk.result.result_version, chunk.result.content_sha256
+        )
+    });
+    let partial = result.as_ref().is_some_and(|chunk| chunk.partial);
+    let usage_summary = run.as_ref().map_or_else(
+        || serde_json::json!({"complete": task.usage_complete}),
+        |run| {
+            serde_json::json!({
+                "inputTokens": run.input_tokens,
+                "outputTokens": run.output_tokens,
+                "cacheReadTokens": run.cache_read_tokens,
+                "cacheCreateTokens": run.cache_create_tokens,
+                "costNanosUsd": run.cost_nanos_usd,
+                "complete": run.usage_complete && task.usage_complete,
+            })
+        },
+    );
+    Ok(TaskSnapshot {
+        task_id: task.id,
+        session_id: task.session_id,
+        parent_task_id: task.parent_task_id,
+        run_id: task.current_run_id,
+        status: task.status.as_db().to_owned(),
+        reason: task.reason,
+        description: Some(task.description),
+        output,
+        error,
+        result_version,
+        partial,
+        result_ref,
+        cleanup_status: task.cleanup_status.as_db().to_owned(),
+        usage_summary,
+        wait_expired: false,
+        created_at: zk_db::time::parse_rfc3339_millis(&task.created_at).unwrap_or(0),
+        child_count,
+    })
 }
 
 /// 工具注册表装配（2.3 基础工具族 + Batch 2 工具域 + 2.6 Python 桥接族；
@@ -600,10 +1069,10 @@ fn task_snapshot(record: zk_db::TaskRecord) -> TaskSnapshot {
 /// 2.6 的 Python 桥接族由 [`sync_python_tool_registry`] 在首次能力探测后动态
 /// 装配；构建期缓存为空时不会把不可用能力暴露给模型。
 ///
-/// Batch 5 追加 1 件（旧 `memdir/MemoryTool`）：
+/// Batch 5 追加 1 件：
 ///
-/// - `Memory`：经 `zk_tools::MemoryStore` 端口注入 [`AppState::memdir`]
-///   （`~/.zk/MEMORY.md`）；与 `/api/memory` 域端点共用同一存储实例。
+/// - `Memory`：经 `zk_tools::MemoryStore` 端口接到 [`AppState::db`]；工具与
+///   `/api/memory` 域端点共享同一 `SQLite` 权威。
 ///
 /// 安全裁决（Bash 四层解析器 / 权限管线）归 2.4-2.5：本阶段 `Bash` 为
 /// 直通模式，只有进程树管理与超时/截断护栏。
@@ -646,7 +1115,9 @@ fn build_tool_registry_with_search_endpoint(
             providers: state.providers.clone(),
         },
     ))));
-    registry.register(Arc::new(MemoryTool::with_store(state.memdir.clone())));
+    registry.register(Arc::new(MemoryTool::with_store(Arc::new(
+        DbMemoryStore::new(state.db.clone()),
+    ))));
     registry.register(Arc::new(SyntheticOutputTool::new()));
     let mcp_slot = state.mcp_slot();
     registry.register(Arc::new(ListMcpResourcesTool::new(Arc::clone(&mcp_slot))));
@@ -675,13 +1146,6 @@ fn build_tool_registry_with_search_endpoint(
     // 写能力时，工厂在注册期裁掉 Write/Edit/Bash。
     if state.config.agent_enabled {
         let mailbox_router = Arc::new(AgentMailboxRouter::default());
-        registry.register(Arc::new(SendMessageTool::new(Arc::new(
-            SendMessageBackendBridge {
-                router: Arc::clone(&mailbox_router),
-                db: state.db.clone(),
-                event_bus: Arc::clone(state.coordinator.event_bus()),
-            },
-        ))));
         // Batch 8H：真实子代理引擎工厂注入（替代占位 `PlaceholderEngineFactory`）。
         // `RealSubAgentEngineFactory` 持有 DB / provider / 预过滤子代理工具注册表，
         // 不持有父 `Engine` 引用，避免循环依赖。`&registry` 在此处仅被读取
@@ -709,12 +1173,14 @@ fn build_tool_registry_with_search_endpoint(
             child_tools,
             Arc::new(HubSink {
                 hub: state.hub.clone(),
+                db: state.db.clone(),
             }),
             child_admission,
             state.costs.clone(),
             state.file_history.clone(),
             state.hooks.clone(),
             Arc::clone(&state.observability),
+            Arc::clone(&state.execution_supervisor),
             child_compact_summarizer,
             child_tool_summarizer,
         );
@@ -727,43 +1193,54 @@ fn build_tool_registry_with_search_endpoint(
             )
             .expect("validated workspace_default_root for WorktreeManager"),
             AgentTimeoutConfig::default(),
-            mailbox_router,
+            Arc::clone(&mailbox_router),
         ));
-        let coordinator = Arc::new(
-            TaskCoordinator::new(
-                state.db.clone(),
-                Arc::new(HubSink {
-                    hub: state.hub.clone(),
-                }),
-            )
-            .with_observability(Arc::clone(&state.observability)),
-        );
+        let runtime = Arc::clone(&state.task_runtime);
         let agent_runtime = Arc::new(AgentRuntime {
             executor: Arc::clone(&executor),
-            tasks: Arc::clone(&coordinator),
+            tasks: Arc::clone(&runtime),
         });
         state.set_agent_runtime(agent_runtime);
-        let agent_backend: Arc<dyn AgentToolBackend> = Arc::new(AgentBackendBridge {
+        let task_port = Arc::new(TaskCoordinatorBridge {
+            runtime: Arc::clone(&runtime),
+            terminations: Arc::clone(&state.authz.terminations),
             executor: Arc::clone(&executor),
             db: state.db.clone(),
             providers: Arc::clone(&state.providers),
-            background_agents: Arc::new(BackgroundAgentTracker::new()),
             worktree_enabled: state.config.worktree_enabled,
+            shared_workspace_enabled: state.shared_workspace_executable(),
+            child_write_enabled: state.config.agent_write_enabled,
+            startup_epoch: state.startup_epoch(),
+        });
+        registry.register(Arc::new(SendMessageTool::new(Arc::new(
+            SendMessageBackendBridge {
+                router: Arc::clone(&mailbox_router),
+                runtime: Arc::clone(&runtime),
+                db: state.db.clone(),
+                event_bus: Arc::clone(state.coordinator.event_bus()),
+            },
+        ))));
+        let agent_backend: Arc<dyn AgentToolBackend> = Arc::new(AgentBackendBridge {
+            task_port: Arc::clone(&task_port),
         });
         registry.register(Arc::new(AgentTool::new(Arc::clone(&agent_backend))));
         skill_fork_backend = Some(agent_backend);
-        let port: Arc<dyn TaskCoordinatorPort> = Arc::new(TaskCoordinatorBridge {
-            coordinator: Arc::clone(&coordinator),
-            executor: Arc::clone(&executor),
-            db: state.db.clone(),
-            providers: Arc::clone(&state.providers),
-        });
+        let port: Arc<dyn TaskCoordinatorPort> = task_port;
         registry.register(Arc::new(TaskCreateTool::new(Arc::clone(&port))));
         registry.register(Arc::new(TaskUpdateTool::new(Arc::clone(&port))));
         registry.register(Arc::new(TaskListTool::new(Arc::clone(&port))));
         registry.register(Arc::new(TaskGetTool::new(Arc::clone(&port))));
         registry.register(Arc::new(TaskOutputTool::new(Arc::clone(&port))));
         registry.register(Arc::new(TaskStopTool::new(port)));
+        // Cron is a gated adapter over this exact TaskRuntime/Executor pair.
+        // Registering inside the successfully assembled Agent branch prevents
+        // the model from seeing schedule tools that cannot execute jobs.
+        if state.config.cron_enabled {
+            let cron: Arc<dyn CronTaskPort> = state.cron_service.clone();
+            registry.register(Arc::new(CronCreateTool::new(Arc::clone(&cron))));
+            registry.register(Arc::new(CronListTool::new(Arc::clone(&cron))));
+            registry.register(Arc::new(CronDeleteTool::new(cron)));
+        }
     }
     // Batch 8D: P2 工具域第一波（4 件常驻 + flag 门控的 Cron 三件）。
     // `Monitor` 持 `FeatureFlags` 句柄走**执行期**门（旧
@@ -776,21 +1253,6 @@ fn build_tool_registry_with_search_endpoint(
         registry.register(Arc::new(WorktreeTool));
     }
     registry.register(Arc::new(TerminalCaptureTool));
-    // Cron 三件的旧 `isEnabled()` 一律 `featureFlags.isEnabled("AGENT_TRIGGERS")`
-    // （出厂 false）→ **注册期**门：flag 关则三件不进注册表，模型看不见。
-    // 台账构造一次、`Arc` 三处共享——否则 `CronList` / `CronDelete` 看不到
-    // `CronCreate` 建的任务。
-    if state
-        .feature_flags
-        .is_enabled(zk_core::feature_flags::AGENT_TRIGGERS)
-    {
-        let cron = Arc::new(CronTaskService::new(std::path::Path::new(
-            &state.config.workspace_default_root,
-        )));
-        registry.register(Arc::new(CronCreateTool::new(Arc::clone(&cron))));
-        registry.register(Arc::new(CronListTool::new(Arc::clone(&cron))));
-        registry.register(Arc::new(CronDeleteTool::new(cron)));
-    }
     let mut skill_known_tools = registry.names();
     // 技能声明在能力暂时不可用时仍可加载；真正执行时，引擎目录只提供当前
     // 动态注册的交集，不会绕过 Python 能力门。
@@ -891,7 +1353,7 @@ fn sync_python_tool(
     }
 }
 
-fn refresh_tool_search_catalog(registry: &ToolRegistry) {
+pub(crate) fn refresh_tool_search_catalog(registry: &ToolRegistry) {
     let mut descriptors: Vec<ToolDescriptor> = registry
         .specs()
         .into_iter()
@@ -911,8 +1373,9 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        SendMessageBackendBridge, build_tool_registry, build_tool_registry_with_search_endpoint,
-        resolve_agent_model, select_search_backend, sync_python_tool_registry,
+        PersistedChildExecution, SendMessageBackendBridge, build_tool_registry,
+        build_tool_registry_with_search_endpoint, needs_attention_error, resolve_agent_model,
+        select_search_backend, snapshot_requires_attention, sync_python_tool_registry,
     };
     use crate::config::Config;
     use crate::python::CapabilityStatus;
@@ -921,19 +1384,50 @@ mod tests {
     use sha2::{Digest, Sha256};
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
-    use zk_core::feature_flags::FlagValue;
     use zk_db::Db;
     use zk_engine::{
         AgentConcurrencyController, AgentMailboxMessage, AgentMailboxRouter, AgentRequest,
-        AgentTimeoutConfig, ChildExecutionContext, IsolationMode, SubAgentEngineFactory,
-        SubAgentExecutor, SystemGitCommandRunner, WorktreeManager,
+        AgentTimeoutConfig, ChildExecutionContext, IsolationMode, MessageSink,
+        SubAgentEngineFactory, SubAgentExecutor, SystemGitCommandRunner, WorktreeManager,
+        task::{ChildTaskSubmission, TaskExecutionResult, TaskRuntime},
     };
     use zk_tools::{
-        SearchRequest, SendMessageBackend, SendMessageInvocation, WebFetchError, WebFetchPort,
-        WebFetchRequest, WebFetchResponse,
+        SearchRequest, SendMessageBackend, SendMessageInvocation, TaskSnapshot, WebFetchError,
+        WebFetchPort, WebFetchRequest, WebFetchResponse,
     };
 
+    fn test_root_budget() -> zk_db::TaskBudgetLimits {
+        zk_db::TaskBudgetLimits {
+            token_limit: Some(1_000_000),
+            cost_limit_nanos_usd: Some(1_000_000_000_000),
+            deadline_at_ms: Some(zk_db::time::now_millis() + 60_000),
+        }
+    }
+
+    async fn install_test_startup_epoch(state: &AppState, db: &Db) -> i64 {
+        let epoch = db
+            .begin_runtime_startup_epoch()
+            .await
+            .expect("allocate test startup epoch");
+        state
+            .set_startup_epoch(epoch)
+            .expect("install test startup epoch");
+        epoch
+    }
+
     struct SearchFixtureFetch;
+
+    struct TestSink;
+
+    impl MessageSink for TestSink {
+        fn push<'a>(
+            &'a self,
+            _session_id: &'a str,
+            _message: zk_protocol::ServerMessage,
+        ) -> BoxFuture<'a, ()> {
+            Box::pin(async {})
+        }
+    }
 
     impl WebFetchPort for SearchFixtureFetch {
         fn fetch(
@@ -1072,7 +1566,7 @@ mod tests {
         let digest = format!("{:x}", Sha256::digest(encoded));
         assert_eq!(
             digest,
-            "36cb708a3e9b113886acffd7799cfd7d7cb1da23e65045b415e4e608f9ff934c"
+            "c755caa676a8ecb5ed332ba1ba9577e410ea4f0932058768a3f3dfa6b29b5f9b"
         );
     }
 
@@ -1084,6 +1578,7 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
         std::fs::create_dir_all(&workspace).expect("workspace");
+        let workspace = std::fs::canonicalize(workspace).expect("canonical workspace");
         let notebook = workspace.join("book.ipynb");
         let original = r#"{"cells":[{"cell_type":"markdown","metadata":{},"source":["old"]}],"metadata":{},"nbformat":4,"nbformat_minor":5}"#;
         std::fs::write(&notebook, original).expect("notebook");
@@ -1092,14 +1587,19 @@ mod tests {
             .await
             .expect("session");
         let state = AppState::new(db.clone(), Config::test_config());
-        let tool = build_tool_registry(&state)
-            .get("NotebookEdit")
-            .expect("NotebookEdit");
+        let registry = build_tool_registry(&state);
+        let read = registry.get("Read").expect("Read");
+        let tool = registry.get("NotebookEdit").expect("NotebookEdit");
         let (tx, _rx) = mpsc::unbounded_channel();
         let context = zk_tools::ToolContext::new(CancellationToken::new(), tx)
             .with_working_dir(&workspace)
             .with_session_id(&session.id)
-            .with_tool_use_id("notebook-call-1");
+            .with_tool_use_id("notebook-call-1")
+            .with_authorized_write_path(&notebook);
+        let read_output = read
+            .execute(serde_json::json!({"file_path": notebook}), context.clone())
+            .await;
+        assert!(!read_output.is_error, "{}", read_output.content);
         let output = tool
             .execute(
                 serde_json::json!({
@@ -1277,27 +1777,32 @@ mod tests {
         assert!(registry.get("Bash").is_some(), "base family unaffected");
     }
 
-    /// `AGENT_TRIGGERS` 关 → Cron 三件不进注册表（旧 `isEnabled()` 注册期门）；
-    /// 打开 → 三件到位且共享同一张台账（Create 建的任务 List 看得见）。
+    /// Cron requires both the explicit switch and a genuinely assembled Agent
+    /// runtime. Either half missing keeps all three tools out of the catalog.
     #[test]
-    fn agent_triggers_flag_gates_the_cron_trio() {
-        let state = AppState::for_tests();
-        let registry = build_tool_registry(&state);
-        assert_eq!(
-            registry.names().len(),
-            33,
-            "flag off → 33 frozen base tools"
+    fn cron_switch_and_agent_assembly_gate_the_cron_trio() {
+        let mut unavailable = Config::test_config();
+        unavailable.cron_enabled = true;
+        let state = AppState::new(
+            Db::open_in_memory().expect("in-memory db boots with migrations"),
+            unavailable,
         );
+        let registry = build_tool_registry(&state);
         for name in ["CronCreate", "CronList", "CronDelete"] {
-            assert!(registry.get(name).is_none(), "{name} must stay hidden");
+            assert!(
+                registry.get(name).is_none(),
+                "{name} must stay hidden without an executable Agent runtime"
+            );
         }
 
-        state.feature_flags.set_value(
-            zk_core::feature_flags::AGENT_TRIGGERS,
-            FlagValue::Bool(true),
+        let mut enabled = Config::test_config();
+        enabled.agent_enabled = true;
+        enabled.cron_enabled = true;
+        let state = AppState::new(
+            Db::open_in_memory().expect("in-memory db boots with migrations"),
+            enabled,
         );
         let registry = build_tool_registry(&state);
-        assert_eq!(registry.names().len(), 36, "flag on → +3 cron tools");
         for name in ["CronCreate", "CronList", "CronDelete"] {
             assert!(registry.get(name).is_some(), "{name} must register");
         }
@@ -1359,6 +1864,116 @@ mod tests {
         }
     }
 
+    async fn invoke_production_shared_workspace(
+        shared_workspace_enabled: bool,
+    ) -> (bool, bool, serde_json::Value) {
+        let mut config = Config::test_config();
+        config.agent_enabled = true;
+        config.agent_write_enabled = true;
+        config.shared_workspace_enabled = shared_workspace_enabled;
+        let db = Db::open_in_memory().expect("in-memory db boots with migrations");
+        let state = AppState::new(db.clone(), config);
+        let startup_epoch = install_test_startup_epoch(&state, &db).await;
+        let registry = build_tool_registry(&state);
+        let workspace = state.config.workspace_default_root.clone();
+        let session = db
+            .create_session("test-model", &workspace)
+            .await
+            .expect("root session");
+        let run_id = uuid::Uuid::new_v4().to_string();
+        db.start_root_run_with_budget_at_epoch(
+            &run_id,
+            &session.id,
+            None,
+            "test-model",
+            &test_root_budget(),
+            startup_epoch,
+        )
+        .await
+        .expect("root task/run");
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let output = registry
+            .get("Agent")
+            .expect("production Agent tool")
+            .execute(
+                serde_json::json!({
+                    "prompt": "inspect the authorized workspace",
+                    "waitMode": "background",
+                    "isolation": "sharedWorkspace"
+                }),
+                zk_tools::ToolContext::new(CancellationToken::new(), tx)
+                    .with_session_id(session.id)
+                    .with_run_id(run_id)
+                    .with_tool_use_id("shared-workspace-gate")
+                    .with_working_dir(workspace),
+            )
+            .await;
+        let structured =
+            output.metadata.as_ref().expect("structured Agent response")["structuredResult"]
+                .clone();
+        (
+            state.shared_workspace_executable(),
+            output.is_error,
+            structured,
+        )
+    }
+
+    #[tokio::test]
+    async fn shared_workspace_requires_its_independent_production_gate() {
+        let (executable, is_error, response) = invoke_production_shared_workspace(false).await;
+        assert!(!executable);
+        assert!(is_error);
+        assert_eq!(response["code"], "FEATURE_NOT_READY");
+
+        let (executable, is_error, response) = invoke_production_shared_workspace(true).await;
+        assert!(executable);
+        assert!(!is_error, "{response}");
+        assert!(response["taskId"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    async fn production_task_stop_returns_idempotent_v4_receipt() {
+        let mut config = Config::test_config();
+        config.agent_enabled = true;
+        let db = Db::open_in_memory().expect("in-memory db boots with migrations");
+        let state = AppState::new(db.clone(), config);
+        let registry = build_tool_registry(&state);
+        let session = db
+            .create_session("test-model", &state.config.workspace_default_root)
+            .await
+            .expect("root session");
+        let run_id = uuid::Uuid::new_v4().to_string();
+        db.start_run(&run_id, &session.id, None, None, "test-model")
+            .await
+            .expect("root task/run");
+        let tool = registry.get("TaskStop").expect("production TaskStop");
+
+        let invoke = || {
+            let (tx, _rx) = mpsc::unbounded_channel();
+            zk_tools::ToolContext::new(CancellationToken::new(), tx)
+                .with_session_id(session.id.clone())
+        };
+        let first = tool
+            .execute(serde_json::json!({"taskId": run_id}), invoke())
+            .await;
+        assert!(!first.is_error, "{}", first.content);
+        let first = &first.metadata.expect("structured receipt")["structuredResult"];
+        assert_eq!(first["cancelRequested"], true);
+        assert_eq!(first["status"], "cancelling");
+        assert_eq!(first["cleanupStatus"], "pending");
+        assert!(first.get("cancel_requested").is_none());
+        assert!(first.get("cleanup_status").is_none());
+
+        let second = tool
+            .execute(serde_json::json!({"taskId": run_id}), invoke())
+            .await;
+        assert!(!second.is_error, "{}", second.content);
+        let second = &second.metadata.expect("structured receipt")["structuredResult"];
+        assert_eq!(second["cancelRequested"], false);
+        assert_eq!(second["status"], "cancelling");
+        assert_eq!(second["cleanupStatus"], "pending");
+    }
+
     struct MailboxWaitingFactory;
 
     impl SubAgentEngineFactory for MailboxWaitingFactory {
@@ -1389,14 +2004,76 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)] // Exercises persistence-before-delivery as one end-to-end fixture.
     async fn send_message_bridge_persists_before_delivery_and_emits_native_event() {
         let db = Db::open_in_memory().expect("db");
         db.create_session_with_id("parent-session", "test-model", "/tmp")
             .await
             .expect("parent session");
-        db.start_run("parent-run", "parent-session", None, None, "test-model")
+        let parent_task_id = uuid::Uuid::new_v4().to_string();
+        let parent_run_id = uuid::Uuid::new_v4().to_string();
+        let parent = db
+            .create_task_with_run(&zk_db::CreateTaskWithRun {
+                task_id: parent_task_id.clone(),
+                run_id: parent_run_id.clone(),
+                root_session_id: "parent-session".to_owned(),
+                transcript_session_id: "parent-session".to_owned(),
+                parent_task_id: None,
+                parent_run_id: None,
+                creator_tool_use_id: None,
+                ordinal: 0,
+                description: "mailbox parent".to_owned(),
+                prompt: Some("wait for child".to_owned()),
+                task_type: "agent".to_owned(),
+                model: "test-model".to_owned(),
+                working_dir: "/tmp".to_owned(),
+                execution_config_json: serde_json::json!({
+                    "budget": {
+                        "tokenLimit": 1_000_000,
+                        "costLimitNanosUsd": 1_000_000_000_000_i64,
+                        "deadlineAtMs": zk_db::time::now_millis() + 60_000,
+                    }
+                })
+                .to_string(),
+                startup_epoch: 1,
+            })
             .await
-            .expect("parent run");
+            .expect("parent task/run");
+        assert_eq!(
+            db.claim_task_run_cas(&parent_task_id, &parent_run_id, parent.task.version)
+                .await
+                .expect("claim parent"),
+            zk_db::CasOutcome::Applied
+        );
+        let target_task_id = uuid::Uuid::new_v4().to_string();
+        let target_run_id = uuid::Uuid::new_v4().to_string();
+        let target_session_id = uuid::Uuid::new_v4().to_string();
+        let target = db
+            .create_task_with_run(&zk_db::CreateTaskWithRun {
+                task_id: target_task_id.clone(),
+                run_id: target_run_id.clone(),
+                root_session_id: "parent-session".to_owned(),
+                transcript_session_id: target_session_id.clone(),
+                parent_task_id: Some(parent_task_id.clone()),
+                parent_run_id: Some(parent_run_id.clone()),
+                creator_tool_use_id: Some(uuid::Uuid::new_v4().to_string()),
+                ordinal: 0,
+                description: "mailbox target".to_owned(),
+                prompt: Some("wait".to_owned()),
+                task_type: "agent".to_owned(),
+                model: "test-model".to_owned(),
+                working_dir: "/tmp".to_owned(),
+                execution_config_json: "{}".to_owned(),
+                startup_epoch: 1,
+            })
+            .await
+            .expect("durable target task/run");
+        assert_eq!(
+            db.claim_task_run_cas(&target_task_id, &target_run_id, target.task.version)
+                .await
+                .expect("claim target"),
+            zk_db::CasOutcome::Applied
+        );
         let router = Arc::new(AgentMailboxRouter::default());
         let executor = Arc::new(SubAgentExecutor::new_with_mailbox_router(
             Arc::new(AgentConcurrencyController::default()),
@@ -1410,7 +2087,7 @@ mod tests {
             Arc::clone(&router),
         ));
         let request = AgentRequest::new(
-            "target-agent",
+            target_task_id.clone(),
             "wait",
             None,
             Some("test-model".to_owned()),
@@ -1419,17 +2096,36 @@ mod tests {
         );
         let context = ChildExecutionContext {
             parent_session_id: "parent-session".to_owned(),
-            parent_run_id: "parent-run".to_owned(),
+            parent_run_id: parent_run_id.clone(),
             working_directory: std::path::PathBuf::from("/tmp"),
             tool_use_id: "spawn-tool".to_owned(),
             allowed_tools: None,
+            allow_write_tools: false,
+            write_tool_allowlist: None,
+            include_project_prompt: true,
         };
+        let persisted = PersistedChildExecution::try_new(
+            target_task_id.clone(),
+            target_run_id,
+            target_session_id,
+        )
+        .expect("persisted target identity");
         let child = tokio::spawn({
             let executor = Arc::clone(&executor);
-            async move { executor.execute_sync(&request, &context).await }
+            async move {
+                executor
+                    .execute_precreated_with_cancel(
+                        &request,
+                        &context,
+                        &persisted,
+                        zk_db::TaskBudgetLimits::default(),
+                        CancellationToken::new(),
+                    )
+                    .await
+            }
         });
         tokio::time::timeout(Duration::from_secs(1), async {
-            while !router.has_active_agent("target-agent") {
+            while !router.has_active_agent(&target_task_id) {
                 tokio::task::yield_now().await;
             }
         })
@@ -1438,29 +2134,31 @@ mod tests {
 
         let event_bus = Arc::new(zk_engine::CoordinatorEventBus::new());
         let mut events = event_bus.subscribe();
+        let runtime = Arc::new(TaskRuntime::new(db.clone(), Arc::new(TestSink)));
         let backend = SendMessageBackendBridge {
             router,
+            runtime,
             db: db.clone(),
             event_bus,
         };
         backend
             .send_message(SendMessageInvocation {
-                target_agent_id: "target-agent".to_owned(),
+                target_task_id: target_task_id.clone(),
                 message: "continue".to_owned(),
                 parent_session_id: "parent-session".to_owned(),
-                parent_run_id: "parent-run".to_owned(),
+                parent_run_id,
                 tool_use_id: "send-tool".to_owned(),
             })
             .await
             .expect("message queued and delivered");
 
         let durable = db
-            .get_run_events("parent-run", 0, 10)
+            .read_task_inbox(&target_task_id, &[], 10)
             .await
-            .expect("events");
-        assert_eq!(durable.len(), 2, "run_started + queued event");
-        assert_eq!(durable[1].event_type, "teammate_message_queued");
-        assert!(durable[1].event_data.contains("target-agent"));
+            .expect("durable inbox");
+        assert_eq!(durable.len(), 1);
+        assert_eq!(durable[0].content, "continue");
+        assert_eq!(durable[0].status, zk_db::InboxStatus::Delivered);
         assert!(matches!(
             events.recv().await.expect("native event"),
             zk_engine::CoordinatorEvent::TeammateMessage { content, .. } if content == "continue"
@@ -1472,6 +2170,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn send_message_bridge_returns_terminal_receipt_without_fake_message_id() {
+        let db = Db::open_in_memory().expect("db");
+        db.create_session_with_id("parent-session", "test-model", "/tmp")
+            .await
+            .expect("parent session");
+        db.start_run("parent-run", "parent-session", None, None, "test-model")
+            .await
+            .expect("parent run");
+        let target_task_id = uuid::Uuid::new_v4().to_string();
+        db.start_run(&target_task_id, "parent-session", None, None, "test-model")
+            .await
+            .expect("durable target task/run");
+        let target = db
+            .find_runtime_task_by_id(&target_task_id)
+            .await
+            .expect("target lookup")
+            .expect("target task");
+        db.commit_task_result(&zk_db::CommitTaskResult {
+            task_id: target_task_id.clone(),
+            run_id: target_task_id.clone(),
+            expected_task_version: target.version,
+            status: zk_db::ResultStatus::Error,
+            content: "already failed".to_owned(),
+            media_type: "text/plain".to_owned(),
+            error_code: Some("TEST_TERMINAL".to_owned()),
+            cleanup_status: zk_db::CleanupStatus::Confirmed,
+            verification_status: zk_db::VerificationStatus::NotRequested,
+        })
+        .await
+        .expect("commit terminal result");
+
+        let backend = SendMessageBackendBridge {
+            router: Arc::new(AgentMailboxRouter::default()),
+            runtime: Arc::new(TaskRuntime::new(db.clone(), Arc::new(TestSink))),
+            db: db.clone(),
+            event_bus: Arc::new(zk_engine::CoordinatorEventBus::new()),
+        };
+        let invalid_sender = backend
+            .send_message(SendMessageInvocation {
+                target_task_id: target_task_id.clone(),
+                message: "must not be delivered".to_owned(),
+                parent_session_id: "parent-session".to_owned(),
+                parent_run_id: "missing-parent-run".to_owned(),
+                tool_use_id: "send-tool-invalid".to_owned(),
+            })
+            .await
+            .expect_err("missing parent Run must fail closed");
+        assert_eq!(invalid_sender.code, "SEND_MESSAGE_CONTEXT_INVALID");
+        let receipt = backend
+            .send_message(SendMessageInvocation {
+                target_task_id: target_task_id.clone(),
+                message: "late instruction".to_owned(),
+                parent_session_id: "parent-session".to_owned(),
+                parent_run_id: "parent-run".to_owned(),
+                tool_use_id: "send-tool".to_owned(),
+            })
+            .await
+            .expect("terminal target is a successful explicit acknowledgement");
+
+        assert_eq!(receipt.message_id, None);
+        assert_eq!(receipt.delivery_status, "terminal");
+        assert_eq!(receipt.status, "failed");
+        assert!(
+            db.read_task_inbox(&target_task_id, &[], 10)
+                .await
+                .expect("read inbox")
+                .is_empty(),
+            "terminal acknowledgement must not invent a durable inbox row"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // Keeps the real task/swarm JSONL path in one production fixture.
     async fn production_task_and_swarm_events_reach_real_jsonl_sink() {
         let root = std::env::temp_dir().join(format!(
             "zk-observability-runtime-real-{}",
@@ -1486,46 +2257,71 @@ mod tests {
         config.workspace_default_root = root.to_string_lossy().into_owned();
         let db = Db::open_in_memory().expect("real sqlite");
         let state = AppState::new(db.clone(), config);
+        let startup_epoch = install_test_startup_epoch(&state, &db).await;
         let _ = state.tools();
         let runtime = state.agent_runtime().expect("production Agent runtime");
         let session = db
             .create_session("test-model", &state.config.workspace_default_root)
             .await
             .expect("create durable session");
-
-        runtime
+        let parent_run_id = uuid::Uuid::new_v4().to_string();
+        db.start_root_run_with_budget_at_epoch(
+            &parent_run_id,
+            &session.id,
+            Some("query"),
+            "test-model",
+            &test_root_budget(),
+            startup_epoch,
+        )
+        .await
+        .expect("parent run");
+        let submission = ChildTaskSubmission::attached(
+            &session.id,
+            &parent_run_id,
+            &parent_run_id,
+            "observability-tool",
+            "read a real local file",
+            "read the fixture",
+            "test-model",
+            &state.config.workspace_default_root,
+        );
+        let receipt = runtime
             .tasks
-            .submit(
-                "observed-real-task",
-                &session.id,
-                "read a real local file",
-                async move {
-                    tokio::fs::read_to_string(input)
-                        .await
-                        .map_err(|error| error.to_string())
-                },
-            )
+            .submit_child(submission, move |_| async move {
+                match tokio::fs::read_to_string(input).await {
+                    Ok(content) => TaskExecutionResult::Complete(content),
+                    Err(error) => TaskExecutionResult::Failed {
+                        message: error.to_string(),
+                        code: "READ_FAILED".to_owned(),
+                    },
+                }
+            })
             .await
             .expect("submit production task");
         for _ in 0..100 {
             let record = db
-                .find_task_by_id("observed-real-task")
+                .find_runtime_task_by_id(&receipt.task.id)
                 .await
                 .expect("query task")
                 .expect("durable task");
-            if record.status == "COMPLETED" {
-                assert_eq!(record.output.as_deref(), Some("durable task output\n"));
+            if record.status == zk_db::TaskStatus::Succeeded {
+                let result = db
+                    .read_task_result(&record.id, None, 0, zk_db::INLINE_RESULT_LIMIT)
+                    .await
+                    .expect("read result")
+                    .expect("immutable result");
+                assert_eq!(result.content, "durable task output\n");
                 break;
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         assert_eq!(
-            db.find_task_by_id("observed-real-task")
+            db.find_runtime_task_by_id(&receipt.task.id)
                 .await
                 .expect("query terminal task")
                 .expect("terminal task")
                 .status,
-            "COMPLETED"
+            zk_db::TaskStatus::Succeeded
         );
 
         state
@@ -1588,5 +2384,33 @@ mod tests {
                 .expect("implicit inheritance"),
             "parent-model"
         );
+    }
+
+    #[test]
+    fn needs_attention_child_is_returned_as_an_immediate_stable_error() {
+        let snapshot = TaskSnapshot {
+            task_id: uuid::Uuid::new_v4().to_string(),
+            session_id: uuid::Uuid::new_v4().to_string(),
+            parent_task_id: Some(uuid::Uuid::new_v4().to_string()),
+            run_id: Some(uuid::Uuid::new_v4().to_string()),
+            status: "needsAttention".to_owned(),
+            reason: Some("durable terminal commit failed".to_owned()),
+            description: None,
+            output: None,
+            error: None,
+            result_version: None,
+            partial: false,
+            result_ref: None,
+            cleanup_status: "confirmed".to_owned(),
+            usage_summary: serde_json::json!({"complete": false}),
+            wait_expired: false,
+            created_at: 0,
+            child_count: 0,
+        };
+        assert!(snapshot_requires_attention(&snapshot));
+        let error = needs_attention_error(&snapshot);
+        assert_eq!(error.code, "AGENT_TASK_NEEDS_ATTENTION");
+        assert_eq!(error.message, "durable terminal commit failed");
+        assert!(!error.retryable);
     }
 }

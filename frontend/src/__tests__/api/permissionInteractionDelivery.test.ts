@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { runtimeEnvelope } from '@/test/runtimeEnvelope';
 import { bindSessionAndWait, dispatch, resetBoundSession } from '@/api/dispatch';
 import { usePermissionStore } from '@/store/permissionStore';
 import { useSessionStore } from '@/store/sessionStore';
@@ -66,7 +67,8 @@ async function bindSession(): Promise<number> {
     let payload: { bindRequestId: string; bindingEpoch: number } | undefined;
     const bound = bindSessionAndWait(SESSION, value => { payload = value as never; });
     dispatch({
-        type: 'session_restored', bindRequestId: payload!.bindRequestId, protocolVersion: 3,
+            ...runtimeEnvelope(),
+        type: 'session_restored', bindRequestId: payload!.bindRequestId, protocolVersion: 4,
         bindingEpoch: payload!.bindingEpoch, messages: [],
         metadata: { sessionId: SESSION, model: 'model', permissionMode: 'DEFAULT', status: 'idle' },
     } as never);
@@ -85,7 +87,8 @@ describe('permission interaction delivery', () => {
     it('shows the permission dialog and acks the delivery generation once bound', async () => {
         const bindingEpoch = await bindSession();
 
-        dispatch({ ...(FRAME as object), _bindingEpoch: bindingEpoch } as never);
+        dispatch({
+            ...runtimeEnvelope(), ...(FRAME as object), _bindingEpoch: bindingEpoch } as never);
 
         expect(usePermissionStore.getState().pendingPermissions).toHaveLength(1);
         expect(useSessionStore.getState().status).toBe('waiting_permission');
@@ -102,6 +105,7 @@ describe('permission interaction delivery', () => {
         const staleId = 'f3b1c07e-0000-4000-8000-000000000001';
 
         dispatch({
+            ...runtimeEnvelope(),
             ...(FRAME as object), interactionId: staleId, _bindingEpoch: bindingEpoch - 1,
         } as never);
 
@@ -118,6 +122,7 @@ describe('permission interaction delivery', () => {
         const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
         try {
             dispatch({
+            ...runtimeEnvelope(),
                 ...(FRAME as object), interactionId: droppedId,
                 status: 'decided', _bindingEpoch: bindingEpoch,
             } as never);

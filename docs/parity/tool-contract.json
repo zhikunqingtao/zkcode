@@ -1,7 +1,7 @@
 {
   "version": 1,
   "frozenDefaultCount": 33,
-  "frozenDefaultSchemaSha256": "36cb708a3e9b113886acffd7799cfd7d7cb1da23e65045b415e4e608f9ff934c",
+  "frozenDefaultSchemaSha256": "c755caa676a8ecb5ed332ba1ba9577e410ea4f0932058768a3f3dfa6b29b5f9b",
   "frozenDefault": [
     "AskUserQuestion", "Bash", "Config", "CtxInspect", "Edit", "EnterPlanMode",
     "ExitPlanMode", "GitDiff", "GitLog", "GitStatus", "Glob", "Grep", "ListDir",
@@ -11,8 +11,11 @@
     "VerifyJourney", "VerifyPlanExecution", "Visualization", "WebFetch", "WebSearch", "Write"
   ],
   "featureGates": {
-    "ZK_AGENT_ENABLED": ["Agent", "TaskCreate", "TaskGet", "TaskList", "TaskStop", "TaskUpdate"],
+    "ZK_AGENT_ENABLED": ["Agent", "TaskCreate", "TaskGet", "TaskList", "TaskOutput", "TaskStop", "TaskUpdate", "SendMessage"],
     "ZK_AGENT_WRITE_ENABLED": ["child:Write", "child:Edit", "child:Bash"],
+    "ZK_SHARED_WORKSPACE_ENABLED": ["Agent:isolation=sharedWorkspace"],
+    "ZK_AUTO_RESUME_SAFE_TASKS": ["runtime:safeTaskAutoResume (not executable)"],
+    "ZK_CRON_ENABLED": ["CronCreate", "CronList", "CronDelete", "runtime:CronScheduler"],
     "ZK_WORKTREE_ENABLED": ["Worktree"],
     "ZK_SWARM_ENABLED": ["Swarm REST and dispatch"]
   },

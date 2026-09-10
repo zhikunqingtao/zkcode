@@ -132,6 +132,12 @@ pub trait McpToolSink: Send + Sync {
 
     /// 按 `mcp__<server>__` 前缀批量注销。
     fn unregister_by_prefix(&self, prefix: &str);
+
+    /// Publish the final, policy-filtered directory snapshot for one server.
+    /// Registration is intentionally separate so hosts can update execution
+    /// and UI/catalog views from the same authoritative list.
+    fn publish_server_tools(&self, _server_id: &str, _tools: Vec<crate::protocol::ToolDefinition>) {
+    }
 }
 
 /// 连接健康状态观察端口（对照 Java `broadcastHealthStatus` 的 WebSocket 广播）。
@@ -738,7 +744,7 @@ impl McpClientManager {
             return false;
         };
         remove_if_same(&self.reconnecting_servers, name, &connection);
-        self.tool_sink.unregister_by_prefix(&tool_prefix(name));
+        self.clear_tool_directory(name);
         connection.close().await;
         tracing::info!(server = name, "MCP server removed");
         true
@@ -786,7 +792,7 @@ impl McpClientManager {
         let generation = self.next_generation(name);
         self.cancel_reconnect_work(name);
         tracing::info!(server = name, "Restarting MCP server");
-        self.tool_sink.unregister_by_prefix(&tool_prefix(name));
+        self.clear_tool_directory(name);
         connection.close().await;
 
         connection.connect().await;
@@ -883,6 +889,11 @@ impl McpClientManager {
             task.cancel_forcefully();
         }
     }
+
+    fn clear_tool_directory(&self, server_id: &str) {
+        self.tool_sink.unregister_by_prefix(&tool_prefix(server_id));
+        self.tool_sink.publish_server_tools(server_id, Vec::new());
+    }
 }
 
 // ===== 工具与 prompt 发现 =====
@@ -930,7 +941,13 @@ impl McpClientManager {
         .with_registry_overrides(enhanced_description, timeout_ms)
         .with_capability_identity(
             capability.as_ref().map(|value| value.id.clone()),
-            capability.and_then(|value| value.domain),
+            capability.as_ref().and_then(|value| value.domain.clone()),
+        )
+        .with_child_access(
+            capability
+                .as_ref()
+                .and_then(|value| value.child_agent_access)
+                .unwrap_or_default(),
         )
         .with_result_cache(Arc::clone(&self.result_cache));
         if let Some(tracker) = &self.progress_tracker {
@@ -945,6 +962,10 @@ impl McpClientManager {
     /// 监听回调持 `Weak` 引用（管理器与连接均是），避免
     /// `connection → callback → connection` 的 `Arc` 环。
     fn register_tools_from_connection(self: &Arc<Self>, connection: &Arc<McpServerConnection>) {
+        if connection.status() != McpConnectionStatus::Connected {
+            return;
+        }
+        let mut published = Vec::new();
         for tool in connection.tools() {
             if !self.is_tool_allowed(connection.name(), &tool.name) {
                 tracing::info!(
@@ -956,7 +977,10 @@ impl McpClientManager {
             }
             self.tool_sink
                 .register_dynamic(self.build_adapter(connection, &tool));
+            published.push(tool);
         }
+        self.tool_sink
+            .publish_server_tools(connection.name(), published);
 
         // Prompt discovery performs protocol I/O. Register adapters asynchronously and
         // reject stale connection generations before touching the shared tool directory.
@@ -996,8 +1020,10 @@ impl McpClientManager {
             if !manager.is_current_connection(&name, &connection, manager.generation_of(&name)) {
                 return;
             }
-            manager.tool_sink.unregister_by_prefix(&tool_prefix(&name));
-            manager.register_tools_from_connection(&connection);
+            manager.clear_tool_directory(&name);
+            if connection.status() == McpConnectionStatus::Connected {
+                manager.register_tools_from_connection(&connection);
+            }
             tracing::info!(server = %name, "MCP tools refreshed for server");
         }));
     }
@@ -1131,6 +1157,7 @@ impl McpClientManager {
             if connection.status() == McpConnectionStatus::Connected && !connection.is_alive() {
                 tracing::warn!(server = %name, "MCP server connection lost");
                 connection.set_status(McpConnectionStatus::Failed);
+                self.clear_tool_directory(&name);
             }
             if connection.status() == McpConnectionStatus::Failed
                 && connection.config().transport != McpTransportType::Stdio
@@ -1209,6 +1236,7 @@ impl McpClientManager {
             return;
         }
         connection.set_status(McpConnectionStatus::Degraded);
+        self.clear_tool_directory(connection_name);
         self.broadcast_health_status(connection_name, McpConnectionStatus::Degraded);
         self.submit_reconnect(connection_name, &connection, generation);
     }
@@ -1400,6 +1428,9 @@ impl McpClientManager {
         }
         if connection.status() == McpConnectionStatus::Connected {
             connection.reset_reconnect_attempts();
+            // A reconnect is a complete directory replacement.  Tools and
+            // prompts removed by the new server session must not survive.
+            self.clear_tool_directory(server_id);
             self.register_tools_from_connection(connection);
             tracing::info!(server = server_id, "MCP server reconnected successfully");
             self.broadcast_health_status(server_id, McpConnectionStatus::Connected);
@@ -1694,6 +1725,7 @@ mod tests {
     struct RecordingSink {
         registered: Mutex<Vec<String>>,
         unregistered: Mutex<Vec<String>>,
+        published: Mutex<Vec<(String, Vec<String>)>>,
     }
 
     impl RecordingSink {
@@ -1708,6 +1740,10 @@ mod tests {
         fn unregistered(&self) -> Vec<String> {
             lock(&self.unregistered).clone()
         }
+
+        fn published(&self) -> Vec<(String, Vec<String>)> {
+            lock(&self.published).clone()
+        }
     }
 
     impl McpToolSink for RecordingSink {
@@ -1717,6 +1753,13 @@ mod tests {
 
         fn unregister_by_prefix(&self, prefix: &str) {
             lock(&self.unregistered).push(prefix.to_owned());
+        }
+
+        fn publish_server_tools(&self, server_id: &str, tools: Vec<ToolDefinition>) {
+            lock(&self.published).push((
+                server_id.to_owned(),
+                tools.into_iter().map(|tool| tool.name).collect(),
+            ));
         }
     }
 
@@ -1750,12 +1793,17 @@ mod tests {
     }
 
     impl McpTransport for StubTransport {
+        fn next_request_id(&self) -> RequestId {
+            RequestId::Number(1)
+        }
+
         fn connect(&self) -> BoxFuture<'_, Result<(), McpProtocolError>> {
             Box::pin(async { Ok(()) })
         }
 
         fn send_request<'a>(
             &'a self,
+            _request_id: RequestId,
             _method: &'a str,
             _params: Option<Value>,
             _timeout: Duration,
@@ -2095,18 +2143,20 @@ mod tests {
             .channel_permissions(permissions)
             .build();
         running(&manager);
-        let connection = manager
-            .add_server(config_with(
-                "srv",
-                McpTransportType::Sdk,
-                McpConfigScope::User,
-            ))
-            .await
-            .expect("建连");
+        let connection = add_trusted(
+            &manager,
+            &approval,
+            config_with("srv", McpTransportType::Sdk, McpConfigScope::User),
+        )
+        .await;
         connection.set_tools(vec![tool_def("allowed"), tool_def("blocked")]);
 
         manager.register_tools_from_connection(&connection);
         assert_eq!(sink.registered(), vec!["mcp__srv__allowed".to_owned()]);
+        assert_eq!(
+            sink.published().last(),
+            Some(&("srv".to_owned(), vec!["allowed".to_owned()]))
+        );
     }
 
     #[tokio::test]
@@ -2115,14 +2165,12 @@ mod tests {
         let sink = RecordingSink::shared();
         let manager = builder(&approval, &sink).build();
         running(&manager);
-        let connection = manager
-            .add_server(config_with(
-                "srv",
-                McpTransportType::Sdk,
-                McpConfigScope::User,
-            ))
-            .await
-            .expect("建连");
+        let connection = add_trusted(
+            &manager,
+            &approval,
+            config_with("srv", McpTransportType::Sdk, McpConfigScope::User),
+        )
+        .await;
 
         connection.set_tools(vec![tool_def("first")]);
         manager.register_tools_from_connection(&connection);
@@ -2146,14 +2194,12 @@ mod tests {
         let sink = RecordingSink::shared();
         let manager = builder(&approval, &sink).build();
         running(&manager);
-        let connection = manager
-            .add_server(config_with(
-                "srv",
-                McpTransportType::Sdk,
-                McpConfigScope::User,
-            ))
-            .await
-            .expect("建连");
+        let connection = add_trusted(
+            &manager,
+            &approval,
+            config_with("srv", McpTransportType::Sdk, McpConfigScope::User),
+        )
+        .await;
         connection.set_tools(vec![tool_def("first")]);
         manager.register_tools_from_connection(&connection);
         lock(&sink.registered).clear();
@@ -2166,6 +2212,38 @@ mod tests {
 
         assert!(sink.registered().is_empty());
         assert!(sink.unregistered().is_empty());
+    }
+
+    #[tokio::test]
+    async fn reconnect_replaces_directory_and_does_not_keep_removed_tools() {
+        let approval = RecordingApproval::shared();
+        let sink = RecordingSink::shared();
+        let manager = builder(&approval, &sink).build();
+        running(&manager);
+        let connection = add_trusted(
+            &manager,
+            &approval,
+            config_with("srv", McpTransportType::Sdk, McpConfigScope::User),
+        )
+        .await;
+        connection.set_tools(vec![tool_def("removed_after_reconnect")]);
+        manager.register_tools_from_connection(&connection);
+        lock(&sink.registered).clear();
+        lock(&sink.unregistered).clear();
+
+        let generation = manager.generation_of("srv");
+        manager.reconnect_once("srv", &connection, generation).await;
+
+        assert!(
+            sink.registered().is_empty(),
+            "a tool absent from the new session must not be re-registered"
+        );
+        assert!(
+            sink.unregistered()
+                .iter()
+                .any(|prefix| prefix == "mcp__srv__"),
+            "reconnect must replace, not merge, the dynamic directory"
+        );
     }
 
     #[tokio::test]

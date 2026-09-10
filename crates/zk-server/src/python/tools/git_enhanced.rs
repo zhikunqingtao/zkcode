@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use futures::future::BoxFuture;
 use serde_json::json;
-use zk_tools::{Tool, ToolContext, ToolOutput};
+use zk_tools::{ChildToolAccess, Tool, ToolContext, ToolOutput};
 
 use super::{GIT_ENHANCED, PythonEnvelope, allowed_list, failure, is_blank, opt_str};
 use crate::python::client::{Correlation, PythonClient};
@@ -85,6 +85,10 @@ impl Tool for GitEnhancedTool {
 
     fn description(&self) -> &'static str {
         DESCRIPTION
+    }
+
+    fn child_access(&self) -> ChildToolAccess {
+        ChildToolAccess::ReadOnly
     }
 
     fn parameters(&self) -> serde_json::Value {

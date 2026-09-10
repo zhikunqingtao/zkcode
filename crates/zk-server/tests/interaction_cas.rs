@@ -264,7 +264,7 @@ async fn run_remains_waiting_until_all_concurrent_interactions_resolve() {
         .expect("first decision");
     assert_eq!(
         run_status(&fixture.db, &fixture.run_id).await,
-        "waiting_interaction"
+        "waitingInteraction"
     );
 
     fixture
@@ -464,12 +464,12 @@ async fn unacknowledged_delivery_expires_before_requesting_run_termination() {
         InteractionStatus::Undeliverable
     );
     // 旧测试注入的是收集用 `ApplicationEventPublisher`（无
-    // `RunTerminationCoordinator` 监听该事件），故 Run 停在 `waiting_interaction`
+    // `RunTerminationCoordinator` 监听该事件），故 Run 停在 `waitingInteraction`
     // ——本文件断言的是「事件已发」这一交互域责任边界。真协调器接线后的终态链见
     // `crates/zk-server/tests/run_termination.rs`。
     assert_eq!(
         run_status(&fixture.db, &fixture.run_id).await,
-        "waiting_interaction"
+        "waitingInteraction"
     );
     assert!(
         fixture
@@ -477,7 +477,7 @@ async fn unacknowledged_delivery_expires_before_requesting_run_termination() {
             .events()
             .iter()
             .any(|(run_id, exit_reason, _)| {
-                run_id == &fixture.run_id && exit_reason == "interaction_expired"
+                run_id == &fixture.run_id && exit_reason == "timeout"
             }),
         "expiry must request run termination: {:?}",
         fixture.terminations.events()
@@ -774,7 +774,7 @@ async fn decision_rolls_back_when_run_cannot_resume() {
         fixture
             .db
             .with_writer(move |conn| {
-                runs::request_cancel_in_current_write(conn, &run_id, "user_cancelled")
+                runs::request_cancel_in_current_write(conn, &run_id, runs::EXIT_USER_CANCELLED)
             })
             .await
             .expect("cancel write")

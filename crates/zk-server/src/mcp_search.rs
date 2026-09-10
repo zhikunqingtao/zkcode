@@ -138,8 +138,13 @@ fn extract_result_rows(response: &Value) -> Option<Vec<Value>> {
         if item.get("type").and_then(Value::as_str) != Some("text") {
             continue;
         }
-        let text = item.get("text").and_then(Value::as_str)?;
-        let parsed = parse_text_payload(text)?;
+        let Some(parsed) = item
+            .get("text")
+            .and_then(Value::as_str)
+            .and_then(parse_text_payload)
+        else {
+            continue;
+        };
         if let Some(rows) = rows_in_value(&parsed) {
             return Some(rows.to_vec());
         }
@@ -182,19 +187,23 @@ fn parse_text_payload(text: &str) -> Option<Value> {
 }
 
 fn decode_nested_json(value: Value) -> Option<Value> {
-    if let Some(encoded) = value.as_str() {
-        serde_json::from_str(encoded).ok()
-    } else {
-        Some(value)
+    let mut value = value;
+    for _ in 0..4 {
+        let Some(encoded) = value.as_str() else {
+            return Some(value);
+        };
+        value = serde_json::from_str(encoded).ok()?;
     }
+    None
 }
 
 fn map_result(row: &Value, rank: usize) -> Option<SearchResult> {
     let title = row.get("title")?.as_str()?.to_owned();
     let url = row
         .get("url")
-        .or_else(|| row.get("link"))?
-        .as_str()?
+        .or_else(|| row.get("link"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
         .to_owned();
     let snippet = row
         .get("content")
@@ -205,6 +214,7 @@ fn map_result(row: &Value, rank: usize) -> Option<SearchResult> {
         .to_owned();
     let source = row
         .get("site_name")
+        .or_else(|| row.get("media"))
         .or_else(|| row.get("source"))
         .and_then(Value::as_str)
         .unwrap_or(ZHIPU_WEB_SEARCH_SERVER)
@@ -249,6 +259,19 @@ mod tests {
         });
         let parsed = parse_search_response(Some(&structured), 1).expect("structured results");
         assert_eq!(parsed[0].source, ZHIPU_WEB_SEARCH_SERVER);
+    }
+
+    #[test]
+    fn preserves_nested_provider_summaries_without_fabricating_links() {
+        let rows = json!([{"title":"Finding","link":"","content":"Unverified summary","media":"Provider"}]);
+        let once = serde_json::to_string(&rows).unwrap();
+        let twice = serde_json::to_string(&once).unwrap();
+        let response = json!({"content":[{"type":"text","text":twice}]});
+        let results = parse_search_response(Some(&response), 5).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].url, "");
+        assert_eq!(results[0].snippet, "Unverified summary");
+        assert_eq!(results[0].source, "Provider");
     }
 
     #[tokio::test]

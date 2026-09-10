@@ -486,14 +486,10 @@ impl crate::interaction::InteractionPublisher for WsInteractionPublisher {
         let record = record.clone();
         // 旧 L266-274：`InteractionCreatedEvent` → `deliverInteraction(INITIAL)`；
         // 旧 L276-283：`InteractionTerminalEvent` → `pushInteractionView` 直推。
-        let service = if event_type == "interaction_created" {
-            self.interactions.get().and_then(std::sync::Weak::upgrade)
-        } else {
-            None
-        };
+        let service = self.interactions.get().and_then(std::sync::Weak::upgrade);
         tokio::spawn(async move {
-            match service {
-                Some(service) => {
+            match (event_type, service) {
+                ("interaction_created", Some(service)) => {
                     crate::ws::deliver_interaction(
                         &hub,
                         &service,
@@ -502,8 +498,21 @@ impl crate::interaction::InteractionPublisher for WsInteractionPublisher {
                     )
                     .await;
                 }
-                None => {
-                    crate::ws::delivery::push_interaction_view(&hub, &record, event_type).await;
+                (_, Some(service)) => {
+                    crate::ws::delivery::push_interaction_view(
+                        &hub,
+                        service.database(),
+                        &record,
+                        event_type,
+                    )
+                    .await;
+                }
+                (_, None) => {
+                    tracing::error!(
+                        interaction_id = %record.interaction_id,
+                        event_type,
+                        "interaction WS publisher is not bound; durable frame suppressed"
+                    );
                 }
             }
         });
@@ -516,12 +525,13 @@ impl crate::interaction::InteractionPublisher for WsInteractionPublisher {
 pub struct AuthzStack {
     /// 交互权威（落库 / CAS 决策 / 重投 / 恢复）。
     pub interactions: Arc<DurableInteractionService>,
-    /// Run 终止协调器（旧 `RunTerminationCoordinator` bean，Run 终态唯一权威）。
+    /// Run 取消协调器（旧 `RunTerminationCoordinator` bean）。
     ///
     /// 与 `interactions` 在同一 `Arc::new_cyclic` 里循环装配（见
-    /// [`crate::run_termination::assemble`]），故交互过期路径与 REST 远程中断
+    /// [`crate::run_termination::assemble_with_runtime`]），故交互过期路径与 REST 远程中断
     /// （`POST /api/remote/interrupt`，旧 `RemoteControlController` L99）用的是
-    /// **同一实例**——Run 终态不出现第二个写入者。
+    /// **同一实例**。它只持久化 `cancelling`；执行所有者唯一提交
+    /// Run/Task/`TaskResult` 终态。
     pub terminations: Arc<RunTerminationCoordinator>,
     /// 唯一策略与裁决权威。
     pub authorization: Arc<AuthorizationService>,
@@ -544,7 +554,12 @@ impl std::fmt::Debug for AuthzStack {
 impl AuthzStack {
     /// 装配全链（`hub` 为 `None` 时无下行出口，用于纯持久层测试）。
     #[must_use]
-    pub fn build(db: &Db, config: &Arc<Config>, hub: Option<WsHub>) -> Self {
+    pub fn build(
+        db: &Db,
+        config: &Arc<Config>,
+        hub: Option<WsHub>,
+        task_runtime: &Arc<zk_engine::TaskRuntime>,
+    ) -> Self {
         let scratchpads = SystemScratchpadPathPolicy::new(&config.scratchpad_system_root);
         let path_security = Arc::new(PathSecurityService::new(scratchpads.clone()));
         let bash_security: Arc<dyn BashSecurityPort> = Arc::new(BashSecurityBridge::new());
@@ -568,7 +583,8 @@ impl AuthzStack {
         // 交互服务 ↔ Run 终止协调器的循环装配（旧 Spring 容器 + 事件总线，见
         // `crate::run_termination` 模块文档）：交互过期 / 容量耗尽经
         // `RunTerminationRequest` 端口真正把 Run 推向终态。
-        let (interactions, terminations) = crate::run_termination::assemble(db.clone(), publisher);
+        let (interactions, terminations) =
+            crate::run_termination::assemble_with_runtime(db.clone(), publisher, task_runtime);
         // 投递闸门回指（旧 Spring 事件总线的等价接线，见 D-03）。
         if let Some(publisher) = &ws_publisher {
             publisher.bind(&interactions);

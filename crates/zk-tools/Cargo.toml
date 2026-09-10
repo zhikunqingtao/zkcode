@@ -43,10 +43,12 @@ dashmap = { workspace = true }
 # Batch 8D：`CronTask` 的 durable 台账 `.zk/scheduled_tasks.json` 需
 # derive 序列化。
 serde = { workspace = true }
+thiserror = { workspace = true }
 # Batch 8D：Monitor 的系统指标 / Cron 的表达式解析与时刻推算。
 sysinfo = { workspace = true }
 cron = { workspace = true }
 chrono = { workspace = true }
+chrono-tz = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]

@@ -23,7 +23,7 @@
 //! decide_request(id, version, terminal, ...) ← 前端 permission_response 上行
 //!   └─ PERMISSION 六层协议校验 → CAS UPDATE → [remember → grant] → 3 类 run 事件
 //!      → 该 run 无剩余 pending 则 mark_running（恢复引擎）
-//! expire_deadlines（1s 定时器）/ begin_run_termination / reconcile_capacity_after_restart
+//! expire_deadlines（1s 定时器）/ complete_runtime_cancellation / reconcile_capacity_after_restart
 //! ```
 //!
 //! # 与旧源的结构性偏离（详见 `docs/compatibility.md` §8）
@@ -351,7 +351,7 @@ fn ensure_run_waiting_in_current_write(
     let Some(status) = status else {
         return Ok(TransitionResult::NotFound);
     };
-    if status == "waiting_interaction" {
+    if status == "waitingInteraction" {
         return Ok(TransitionResult::Applied);
     }
     runs::mark_waiting_in_current_write(conn, run_id, reason)
@@ -389,6 +389,7 @@ impl DurableInteractionService {
     }
 
     /// 单测装配（无 WS 下行出口，终止端口仍是生产协调器）。
+    #[cfg(test)]
     #[doc(hidden)]
     #[must_use]
     pub fn for_tests(db: Db) -> Arc<Self> {
@@ -399,6 +400,11 @@ impl DurableInteractionService {
     #[must_use]
     pub fn available_permits(&self) -> usize {
         self.capacity.available_permits()
+    }
+
+    /// Database shared by the interaction state machine and its durable WS outbox.
+    pub(crate) fn database(&self) -> &Db {
+        &self.db
     }
 
     /// 过期定时器已完成的扫描轮次（测试可观测）。
@@ -1471,46 +1477,59 @@ impl DurableInteractionService {
 
     // ── Run 终止 ─────────────────────────────────────────────────────────
 
-    /// 旧 `beginRunCancellation(runId, reason)`（L621-623）。
+    /// Close every pending interaction after the unified `TaskRuntime` has
+    /// durably moved the owning Task and Run to `cancelling`.
     ///
-    /// # Errors
-    /// 见 [`Self::begin_run_termination`]。
-    pub async fn begin_run_cancellation(
-        &self,
-        run_id: &str,
-        reason: &str,
-    ) -> AuthzResult<CancellationResult> {
-        self.begin_run_termination(run_id, "user_cancelled", reason)
-            .await
-    }
-
-    /// 旧 `beginRunTermination(runId, exitReason, reason)`（L625-651）。
-    ///
-    /// 同事务内把 Run 原子切到 `cancelling` 并终结其**全部**待决交互；
-    /// `updated != ids.len()` 时抛 `INTERACTION_CANCEL_COUNT_MISMATCH`（并发写入
-    /// 导致的计数漂移必须整体回滚，不允许出现半取消状态）。
+    /// The old implementation also transitioned the Run in this method. That
+    /// created a second lifecycle writer which could leave a terminal Run next
+    /// to an active Task without a `TaskResult`. The caller must now establish
+    /// Task/Run cancellation first; this method verifies that invariant and only
+    /// owns interaction rows plus their in-memory capacity permits.
     ///
     /// # Errors
     /// 计数不符或写库失败时返回错误。
-    pub async fn begin_run_termination(
+    pub async fn complete_runtime_cancellation(
         &self,
         run_id: &str,
-        exit_reason: &str,
         reason: &str,
     ) -> AuthzResult<CancellationResult> {
         let now = time::format_rfc3339_micros(time::now_millis());
-        let (run_id_owned, exit_reason_owned, reason_owned) =
-            (run_id.to_owned(), exit_reason.to_owned(), reason.to_owned());
+        let (run_id_owned, reason_owned) = (run_id.to_owned(), reason.to_owned());
         let outcome = self
             .db
             .with_writer(move |conn| {
                 let tx = conn.transaction()?;
-                let transition =
-                    runs::request_cancel_in_current_write(&tx, &run_id_owned, &exit_reason_owned)?;
-                if transition != TransitionResult::Applied {
+                let state: Option<(String, String)> = tx
+                    .query_row(
+                        "SELECT r.status,t.status FROM run_envelopes r
+                           JOIN tasks t ON t.id=r.task_id WHERE r.id=?1",
+                        params![run_id_owned],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()?;
+                let Some((run_status, task_status)) = state else {
                     tx.commit()?;
-                    return Ok(Ok((transition, Vec::new())));
-                }
+                    return Ok(Ok((TransitionResult::NotFound, Vec::new())));
+                };
+                let run_terminal = matches!(
+                    run_status.as_str(),
+                    "completed" | "failed" | "cancelled" | "interrupted"
+                );
+                let task_terminal = matches!(
+                    task_status.as_str(),
+                    "succeeded" | "partial" | "failed" | "cancelled"
+                );
+                let transition = if run_status == "cancelling" && task_status == "cancelling" {
+                    TransitionResult::Applied
+                } else if run_terminal && task_terminal {
+                    // The execution owner may commit the terminal TaskResult as
+                    // soon as TaskRuntime signals its token. Pending interaction
+                    // cleanup must survive that race and remains idempotent.
+                    TransitionResult::AlreadyTerminal
+                } else {
+                    tx.commit()?;
+                    return Ok(Ok((TransitionResult::InvalidTransition, Vec::new())));
+                };
                 let ids = {
                     let mut stmt = tx.prepare(
                         "SELECT interaction_id FROM interaction_requests \

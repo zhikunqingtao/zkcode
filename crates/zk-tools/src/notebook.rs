@@ -34,10 +34,11 @@ use std::sync::Arc;
 use futures::future::BoxFuture;
 use serde_json::{Map, Value, json};
 
-use crate::atomic::{ExpectedOldState, sha256_hex, write_checked};
+use crate::atomic::{ExpectedOldState, sha256_hex, write_checked_authorized};
+use crate::file_state;
 use crate::input::{failure, optional_str, optional_usize, required_str, resolve_path};
 use crate::snapshot::{MAX_SNAPSHOT_BYTES, SnapshotRequest, SnapshotSink};
-use crate::tool::{Tool, ToolContext, ToolOutput};
+use crate::tool::{FileArtifactReceipt, Tool, ToolContext, ToolOutput};
 
 /// Notebook 体积上限（对照旧 `MAX_NOTEBOOK_BYTES = 100L * 1024 * 1024`）。
 pub const MAX_NOTEBOOK_BYTES: u64 = 100 * 1024 * 1024;
@@ -228,6 +229,7 @@ async fn load_notebook(path: &Path, raw_path: &str) -> Result<(Value, String, St
 }
 
 impl NotebookEditTool {
+    #[allow(clippy::too_many_lines)] // validation, Read-CAS, mutation and artifact sealing are one transaction-like path
     async fn run(&self, input: Value, ctx: ToolContext) -> ToolOutput {
         let Some(raw_path) = notebook_path(&input) else {
             return failure(
@@ -246,10 +248,31 @@ impl NotebookEditTool {
         let command = canonical_command(raw_command);
 
         let path = resolve_path(raw_path, &ctx);
+        let display = path.display().to_string();
         let (mut notebook, expected_hash, original) = match load_notebook(&path, raw_path).await {
             Ok(loaded) => loaded,
             Err(rejection) => return rejection,
         };
+        let session = ctx.session_id().unwrap_or("__anonymous__");
+        let Some(read_hash) = file_state::global().read_hash(session, &display) else {
+            return failure(
+                "FILE_READ_REQUIRED",
+                "请先使用 Read 工具完整读取 Notebook 后再编辑",
+            );
+        };
+        if file_state::global().is_stale(session, &display) {
+            return failure(
+                "FILE_READ_STATE_STALE",
+                "Notebook 已被外部修改，请重新 Read",
+            );
+        }
+        if read_hash != expected_hash {
+            file_state::global().mark_modified(session, &display);
+            return failure(
+                "FILE_READ_STATE_STALE",
+                "Notebook 已被外部修改，请重新 Read",
+            );
+        }
         let Some(cells) = notebook.get_mut("cells").and_then(Value::as_array_mut) else {
             return failure(
                 "NOTEBOOK_CELLS_MISSING",
@@ -273,8 +296,13 @@ impl NotebookEditTool {
         // persistence is best-effort, matching Write/Edit, while rewind remains durable
         // whenever a session-scoped sink is available.
         let snapshot_captured = self.capture(&ctx, &path, &original).await;
-        let outcome =
-            write_checked(&path, &rendered, &ExpectedOldState::sha256(&expected_hash)).await;
+        let outcome = write_checked_authorized(
+            &path,
+            &rendered,
+            &ExpectedOldState::sha256(&expected_hash),
+            ctx.authorized_write_path(),
+        )
+        .await;
         if !outcome.success {
             return failure(
                 "NOTEBOOK_ATOMIC_WRITE_FAILED",
@@ -283,6 +311,17 @@ impl NotebookEditTool {
                     .unwrap_or_else(|| "atomic write failed".to_owned()),
             );
         }
+        let artifact = FileArtifactReceipt::capture(
+            &path,
+            "modified",
+            outcome.new_hash.as_deref(),
+            rendered.len(),
+        )
+        .await;
+        if artifact.is_none() {
+            tracing::error!(path = %path.display(), "applied NotebookEdit could not produce an artifact receipt");
+        }
+        file_state::global().mark_modified(session, &display);
 
         ToolOutput {
             content: format!("Notebook updated: {detail}"),
@@ -292,6 +331,12 @@ impl NotebookEditTool {
                 "command": command,
                 "detail": detail,
                 "snapshotCaptured": snapshot_captured,
+                "structuredResult": {
+                    "filePath": path.to_string_lossy(),
+                    "type": "update",
+                    "sealedHash": outcome.new_hash,
+                    "artifact": artifact,
+                },
             })),
         }
     }
@@ -402,13 +447,13 @@ fn require_index(input: &Value, len: usize) -> Result<usize, String> {
     Ok(index)
 }
 
-/// 新建 cell（对照旧 `createCell`：nbformat 4.5 字段集 + 8 位 `id`）。
+/// 新建 cell（nbformat 4.5 字段集 + 统一完整 UUID v4 `id`）。
 fn create_cell(cell_type: &str, source: &str) -> Value {
     let mut cell = Map::new();
     cell.insert("cell_type".to_owned(), Value::String(cell_type.to_owned()));
     cell.insert("source".to_owned(), to_source_array(source));
     cell.insert("metadata".to_owned(), Value::Object(Map::new()));
-    let id = uuid::Uuid::new_v4().to_string()[..8].to_owned();
+    let id = uuid::Uuid::new_v4().to_string();
     cell.insert("id".to_owned(), Value::String(id));
     if cell_type == "code" {
         cell.insert("outputs".to_owned(), Value::Array(Vec::new()));
@@ -455,6 +500,13 @@ mod tests {
         ToolContext::new(CancellationToken::new(), tx).with_working_dir(working_dir)
     }
 
+    fn authorized_ctx(path: &Path) -> ToolContext {
+        let body = std::fs::read_to_string(path).expect("read notebook for authorization");
+        let display = path.display().to_string();
+        file_state::global().mark_read("__anonymous__", &display, &body, None, None, false);
+        ctx("/tmp").with_authorized_write_path(path)
+    }
+
     #[derive(Default)]
     struct RecordingSink {
         seen: Mutex<Vec<SnapshotRequest>>,
@@ -489,7 +541,7 @@ mod tests {
             .expect("seed json"),
         )
         .expect("seed notebook");
-        path
+        std::fs::canonicalize(path).expect("canonical notebook")
     }
 
     fn cells_of(path: &PathBuf) -> Vec<Value> {
@@ -499,7 +551,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn insert_alias_adds_a_code_cell_with_nbformat_fields() {
+    async fn insert_alias_adds_a_code_cell_with_nbformat_fields_and_emits_artifact_receipt() {
         let path = temp_notebook("insert");
         let output = NotebookEditTool::new()
             .execute(
@@ -509,11 +561,20 @@ mod tests {
                     "index": 1,
                     "content": "a = 1\nb = 2"
                 }),
-                ctx("/tmp"),
+                authorized_ctx(&path),
             )
             .await;
         assert!(!output.is_error, "{}", output.content);
         assert_eq!(output.content, "Notebook updated: add_cell at index 1");
+        let written = std::fs::read(&path).expect("written notebook");
+        let receipt = output.file_artifact_receipt().expect("artifact receipt");
+        assert_eq!(receipt.operation, "modified");
+        assert_eq!(receipt.file_size, written.len() as u64);
+        assert_eq!(receipt.sealed_hash, crate::sha256_hex(&written));
+        assert_eq!(
+            std::path::PathBuf::from(receipt.canonical_path),
+            std::fs::canonicalize(&path).expect("canonical path")
+        );
         assert!(output.metadata.expect("metadata")["sealedHash"].is_string());
 
         let cells = cells_of(&path);
@@ -523,9 +584,10 @@ mod tests {
         assert!(cells[1]["execution_count"].is_null());
         assert_eq!(cells[1]["outputs"], json!([]));
         assert_eq!(
-            cells[1]["id"].as_str().expect("cell id").len(),
-            8,
-            "nbformat 4.5 cell id"
+            uuid::Uuid::parse_str(cells[1]["id"].as_str().expect("cell id"))
+                .expect("full UUID v4")
+                .get_version_num(),
+            4
         );
     }
 
@@ -540,7 +602,7 @@ mod tests {
                     "cell_index": 0,
                     "content": "print(2)"
                 }),
-                ctx("/tmp"),
+                authorized_ctx(&path),
             )
             .await;
         assert!(!output.is_error, "{}", output.content);
@@ -556,7 +618,7 @@ mod tests {
         let deleted = NotebookEditTool::new()
             .execute(
                 json!({ "path": path.to_str().unwrap(), "action": "delete_cell", "index": 1 }),
-                ctx("/tmp"),
+                authorized_ctx(&path),
             )
             .await;
         assert_eq!(deleted.content, "Notebook updated: delete_cell at index 1");
@@ -567,7 +629,7 @@ mod tests {
             .execute(
                 json!({ "path": path.to_str().unwrap(), "action": "move_cell",
                         "index": 0, "direction": "down" }),
-                ctx("/tmp"),
+                authorized_ctx(&path),
             )
             .await;
         assert_eq!(moved.content, "Notebook updated: move_cell from 0 to 1");
@@ -579,7 +641,7 @@ mod tests {
             .execute(
                 json!({ "path": path.to_str().unwrap(), "action": "move_cell",
                         "index": 1, "target_index": 0 }),
-                ctx("/tmp"),
+                authorized_ctx(&path),
             )
             .await;
         assert_eq!(targeted.content, "Notebook updated: move_cell from 1 to 0");
@@ -592,7 +654,7 @@ mod tests {
             .execute(
                 json!({ "path": path.to_str().unwrap(), "action": "change_cell_type",
                         "index": 0, "cell_type": "markdown" }),
-                ctx("/tmp"),
+                authorized_ctx(&path),
             )
             .await;
         assert!(!to_markdown.is_error, "{}", to_markdown.content);
@@ -605,7 +667,7 @@ mod tests {
             .execute(
                 json!({ "path": path.to_str().unwrap(), "action": "change_cell_type",
                         "index": 1, "cell_type": "code" }),
-                ctx("/tmp"),
+                authorized_ctx(&path),
             )
             .await;
         assert!(!to_code.is_error, "{}", to_code.content);
@@ -620,7 +682,7 @@ mod tests {
         let out_of_range = NotebookEditTool::new()
             .execute(
                 json!({ "path": path.to_str().unwrap(), "action": "delete_cell", "index": 9 }),
-                ctx("/tmp"),
+                authorized_ctx(&path),
             )
             .await;
         assert!(out_of_range.is_error);
@@ -632,7 +694,7 @@ mod tests {
         let unknown = NotebookEditTool::new()
             .execute(
                 json!({ "path": path.to_str().unwrap(), "action": "burn_cell", "index": 0 }),
-                ctx("/tmp"),
+                authorized_ctx(&path),
             )
             .await;
         assert!(unknown.is_error);
@@ -661,7 +723,7 @@ mod tests {
         let no_cells = NotebookEditTool::new()
             .execute(
                 json!({ "path": path.to_str().unwrap(), "action": "delete_cell", "index": 0 }),
-                ctx("/tmp"),
+                authorized_ctx(&path),
             )
             .await;
         assert!(no_cells.is_error);
@@ -709,7 +771,16 @@ mod tests {
         let context = ToolContext::new(CancellationToken::new(), tx)
             .with_working_dir("/tmp")
             .with_session_id("session-1")
-            .with_tool_use_id("tool-use-1");
+            .with_tool_use_id("tool-use-1")
+            .with_authorized_write_path(&path);
+        file_state::global().mark_read(
+            "session-1",
+            &path.display().to_string(),
+            &original,
+            None,
+            None,
+            false,
+        );
 
         let output = tool
             .execute(

@@ -6,8 +6,8 @@
  * 跨 Store 消息通过私有 handle* 方法协调。
  */
 
-import { isPermissionMode } from '@/types';
-import type { Message, MessageCompletePayload, ServerMessage, PermissionRequest, TokenWarningPayload, ToolPermissionDeniedPayload, InteractionUpdatedPayload, InteractionTerminalPayload } from '@/types';
+import { isPermissionMode, WS_PROTOCOL_VERSION } from '@/types';
+import type { Message, MessageCompletePayload, ServerMessage, ServerMessagePayload, RuntimeServerEnvelope, PermissionRequest, TokenWarningPayload, ToolPermissionDeniedPayload, InteractionUpdatedPayload, InteractionTerminalPayload, RuntimeEventContext, RuntimeRunSnapshot, RuntimeTaskSnapshot, TaskState, Usage } from '@/types';
 import type { ActivityData } from '@/types/apos';
 import { useMessageStore } from '@/store/messageStore';
 import { useActivityStore } from '@/store/activityStore';
@@ -30,11 +30,97 @@ import { useEvidenceStore } from '@/store/evidenceStore';
 import { useRunStore } from '@/store/runStore';
 import { anomalyEngine } from '@/services/AnomalyDetectionEngine';
 import { mapRunChecksResponseToRiskAssessment } from '@/utils/aposAdapters';
-import { appendStreamDelta } from '@/hooks/useStreamingText';
 import { generateUUID } from '@/utils/uuid';
 
 /** 序列号校验器 — 检测乱序/丢失消息 */
 let lastSeqTs = 0;
+const seenEventIds = new Set<string>();
+const seenEventOrder: string[] = [];
+const MAX_SEEN_EVENT_IDS = 20_000;
+const durableEventHighWaterBySession = new Map<string, number>();
+
+/** source Run 是并发投影的最小隔离单元，其次才回退到 source Task/root Run。 */
+export function runtimePartitionKey(context: RuntimeEventContext): string {
+    if (context.sourceRunId) return `sourceRun:${context.sourceRunId}`;
+    if (context.sourceTaskId) return `sourceTask:${context.sourceTaskId}`;
+    if (context.runId) return `run:${context.runId}`;
+    if (context.taskId) return `task:${context.taskId}`;
+    if (context.sessionId) return `session:${context.sessionId}`;
+    return 'root';
+}
+
+const EMPTY_USAGE: Usage = {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadInputTokens: 0,
+    cacheCreationInputTokens: 0,
+};
+
+function finalizeAgentRuntimePartition(
+    context: RuntimeEventContext,
+    terminalMessage: string,
+): void {
+    // agent_* is a child lifecycle event. Refuse to interpret an entirely
+    // unattributed control frame as the root partition: doing so could close
+    // unrelated root tools.
+    if (!context.sourceRunId && !context.sourceTaskId && !context.runId && !context.taskId) {
+        console.error('[Protocol] Agent terminal event has no runtime attribution');
+        return;
+    }
+    useMessageStore.getState().finalizeStream(
+        EMPTY_USAGE,
+        runtimePartitionKey(context),
+        { closeActiveTools: true, orphanedToolMessage: terminalMessage },
+    );
+}
+
+function isRootRuntimeEvent(context: RuntimeEventContext): boolean {
+    if (context.sourceRunId) return context.sourceRunId === context.runId;
+    if (context.sourceTaskId) return context.sourceTaskId === context.taskId;
+    return true;
+}
+
+function acceptV4Event(data: Partial<ServerMessage>): boolean {
+    const context = data.eventContext;
+    const completeContext = context !== undefined
+        && ['sessionId', 'taskId', 'runId', 'sourceTaskId', 'sourceRunId', 'toolUseId']
+            .every(field => Object.prototype.hasOwnProperty.call(context, field));
+    if (!completeContext || context.protocolVersion !== WS_PROTOCOL_VERSION || !context.eventId) {
+        console.error('[Protocol] Dropped non-v4 event', {
+            type: data.type,
+            protocolVersion: context?.protocolVersion,
+            eventId: context?.eventId,
+        });
+        return false;
+    }
+    const payloadToolUseId = 'toolUseId' in data && typeof data.toolUseId === 'string'
+        ? data.toolUseId : null;
+    if (payloadToolUseId !== null && context.toolUseId !== payloadToolUseId) {
+        console.error('[Protocol] Dropped tool event with inconsistent attribution', {
+            type: data.type,
+            payloadToolUseId,
+            contextToolUseId: context.toolUseId,
+        });
+        return false;
+    }
+    if (seenEventIds.has(context.eventId)) return false;
+    seenEventIds.add(context.eventId);
+    seenEventOrder.push(context.eventId);
+    if (seenEventOrder.length > MAX_SEEN_EVENT_IDS) {
+        const evicted = seenEventOrder.shift();
+        if (evicted) seenEventIds.delete(evicted);
+    }
+    if (context.sessionId && /^\d+$/.test(context.eventId)) {
+        const eventId = Number(context.eventId);
+        if (Number.isSafeInteger(eventId)) {
+            durableEventHighWaterBySession.set(
+                context.sessionId,
+                Math.max(durableEventHighWaterBySession.get(context.sessionId) ?? 0, eventId),
+            );
+        }
+    }
+    return true;
+}
 
 interface PendingBind {
     sessionId: string;
@@ -42,7 +128,7 @@ interface PendingBind {
     restoreAccepted: boolean;
     resolve: (restored: boolean) => void;
     timer: ReturnType<typeof setTimeout>;
-    queued: Array<ServerMessage & { ts?: number }>;
+    queued: RawServerMessage[];
 }
 const pendingBinds = new Map<string, PendingBind>();
 let activeRecoveryId: string | null = null;
@@ -231,7 +317,7 @@ async function flushPendingInteractionAcks(sessionId: string): Promise<void> {
  */
 export function bindSessionAndWait(
     sessionId: string,
-    publish: (payload: { sessionId: string; protocolVersion: number; bindRequestId: string; bindingEpoch: number }) => void | boolean,
+    publish: (payload: { sessionId: string; protocolVersion: number; bindRequestId: string; bindingEpoch: number; afterEventId?: number }) => void | boolean,
     timeoutMs = 5000,
 ): Promise<boolean> {
     if (activeRecoveryId) finishBind(activeRecoveryId, false, false);
@@ -255,9 +341,12 @@ export function bindSessionAndWait(
         try {
             const published = publish({
                 sessionId,
-                protocolVersion: 3,
+                protocolVersion: WS_PROTOCOL_VERSION,
                 bindRequestId,
                 bindingEpoch,
+                ...(durableEventHighWaterBySession.get(sessionId)
+                    ? { afterEventId: durableEventHighWaterBySession.get(sessionId) }
+                    : {}),
             });
             if (published === false) {
                 finishBind(bindRequestId, false, false);
@@ -283,13 +372,17 @@ function finishBind(bindRequestId: string, restored: boolean, replayQueued: bool
  * dispatch — 按 type 字段分发 Server→Client 消息到对应 Store。
  * @param data 原始 JSON body (WsMessage 格式: { type, ts, ...payload })
  */
-export function dispatch(data: ServerMessage & { ts?: number }): void {
-    const routed = data as ServerMessage & { ts?: number; _sessionId?: string; _bindingEpoch?: number };
+type RawServerMessage = ServerMessagePayload & Partial<RuntimeServerEnvelope>;
+
+export function dispatch(data: RawServerMessage): void {
+    const routed = data as RawServerMessage;
     if (activeRecoveryId && !RECOVERY_BYPASS_TYPES.has(data.type)) {
         const pending = pendingBinds.get(activeRecoveryId);
         if (pending) {
-            if (routed._sessionId && (routed._sessionId !== pending.sessionId
-                    || routed._bindingEpoch !== pending.bindingEpoch)) {
+            const routedSessionId = routed.eventContext?.sessionId ?? routed._sessionId;
+            if (routedSessionId && (routedSessionId !== pending.sessionId
+                    || (routed._bindingEpoch !== undefined
+                        && routed._bindingEpoch !== pending.bindingEpoch))) {
                 console.warn(`[WS] Recovery filter: discarding message type=${data.type}, sessionId mismatch`);
                 return;
             }
@@ -299,10 +392,14 @@ export function dispatch(data: ServerMessage & { ts?: number }): void {
             return;
         }
     }
-    if (!activeRecoveryId && routed._sessionId && boundSessionId
-            && (routed._sessionId !== boundSessionId || routed._bindingEpoch !== boundBindingEpoch)) {
+    const routedSessionId = routed.eventContext?.sessionId ?? routed._sessionId;
+    if (!activeRecoveryId && routedSessionId && boundSessionId
+            && (routedSessionId !== boundSessionId
+                || (routed._bindingEpoch !== undefined
+                    && routed._bindingEpoch !== boundBindingEpoch))) {
         return;
     }
+    if (!acceptV4Event(data)) return;
     // 序列号/时间戳校验
     if (data.ts) {
         if (data.ts < lastSeqTs) {
@@ -358,20 +455,38 @@ const handlers: Record<string, (data: any) => void> = {
     'interaction_created': (d: InteractionView) => handleInteractionCreated(d),
     // === messageStore (5 种) ===
     'stream_delta':       (d) => {
-        // 首次 delta 时在 messageStore 创建占位 assistant 消息
-        if (!useMessageStore.getState().streamingMessageId) {
-            useMessageStore.getState().appendStreamDelta('');
-        }
-        // 后续 delta 仅写入外部高性能 store（绕过 Immer 开销）
-        appendStreamDelta(d.delta);
+        if (!isRootRuntimeEvent(d.eventContext)) return;
+        useMessageStore.getState().appendStreamDelta(
+            d.delta, runtimePartitionKey(d.eventContext));
     },
-    'thinking_delta':     (d) => useMessageStore.getState().appendThinkingDelta(d.delta),
-    'tool_use_start':     (d) => useMessageStore.getState().startToolCall(d.toolUseId, d.toolName, d.input),
+    'thinking_delta':     (d) => {
+        if (!isRootRuntimeEvent(d.eventContext)) return;
+        useMessageStore.getState().appendThinkingDelta(
+            d.delta, runtimePartitionKey(d.eventContext));
+    },
+    'tool_use_start':     (d) => {
+        if (!isRootRuntimeEvent(d.eventContext)) return;
+        useMessageStore.getState().startToolCall(
+            d.toolUseId, d.toolName, d.input, runtimePartitionKey(d.eventContext));
+    },
     'tool_use_input':     (d) => {
-        useMessageStore.getState().updateToolCallInput(d.toolUseId, d.input);
+        if (!isRootRuntimeEvent(d.eventContext)) return;
+        useMessageStore.getState().updateToolCallInput(
+            d.toolUseId, d.input, runtimePartitionKey(d.eventContext));
     },
-    'tool_use_progress':  (d) => useMessageStore.getState().updateToolCallProgress(d.toolUseId, d.progress),
-    'tool_result':        (d) => useMessageStore.getState().completeToolCall(d.toolUseId, d.result ?? { content: d.content ?? '', isError: d.isError ?? false }),
+    'tool_use_progress':  (d) => {
+        if (!isRootRuntimeEvent(d.eventContext)) return;
+        useMessageStore.getState().updateToolCallProgress(
+            d.toolUseId, d.progress, runtimePartitionKey(d.eventContext));
+    },
+    'tool_result':        (d) => {
+        if (!isRootRuntimeEvent(d.eventContext)) return;
+        useMessageStore.getState().completeToolCall(
+            d.toolUseId,
+            d.result ?? { content: d.content ?? '', isError: d.isError ?? false },
+            runtimePartitionKey(d.eventContext),
+        );
+    },
 
     'run_input_queued':   (d: { requestId: string }) => {
         const key = `run-input-${d.requestId}`;
@@ -429,14 +544,18 @@ const handlers: Record<string, (data: any) => void> = {
     },
 
     // === messageStore + sessionStore (2 种) ===
-    'error':              (d) => handleError(d),
-    'compact_complete':   (d) => handleCompactComplete(d),
+    'error':              (d) => handleError(d, d.eventContext),
+    'compact_complete':   (d) => handleCompactComplete(d, d.eventContext),
 
     // === messageStore + sessionStore (1 种) ===
-    'message_complete':   (d) => handleMessageComplete(d),
+    'message_complete':   (d) => handleMessageComplete(d, d.eventContext),
 
     // === sessionStore (2 种) ===
-    'compact_start':      ()  => useSessionStore.getState().setStatus('compacting'),
+    'compact_start':      (d)  => {
+        if (isRootRuntimeEvent(d.eventContext)) {
+            useSessionStore.getState().setStatus('compacting');
+        }
+    },
     'rate_limit':         (d) => useSessionStore.getState().handleRateLimit(d),
 
     // === permissionStore + sessionStore (1 种) ===
@@ -467,11 +586,27 @@ const handlers: Record<string, (data: any) => void> = {
         useCoordinatorStore.getState().addAgentTask({ type: 'agent_spawn', ...task });
         useCoordinatorStore.getState().updateAgentTask(d.agentId, d.prompt);
     },
-    'agent_completed':    (d: { agentId: string; result: string }) => {
+    'agent_completed':    (d: {
+        agentId: string;
+        result: string;
+        eventContext: RuntimeEventContext;
+    }) => {
+        finalizeAgentRuntimePartition(
+            d.eventContext,
+            `Agent ${d.agentId} completed before this tool reported a terminal result.`,
+        );
         useTaskStore.getState().completeAgentTask(d.agentId, d.result);
         useCoordinatorStore.getState().completeAgentTask(d.agentId, d.result);
     },
-    'agent_failed':       (d: { agentId: string; error: string }) => {
+    'agent_failed':       (d: {
+        agentId: string;
+        error: string;
+        eventContext: RuntimeEventContext;
+    }) => {
+        finalizeAgentRuntimePartition(
+            d.eventContext,
+            `Agent ${d.agentId} failed before this tool reported a terminal result.`,
+        );
         useTaskStore.getState().failAgentTask(d.agentId, d.error);
         useCoordinatorStore.getState().failAgentTask(d.agentId, d.error);
     },
@@ -540,7 +675,7 @@ const handlers: Record<string, (data: any) => void> = {
     },
 
     // === mcpStore: M4 工具调用进度 (1 种) ===
-    'mcp_tool_progress':  (d: { progressToken: string; serverName: string; toolName: string; progress: number; total: number; message: string }) => {
+    'mcp_tool_progress':  (d: { progressToken: string; serverName: string; toolName: string; progress: number; total: number; message: string; runId?: string; toolUseId?: string; terminal: boolean }) => {
         useMcpStore.getState().updateMcpProgress({
             type: 'mcp_tool_progress',
             progressToken: d.progressToken,
@@ -549,6 +684,9 @@ const handlers: Record<string, (data: any) => void> = {
             progress: d.progress ?? 0,
             total: d.total ?? 0,
             message: d.message ?? '',
+            runId: d.runId,
+            toolUseId: d.toolUseId,
+            terminal: d.terminal,
         });
     },
 
@@ -559,8 +697,12 @@ const handlers: Record<string, (data: any) => void> = {
     'pong':               ()  => { /* 连接存活确认, 重置超时计时器 */ },
 
     // === 新增: 压缩进度/token警告/中断确认 (3 种) ===
-    'compact_event':      (d: { phase: string; usagePercent: number }) => {
-        if (d.phase === 'warning') {
+    'compact_event':      (d: {
+        phase: string;
+        usagePercent: number;
+        eventContext: RuntimeEventContext;
+    }) => {
+        if (isRootRuntimeEvent(d.eventContext) && d.phase === 'warning') {
             useNotificationStore.getState().addNotification({
                 key: 'compact-warning',
                 level: 'warning',
@@ -851,11 +993,20 @@ function handlePermissionRequest(data: PermissionRequest, sessionId: string | nu
  * 助手回合完成 — messageStore + sessionStore
  * v1.53.0: 不再更新 costStore，费用由 #15 cost_update 权威推送
  */
-function handleMessageComplete(data: MessageCompletePayload): void {
+function handleMessageComplete(
+    data: MessageCompletePayload,
+    context: RuntimeEventContext,
+): void {
+    const rootEvent = isRootRuntimeEvent(context);
+    // Child model streams are execution diagnostics owned by the Agent card,
+    // not conversation messages. The agent_* lifecycle event carries their
+    // terminal state and result into taskStore/coordinatorStore.
+    if (!rootEvent) return;
+    const partitionKey = runtimePartitionKey(context);
     // 延迟 finalizeStream，确保最后的 stream_delta 已渲染
     queueMicrotask(() => {
         const currentSessionId = useSessionStore.getState().sessionId;
-        const hasCommittedMessages = Array.isArray(data.committedMessages);
+        const hasCommittedMessages = rootEvent && Array.isArray(data.committedMessages);
         const sessionMatches = !data.sessionId || data.sessionId === currentSessionId;
         // A late completion from a session the user has already left must never
         // overwrite or reload the newly selected session.
@@ -871,11 +1022,11 @@ function handleMessageComplete(data: MessageCompletePayload): void {
                 recoverAuthoritativeSession(currentSessionId);
                 return;
             }
-            useMessageStore.getState().finalizeStream(data.usage);
+            useMessageStore.getState().finalizeStream(data.usage, partitionKey);
         }
         // ★ 回合结束时清除 token budget 状态
-        useMessageStore.getState().clearTokenBudgetState();
-        if (data.stopReason !== 'tool_use') {
+        if (rootEvent) useMessageStore.getState().clearTokenBudgetState();
+        if (rootEvent && data.stopReason !== 'tool_use') {
             useSessionStore.getState().setStatus('idle');
         }
     });
@@ -918,7 +1069,13 @@ function recoverAuthoritativeSession(sessionId: string | null): void {
 }
 
 /** API 错误 — messageStore + sessionStore */
-function handleError(data: { code: string; message: string; retryable: boolean }): void {
+function handleError(
+    data: { code: string; message: string; retryable: boolean },
+    context: RuntimeEventContext,
+): void {
+    // Child failures are surfaced by agent_failed/task_update. Projecting the
+    // same error here would insert a global system message into the root chat.
+    if (!isRootRuntimeEvent(context)) return;
     useMessageStore.getState().addMessage({
         type: 'system',
         uuid: generateUUID(),
@@ -927,6 +1084,10 @@ function handleError(data: { code: string; message: string; retryable: boolean }
         subtype: 'error',
         errorCode: data.code,
         retryable: data.retryable,
+        metadata: {
+            sourceTaskId: context.sourceTaskId,
+            sourceRunId: context.sourceRunId,
+        },
     } as Message);
     useSessionStore.getState().setStatus('idle');
 }
@@ -935,7 +1096,10 @@ function handleError(data: { code: string; message: string; retryable: boolean }
 function handleCompactComplete(data: {
     summary?: string; tokensSaved?: number;  // 旧格式: 自动压缩
     displayText?: string; compactionData?: Record<string, unknown>;  // 新格式: /compact 手动压缩
-}): void {
+}, context: RuntimeEventContext): void {
+    // 子 Run 的上下文只属于该 Agent。即使后端错误投影压缩事件，也不得改变根
+    // 会话状态或插入全局分割线。控制面手动 /compact 的空归属仍视为根事件。
+    if (!isRootRuntimeEvent(context)) return;
     // 自动压缩属于 QueryEngine 运行的一部分；独立 /compact 完成才回到 idle。
     useSessionStore.getState().setStatus(data.compactionData ? 'idle' : 'streaming');
     if (data.compactionData) {
@@ -967,6 +1131,7 @@ function handleCompactComplete(data: {
 function handleSessionRestore(data: {
     bindRequestId: string;
     bindingEpoch: number;
+    protocolVersion: number;
     messages: Message[];
     activities?: ActivityData[];
     totalActivityCount?: number;
@@ -977,14 +1142,27 @@ function handleSessionRestore(data: {
         permissionMode: string;
         status: 'idle' | 'interrupted';
     };
-    runSnapshot?: { id: string; status: string };
+    runSnapshot?: RuntimeRunSnapshot | null;
+    taskTree?: RuntimeTaskSnapshot[];
     snapshotEventSeq?: number;
-    activeToolCalls?: Array<{ toolUseId: string; toolName: string; input: unknown; startedAt?: number }>;
-    costSummary?: { totalCost?: number };
+    activeToolCalls?: Array<{
+        toolUseId: string;
+        toolName: string;
+        input: unknown;
+        startedAt?: number;
+        phase?: 'preparing' | 'running';
+        eventContext?: RuntimeEventContext;
+    }>;
+    costSummary?: { sessionCost?: number; totalCost?: number; usage?: Usage; usageComplete?: boolean };
 }): void {
     const pending = pendingBinds.get(data.bindRequestId);
     if (!pending || pending.sessionId !== data.metadata.sessionId
             || pending.bindingEpoch !== data.bindingEpoch) return;
+    if (data.protocolVersion !== WS_PROTOCOL_VERSION) {
+        console.error('[Protocol] Rejected session snapshot from unsupported WS version:',
+            data.protocolVersion);
+        return;
+    }
     const restoredPermissionMode = data.metadata.permissionMode?.toLowerCase();
     if (!isPermissionMode(restoredPermissionMode)) {
         console.error('[Protocol] Invalid restored permission mode:',
@@ -994,22 +1172,71 @@ function handleSessionRestore(data: {
     // From this point the bind is confirmed. If interaction recovery exceeds
     // the outer timeout, queued frames must be replayed rather than discarded.
     pending.restoreAccepted = true;
+    if (data.snapshotEventSeq !== undefined && data.snapshotEventSeq >= 0) {
+        durableEventHighWaterBySession.set(
+            data.metadata.sessionId,
+            Math.max(
+                durableEventHighWaterBySession.get(data.metadata.sessionId) ?? 0,
+                data.snapshotEventSeq,
+            ),
+        );
+    }
     // 1. 重置序列号
     resetSequence();
 
     // 2. 这个 matching restore 是 Session 投影的唯一提交点。
-    // 先同步清除旧 Session 的交互投影，避免旧权限/提问对话框泄漏到新 Session。
+    // 所有 session-scoped Store 先无条件清空，再用快照替换；空快照也是权威值。
     usePermissionStore.getState().clearPermissions();
     useAppUiStore.setState({ elicitationDialog: null });
+    useTaskStore.getState().replaceTasks((data.taskTree ?? []).map(projectRestoredTask));
+    useCoordinatorStore.getState().clearAll();
+    useSwarmStore.getState().clearAll();
+    useInboxStore.setState({ messages: [], unreadCount: 0 });
+    usePlanStore.setState({
+        isPlanMode: false,
+        planName: '',
+        planOverview: '',
+        steps: [],
+        currentStepId: null,
+        history: [],
+    });
+    useInsightStore.getState().clearAll();
+    useAnomalyStore.setState({
+        activeAnomalies: [],
+        resolvedHistory: [],
+        cooldownMap: new Map(),
+    });
+    useJourneyVerifyStore.getState().reset();
+    useEvidenceStore.setState({
+        currentBundle: null,
+        sessionBundles: [],
+        loading: false,
+        error: null,
+        attentions: [],
+    });
+    useRunStore.setState({
+        manifests: new Map(),
+        verificationResults: new Map(),
+        recoverySnapshots: new Map(),
+        recoveryEventSeq: new Map(),
+    });
 
     // 3. 原子替换消息历史和仍在运行的工具投影。
     const runStatus = data.runSnapshot?.status;
-    const runCanHaveActiveTools = runStatus === 'RUNNING'
-        || runStatus === 'CANCELLING'
-        || runStatus === 'WAITING_INTERACTION';
+    const runCanHaveActiveTools = runStatus === 'running'
+        || runStatus === 'cancelling'
+        || runStatus === 'waitingDependencies'
+        || runStatus === 'waitingInteraction';
     useMessageStore.getState().restoreSessionSnapshot(
         data.messages,
-        runCanHaveActiveTools ? data.activeToolCalls ?? [] : [],
+        runCanHaveActiveTools ? (data.activeToolCalls ?? [])
+            .filter(call => !call.eventContext || isRootRuntimeEvent(call.eventContext))
+            .map(call => ({
+                ...call,
+                runtimePartitionKey: call.eventContext
+                    ? runtimePartitionKey(call.eventContext)
+                    : data.runSnapshot?.id ? `run:${data.runSnapshot.id}` : 'root',
+            })) : [],
     );
     if (data.runSnapshot?.id) {
         useRunStore.getState().replaceRecoverySnapshot(
@@ -1029,7 +1256,7 @@ function handleSessionRestore(data: {
     boundBindRequestId = data.bindRequestId;
 
     // 5. 恢复状态
-    if (data.metadata.status === 'interrupted' || data.runSnapshot?.status === 'INTERRUPTED') {
+    if (data.metadata.status === 'interrupted' || data.runSnapshot?.status === 'interrupted') {
         useSessionStore.getState().setStatus('idle');
         useNotificationStore.getState().addNotification({
             key: 'session-restore-interrupted',
@@ -1037,30 +1264,36 @@ function handleSessionRestore(data: {
             message: 'AI 输出在断线期间被中断，你可以发送消息继续对话',
             timeout: 8000,
         });
-    } else if (data.runSnapshot?.status === 'RUNNING' || data.runSnapshot?.status === 'CANCELLING') {
+    } else if (data.runSnapshot?.status === 'running'
+            || data.runSnapshot?.status === 'cancelling'
+            || data.runSnapshot?.status === 'waitingDependencies') {
         useSessionStore.getState().setStatus('streaming');
-    } else if (data.runSnapshot?.status === 'WAITING_INTERACTION') {
+    } else if (data.runSnapshot?.status === 'waitingInteraction') {
         useSessionStore.getState().setStatus('waiting_permission');
     } else {
         useSessionStore.getState().setStatus('idle');
     }
 
-    if (data.costSummary && typeof data.costSummary.totalCost === 'number') {
-        const currentCost = useCostStore.getState();
-        useCostStore.getState().updateCost({
-            sessionCost: data.costSummary.totalCost,
-            totalCost: currentCost.totalCost,
-            usage: currentCost.usage,
-        });
-    }
+    useCostStore.getState().updateCost({
+        sessionCost: data.costSummary?.sessionCost
+            ?? data.costSummary?.totalCost ?? 0,
+        totalCost: data.costSummary?.totalCost ?? 0,
+        usage: data.costSummary?.usage ?? {
+            inputTokens: 0,
+            outputTokens: 0,
+            cacheReadInputTokens: 0,
+            cacheCreationInputTokens: 0,
+        },
+        usageComplete: data.costSummary?.usageComplete ?? true,
+    });
 
     // 6. 更新连接状态
     useBridgeStore.getState().updateBridgeStatus({ status: 'connected', url: '' });
 
     // 7. 恢复 Activity 数据（从后端持久化存储，最多 50 条最近记录）
+    const activityStore = useActivityStore.getState();
+    activityStore.clearAll();
     if (data.activities && data.activities.length > 0) {
-        const activityStore = useActivityStore.getState();
-        activityStore.clearAll();
         data.activities.forEach(a => {
             // 防御性规范化：确保 changedFiles 始终为数组（后端可能为 null）
             const normalized = {
@@ -1093,6 +1326,32 @@ function handleSessionRestore(data: {
             });
         })
         .finally(() => finishBind(data.bindRequestId, true, true));
+}
+
+function projectRestoredTask(task: RuntimeTaskSnapshot): TaskState {
+    const createdAt = Date.parse(task.createdAt);
+    const status: TaskState['status'] = (() => {
+        switch (task.status) {
+            case 'queued': return 'pending';
+            case 'succeeded':
+            case 'partial': return 'completed';
+            case 'failed':
+            case 'needsAttention': return 'failed';
+            case 'cancelled': return 'cancelled';
+            default: return 'running';
+        }
+    })();
+    return {
+        taskId: task.id,
+        status,
+        runtimeStatus: task.status,
+        progress: task.reportedProgress,
+        isCoordinator: task.parentTaskId === null,
+        agentName: task.description,
+        agentType: task.taskType,
+        parentTaskId: task.parentTaskId ?? undefined,
+        createdAt: Number.isNaN(createdAt) ? Date.now() : createdAt,
+    };
 }
 
 interface BindRecoveryAuthority {

@@ -40,6 +40,7 @@
 #![allow(clippy::module_name_repetitions)] // ProviderEvent 等命名对齐旧领域术语，不按模块前缀裁剪
 
 use std::borrow::Cow;
+use std::sync::Arc;
 
 use futures::stream::BoxStream;
 use tokio_util::sync::CancellationToken;
@@ -47,6 +48,7 @@ use zk_protocol::model::Usage;
 
 use crate::cache::{SystemPrompt, SystemPromptSegment, ToolOrigin, tool_cache_breakpoint};
 use crate::error::ProviderError;
+use crate::ledger::{LlmCallObserver, LlmExecutionAttribution};
 
 /// Chat 消息角色（`OpenAI` Chat Completions 语义子集）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -283,6 +285,13 @@ pub struct ChatRequest {
     pub max_tokens: u32,
     /// 思考模式。
     pub thinking: ThinkingMode,
+    /// Durable Task/Run attribution for physical-call accounting.
+    ///
+    /// This is local execution metadata and is never serialized to a provider.
+    pub execution: Option<LlmExecutionAttribution>,
+    /// Provider-neutral physical-call observer. The registry invokes it once
+    /// per actual retry/fallback attempt.
+    pub call_observer: Option<Arc<dyn LlmCallObserver>>,
 }
 
 impl ChatRequest {
@@ -299,6 +308,8 @@ impl ChatRequest {
             tool_cache_breakpoint: None,
             max_tokens: 8192,
             thinking: ThinkingMode::Disabled,
+            execution: None,
+            call_observer: None,
         }
     }
 
@@ -385,6 +396,18 @@ impl ChatRequest {
     #[must_use]
     pub fn with_thinking(mut self, thinking: ThinkingMode) -> Self {
         self.thinking = thinking;
+        self
+    }
+
+    /// Attach durable execution attribution and a physical-call observer.
+    #[must_use]
+    pub fn with_execution(
+        mut self,
+        attribution: LlmExecutionAttribution,
+        observer: Arc<dyn LlmCallObserver>,
+    ) -> Self {
+        self.execution = Some(attribution);
+        self.call_observer = Some(observer);
         self
     }
 }

@@ -9,7 +9,6 @@
 //!   `AgentResult` / `AgentDefinition`，对照旧 `SubAgentExecutor` 内部类）。
 //! - [`worktree`]：Git Worktree 管理器（对照旧 `WorktreeManager.java`）。
 //! - [`executor`]：子代理执行器（对照旧 `SubAgentExecutor.executeSync`）。
-//! - [`tracker`]：后台代理追踪器（对照旧 `BackgroundAgentTracker.java`）。
 //!
 //! # 依赖方向
 //!
@@ -19,17 +18,17 @@
 //! SubAgentExecutor 引用以避免循环）。
 
 pub mod executor;
-pub mod tracker;
 pub mod types;
 pub mod worktree;
 
 pub use executor::{
     AgentMailboxMessage, AgentMailboxRouter, AgentTimeoutConfig, ChildExecutionContext,
-    RealSubAgentEngineFactory, SUB_AGENT_TOOL_NAMES, SubAgentEngineFactory, SubAgentExecutor,
-    build_sub_agent_registry, build_sub_agent_registry_with_policy,
+    PersistedChildExecution, RealSubAgentEngineFactory, SUB_AGENT_TOOL_NAMES,
+    SubAgentEngineFactory, SubAgentExecutor, build_sub_agent_registry,
+    build_sub_agent_registry_with_policy,
 };
-pub use tracker::{AgentTrackingState, BackgroundAgentTracker};
 pub use types::{
-    AgentDefinition, AgentRequest, AgentResult, AgentStatus, IsolationMode, MAX_RESULT_SIZE_CHARS,
+    AgentDefinition, AgentRequest, AgentResult, AgentStatus, IsolationMode, READ_ONLY_CHILD_TOOLS,
+    WRITE_CHILD_TOOLS,
 };
 pub use worktree::{GitCommandOutput, GitCommandRunner, SystemGitCommandRunner, WorktreeManager};

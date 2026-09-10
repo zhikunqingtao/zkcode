@@ -101,7 +101,7 @@ fn bind_frame(session_id: &str, request_id: &str, epoch: i64) -> serde_json::Val
         "sessionId": session_id,
         "bindRequestId": request_id,
         "bindingEpoch": epoch,
-        "protocolVersion": 3,
+        "protocolVersion": 4,
     })
 }
 
@@ -197,7 +197,7 @@ async fn bind_restores_then_push_delivers_flat_envelope() {
     assert_eq!(restored["type"], "session_restored");
     assert_eq!(restored["bindRequestId"], "br-1");
     assert_eq!(restored["bindingEpoch"], 1);
-    assert_eq!(restored["protocolVersion"], 3);
+    assert_eq!(restored["protocolVersion"], 4);
     assert_eq!(restored["metadata"]["sessionId"], session_id);
     assert_eq!(restored["metadata"]["permissionMode"], "DEFAULT");
     assert_eq!(restored["messages"][0]["type"], "user");
@@ -259,7 +259,10 @@ async fn rebind_increments_epoch_and_stale_is_rejected() {
     assert_eq!(stale["type"], "protocol_error");
     assert_eq!(stale["code"], "STALE_BINDING_EPOCH");
     assert_eq!(stale["bindingEpoch"], 5);
-    assert_eq!(stale["supportedVersion"], 3);
+    assert_eq!(
+        stale["supportedVersion"],
+        u64::from(zk_protocol::WS_PROTOCOL_VERSION)
+    );
 }
 
 // ── 场景 4：未知 type / 非 JSON ─────────────────────────────────────────────

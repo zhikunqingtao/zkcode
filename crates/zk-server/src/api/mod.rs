@@ -52,6 +52,7 @@ pub(crate) mod session_snapshot;
 pub(crate) mod skill;
 pub(crate) mod speech;
 pub(crate) mod system;
+pub(crate) mod task_diagnostic;
 pub(crate) mod tool;
 pub(crate) mod verify;
 pub(crate) mod workbench;

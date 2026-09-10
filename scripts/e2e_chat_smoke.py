@@ -49,11 +49,15 @@ async def main() -> int:
     text_parts: list[str] = []
     thinking_chars = 0
 
-    async with websockets.connect(WS_URL, max_size=8 * 1024 * 1024) as ws:
+    async with websockets.connect(
+        WS_URL,
+        max_size=8 * 1024 * 1024,
+        origin=BASE,
+    ) as ws:
         await ws.send(json.dumps({
             "type": "bind_session", "sessionId": sid,
             "bindRequestId": "e2e-bind-1", "bindingEpoch": 1,
-            "protocolVersion": 3,
+            "protocolVersion": 4,
         }))
         restored = json.loads(await asyncio.wait_for(ws.recv(), 15))
         assert restored["type"] == "session_restored", restored

@@ -161,8 +161,11 @@ pub enum ClientMessage {
         bind_request_id: String,
         /// 连接绑定纪元（>=1，防跨连接错投）。
         binding_epoch: i64,
-        /// WS 协议版本（当前 3）。
+        /// WS 协议版本（当前 4）。
         protocol_version: i64,
+        /// Last durable global event ID applied for this Session.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after_event_id: Option<i64>,
     },
 
     /// 旧 Map 入口 `/app/interaction-received`（handler 读取 interactionId /

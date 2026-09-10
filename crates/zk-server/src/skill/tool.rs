@@ -217,10 +217,10 @@ impl Tool for SkillTool {
                 let invocation = AgentInvocation {
                     prompt: rendered,
                     description: format!("skill {}", skill.effective_name()),
-                    agent_type: skill.frontmatter.agent.clone(),
+                    subagent_type: skill.frontmatter.agent.clone(),
                     model_override: model,
-                    isolation: "none".to_owned(),
-                    run_in_background: false,
+                    isolation: "readOnly".to_owned(),
+                    wait_mode: "terminal".to_owned(),
                     parent_session_id: parent_session_id.to_owned(),
                     parent_run_id: parent_run_id.to_owned(),
                     working_directory: ctx.working_dir().to_path_buf(),
@@ -228,15 +228,18 @@ impl Tool for SkillTool {
                     allowed_tools: (!skill.frontmatter.allowed_tools.is_empty())
                         .then(|| skill.frontmatter.allowed_tools.iter().cloned().collect()),
                 };
-                let (status, result, _) =
-                    backend.execute_agent(invocation, ctx.cancel.clone()).await;
-                return if status == "completed" {
-                    ToolOutput::ok(result.unwrap_or_else(|| "Forked skill completed.".to_owned()))
-                } else {
-                    error(
+                return match backend.execute_agent(invocation, ctx.cancel.clone()).await {
+                    Ok(task) if task.status == "succeeded" => ToolOutput::ok(
+                        task.output
+                            .unwrap_or_else(|| "Forked skill completed.".to_owned()),
+                    ),
+                    Ok(task) => error(
                         "SKILL_FORK_FAILED",
-                        result.unwrap_or_else(|| format!("forked skill ended with {status}")),
-                    )
+                        task.error
+                            .or(task.reason)
+                            .unwrap_or_else(|| format!("forked skill ended with {}", task.status)),
+                    ),
+                    Err(failure) => error(failure.code.as_str(), failure.message),
                 };
             }
 
@@ -275,6 +278,7 @@ mod tests {
     use super::*;
     use crate::skill::{SkillDefinition, SkillSource};
     use zk_llm::ProviderRegistry;
+    use zk_tools::{TaskPortError, TaskSnapshot};
 
     fn context() -> ToolContext {
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -310,13 +314,27 @@ mod tests {
             &self,
             invocation: AgentInvocation,
             _cancel: tokio_util::sync::CancellationToken,
-        ) -> BoxFuture<'_, (String, Option<String>, Option<String>)> {
+        ) -> BoxFuture<'_, Result<TaskSnapshot, TaskPortError>> {
             self.seen.lock().expect("seen").push(invocation);
-            Box::pin(futures::future::ready((
-                "completed".to_owned(),
-                Some("fork result".to_owned()),
-                None,
-            )))
+            Box::pin(futures::future::ready(Ok(TaskSnapshot {
+                task_id: "550e8400-e29b-41d4-a716-446655440000".into(),
+                session_id: "internal-session".into(),
+                parent_task_id: Some("root-task".into()),
+                run_id: Some("550e8400-e29b-41d4-a716-446655440001".into()),
+                status: "succeeded".into(),
+                reason: Some("modelFinished".into()),
+                description: Some("skill".into()),
+                output: Some("fork result".into()),
+                error: None,
+                result_version: Some(1),
+                partial: false,
+                result_ref: Some("result:550e8400-e29b-41d4-a716-446655440000:1".into()),
+                cleanup_status: "confirmed".into(),
+                usage_summary: json!({"complete": true}),
+                wait_expired: false,
+                created_at: 0,
+                child_count: 0,
+            })))
         }
     }
 
@@ -448,7 +466,7 @@ mod tests {
         let seen = backend.seen.lock().expect("seen");
         assert_eq!(seen.len(), 1);
         assert_eq!(seen[0].model_override.as_deref(), Some("model-a"));
-        assert_eq!(seen[0].agent_type.as_deref(), Some("explore"));
+        assert_eq!(seen[0].subagent_type.as_deref(), Some("explore"));
         assert_eq!(seen[0].parent_session_id, "parent-session");
         assert_eq!(
             seen[0].allowed_tools,

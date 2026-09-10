@@ -82,7 +82,7 @@ async fn list_sessions_cursor_pagination_full_cycle() {
     let db_path = dir.join("data.db");
     let db = zk_db::Db::open(&db_path).unwrap();
 
-    // 布数：5 个真实会话（updated_at 每小时递增）+ 1 个 subagent 虚拟会话。
+    // 布数：5 个 root 会话（updated_at 每小时递增）+ 1 个结构化 internal transcript。
     db.with_conn_blocking(|conn| {
         for i in 0..5u32 {
             let iso = format!("2026-08-0{}T10:00:00.{:06}Z", 1 + i, i * 100_000);
@@ -94,10 +94,18 @@ async fn list_sessions_cursor_pagination_full_cycle() {
             .unwrap();
         }
         conn.execute(
-            "INSERT INTO sessions (id, model, working_dir, status, metadata_json, created_at, updated_at)
-             VALUES ('sub-1', 'subagent', '/w', 'active',
-                     '{\"type\":\"subagent\",\"parent_session_id\":\"sess-0\"}',
-                     '2026-08-09T10:00:00.000000Z', '2026-08-09T10:00:00.000000Z')",
+            "INSERT INTO tasks
+                (id,session_id,root_task_id,description,task_type,status,created_at,updated_at)
+             VALUES('task-root','sess-0','task-root','root','agent','queued',
+                    '2026-08-01T10:00:00.000000Z','2026-08-01T10:00:00.000000Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions
+                (id,kind,parent_session_id,parent_task_id,model,working_dir,status,created_at,updated_at)
+             VALUES('sub-1','internal','sess-0','task-root','subagent','/w','active',
+                    '2026-08-09T10:00:00.000000Z','2026-08-09T10:00:00.000000Z')",
             [],
         )
         .unwrap();

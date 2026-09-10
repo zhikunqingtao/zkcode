@@ -5,6 +5,15 @@
  * 文件位置: frontend/src/types/index.ts (统一导出)
  */
 
+import type {
+    RuntimeCleanupStatus,
+    RuntimeRunStatus,
+    RuntimeTaskStatus,
+    RuntimeVerificationStatus,
+} from './generated/taskRuntimeV4';
+
+export * from './generated/taskRuntimeV4';
+
 // ==================== 消息类型 — 对齐 §5.1 Java sealed interface Message ====================
 
 export type Message =
@@ -43,7 +52,34 @@ export interface Usage {
     cacheCreationInputTokens: number;
 }
 
-// ==================== ServerMessage 25 种类型 — 对齐 §8.5.1a ====================
+// ==================== WebSocket v4 运行时信封 ====================
+
+export const WS_PROTOCOL_VERSION = 4 as const;
+
+/**
+ * 每条下行事件必带的身份与归属。不属于 Task/Run/工具的控制事件
+ * 使用 null，不省略字段，以便前端可以严格区分“未归属”与“服务端漏填”。
+ */
+export interface RuntimeEventContext {
+    protocolVersion: typeof WS_PROTOCOL_VERSION;
+    eventId: string;
+    sessionId: string | null;
+    taskId: string | null;
+    runId: string | null;
+    sourceTaskId: string | null;
+    sourceRunId: string | null;
+    toolUseId: string | null;
+}
+
+export interface RuntimeServerEnvelope {
+    eventContext: RuntimeEventContext;
+    ts: number;
+    seq?: number;
+    _sessionId?: string;
+    _bindingEpoch?: number;
+}
+
+// ==================== ServerMessage payload ====================
 
 export interface StreamDeltaPayload { type: 'stream_delta'; delta: string; messageId: string }
 export interface ThinkingDeltaPayload { type: 'thinking_delta'; delta: string; messageId: string }
@@ -77,12 +113,39 @@ export interface McpToolProgressPayload {
     progress: number;
     total: number;
     message: string;
+    runId?: string;
+    toolUseId?: string;
+    terminal: boolean;
 }
+
+export interface RuntimeRunSnapshot {
+    [key: string]: unknown;
+    id: string;
+    status: RuntimeRunStatus;
+    verificationStatus: RuntimeVerificationStatus;
+}
+
+export interface RuntimeTaskSnapshot {
+    [key: string]: unknown;
+    id: string;
+    sessionId: string;
+    parentTaskId: string | null;
+    rootTaskId: string;
+    currentRunId: string | null;
+    description: string;
+    taskType: string;
+    status: RuntimeTaskStatus;
+    reportedProgress: number;
+    cleanupStatus: RuntimeCleanupStatus;
+    verificationStatus: RuntimeVerificationStatus;
+    createdAt: string;
+}
+
 export interface SessionRestoredPayload {
     type: 'session_restored';
     bindRequestId: string;
     bindingEpoch: number;
-    protocolVersion: number;
+    protocolVersion: typeof WS_PROTOCOL_VERSION;
     messages: Message[];
     metadata: { sessionId: string; model: string; permissionMode: string; status: string };
     totalCount?: number;
@@ -90,9 +153,17 @@ export interface SessionRestoredPayload {
     compactSummary?: string | null;
     oldestLoadedUuid?: string;
     snapshotEventSeq?: number;
-    activeToolCalls?: Array<{ toolUseId: string; toolName: string; input?: Record<string, unknown> }>;
-    runSnapshot?: Record<string, unknown> | null;
-    costSummary?: { totalCost?: number };
+    activeToolCalls?: Array<{
+        toolUseId: string;
+        toolName: string;
+        input?: Record<string, unknown>;
+        startedAt?: number;
+        phase?: 'preparing' | 'running';
+        eventContext?: RuntimeEventContext;
+    }>;
+    runSnapshot?: RuntimeRunSnapshot | null;
+    taskTree?: RuntimeTaskSnapshot[];
+    costSummary?: { sessionCost?: number; totalCost?: number; usage?: Usage; usageComplete?: boolean };
 }
 export interface ProtocolErrorPayload { type: 'protocol_error'; code: string; supportedVersion: number; bindRequestId?: string; bindingEpoch?: number }
 export interface MessageCompletePayload {
@@ -230,7 +301,7 @@ export interface ToolPermissionDeniedPayload {
     toolName: string;
 }
 
-export type ServerMessage =
+export type ServerMessagePayload =
     | StreamDeltaPayload
     | ThinkingDeltaPayload
     | ToolUseStartPayload
@@ -280,6 +351,9 @@ export type ServerMessage =
     | InteractionUpdatedPayload
     | InteractionTerminalPayload;
 
+/** WebSocket v4 下行消息：payload 和强制运行时信封的交叉类型。 */
+export type ServerMessage = ServerMessagePayload & RuntimeServerEnvelope;
+
 // ==================== 工具相关类型 ====================
 
 /** 工具结果 — 对齐 §3.3 Java record ToolResult */
@@ -307,9 +381,11 @@ export interface ExternalResourceResult {
 
 /** 工具调用状态 — MessageStore 内部状态 */
 export interface ToolCallState {
+    toolUseId?: string;
+    runtimePartitionKey?: string;
     toolName: string;
     input: unknown;
-    status: 'pending' | 'running' | 'completed' | 'error' | 'permission_needed';
+    status: 'preparing' | 'pending' | 'running' | 'completed' | 'error' | 'permission_needed';
     result?: ToolResult;
     progress?: string;
     progressHistory?: string[];
@@ -441,6 +517,7 @@ export interface TaskState {
     agentName?: string;
     agentType?: string;
     parentTaskId?: string;
+    runtimeStatus?: RuntimeTaskStatus;
     createdAt: number;
 }
 

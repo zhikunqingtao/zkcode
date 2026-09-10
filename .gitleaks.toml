@@ -10,7 +10,7 @@ regex = '''sk-sp-[A-Za-z0-9._-]{35,}'''
 keywords = ["sk-sp-"]
 
 [allowlist]
-description = "Generated/runtime paths plus the explicitly public first-run demo credential asset"
+description = "Generated/runtime paths, public MCP server identifiers, and the explicitly public first-run demo credential asset"
 paths = [
   '''(^|/)target(?:-[^/]*)?/''',
   '''(^|/)node_modules/''',
@@ -22,4 +22,10 @@ paths = [
   '''(^|/)test-results/''',
   '''(^|/)playwright-report/''',
   '''^configuration/bootstrap/demo-credentials\.db$''',
+]
+# DashScope publishes these identifiers as part of MCP endpoint URLs. They are
+# routing names, not bearer credentials. Keep the exception exact so API keys
+# elsewhere in the same registry remain subject to the default rules.
+regexes = [
+  '''^market-cmgjmcp[0-9]{8}$''',
 ]

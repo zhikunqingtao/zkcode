@@ -17,4 +17,17 @@ use zk_protocol::ServerMessage;
 pub trait MessageSink: Send + Sync {
     /// 向指定会话推送一条下行消息（推送失败由通道层自行吞吸，永不上抛）。
     fn push<'a>(&'a self, session_id: &'a str, message: ServerMessage) -> BoxFuture<'a, ()>;
+
+    /// Route an event to the visible root Session while retaining the Session
+    /// that actually produced it. Root engines use the same value for both;
+    /// child routing adapters override this method so the durable WS outbox can
+    /// resolve the child Run instead of attributing its stream to the parent.
+    fn push_from<'a>(
+        &'a self,
+        route_session_id: &'a str,
+        _source_session_id: &'a str,
+        message: ServerMessage,
+    ) -> BoxFuture<'a, ()> {
+        self.push(route_session_id, message)
+    }
 }
