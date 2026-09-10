@@ -134,7 +134,7 @@ image = { version = "0.25", default-features = false, features = [
 # 同为 Myers 差分 + 标准 unified 格式，不自研差分算法（长期可维护）。
 # 纯 Rust、默认 features 零传递依赖、无 unsafe 暴露面，符合 workspace
 # `unsafe_code = "forbid"`；许可证 Apache-2.0，在 deny.toml allow 列表内。
-similar = { version = "2", default-features = false, features = ["text"] }
+similar = { version = "3", default-features = false, features = ["text"] }
 # Batch 6: concurrent hash map (DashMap) for agent/task state
 dashmap = "6"
 # Batch 8D（Monitor 工具）引入：跨平台系统指标采集。旧 `MonitorTool` 读
