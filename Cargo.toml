@@ -111,7 +111,7 @@ sha2 = "0.10"
 # 一次跨进程 RTT 与「侧车不可用」这一整类回退路径（详见 context/token_counter.rs）。
 # 词表内嵌于 crate（无运行时下载、无网络依赖），纯 Rust 无 C 依赖、无 unsafe 暴露面，
 # 符合 workspace `unsafe_code = "forbid"`；许可证 MIT，在 deny.toml allow 列表内。
-tiktoken-rs = "0.6"
+tiktoken-rs = "0.12"
 # Batch 0 P0-15（TokenBudgetGuard 图片/Base64 预算守卫）引入：图片解码 + 缩放 +
 # JPEG 重编码。旧实现走 JVM `javax.imageio`（`ImageReader` 只读头部取宽高做像素
 # 闸门、`ImageIO.read` 全解码、`JPEGImageWriteParam` 显式压缩质量）；本实现取
