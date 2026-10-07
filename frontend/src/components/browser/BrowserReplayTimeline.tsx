@@ -16,7 +16,7 @@
  *   · 后端使用 workspace `.zk/browser-replay` 原子 JSON，带容量与 retention 上限
  */
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState, useRef } from 'react';
 import { Drawer } from '@/components/layout/Drawer';
 import { RefreshCw, Image as ImageIcon, ChevronDown, ChevronRight, Trash2 } from 'lucide-react';
 
@@ -39,6 +39,7 @@ interface BrowserReplayTimelineProps {
     sessionId: string;
     /** 默认 360，覆盖移动端/桌面端布局 */
     width?: number;
+    inline?: boolean;
 }
 
 const BrowserReplayTimeline: React.FC<BrowserReplayTimelineProps> = ({
@@ -46,63 +47,95 @@ const BrowserReplayTimeline: React.FC<BrowserReplayTimelineProps> = ({
     onClose,
     sessionId,
     width = 420,
+    inline = false,
 }) => {
     const [snapshots, setSnapshots] = useState<BrowserSnapshot[]>([]);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [selectedId, setSelectedId] = useState<string | null>(null);
 
-    const fetchTimeline = useCallback(async () => {
-        if (!sessionId) return;
+    const request = useRef<AbortController | null>(null);
+    const epoch = useRef(0);
+
+    const load = useCallback(async (method: 'GET' | 'DELETE') => {
+        if (!sessionId || !open) return;
+        request.current?.abort();
+        const controller = new AbortController();
+        request.current = controller;
+        const generation = ++epoch.current;
         setLoading(true);
         setError(null);
         try {
-            const resp = await fetch(`/api/browser/replay/${encodeURIComponent(sessionId)}`);
-            if (!resp.ok) {
-                throw new Error(`HTTP ${resp.status}`);
-            }
-            const data: BrowserSnapshot[] = await resp.json();
-            setSnapshots(Array.isArray(data) ? data : []);
-        } catch (e) {
-            setError(e instanceof Error ? e.message : String(e));
-        } finally {
-            setLoading(false);
-        }
-    }, [sessionId]);
-
-    const clearTimeline = useCallback(async () => {
-        if (!sessionId) return;
-        try {
-            await fetch(`/api/browser/replay/${encodeURIComponent(sessionId)}`, {
-                method: 'DELETE',
+            const response = await fetch(`/api/browser/replay/${encodeURIComponent(sessionId)}`, {
+                method, headers: { 'X-Session-Id': sessionId }, signal: controller.signal,
             });
-            setSnapshots([]);
-            setSelectedId(null);
-        } catch (e) {
-            setError(e instanceof Error ? e.message : String(e));
+            const data: unknown = await response.json();
+            if (controller.signal.aborted || generation !== epoch.current) return;
+            if (!response.ok) {
+                if (method === 'GET' && response.status === 404 && hasCode(data, 'REPLAY_NOT_FOUND')) {
+                    setSnapshots([]);
+                    setSelectedId(null);
+                    return;
+                }
+                if (hasCode(data, 'EPHEMERAL_OPERATION_UNSUPPORTED')) {
+                    throw new Error('临时会话不保存磁盘时间线；请查看本轮浏览器工具的证据。');
+                }
+                throw new Error(`HTTP ${response.status}：浏览器时间线操作未完成`);
+            }
+            if (method === 'DELETE') {
+                if (!data || typeof data !== 'object' || !('status' in data) || data.status !== 'deleted') {
+                    throw new Error('服务端未确认时间线已清空，请刷新后核实');
+                }
+                setSnapshots([]);
+                setSelectedId(null);
+            } else {
+                if (!Array.isArray(data) || data.some(item => !validSnapshot(item, sessionId))) {
+                    throw new Error('浏览器时间线返回了无效或跨会话数据');
+                }
+                setSnapshots(data);
+                setSelectedId(previous => data.some(item => item.snapshotId === previous) ? previous : null);
+            }
+        } catch (error) {
+            if (!controller.signal.aborted && generation === epoch.current) {
+                setError(error instanceof Error ? error.message : String(error));
+            }
+        } finally {
+            if (!controller.signal.aborted && generation === epoch.current) setLoading(false);
         }
-    }, [sessionId]);
+    }, [sessionId, open]);
 
-    // 打开时自动拉取一次
+    const fetchTimeline = useCallback(() => { void load('GET'); }, [load]);
+    const clearTimeline = useCallback(() => {
+        if (window.confirm('清空当前会话的浏览器快照时间线？此操作不会删除消息中的证据。')) void load('DELETE');
+    }, [load]);
+
+    const cancelPending = useCallback(() => {
+        ++epoch.current;
+        request.current?.abort();
+    }, []);
+
     useEffect(() => {
-        if (open) {
-            fetchTimeline();
-        }
-    }, [open, fetchTimeline]);
+        setSnapshots([]);
+        setSelectedId(null);
+        setError(null);
+        setLoading(false);
+        if (open && sessionId) void load('GET');
+        return cancelPending;
+    }, [open, sessionId, load, cancelPending]);
 
     const selected = useMemo(
         () => snapshots.find((s) => s.snapshotId === selectedId) ?? null,
         [snapshots, selectedId],
     );
 
-    return (
-        <Drawer open={open} onClose={onClose} width={width} side="right">
-            <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--border)]">
+    const content = (
+        <>
+            <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--v2-border-hairline)]">
                 <div className="flex flex-col">
-                    <span className="text-sm font-semibold text-[var(--text-primary)]">
+                    <span className="text-sm font-semibold text-[var(--v2-text-1)]">
                         浏览器快照时间线
                     </span>
-                    <span className="text-xs text-[var(--text-secondary)]">
+                    <span className="text-[13px] text-[var(--v2-text-2)]">
                         session: {sessionId.slice(0, 12)}… · {snapshots.length} 帧
                     </span>
                 </div>
@@ -111,7 +144,7 @@ const BrowserReplayTimeline: React.FC<BrowserReplayTimelineProps> = ({
                         type="button"
                         onClick={fetchTimeline}
                         disabled={loading}
-                        className="p-1.5 rounded hover:bg-[var(--bg-secondary)] disabled:opacity-50"
+                        className="panel-control p-1.5 rounded-sm hover:bg-[var(--v2-bg-sunken)] disabled:opacity-50"
                         title="刷新"
                     >
                         <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
@@ -120,7 +153,7 @@ const BrowserReplayTimeline: React.FC<BrowserReplayTimelineProps> = ({
                         type="button"
                         onClick={clearTimeline}
                         disabled={loading || snapshots.length === 0}
-                        className="p-1.5 rounded hover:bg-[var(--bg-secondary)] disabled:opacity-50"
+                        className="panel-control p-1.5 rounded-sm hover:bg-[var(--v2-bg-sunken)] disabled:opacity-50"
                         title="清空"
                     >
                         <Trash2 size={14} />
@@ -129,20 +162,20 @@ const BrowserReplayTimeline: React.FC<BrowserReplayTimelineProps> = ({
             </div>
 
             {error && (
-                <div className="px-4 py-2 text-xs text-red-500 bg-red-500/10 border-b border-red-500/20">
+                <div className="px-4 py-2 text-[13px] text-err bg-errsoft border-b border-err">
                     {error}
                 </div>
             )}
 
             <div className="flex-1 overflow-y-auto">
                 {snapshots.length === 0 && !loading && !error && (
-                    <div className="p-6 text-center text-xs text-[var(--text-secondary)]">
+                    <div className="p-6 text-center text-[13px] text-[var(--v2-text-2)]">
                         暂无快照。可在对话中输入
-                        <code className="mx-1 px-1 bg-[var(--bg-secondary)] rounded">/browser-snapshot</code>
+                        <code className="mx-1 px-1 bg-[var(--v2-bg-sunken)] rounded-sm">/browser-snapshot</code>
                         触发一次采集。
                     </div>
                 )}
-                <ul className="divide-y divide-[var(--border)]">
+                <ul className="divide-y divide-[var(--v2-border-hairline)]">
                     {snapshots.map((snap) => (
                         <SnapshotRow
                             key={snap.snapshotId}
@@ -157,13 +190,30 @@ const BrowserReplayTimeline: React.FC<BrowserReplayTimelineProps> = ({
             </div>
 
             {selected && (
-                <div className="border-t border-[var(--border)] max-h-64 overflow-y-auto p-3 bg-[var(--bg-secondary)]/30">
+                <div className="border-t border-[var(--v2-border-hairline)] max-h-64 overflow-y-auto p-3 bg-[var(--v2-bg-sunken)]/30">
                     <InteractiveList interactive={selected.interactive} />
                 </div>
             )}
-        </Drawer>
+        </>
     );
+    return inline ? <section className="flex h-full min-h-0 flex-col" aria-label="浏览器快照时间线">{content}</section>
+        : <Drawer open={open} onClose={onClose} width={width} side="right">{content}</Drawer>;
 };
+
+function hasCode(value: unknown, code: string): boolean {
+    return !!value && typeof value === 'object' && 'code' in value && value.code === code;
+}
+function validSnapshot(value: unknown, sessionId: string): value is BrowserSnapshot {
+    if (!value || typeof value !== 'object') return false;
+    const frame = value as Partial<BrowserSnapshot>;
+    return frame.sessionId === sessionId && typeof frame.snapshotId === 'string'
+        && typeof frame.capturedAt === 'string' && typeof frame.nodeCount === 'number'
+        && Array.isArray(frame.interactive)
+        && frame.interactive.every(item => !!item && typeof item.role === 'string')
+        && (frame.url === null || typeof frame.url === 'string')
+        && (frame.title === null || typeof frame.title === 'string')
+        && (frame.screenshotBase64 === null || typeof frame.screenshotBase64 === 'string');
+}
 
 interface SnapshotRowProps {
     snapshot: BrowserSnapshot;
@@ -181,13 +231,13 @@ const SnapshotRow: React.FC<SnapshotRowProps> = ({ snapshot, expanded, onToggle 
     }, [snapshot.capturedAt]);
 
     return (
-        <li className="px-3 py-2 hover:bg-[var(--bg-secondary)]/50 cursor-pointer" onClick={onToggle}>
+        <li className="px-3 py-2 hover:bg-[var(--v2-bg-sunken)]/50 cursor-pointer" onClick={onToggle}>
             <div className="flex items-start gap-2">
-                <div className="mt-0.5 text-[var(--text-secondary)]">
+                <div className="mt-0.5 text-[var(--v2-text-2)]">
                     {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                 </div>
                 <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 text-xs text-[var(--text-secondary)] mb-1">
+                    <div className="flex items-center gap-2 text-[13px] text-[var(--v2-text-2)] mb-1">
                         <span className="font-mono">{ts}</span>
                         <span className="opacity-60">·</span>
                         <span>
@@ -199,11 +249,11 @@ const SnapshotRow: React.FC<SnapshotRowProps> = ({ snapshot, expanded, onToggle 
                             <ImageIcon size={12} className="opacity-60" />
                         )}
                     </div>
-                    <div className="text-sm text-[var(--text-primary)] truncate">
+                    <div className="text-sm text-[var(--v2-text-1)] truncate">
                         {snapshot.title || snapshot.url || '(untitled)'}
                     </div>
                     {snapshot.url && (
-                        <div className="text-xs text-[var(--text-secondary)] truncate font-mono">
+                        <div className="text-[13px] text-[var(--v2-text-2)] truncate font-mono">
                             {snapshot.url}
                         </div>
                     )}
@@ -214,7 +264,7 @@ const SnapshotRow: React.FC<SnapshotRowProps> = ({ snapshot, expanded, onToggle 
                     <img
                         src={`data:image/png;base64,${snapshot.screenshotBase64}`}
                         alt="snapshot"
-                        className="max-w-full max-h-40 rounded border border-[var(--border)]"
+                        className="max-w-full max-h-40 rounded-sm border border-[var(--v2-border-hairline)]"
                     />
                 </div>
             )}
@@ -229,28 +279,28 @@ interface InteractiveListProps {
 const InteractiveList: React.FC<InteractiveListProps> = ({ interactive }) => {
     if (!interactive || interactive.length === 0) {
         return (
-            <div className="text-xs text-[var(--text-secondary)]">未抽取到交互元素。</div>
+            <div className="text-[13px] text-[var(--v2-text-2)]">未抽取到交互元素。</div>
         );
     }
     return (
         <div>
-            <div className="text-xs font-semibold text-[var(--text-secondary)] mb-2">
+            <div className="text-[13px] font-semibold text-[var(--v2-text-2)] mb-2">
                 交互元素 ({interactive.length})
             </div>
-            <ul className="space-y-1 text-xs font-mono">
+            <ul className="space-y-1 text-[13px] font-mono">
                 {interactive.slice(0, 50).map((it, idx) => (
                     <li key={idx} className="flex gap-2">
-                        <span className="text-[var(--accent)] min-w-[64px]">{it.role}</span>
-                        <span className="text-[var(--text-primary)] truncate flex-1">
+                        <span className="text-accent2-ink min-w-[64px]">{it.role}</span>
+                        <span className="text-[var(--v2-text-1)] truncate flex-1">
                             {it.name || '(no name)'}
                         </span>
                         {it.disabled && (
-                            <span className="text-[var(--text-secondary)] opacity-60">disabled</span>
+                            <span className="text-[var(--v2-text-2)] opacity-60">disabled</span>
                         )}
                     </li>
                 ))}
                 {interactive.length > 50 && (
-                    <li className="text-[var(--text-secondary)] opacity-60">
+                    <li className="text-[var(--v2-text-2)] opacity-60">
                         … 还有 {interactive.length - 50} 项
                     </li>
                 )}

@@ -1,8 +1,19 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+@import './liquid-glass.css';
+@import './spaceship.css';
+@import './ink-havoc.css';
+@import './jelly.css';
+@config "../../tailwind.config.ts";
 
 @layer base {
+  /* Preserve existing application defaults across Tailwind's v4 preflight. */
+  *, ::before, ::after, ::backdrop, ::file-selector-button {
+    border-color: var(--color-border);
+  }
+  input::placeholder, textarea::placeholder { color: var(--text-muted); }
+  button:not(:disabled), [role="button"]:not(:disabled) { cursor: pointer; }
+  dialog { margin: auto; }
+
   /* ===== Light 主题 (默认) ===== */
   :root {
     /* §8.6 26 个核心 CSS 变量 — Light */
@@ -11,22 +22,15 @@
     --text-primary:            #1a1a2e;
     --text-secondary:          #6b7280;
     --border:                  #e5e7eb;
-    --accent:                  var(--accent-color, #3b82f6);
-    --code-bg:                 #f3f4f6;
+    --code-bg:                 #E4F0E8;
     --diff-add:                #d4edda;
     --diff-remove:             #f8d7da;
-    --focus-ring:              #6366f1;
     --bg-hover:                #f3f4f6;
 
     /* 扩展色板 — Tailwind 集成 */
     --color-surface:           #ffffff;
     --color-surface-elevated:  #f8fafc;
     --color-surface-sunken:    #f1f5f9;
-    --color-primary:           #6366f1;
-    --color-primary-hover:     #4f46e5;
-    --color-primary-active:    #4338ca;
-    --color-accent:            var(--accent-color, #8b5cf6);
-    --color-accent-muted:      #c4b5fd;
     --color-muted:             #64748b;
     --color-border:            #e2e8f0;
     --color-text:              #0f172a;
@@ -34,8 +38,6 @@
     --color-text-muted:        #94a3b8;
     --color-code-bg:           #f1f5f9;
     --color-code-border:       #e2e8f0;
-    --color-info:              #3b82f6;
-    --color-info-bg:           #eff6ff;
     --color-success:           #22c55e;
     --color-success-bg:        #f0fdf4;
     --color-warning:           #eab308;
@@ -44,20 +46,18 @@
     --color-danger-bg:         #fef2f2;
     --color-scrollbar:         #cbd5e1;
     --color-scrollbar-hover:   #94a3b8;
-    --color-focus-ring:        #6366f1;
     --color-skeleton:          #e2e8f0;
     --color-overlay:           rgba(0, 0, 0, 0.5);
 
-    /* §8.6 可配置主题属性 */
-    --accent-color:            #3b82f6;
+    /* §8.6 可配置主题属性（accent 由 applyAccent 写 v2 令牌，--accent-color 旧链已退役） */
     --font-size:               14px;
-    --font-family-code:        'JetBrains Mono', 'Fira Code', monospace;
+    --font-family-code:        ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     --border-radius:           8px;
     --text-muted:              #94a3b8;
 
     /* 虚拟键盘 (§8.8.3) */
     --keyboard-height:         0px;
-    --viewport-height:         100dvh;
+    --viewport-height:         100vh;
   }
 
   /* ===== Dark 主题 ===== */
@@ -68,11 +68,9 @@
     --text-primary:            #e6edf3;
     --text-secondary:          #8b949e;
     --border:                  #30363d;
-    --accent:                  var(--accent-color, #3b82f6);
-    --code-bg:                 #1c2128;
+    --code-bg:                 #1A2029;
     --diff-add:                #1a4d2e;
     --diff-remove:             #4d1a1a;
-    --focus-ring:              #818cf8;
     --bg-hover:                #1c2128;
     --text-muted:              #64748b;
 
@@ -80,11 +78,6 @@
     --color-surface:           #0f172a;
     --color-surface-elevated:  #1e293b;
     --color-surface-sunken:    #020617;
-    --color-primary:           #818cf8;
-    --color-primary-hover:     #6366f1;
-    --color-primary-active:    #4f46e5;
-    --color-accent:            var(--accent-color, #a78bfa);
-    --color-accent-muted:      #5b21b6;
     --color-muted:             #94a3b8;
     --color-border:            #334155;
     --color-text:              #f8fafc;
@@ -92,8 +85,6 @@
     --color-text-muted:        #64748b;
     --color-code-bg:           #1e293b;
     --color-code-border:       #334155;
-    --color-info:              #60a5fa;
-    --color-info-bg:           #172554;
     --color-success:           #4ade80;
     --color-success-bg:        #052e16;
     --color-warning:           #facc15;
@@ -102,116 +93,19 @@
     --color-danger-bg:         #450a0a;
     --color-scrollbar:         #475569;
     --color-scrollbar-hover:   #64748b;
-    --color-focus-ring:        #818cf8;
     --color-skeleton:          #334155;
     --color-overlay:           rgba(0, 0, 0, 0.7);
   }
 
-  /* ===== Apple Liquid Glass 主题 ===== */
-  .glass {
-    /* §8.7 液态玻璃核心变量 — 半透明 + 毛玻璃 */
-    --bg-primary:              rgba(255, 255, 255, 0.45);
-    --bg-secondary:            rgba(245, 245, 247, 0.55);
-    --text-primary:            #1c1c1e;
-    --text-secondary:          #636366;
-    --border:                  rgba(0, 0, 0, 0.08);
-    --accent:                  var(--accent-color, #007aff);
-    --code-bg:                 rgba(245, 245, 247, 0.6);
-    --diff-add:                rgba(52, 199, 89, 0.15);
-    --diff-remove:             rgba(255, 59, 48, 0.15);
-    --focus-ring:              rgba(0, 122, 255, 0.6);
-    --bg-hover:                rgba(0, 0, 0, 0.04);
-    --text-muted:              #aeaeb2;
 
-    /* 液态玻璃专属变量 */
-    --glass-blur:              20px;
-    --glass-saturation:        180%;
-    --glass-brightness:        1.05;
-    --glass-border:            rgba(255, 255, 255, 0.35);
-    --glass-shadow:            0 8px 32px rgba(0, 0, 0, 0.08),
-                               0 2px 8px rgba(0, 0, 0, 0.04);
-    --glass-inner-shadow:      inset 0 1px 0 rgba(255, 255, 255, 0.5);
-    --glass-specular:          linear-gradient(
-                                 135deg,
-                                 rgba(255, 255, 255, 0.4) 0%,
-                                 rgba(255, 255, 255, 0.05) 50%,
-                                 rgba(255, 255, 255, 0.15) 100%
-                               );
 
-    /* 扩展色板 — 半透明适配 */
-    --color-surface:           rgba(255, 255, 255, 0.45);
-    --color-surface-elevated:  rgba(255, 255, 255, 0.65);
-    --color-surface-sunken:    rgba(245, 245, 247, 0.35);
-    --color-primary:           #007aff;
-    --color-primary-hover:     #0056cc;
-    --color-primary-active:    #004099;
-    --color-accent:            var(--accent-color, #5856d6);
-    --color-accent-muted:      rgba(88, 86, 214, 0.25);
-    --color-muted:             #8e8e93;
-    --color-border:            rgba(0, 0, 0, 0.08);
-    --color-text:              #1c1c1e;
-    --color-text-secondary:    #636366;
-    --color-text-muted:        #aeaeb2;
-    --color-code-bg:           rgba(245, 245, 247, 0.6);
-    --color-code-border:       rgba(0, 0, 0, 0.06);
-    --color-info:              #007aff;
-    --color-info-bg:           rgba(0, 122, 255, 0.1);
-    --color-success:           #34c759;
-    --color-success-bg:        rgba(52, 199, 89, 0.1);
-    --color-warning:           #ff9500;
-    --color-warning-bg:        rgba(255, 149, 0, 0.1);
-    --color-danger:            #ff3b30;
-    --color-danger-bg:         rgba(255, 59, 48, 0.1);
-    --color-scrollbar:         rgba(0, 0, 0, 0.15);
-    --color-scrollbar-hover:   rgba(0, 0, 0, 0.25);
-    --color-focus-ring:        rgba(0, 122, 255, 0.6);
-    --color-skeleton:          rgba(0, 0, 0, 0.06);
-    --color-overlay:           rgba(0, 0, 0, 0.3);
-  }
 
-  /* ===== prefers-color-scheme 自动跟随系统 ===== */
-  @media (prefers-color-scheme: dark) {
-    :root:where(:not(.light, .dark, .glass)) {
-      --bg-primary:              #0d1117;
-      --bg-secondary:            #161b22;
-      --text-primary:            #e6edf3;
-      --text-secondary:          #8b949e;
-      --border:                  #30363d;
-      --code-bg:                 #1c2128;
-      --diff-add:                #1a4d2e;
-      --diff-remove:             #4d1a1a;
-      --focus-ring:              #818cf8;
-      --bg-hover:                #1c2128;
-      --text-muted:              #64748b;
-
-      --color-surface:           #0f172a;
-      --color-surface-elevated:  #1e293b;
-      --color-surface-sunken:    #020617;
-      --color-primary:           #818cf8;
-      --color-primary-hover:     #6366f1;
-      --color-primary-active:    #4f46e5;
-      --color-accent:            var(--accent-color, #a78bfa);
-      --color-accent-muted:      #5b21b6;
-      --color-muted:             #94a3b8;
-      --color-border:            #334155;
-      --color-text:              #f8fafc;
-      --color-text-secondary:    #cbd5e1;
-      --color-text-muted:        #64748b;
-      --color-code-bg:           #1e293b;
-      --color-code-border:       #334155;
-      --color-scrollbar:         #475569;
-      --color-scrollbar-hover:   #64748b;
-      --color-focus-ring:        #818cf8;
-      --color-skeleton:          #334155;
-      --color-overlay:           rgba(0, 0, 0, 0.7);
-    }
-  }
 }
 
 /* ===== 全局 Body 样式 ===== */
 body {
   margin: 0;
-  font-family: Inter, system-ui, sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
   font-size: var(--font-size, 14px);
   background-color: var(--bg-primary);
   color: var(--text-primary);
@@ -246,7 +140,7 @@ body {
   width: auto;
   height: auto;
   padding: 8px 16px;
-  background: var(--accent);
+  background: var(--v2-accent-strong);
   color: white;
   border-radius: var(--border-radius);
   font-size: 14px;
@@ -268,18 +162,24 @@ body {
   }
 }
 
-/* ===== §8.8.4 安全区域 ===== */
-.app-root {
-  height: var(--viewport-height, 100dvh);
-  padding-top: env(safe-area-inset-top);
-  padding-left: env(safe-area-inset-left);
-  padding-right: env(safe-area-inset-right);
+/* ===== 可视视口与安全区域 ===== */
+@supports (height: 100dvh) {
+  :root { --viewport-height: 100dvh; }
+}
+.app-root { height: 100vh; }
+@media (max-width: 1023px) {
+  .app-root {
+    position: fixed;
+    inset-inline: 0;
+    top: var(--viewport-offset-top, 0px);
+    height: var(--viewport-height, 100vh);
+    padding: env(safe-area-inset-top) env(safe-area-inset-right)
+      env(safe-area-inset-bottom) env(safe-area-inset-left);
+  }
 }
 
-.prompt-input-container {
-  padding-bottom: calc(var(--keyboard-height, 0px) + env(safe-area-inset-bottom));
-  transition: padding-bottom 0.25s ease-out;
-}
+/* 根容器已经按键盘上方的可视高度布局；不再重复扣除键盘和安全区。 */
+.prompt-input-container { padding-bottom: 0.75rem; }
 
 /* ===== §8.8.5 动画偏好 ===== */
 @media (prefers-reduced-motion: reduce) {
@@ -308,7 +208,7 @@ body {
 }
 
 /* ===== §8.8 移动端代码块横向滚动 ===== */
-@media (max-width: 639px) {
+@media (max-width: 767px) {
   pre {
     overflow-x: auto;
     -webkit-overflow-scrolling: touch;
@@ -325,83 +225,168 @@ body {
   to { opacity: 1; transform: translateY(0); }
 }
 
-/* ===== §8.7 Apple Liquid Glass 效果样式 ===== */
+/* ===== 声波动画 — 语音录音态指示器 ===== */
+@keyframes soundwave {
+  0%, 100% { transform: scaleY(0.4); }
+  50% { transform: scaleY(1); }
+}
+.animate-soundwave {
+  animation: soundwave 1s ease-in-out infinite;
+}
 
-/* 液态玻璃主题背景: 抽象渐变起、波光效果 */
-.glass body {
+/* ===== v2 令牌（新增，不动任何旧变量） ===== */
+:root{
+  --v2-on-accent: #ffffff;
+  --v2-bg-app:#F2F7F4; --v2-bg-surface:#FFFFFF; --v2-bg-surface-2:#EAF3ED; --v2-bg-sunken:#E0EDE4;
+  --v2-bg-hover:rgba(20,40,34,.045); --v2-bg-active:rgba(20,40,34,.07);
+  --v2-border-hairline:rgba(20,40,34,.08); --v2-border-strong:rgba(20,40,34,.14);
+  --v2-overlay:rgba(20,40,34,.32);
+  --v2-text-1:#1F2430; --v2-text-2:#49546B; --v2-text-3:#596A60; --v2-text-4:#596A60;
+  --v2-ok:#2C724B; --v2-ok-soft:rgba(63,143,98,.12); --v2-ok-strong:#245E3E;
+  --v2-warn:#8F5C12; --v2-warn-soft:rgba(180,116,27,.12); --v2-warn-strong:#7A4E0F;
+  --v2-err:#B03B35; --v2-err-soft:rgba(196,69,63,.12); --v2-err-strong:#A3352F;
+  --v2-diff-add-bg:rgba(63,143,98,.10); --v2-diff-remove-bg:rgba(196,69,63,.10);
+  --v2-code-bg:#E4F0E8;
+  --v2-accent:#12967F; --v2-accent-strong:#0C7563;
+  --v2-accent-soft:rgba(18,150,127,.10); --v2-accent-ring:rgba(18,150,127,.32);
+  /* --focus-ring 跟随 accent（旧变量区不再定义，集中于 v2 块以满足单块对拍约定） */
+  --focus-ring:var(--v2-accent);
+  --v2-accent-hover:color-mix(in srgb, var(--v2-accent-strong) 92%, black);
+  --v2-accent-active:color-mix(in srgb, var(--v2-accent-strong) 84%, black);
+  --v2-shadow-xs:0 1px 2px rgba(20,40,34,.04);
+  --v2-shadow-sm:0 1px 2px rgba(20,40,34,.04),0 2px 8px rgba(20,40,34,.05);
+  --v2-shadow-md:0 2px 6px rgba(20,40,34,.05),0 10px 28px rgba(20,40,34,.08);
+  --v2-shadow-lg:0 4px 12px rgba(20,40,34,.07),0 20px 56px rgba(20,40,34,.14);
+  --v2-shadow-inset:inset 2px 2px 5px rgba(20,40,34,.12),inset -2px -2px 5px rgba(255,255,255,.7);
+  --v2-shadow-raised:-3px -3px 8px rgba(255,255,255,.85),3px 3px 8px rgba(20,40,34,.10);
+  --v2-shadow-raised-hover:-1.5px -1.5px 4px rgba(255,255,255,.85),1.5px 1.5px 4px rgba(20,40,34,.10);
+  --v2-shadow-pressed:inset 2px 2px 5px rgba(20,40,34,.12),inset -2px -2px 5px rgba(255,255,255,.7);
+  --v2-shadow-soft:-8px -8px 20px rgba(255,255,255,.85),8px 8px 20px rgba(20,40,34,.07);
+  --v2-shadow-soft-sm:-4px -4px 10px rgba(255,255,255,.8),4px 4px 10px rgba(20,40,34,.06);
+  --v2-r-xs:6px; --v2-r-sm:10px; --v2-r-md:14px; --v2-r-lg:16px; --v2-r-panel:22px; --v2-r-pill:999px;
+  --v2-dur-fast:120ms; --v2-dur-base:180ms; --v2-dur-slow:240ms; --v2-dur-sheet:240ms;
+  --v2-ease:cubic-bezier(.2,.8,.2,1); --v2-ease-in-out:cubic-bezier(.4,0,.2,1);
+  --v2-spring:cubic-bezier(.34,1.56,.64,1);
+  --v2-chart-1:#5E63DE; --v2-chart-2:#2C8C7E; --v2-chart-3:#B4741B; --v2-chart-4:#C4453F;
+  --v2-chart-5:#2D7DB3; --v2-chart-6:#7E4FB8; --v2-chart-7:#6B8E23; --v2-chart-8:#596A60;
+}
+.dark{
+  --v2-on-accent: #ffffff;
+  --v2-bg-app:#161A22; --v2-bg-surface:#1E2430; --v2-bg-surface-2:#262E3D; --v2-bg-sunken:#12161E;
+  --v2-bg-hover:rgba(148,163,184,.05); --v2-bg-active:rgba(148,163,184,.08);
+  --v2-border-hairline:rgba(148,163,184,.12); --v2-border-strong:rgba(148,163,184,.18);
+  --v2-overlay:rgba(0,0,0,.55);
+  --v2-text-1:#DCE3EE; --v2-text-2:#A3AFC2; --v2-text-3:#8B99AD; --v2-text-4:#8B99AD;
+  --v2-ok:#7BC79A; --v2-ok-soft:rgba(123,199,154,.14); --v2-ok-strong:#9AD6B1;
+  --v2-warn:#E0A94A; --v2-warn-soft:rgba(224,169,74,.14); --v2-warn-strong:#EBC27A;
+  --v2-err:#F0756C; --v2-err-soft:rgba(240,117,108,.14); --v2-err-strong:#C4453F;
+  --v2-diff-add-bg:rgba(123,199,154,.12); --v2-diff-remove-bg:rgba(240,117,108,.12);
+  --v2-code-bg:#1A2029;
+  /* dark 同样跟随 accent（值由 applyAccent 运行时写入 --v2-accent） */
+  --focus-ring:var(--v2-accent);
+  --v2-shadow-xs:0 1px 2px rgba(0,0,0,.4);
+  --v2-shadow-sm:0 1px 2px rgba(0,0,0,.4),0 2px 8px rgba(0,0,0,.35);
+  --v2-shadow-md:0 2px 6px rgba(0,0,0,.4),0 10px 28px rgba(0,0,0,.45);
+  --v2-shadow-lg:0 4px 12px rgba(0,0,0,.5),0 20px 56px rgba(0,0,0,.55);
+  --v2-shadow-inset:inset 2px 2px 6px rgba(0,0,0,.5);
+  --v2-shadow-raised:inset 0 1px 0 rgba(255,255,255,.04),2px 3px 8px rgba(0,0,0,.45);
+  --v2-shadow-raised-hover:inset 0 1px 0 rgba(255,255,255,.04),1px 1.5px 4px rgba(0,0,0,.45);
+  --v2-shadow-pressed:inset 2px 2px 6px rgba(0,0,0,.5);
+  --v2-shadow-soft:none; --v2-shadow-soft-sm:none;
+  --v2-chart-1:#8A8FF0; --v2-chart-2:#5FC4B2; --v2-chart-3:#E0A94A; --v2-chart-4:#EF6B63;
+  --v2-chart-5:#6DB4E6; --v2-chart-6:#B58CD6; --v2-chart-7:#A3C24E; --v2-chart-8:#8B99AD;
+}
+
+/* 深色氛围光：左上跟随 accent + 右上固定紫光，极低透明度，正中保持纯净阅读区（柔夜墨蓝 §D） */
+.dark .app-workspace {
   background:
-    radial-gradient(ellipse at 20% 50%, rgba(0, 122, 255, 0.12) 0%, transparent 50%),
-    radial-gradient(ellipse at 80% 20%, rgba(88, 86, 214, 0.10) 0%, transparent 50%),
-    radial-gradient(ellipse at 50% 80%, rgba(255, 149, 0, 0.06) 0%, transparent 50%),
-    linear-gradient(135deg, #f5f5f7 0%, #e8e8ed 50%, #f0f0f5 100%);
-  background-attachment: fixed;
+    radial-gradient(ellipse at 10% 0%, color-mix(in srgb, var(--v2-accent) 5.5%, transparent) 0%, transparent 48%),
+    radial-gradient(ellipse at 92% 6%, rgba(183,166,240,.05) 0%, transparent 48%),
+    var(--v2-bg-surface);
 }
 
-/* Header 毛玻璃 */
-.glass header {
-  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturation)) brightness(var(--glass-brightness));
-  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturation)) brightness(var(--glass-brightness));
-  background: var(--bg-secondary) !important;
-  border-bottom-color: var(--glass-border) !important;
-  box-shadow: var(--glass-shadow);
+/* ===== v2 keyframes（新增；保留现有 shimmer/slideUp/soundwave，合计 8 个） ===== */
+@keyframes fadeIn  { from { opacity: 0 } to { opacity: 1 } }
+@keyframes scaleIn { from { opacity: 0; transform: scale(.98) } to { opacity: 1; transform: scale(1) } }
+@keyframes sheetUp { from { transform: translateY(100%) } to { transform: translateY(0) } }
+@keyframes accentPulse {                                   /* 运行中呼吸点 */
+  0%,100% { opacity: 1;  box-shadow: 0 0 0 0 var(--v2-accent-ring) }
+  50%     { opacity: .6; box-shadow: 0 0 0 4px transparent } }
+@keyframes indeterminate {                                 /* 不定进度条 */
+  0% { transform: translateX(-60%) scaleX(.4) }
+  100% { transform: translateX(160%) scaleX(.4) } }
+@keyframes stopPulseRing {                                 /* 运行中停止钮：红色光环扩散 */
+  0%   { box-shadow: 0 0 0 0   color-mix(in srgb, var(--v2-err) 45%, transparent) }
+  70%  { box-shadow: 0 0 0 9px color-mix(in srgb, var(--v2-err) 0%, transparent) }
+  100% { box-shadow: 0 0 0 9px color-mix(in srgb, var(--v2-err) 0%, transparent) } }
+@keyframes stopIconBeat {                                  /* 运行中停止钮：方块心跳 */
+  0%,100% { transform: scale(1);   opacity: 1 }
+  50%     { transform: scale(.78); opacity: .8 } }
+
+/* 运行中停止按钮动效（三端统一：光环扩散 + 方块心跳，1.6s 同相循环；
+   reduced-motion 由 §8.8.5 全局压制，无需重复 media query） */
+.stop-btn-running { animation: stopPulseRing 1.6s cubic-bezier(.4, 0, .6, 1) infinite; }
+.stop-btn-running > svg { animation: stopIconBeat 1.6s ease-in-out infinite; }
+
+/* ===== §5.4 展开/收起容器（grid-rows 方案；旧 Safari @supports 兜底 max-height） ===== */
+.expand-collapse {
+  display: grid;
+  transition: grid-template-rows var(--v2-dur-slow) var(--v2-ease), opacity var(--v2-dur-base) var(--v2-ease);
+}
+.expand-collapse[data-open="true"] { grid-template-rows: 1fr; opacity: 1; }
+.expand-collapse[data-open="false"] { grid-template-rows: 0fr; opacity: 0; }
+.expand-collapse > .expand-collapse-inner { overflow: hidden; }
+@supports not (grid-template-rows: 0fr) {
+  .expand-collapse { transition: max-height var(--v2-dur-slow) var(--v2-ease), opacity var(--v2-dur-base) var(--v2-ease); }
+  .expand-collapse[data-open="true"] { max-height: 600px; }
+  .expand-collapse[data-open="false"] { max-height: 0; }
 }
 
-/* Sidebar 毛玻璃 */
-.glass aside {
-  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturation));
-  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturation));
-  background: var(--bg-secondary) !important;
-  border-right-color: var(--glass-border) !important;
-  box-shadow: var(--glass-inner-shadow);
+/* ===== 会话卡选中 pill（荧光浮起，framer-motion layoutId 滑动载体） =====
+   选中视觉独立成层：accent 染色底 + 45% 边框 + 外发光 + 浮起阴影 + 左侧 4px 渐变光柱。
+   color-mix 基于 --v2-accent 局部定制（不动全局 token），accent 运行时切换自动跟随；
+   切换会话时 framer-motion 对同一 layoutId 元素做 FLIP 滑动（magic move）。 */
+.session-active-pill {
+  position: absolute;
+  inset: 0;
+  border-radius: 14px;
+  pointer-events: none;
+  /* FLIP 滑动期间 pill 以 transform 移动：will-change 提示合成器独立成层，
+     避免大面积模糊阴影每帧重排重绘（迟滞感主因）。 */
+  will-change: transform;
+  background: color-mix(in srgb, var(--v2-accent) 18%, transparent);
+  border: 1px solid color-mix(in srgb, var(--v2-accent) 45%, transparent);
+  /* 外发光收敛至 10px blur：动画元素上的大范围阴影模糊是重绘热点 */
+  box-shadow:
+    0 0 10px -2px color-mix(in srgb, var(--v2-accent) 26%, transparent),
+    var(--v2-shadow-raised);
+}
+/* 左侧渐变光柱：上下内缩 8px 避开卡片圆角，自身带微光 */
+.session-active-pill::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 8px;
+  bottom: 8px;
+  width: 4px;
+  border-radius: 4px;
+  background: linear-gradient(180deg, var(--v2-accent), var(--v2-accent-strong));
+  box-shadow: 0 0 6px color-mix(in srgb, var(--v2-accent) 50%, transparent);
+}
+/* 浅色：染色与光晕减弱（浅底发光显脏，主要靠染色+边框+光柱） */
+html.light .session-active-pill {
+  background: color-mix(in srgb, var(--v2-accent) 12%, transparent);
+  box-shadow:
+    0 0 8px -2px color-mix(in srgb, var(--v2-accent) 14%, transparent),
+    var(--v2-shadow-raised);
 }
 
-/* StatusBar 毛玻璃 */
-.glass footer {
-  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturation));
-  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturation));
-  background: var(--bg-secondary) !important;
-  border-top-color: var(--glass-border) !important;
-}
-
-/* 设置面板/对话框玻璃效果 */
-.glass [role="dialog"],
-.glass .settings-panel {
-  backdrop-filter: blur(calc(var(--glass-blur) * 1.5)) saturate(var(--glass-saturation)) brightness(var(--glass-brightness));
-  -webkit-backdrop-filter: blur(calc(var(--glass-blur) * 1.5)) saturate(var(--glass-saturation)) brightness(var(--glass-brightness));
-  background: rgba(255, 255, 255, 0.72) !important;
-  border-color: var(--glass-border) !important;
-  box-shadow: var(--glass-shadow), var(--glass-inner-shadow);
-}
-
-/* 按钮微玻璃效果 */
-.glass button:hover {
-  backdrop-filter: blur(8px) saturate(150%);
-  -webkit-backdrop-filter: blur(8px) saturate(150%);
-}
-
-/* 下拉菜单/输入框玻璃 */
-.glass select,
-.glass input[type="text"],
-.glass textarea {
-  backdrop-filter: blur(12px) saturate(160%);
-  -webkit-backdrop-filter: blur(12px) saturate(160%);
-  background: rgba(255, 255, 255, 0.5) !important;
-  border-color: var(--glass-border) !important;
-}
-
-/* 代码块玻璃效果 */
-.glass pre,
-.glass code {
-  backdrop-filter: blur(10px) saturate(140%);
-  -webkit-backdrop-filter: blur(10px) saturate(140%);
-}
-
-/* 液态玻璃卡片 — 通用工具类 */
-.glass .glass-card {
-  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturation)) brightness(var(--glass-brightness));
-  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturation)) brightness(var(--glass-brightness));
-  background: rgba(255, 255, 255, 0.55);
-  border: 1px solid var(--glass-border);
-  box-shadow: var(--glass-shadow), var(--glass-inner-shadow);
-  border-radius: var(--border-radius);
+/* ===== 会话卡操作区：指针能力自适应可见性 =====
+   触屏/粗指针设备无 hover：操作区默认常驻可见（合并/删除入口可发现，
+   且避免 opacity-0 元素仍可被误触）；仅精确指针（鼠标）设备折叠为
+   hover/聚焦显示，保持列表整洁与键盘可达（focus-within）。 */
+@media (hover: hover) and (pointer: fine) {
+  .session-card .card-actions { opacity: 0; }
+  .session-card:hover .card-actions,
+  .session-card:focus-within .card-actions { opacity: 1; }
 }

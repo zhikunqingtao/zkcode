@@ -114,8 +114,17 @@ impl ChatProvider for OpenAiCompatProvider {
         request: ChatRequest,
         cancel: CancellationToken,
     ) -> Result<futures::stream::BoxStream<'static, ProviderEvent>, ProviderError> {
-        let body = build_request_body(&request);
-        let url = chat_completions_url(&self.config.base_url);
+        crate::validate_request_options(&request, &self.config.name)?;
+        let responses = crate::responses::uses_responses(&self.config.name, &request.model);
+        let url = if responses {
+            format!("{}/responses", self.config.base_url.trim_end_matches('/'))
+        } else {
+            chat_completions_url(&self.config.base_url)
+        };
+        let summary = request.summary_thinking.is_some();
+        let base_url = self.config.base_url.clone();
+        let model = request.model.clone();
+        let origin = self.config.name.clone();
         if self.config.api_keys.is_empty() {
             return Err(ProviderError::Config {
                 message: format!("provider '{}' has empty api key", self.config.name),
@@ -128,8 +137,26 @@ impl ChatProvider for OpenAiCompatProvider {
         let client = self.client.clone();
 
         // 字节源：先发请求（HTTP 状态错误 → Err 项），成功则转响应字节流。
+        let image_cancel = cancel.clone();
         let byte_source = futures::stream::once(async move {
-            let key = keys.next_key().ok_or_else(|| ProviderError::Config {
+            let request =
+                crate::user_images::prepare_inline_images(request, &provider, image_cancel).await?;
+            let mut body = if responses {
+                crate::responses::build_request(&request, &provider)
+            } else {
+                build_provider_request(&request, &provider)
+            };
+            if summary {
+                crate::summary_transport::prepare(&mut body, &base_url);
+            }
+            crate::payload_guard::validate(&body, &request.model, request.max_tokens)?;
+            crate::user_images::record_dispatched_image_sources(&request);
+            let key = if summary {
+                keys.summary_key()
+            } else {
+                keys.next_key()
+            }
+            .ok_or_else(|| ProviderError::Config {
                 message: format!("provider '{provider}' has empty api key"),
             })?;
             // 密钥在此唯一一次离开 ApiKey——进入 Authorization 头，不进入日志/错误链。
@@ -140,46 +167,122 @@ impl ChatProvider for OpenAiCompatProvider {
                 .json(&body)
                 .send()
                 .await
-                .map_err(|e| ProviderError::Network {
-                    message: e.to_string(),
-                })?;
-            let status = response.status();
-            if !status.is_success() {
-                if status.as_u16() == 429 {
-                    keys.mark_rate_limited(&key);
-                }
-                let retry_after = response
-                    .headers()
-                    .get(reqwest::header::RETRY_AFTER)
-                    .and_then(|v| v.to_str().ok())
-                    .map(str::to_owned);
-                let body_text = response.text().await.unwrap_or_default();
-                return Err(map_http_response(
-                    status.as_u16(),
-                    &body_text,
-                    retry_after.as_deref(),
-                ));
+                .map_err(|error| ProviderError::from_transport(&error))?;
+            if !response.status().is_success() {
+                return Err(read_response_error(response, &provider, summary, &keys, &key).await);
             }
             Ok(response)
         })
         .flat_map(
-            |result: Result<reqwest::Response, ProviderError>| match result {
+            move |result: Result<reqwest::Response, ProviderError>| match result {
+                Ok(response) if summary => {
+                    futures::stream::once(crate::summary_transport::response_bytes(response))
+                        .boxed()
+                }
                 Ok(response) => response
                     .bytes_stream()
-                    .map(|r| {
-                        r.map_err(|e| ProviderError::Network {
-                            message: e.to_string(),
-                        })
-                    })
-                    .left_stream(),
-                Err(error) => {
-                    futures::stream::once(futures::future::ready(Err(error))).right_stream()
-                }
+                    .map(|r| r.map_err(|error| ProviderError::from_transport(&error)))
+                    .boxed(),
+                Err(error) => futures::stream::once(futures::future::ready(Err(error))).boxed(),
             },
         );
 
-        Ok(Box::pin(sse_event_stream(byte_source, cancel)))
+        if responses {
+            Ok(Box::pin(crate::responses::event_stream(
+                byte_source,
+                cancel,
+                origin,
+                model,
+            )))
+        } else {
+            Ok(Box::pin(sse_event_stream(byte_source, cancel).map(
+                move |event| match event {
+                    ProviderEvent::ResponseState { mut state } => {
+                        state.provider.clone_from(&origin);
+                        state.model.clone_from(&model);
+                        ProviderEvent::ResponseState { state }
+                    }
+                    other => other,
+                },
+            )))
+        }
     }
+}
+
+async fn read_response_error(
+    response: reqwest::Response,
+    provider: &str,
+    summary: bool,
+    keys: &crate::ApiKeyRing,
+    key: &crate::ApiKey,
+) -> ProviderError {
+    let status = response.status().as_u16();
+    if status == 429 && !summary {
+        keys.mark_rate_limited(key);
+    }
+    let retry_after = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    let body = response.text().await.unwrap_or_default();
+    response_error(
+        provider,
+        status,
+        &body,
+        retry_after.as_deref(),
+        summary,
+        keys,
+        key,
+    )
+}
+
+fn response_error(
+    provider: &str,
+    status: u16,
+    body: &str,
+    retry_after: Option<&str>,
+    summary: bool,
+    keys: &crate::ApiKeyRing,
+    key: &crate::ApiKey,
+) -> ProviderError {
+    let mut error = map_http_response(status, body, retry_after);
+    if summary {
+        if let ProviderError::Http {
+            retryable,
+            retry_after_ms,
+            ..
+        } = &mut error
+        {
+            *retryable = status == 429;
+            *retry_after_ms =
+                (status == 429).then(|| crate::summary_transport::retry_delay_ms(retry_after));
+        }
+        return error;
+    }
+    let quota_failure = provider == "zenmux"
+        && ((status == 402
+            && (body.contains("quota_exceeded") || body.contains("quote_exceeded")))
+            || (status == 404 && body.contains("model_not_available")));
+    if quota_failure {
+        keys.mark_rate_limited_at(key, crate::clock::mono_millis(), 15 * 60 * 1000);
+        if keys.len() > 1
+            && let ProviderError::Http { retryable, .. } = &mut error
+        {
+            *retryable = true;
+        }
+    }
+    error
+}
+
+struct SseState<S> {
+    source: Pin<Box<S>>,
+    splitter: LineSplitter,
+    pending: VecDeque<ProviderEvent>,
+    accumulators: BTreeMap<u64, ToolCallAccumulator>,
+    cancel: CancellationToken,
+    done: bool,
+    saw_finish: bool,
 }
 
 /// 将 `OpenAI` 兼容 SSE 字节流转换为统一事件流。
@@ -205,14 +308,6 @@ pub fn sse_event_stream<S>(
 where
     S: Stream<Item = Result<Bytes, ProviderError>> + Send + 'static,
 {
-    struct SseState<S> {
-        source: Pin<Box<S>>,
-        splitter: LineSplitter,
-        pending: VecDeque<ProviderEvent>,
-        accumulators: BTreeMap<u64, ToolCallAccumulator>,
-        cancel: CancellationToken,
-        done: bool,
-    }
     futures::stream::unfold(
         SseState {
             source: Box::pin(byte_source),
@@ -221,6 +316,7 @@ where
             accumulators: BTreeMap::new(),
             cancel,
             done: false,
+            saw_finish: false,
         },
         |mut st| async move {
             loop {
@@ -233,12 +329,21 @@ where
                 // 积压事件先于终止判定投递：[DONE] / 流耗尽 / Error 之前
                 // 产出的事件必须完整吐出（积压丢弃 = 半条消息假失败）。
                 if let Some(event) = st.pending.pop_front() {
+                    if matches!(event, ProviderEvent::Finish { .. }) {
+                        st.saw_finish = true;
+                    }
                     return Some((event, st));
                 }
                 if st.done {
                     return None;
                 }
-                match st.source.as_mut().next().await {
+                let mut source = st.source.as_mut();
+                let next = tokio::select! {
+                    biased;
+                    () = st.cancel.cancelled() => return None,
+                    next = source.next() => next,
+                };
+                match next {
                     None => {
                         // 流耗尽：冲刷残留半行（末行无换行的宽容处理）后结束。
                         if let Some(line) = st.splitter.flush() {
@@ -250,6 +355,20 @@ where
                             );
                         }
                         st.done = true;
+                        if !st.saw_finish
+                            && !st.pending.iter().any(|event| {
+                                matches!(
+                                    event,
+                                    ProviderEvent::Finish { .. } | ProviderEvent::Error { .. }
+                                )
+                            })
+                        {
+                            st.pending.push_back(ProviderEvent::Error {
+                                error: ProviderError::Network {
+                                    message: "INCOMPLETE_CHAT_STREAM: finish_reason missing".into(),
+                                },
+                            });
+                        }
                     }
                     Some(Ok(bytes)) => {
                         for line in st.splitter.feed(&bytes) {
@@ -260,6 +379,23 @@ where
                                 &mut st.accumulators,
                             );
                             if st.done {
+                                if !st.saw_finish
+                                    && !st.pending.iter().any(|event| {
+                                        matches!(
+                                            event,
+                                            ProviderEvent::Finish { .. }
+                                                | ProviderEvent::Error { .. }
+                                        )
+                                    })
+                                {
+                                    st.pending.push_back(ProviderEvent::Error {
+                                        error: ProviderError::Network {
+                                            message:
+                                                "INCOMPLETE_CHAT_STREAM: finish_reason missing"
+                                                    .into(),
+                                        },
+                                    });
+                                }
                                 break;
                             }
                         }
@@ -353,6 +489,10 @@ impl ChunkFailure {
 /// 工具增量（`ToolUseStart` / `ToolInputDelta`）→ `Finish`。`choices`
 /// 缺失 / 空数组时按 usage-only 尾块处理。失败前已解析出的事件仍然
 /// 返回（半 chunk 有效增量不丢弃）。
+#[expect(
+    clippy::too_many_lines,
+    reason = "One SSE chunk projects ordered reasoning, text, tools and finish events atomically."
+)]
 fn parse_chunk(
     payload: &str,
     accumulators: &mut BTreeMap<u64, ToolCallAccumulator>,
@@ -368,19 +508,31 @@ fn parse_chunk(
             );
         }
     };
+    if let Some(error) = chunk.get("error").filter(|error| !error.is_null()) {
+        let status = error["code"]
+            .as_u64()
+            .and_then(|code| u16::try_from(code).ok())
+            .unwrap_or(502);
+        return (
+            Vec::new(),
+            Some(ChunkFailure::fatal(ProviderError::http(
+                status,
+                error["message"]
+                    .as_str()
+                    .unwrap_or("Provider stream error")
+                    .into(),
+                None,
+            ))),
+        );
+    }
     let choice = chunk
         .get("choices")
         .and_then(Value::as_array)
         .and_then(|arr| arr.first());
     let Some(choice) = choice else {
         // usage-only chunk（对齐旧 L614-621：choices 空且带 usage → 只补 usage）。
-        if let Some(usage) = chunk.get("usage").filter(|u| !u.is_null()) {
-            return (
-                vec![ProviderEvent::UsageUpdate {
-                    usage: parse_usage(usage),
-                }],
-                None,
-            );
+        if let Some(usage) = chunk.get("usage").and_then(parse_usage) {
+            return (vec![ProviderEvent::UsageUpdate { usage }], None);
         }
         return (Vec::new(), None);
     };
@@ -388,12 +540,48 @@ fn parse_chunk(
     let mut events = Vec::new();
     if let Some(delta) = choice.get("delta").filter(|d| !d.is_null()) {
         // 1. DeepSeek reasoning_content 思考增量（非空才发，对齐旧 L631-637）。
-        if let Some(thinking) = delta.get("reasoning_content").and_then(Value::as_str)
-            && !thinking.is_empty()
+        if let Some(details) = delta.get("reasoning_details").and_then(Value::as_array)
+            && !details.is_empty()
         {
-            events.push(ProviderEvent::ThinkingDelta {
-                thinking: thinking.to_owned(),
+            events.push(ProviderEvent::ResponseState {
+                state: crate::ProviderResponseState {
+                    provider: "openrouter".into(),
+                    model: String::new(),
+                    output: vec![
+                        json!({"type":"openrouter_reasoning","reasoning_details":details}),
+                    ],
+                },
             });
+        }
+        let direct_reasoning = delta
+            .get("reasoning")
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+            .or_else(|| {
+                delta
+                    .get("reasoning_content")
+                    .and_then(Value::as_str)
+                    .filter(|text| !text.is_empty())
+            });
+        let thinking = direct_reasoning.map_or_else(
+            || {
+                delta
+                    .get("reasoning_details")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|item| {
+                        item.get("text")
+                            .or_else(|| item.get("summary"))
+                            .and_then(Value::as_str)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("")
+            },
+            str::to_owned,
+        );
+        if !thinking.is_empty() {
+            events.push(ProviderEvent::ThinkingDelta { thinking });
         }
         // 2. 文本增量（非空才发，对齐旧 L639-645）。
         if let Some(text) = delta.get("content").and_then(Value::as_str)
@@ -414,7 +602,10 @@ fn parse_chunk(
     }
     // 4. finish_reason（非 null）→ Finish（对齐旧 L698-715）。
     if let Some(raw) = choice.get("finish_reason").and_then(Value::as_str) {
-        let usage = chunk.get("usage").filter(|u| !u.is_null()).map(parse_usage);
+        let usage = chunk
+            .get("usage")
+            .filter(|u| !u.is_null())
+            .and_then(parse_usage);
         events.push(ProviderEvent::Finish {
             finish_reason: FinishReason::from_openai(raw),
             usage,
@@ -495,6 +686,11 @@ fn update_identity(
         }
         return None;
     }
+    if slot.as_ref().is_some_and(|existing| existing != value) {
+        return Some(ChunkFailure::fatal(ProviderError::Parse {
+            message: format!("INVALID_TOOL_CALL_STREAM: {field} changed at index {index}"),
+        }));
+    }
     *slot = Some(value.to_owned());
     None
 }
@@ -504,19 +700,25 @@ fn update_identity(
 /// `prompt_tokens` / `completion_tokens` → input / output；cache 两字段
 /// 恒 0（旧注释：`OpenAI` 标准 API 无此字段；qwen 的 cache 字段旧实现
 /// 亦不读，保持一致）。
-fn parse_usage(node: &Value) -> Usage {
-    Usage {
-        input_tokens: node
-            .get("prompt_tokens")
-            .and_then(Value::as_i64)
-            .unwrap_or(0),
-        output_tokens: node
-            .get("completion_tokens")
-            .and_then(Value::as_i64)
-            .unwrap_or(0),
-        cache_read_input_tokens: 0,
-        cache_creation_input_tokens: 0,
-    }
+fn parse_usage(node: &Value) -> Option<Usage> {
+    let input_tokens = node.get("prompt_tokens")?.as_i64().filter(|n| *n >= 0)?;
+    let output_tokens = node
+        .get("completion_tokens")?
+        .as_i64()
+        .filter(|n| *n >= 0)?;
+    Some(Usage {
+        input_tokens,
+        output_tokens,
+        cache_read_input_tokens: node["prompt_tokens_details"]["cached_tokens"]
+            .as_i64()
+            .or_else(|| node["prompt_cache_hit_tokens"].as_i64())
+            .unwrap_or(0)
+            .max(0),
+        cache_creation_input_tokens: node["cache_creation_input_tokens"]
+            .as_i64()
+            .unwrap_or(0)
+            .max(0),
+    })
 }
 
 /// HTTP 错误响应 → [`ProviderError`]（对齐旧 handleErrorResponse L736-765）。
@@ -537,7 +739,7 @@ pub(crate) fn map_http_response(
                 .map(str::to_owned)
         })
         .unwrap_or_else(|| format!("HTTP {status}"));
-    let retry_after_ms = if status == 429 {
+    let retry_after_ms = if matches!(status, 429 | 529) {
         parse_retry_after_ms(retry_after)
     } else {
         None
@@ -665,7 +867,136 @@ fn build_request_body(request: &ChatRequest) -> Value {
     Value::Object(root)
 }
 
-/// 思考参数（模型族判定；deepseek/kimi/GLM 无条件、qwen 受配置）。
+#[cfg(test)]
+use crate::user_images::ensure_inline_image_budget;
+
+fn build_provider_request(request: &ChatRequest, provider: &str) -> Value {
+    let mut body = build_request_body(request);
+    if !request.stop_sequences.is_empty() {
+        body["stop"] = json!(request.stop_sequences);
+    }
+    if provider == "dashscope-token-plan" && request.model == "bailian/glm-5.3" {
+        body["model"] = json!("glm-5.3");
+        body["enable_thinking"] = json!(true);
+        body["reasoning_effort"] = json!("max");
+        body["clear_thinking"] = json!(false);
+    }
+    if provider == "kimi-code" {
+        if let Some(body) = body.as_object_mut() {
+            body.remove("max_completion_tokens");
+        }
+        body["max_tokens"] = json!(request.max_tokens);
+        body["thinking"] =
+            json!({"type": if request.thinking.requires_support() {"enabled"} else {"disabled"}});
+        if request.thinking.requires_support() {
+            body["reasoning_effort"] = json!("max");
+        }
+    }
+    if provider == "openrouter" {
+        if let Some(model) = request.model.strip_prefix("openrouter/") {
+            body["model"] = json!(model);
+            body["reasoning"] = if request.thinking.requires_support() {
+                json!({"effort":"max","exclude":false})
+            } else {
+                json!({"enabled":false})
+            };
+            body["provider"] = json!({"require_parameters":true});
+        }
+        let offset = usize::from(request.system_text().is_some());
+        for (index, message) in request.messages.iter().enumerate() {
+            if let Some(state) = &message.provider_state
+                && state.provider == provider
+                && state.model == request.model
+            {
+                let details = merge_openrouter_reasoning(&state.output);
+                if !details.is_empty() {
+                    body["messages"][index + offset]["reasoning_details"] = json!(details);
+                }
+            }
+        }
+    }
+    if let Some(effort) = request.reasoning_effort {
+        if provider == "openrouter" {
+            body["reasoning"] = json!({"effort":effort.as_str(),"exclude":false});
+            if let Some(body) = body.as_object_mut() {
+                body.remove("reasoning_effort");
+            }
+        } else {
+            body["reasoning_effort"] = json!(effort.as_str());
+        }
+    }
+    if let Some(mode) = request.summary_thinking {
+        use crate::SummaryThinkingMode;
+        if request.model.starts_with("deepseek-") {
+            body["thinking"] =
+                json!({"type":if mode==SummaryThinkingMode::Off {"disabled"} else {"enabled"}});
+            if mode == SummaryThinkingMode::Off {
+                if let Some(body) = body.as_object_mut() {
+                    body.remove("reasoning_effort");
+                }
+            } else {
+                body["reasoning_effort"] = json!(if mode == SummaryThinkingMode::Low {
+                    "low"
+                } else {
+                    "max"
+                });
+            }
+        } else if request.model.starts_with("qwen") {
+            body["enable_thinking"] = json!(mode != SummaryThinkingMode::Off);
+            if mode != SummaryThinkingMode::Off {
+                body["reasoning_effort"] = json!("max");
+            }
+        }
+    }
+    body
+}
+
+/// Reassemble streamed reasoning details by stable index/id. Provider identity
+/// and the model are checked before this opaque state can reach the wire.
+fn merge_openrouter_reasoning(output: &[Value]) -> Vec<Value> {
+    let mut merged: Vec<Value> = Vec::new();
+    for fragment in output
+        .iter()
+        .filter(|item| item["type"] == "openrouter_reasoning")
+        .flat_map(|item| item["reasoning_details"].as_array().into_iter().flatten())
+    {
+        let found = merged.iter_mut().find(|item| {
+            item["type"] == fragment["type"]
+                && !(item.get("id").is_some()
+                    && fragment.get("id").is_some()
+                    && item.get("id") != fragment.get("id"))
+                && (fragment.get("index").is_some() && item.get("index") == fragment.get("index")
+                    || fragment.get("id").is_some() && item.get("id") == fragment.get("id"))
+        });
+        if let Some(existing) = found {
+            if let (Some(existing), Some(fragment)) =
+                (existing.as_object_mut(), fragment.as_object())
+            {
+                for (key, value) in fragment {
+                    if matches!(key.as_str(), "text" | "data" | "summary") && value.is_string() {
+                        if let Some(current) =
+                            existing.get(key).and_then(Value::as_str).map(str::to_owned)
+                        {
+                            existing.insert(
+                                key.clone(),
+                                Value::String(current + value.as_str().unwrap_or_default()),
+                            );
+                        } else {
+                            existing.insert(key.clone(), value.clone());
+                        }
+                    } else {
+                        existing.insert(key.clone(), value.clone());
+                    }
+                }
+            }
+        } else {
+            merged.push(fragment.clone());
+        }
+    }
+    merged
+}
+
+/// 思考参数（DeepSeek/Kimi/Qwen 尊重开关；GLM 强制思考由预检拒绝关闭）。
 ///
 /// vision 兜底模型单列——实测视觉请求在非思考模式下才稳定返回完整正文
 ///（思考模式可能在较短 `max_tokens` 下只消耗推理预算而没有 content），
@@ -673,11 +1004,13 @@ fn build_request_body(request: &ChatRequest) -> Value {
 fn insert_thinking_params(root: &mut serde_json::Map<String, Value>, request: &ChatRequest) {
     if is_deepseek_vision_model(&request.model) {
         root.insert("thinking".into(), json!({ "type": "disabled" }));
-    } else if request.model.starts_with("deepseek-v4-") {
-        root.insert("thinking".into(), json!({ "type": "enabled" }));
-        root.insert("reasoning_effort".into(), json!("max"));
-    } else if request.model == "kimi-k3" {
-        root.insert("reasoning_effort".into(), json!("max"));
+    } else if request.model.starts_with("deepseek-v4-")
+        || matches!(
+            request.model.as_str(),
+            "deepseek-flash" | "deepseek-v4.1-flash" | "kimi-k3"
+        )
+    {
+        insert_switchable_thinking(root, request.thinking);
     } else if is_glm_forced_thinking_model(&request.model) {
         root.insert(
             "thinking".into(),
@@ -690,6 +1023,10 @@ fn insert_thinking_params(root: &mut serde_json::Map<String, Value>, request: &C
             root.insert("reasoning_effort".into(), json!("max"));
         } else if request.model.starts_with("openai/") {
             root.insert("reasoning".into(), json!({ "enabled": false }));
+        } else {
+            // Chat Completions must receive the explicit switch. Known models
+            // that cannot disable reasoning are rejected before HTTP dispatch.
+            root.insert("reasoning_effort".into(), json!("none"));
         }
     } else if is_high_reasoning_model(&request.model) {
         if request.thinking.requires_support() {
@@ -697,12 +1034,24 @@ fn insert_thinking_params(root: &mut serde_json::Map<String, Value>, request: &C
         } else {
             root.insert("reasoning".into(), json!({ "enabled": false }));
         }
-    } else if (request.model.starts_with("qwen3.8-")
+    } else if request.model.starts_with("qwen3.8-")
         || request.model.starts_with("qwen3.7-")
-        || request.model.starts_with("qwen3.6-"))
-        && request.thinking.requires_support()
+        || request.model.starts_with("qwen3.6-")
     {
-        root.insert("enable_thinking".into(), json!(true));
+        root.insert(
+            "enable_thinking".into(),
+            json!(request.thinking.requires_support()),
+        );
+    }
+}
+
+fn insert_switchable_thinking(root: &mut serde_json::Map<String, Value>, mode: ThinkingMode) {
+    root.insert(
+        "thinking".into(),
+        json!({"type": if mode.requires_support() {"enabled"} else {"disabled"}}),
+    );
+    if mode.requires_support() {
+        root.insert("reasoning_effort".into(), json!("max"));
     }
 }
 
@@ -731,8 +1080,9 @@ fn is_high_reasoning_model(model: &str) -> bool {
 /// 返回 `false`（对照旧 `isDeepSeekV4Model` 排除 vision 的语义）。
 #[must_use]
 pub fn thinking_params_for(model: &str, mode: ThinkingMode) -> bool {
-    (model.starts_with("deepseek-v4-") && !is_deepseek_vision_model(model))
-        || model == "kimi-k3"
+    (((model.starts_with("deepseek-v4-") && !is_deepseek_vision_model(model))
+        || matches!(model, "deepseek-flash" | "deepseek-v4.1-flash" | "kimi-k3"))
+        && mode.requires_support())
         || is_glm_forced_thinking_model(model)
         || ((is_openai_max_reasoning_model(model) || is_high_reasoning_model(model))
             && mode.requires_support())
@@ -791,7 +1141,7 @@ impl LineSplitter {
 /// `appendImageUrlPart`): a non-blank trusted remote URL is forwarded
 /// verbatim, otherwise the base64 payload becomes a data URI, and images
 /// carrying neither are skipped.
-fn resolve_image_url(image: &crate::ImageSource) -> Option<String> {
+pub(crate) fn resolve_image_url(image: &crate::ImageSource) -> Option<String> {
     if let Some(url) = image.url.as_deref()
         && !url.trim().is_empty()
     {
@@ -833,6 +1183,54 @@ mod tests {
     }
 
     #[test]
+    fn incomplete_usage_is_unknown_and_explicit_zero_is_known() {
+        for usage in [
+            json!({}),
+            json!({"prompt_tokens":4}),
+            json!({"completion_tokens":0}),
+            json!({"prompt_tokens":-1,"completion_tokens":2}),
+        ] {
+            assert!(super::parse_usage(&usage).is_none());
+            let payload = json!({"choices":[{"finish_reason":"stop"}],"usage":usage});
+            let (events, error) =
+                super::parse_chunk(&payload.to_string(), &mut std::collections::BTreeMap::new());
+            assert!(error.is_none());
+            assert!(matches!(
+                events.last(),
+                Some(ProviderEvent::Finish { usage: None, .. })
+            ));
+        }
+        assert_eq!(
+            super::parse_usage(&json!({"prompt_tokens":0,"completion_tokens":0})),
+            Some(Usage::default())
+        );
+    }
+
+    #[test]
+    fn summary_wire_override_supports_low_off_without_changing_chat() {
+        use crate::SummaryThinkingMode;
+        let mut request = ChatRequest::new("deepseek-flash").with_thinking(ThinkingMode::Adaptive);
+        assert_eq!(
+            super::build_provider_request(&request, "deepseek")["reasoning_effort"],
+            "max"
+        );
+        request.summary_thinking = Some(SummaryThinkingMode::Low);
+        assert_eq!(
+            super::build_provider_request(&request, "deepseek")["reasoning_effort"],
+            "low"
+        );
+        request.summary_thinking = Some(SummaryThinkingMode::Off);
+        let body = super::build_provider_request(&request, "deepseek");
+        assert_eq!(body["thinking"]["type"], "disabled");
+        assert!(body.get("reasoning_effort").is_none());
+        request.model = "qwen3.7-plus".into();
+        assert_eq!(
+            super::build_provider_request(&request, "dashscope")["enable_thinking"],
+            false
+        );
+    }
+
+    #[test]
     fn request_body_matches_legacy_shape() {
         let body = build_request_body(&qwen_request());
         assert_eq!(body["model"], "qwen3.8-max-0902");
@@ -845,15 +1243,17 @@ mod tests {
         assert_eq!(messages[0]["content"], "be terse");
         assert_eq!(messages[1]["role"], "user");
         assert_eq!(messages[2]["role"], "assistant");
-        // qwen + Disabled → 无思考参数、无 tools 字段。
-        assert!(body.get("enable_thinking").is_none());
+        // qwen + Disabled must override the provider's thinking-on default.
+        assert_eq!(body["enable_thinking"], false);
         assert!(body.get("tools").is_none());
     }
 
     #[test]
     fn request_body_thinking_params_per_model_family() {
-        // deepseek-v4-*：thinking + reasoning_effort=max（无条件）。
-        let deepseek = build_request_body(&ChatRequest::new("deepseek-v4-flash"));
+        // The normal engine's Adaptive default retains enabled + max.
+        let deepseek = build_request_body(
+            &ChatRequest::new("deepseek-v4-flash").with_thinking(ThinkingMode::Adaptive),
+        );
         assert_eq!(deepseek["thinking"]["type"], "enabled");
         assert_eq!(deepseek["reasoning_effort"], "max");
         // deepseek 视觉兜底模型：thinking 固定 disabled 且不发 reasoning_effort。
@@ -861,13 +1261,15 @@ mod tests {
         assert_eq!(vision["thinking"]["type"], "disabled");
         assert!(vision.get("reasoning_effort").is_none());
         // kimi-k3：reasoning_effort=max；且 max_tokens 换名。
-        let kimi = build_request_body(&ChatRequest::new("kimi-k3"));
+        let kimi =
+            build_request_body(&ChatRequest::new("kimi-k3").with_thinking(ThinkingMode::Adaptive));
         assert_eq!(kimi["reasoning_effort"], "max");
         assert!(kimi.get("max_tokens").is_none());
         assert_eq!(kimi["max_completion_tokens"], 8192);
-        // GLM-5.3 系列：即使请求关闭思考，仍固定下发官方要求的完整参数。
+        // GLM-5.3 requires thinking; disabled is rejected before this renderer.
         for model in ["glm-5.3", "glm-5.3-flash"] {
-            let glm = build_request_body(&ChatRequest::new(model));
+            let glm =
+                build_request_body(&ChatRequest::new(model).with_thinking(ThinkingMode::Adaptive));
             assert_eq!(glm["thinking"]["type"], "enabled");
             assert_eq!(glm["thinking"]["clear_thinking"], false);
             assert_eq!(glm["reasoning_effort"], "max");
@@ -875,7 +1277,7 @@ mod tests {
         }
         // qwen3.7-*：仅 thinking 需要支持时下发 enable_thinking。
         let qwen_off = build_request_body(&qwen_request());
-        assert!(qwen_off.get("enable_thinking").is_none());
+        assert_eq!(qwen_off["enable_thinking"], false);
         let qwen_on = build_request_body(
             &ChatRequest::new("qwen3.7-plus").with_thinking(ThinkingMode::Enabled),
         );
@@ -890,7 +1292,7 @@ mod tests {
         );
         assert_eq!(qwen38["enable_thinking"], true);
         let qwen38_off = build_request_body(&ChatRequest::new("qwen3.8-max"));
-        assert!(qwen38_off.get("enable_thinking").is_none());
+        assert_eq!(qwen38_off["enable_thinking"], false);
         // OpenAI Sol / Astra：ZenMux ID 显式关闭；启用时直连与 ZenMux 均使用 max。
         for model in [
             "gpt-5.6-sol",
@@ -899,10 +1301,11 @@ mod tests {
             "openai/gpt-6-astra",
         ] {
             let disabled = build_request_body(&ChatRequest::new(model));
-            assert!(disabled.get("reasoning_effort").is_none());
             if model.starts_with("openai/") {
+                assert!(disabled.get("reasoning_effort").is_none());
                 assert_eq!(disabled["reasoning"]["enabled"], false);
             } else {
+                assert_eq!(disabled["reasoning_effort"], "none");
                 assert!(disabled.get("reasoning").is_none());
             }
             let enabled =
@@ -1319,9 +1722,13 @@ mod tests {
 
     #[test]
     fn thinking_params_helper_mirrors_request_body() {
-        assert!(thinking_params_for(
+        assert!(!thinking_params_for(
             "deepseek-v4-pro",
             ThinkingMode::Disabled
+        ));
+        assert!(thinking_params_for(
+            "deepseek-v4-pro",
+            ThinkingMode::Adaptive
         ));
         // 视觉兜底模型下发的是 disabled，不算思考启用参数。
         assert!(!thinking_params_for(
@@ -1330,7 +1737,8 @@ mod tests {
         ));
         assert!(is_deepseek_vision_model("deepseek-v4-flash-vision-exp"));
         assert!(!is_deepseek_vision_model("deepseek-v4-flash"));
-        assert!(thinking_params_for("kimi-k3", ThinkingMode::Disabled));
+        assert!(!thinking_params_for("kimi-k3", ThinkingMode::Disabled));
+        assert!(thinking_params_for("kimi-k3", ThinkingMode::Adaptive));
         assert!(thinking_params_for("glm-5.3", ThinkingMode::Disabled));
         assert!(thinking_params_for("glm-5.3-flash", ThinkingMode::Disabled));
         assert!(!thinking_params_for(
@@ -1423,5 +1831,65 @@ mod tests {
             body["messages"][0]["content"].as_array().map(Vec::len),
             Some(1)
         );
+    }
+    #[test]
+    fn openrouter_streamed_reasoning_reassembles_only_same_identity() {
+        let fragments = vec![
+            json!({"type":"openrouter_reasoning","reasoning_details":[{"type":"reasoning.text","index":0,"id":"a","text":"first "}]}),
+            json!({"type":"openrouter_reasoning","reasoning_details":[{"type":"reasoning.text","index":0,"id":"a","text":"second"},{"type":"reasoning.encrypted","id":"sealed","data":"a"}]}),
+            json!({"type":"openrouter_reasoning","reasoning_details":[{"type":"reasoning.text","index":0,"id":"b","text":"distinct"},{"type":"reasoning.encrypted","id":"sealed","data":"b"}]}),
+        ];
+        let merged = super::merge_openrouter_reasoning(&fragments);
+        assert_eq!(merged.len(), 3);
+        assert_eq!(merged[0]["text"], "first second");
+        assert_eq!(merged[1]["data"], "ab");
+        assert_eq!(merged[2]["text"], "distinct");
+    }
+
+    #[test]
+    fn kimi_inline_payload_is_rechecked_after_url_conversion() {
+        let mut request = ChatRequest::new("kimi-k3");
+        let capacity = crate::models::capabilities_for("kimi-k3").context_window as usize;
+        request.messages.push(crate::ChatMessage::user_with_images(
+            "inspect",
+            vec![crate::ImageSource {
+                media_type: "image/png".into(),
+                data: Some("A".repeat(capacity)),
+                url: None,
+            }],
+        ));
+        assert!(
+            super::ensure_inline_image_budget(&request)
+                .unwrap_err()
+                .to_string()
+                .contains("IMAGE_BUDGET_EXCEEDED")
+        );
+        assert_eq!(
+            request.messages[0].images[0].data.as_ref().unwrap().len(),
+            capacity
+        );
+        request.messages[0].images[0].data = Some("small".into());
+        assert!(super::ensure_inline_image_budget(&request).is_ok());
+    }
+    #[test]
+    fn explicit_effort_and_stop_override_only_the_requested_wire_options() {
+        let mut request = ChatRequest::new("deepseek-flash").with_thinking(ThinkingMode::Enabled);
+        let default = build_provider_request(&request, "deepseek");
+        assert_eq!(default["reasoning_effort"], "max");
+        assert!(default.get("stop").is_none());
+        request.reasoning_effort = Some(crate::ReasoningEffort::Low);
+        request.stop_sequences = vec![" END ".into(), "完成".into()];
+        crate::validate_request_options(&request, "deepseek").unwrap();
+        let body = build_provider_request(&request, "deepseek");
+        assert_eq!(body["reasoning_effort"], "low");
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["stop"], json!([" END ", "完成"]));
+        assert_eq!(body["max_tokens"], default["max_tokens"]);
+        request.model = "openrouter/openai/gpt-6-astra".into();
+        request.reasoning_effort = Some(crate::ReasoningEffort::Max);
+        crate::validate_request_options(&request, "openrouter").unwrap();
+        let body = build_provider_request(&request, "openrouter");
+        assert_eq!(body["reasoning"]["effort"], "max");
+        assert!(body.get("reasoning_effort").is_none());
     }
 }

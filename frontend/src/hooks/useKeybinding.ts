@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { keyboardCombo } from '@/keyboard/shortcuts';
 
-/** 键盘绑定上下文类型 */
 export type KeybindingContext =
   | 'global' | 'chat' | 'autocomplete' | 'confirmation' | 'help'
   | 'transcript' | 'history_search' | 'task' | 'theme_picker'
@@ -8,138 +8,86 @@ export type KeybindingContext =
   | 'message_selector' | 'message_actions' | 'diff_dialog'
   | 'model_picker' | 'select';
 
-/** 快捷键绑定配置 */
-interface KeyBinding {
+export interface KeyBinding {
   key: string;
   action: string;
   context: KeybindingContext;
   handler: () => void;
+  enabled?: boolean;
+  allowInInput?: boolean;
+  when?: (event: KeyboardEvent) => boolean;
+}
+const activeContexts = new Map<KeybindingContext, number>();
+export const CHORD_TIMEOUT_MS = 1200;
+export function isContextActive(context: KeybindingContext): boolean {
+  return context === 'global' || (activeContexts.get(context) ?? 0) > 0;
 }
 
-// 和弦超时 (毫秒)
-// const CHORD_TIMEOUT_MS = 500;
-
-/**
- * useKeybinding — 键盘快捷键 hook。
- *
- * 在组件中注册键盘绑定，支持：
- * - 单键绑定 (Ctrl+K)
- * - 和弦绑定 (Ctrl+X Ctrl+K)
- * - 浏览器冲突键处理
- * - 上下文感知
- *
- */
-export function useKeybinding(bindings: KeyBinding[]) {
-  const bindingsRef = useRef(bindings);
-  bindingsRef.current = bindings;
-
-  const [pendingChord, _setPendingChord] = useState<string | null>(null);
-  const chordTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const handleKeyDown = useCallback((e: KeyboardEvent) => {
-    // 跳过输入元素内的按键（除非是特殊组合键）
-    const target = e.target as HTMLElement;
-    const isInput = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA'
-      || target.tagName === 'SELECT' || target.isContentEditable;
-
-    const combo = buildCombo(e);
-
-    for (const binding of bindingsRef.current) {
-      if (binding.key === combo) {
-        // 输入元素内只响应带修饰符的组合键
-        if (isInput && !e.ctrlKey && !e.altKey && !e.metaKey) {
-          continue;
-        }
-
-        e.preventDefault();
-        e.stopPropagation();
-        binding.handler();
-        return;
-      }
-    }
-  }, []);
-
-  useEffect(() => {
-    document.addEventListener('keydown', handleKeyDown);
-    const timerAtRegistration = chordTimerRef.current;
-    return () => {
-      document.removeEventListener('keydown', handleKeyDown);
-      if (timerAtRegistration) {
-        clearTimeout(timerAtRegistration);
-      }
-    };
-  }, [handleKeyDown]);
-
-  return { pendingChord };
-}
-
-/**
- * useRegisterKeybindingContext — 注册键盘绑定上下文。
- *
- * 组件挂载时注册上下文，卸载时取消。
- * 上下文激活后其绑定优先于 Global 绑定。
- */
-export function useRegisterKeybindingContext(
-  context: KeybindingContext,
-  isActive: boolean = true
-) {
+/** Contexts are reference counted: unmounting one panel cannot unregister another. */
+export function useRegisterKeybindingContext(context: KeybindingContext, isActive = true) {
   useEffect(() => {
     if (!isActive) return;
-    // 注册到全局上下文管理器
-    activeContexts.add(context);
+    activeContexts.set(context, (activeContexts.get(context) ?? 0) + 1);
     return () => {
-      activeContexts.delete(context);
+      const remaining = (activeContexts.get(context) ?? 1) - 1;
+      if (remaining > 0) activeContexts.set(context, remaining);
+      else activeContexts.delete(context);
     };
   }, [context, isActive]);
 }
 
-/** 全局活跃上下文集合 */
-const activeContexts = new Set<KeybindingContext>();
+/** Dispatches configured shortcuts after React/editor handlers have had first refusal. */
+export function useKeybinding(bindings: KeyBinding[]) {
+  const bindingsRef = useRef(bindings);
+  bindingsRef.current = bindings;
+  const [pendingChord, setPendingChord] = useState<string | null>(null);
+  const chordRef = useRef<string | null>(null);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const clearChord = useCallback(() => {
+    if (timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = null;
+    chordRef.current = null;
+    setPendingChord(null);
+  }, []);
 
-/** 检查上下文是否活跃 */
-export function isContextActive(context: KeybindingContext): boolean {
-  return context === 'global' || activeContexts.has(context);
+  useEffect(() => {
+    const keydown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.isComposing || event.keyCode === 229 || event.repeat) return;
+      if (event.key === 'Escape' && chordRef.current) {
+        clearChord(); event.preventDefault(); return;
+      }
+      const combo = keyboardCombo(event);
+      if (!combo) return;
+      const target = event.target;
+      const editable = target instanceof HTMLElement && (target.matches('input,textarea,select') || target.isContentEditable);
+      const eligible = bindingsRef.current.filter(binding => binding.enabled !== false
+        && isContextActive(binding.context) && (!binding.when || binding.when(event))
+        && (!editable || binding.allowInInput || event.ctrlKey || event.altKey || event.metaKey))
+        .sort((a, b) => Number(a.context === 'global') - Number(b.context === 'global'));
+      const sequence = chordRef.current ? `${chordRef.current} ${combo}` : combo;
+      const match = eligible.find(binding => binding.key === sequence);
+      clearChord();
+      if (match) {
+        event.preventDefault(); event.stopPropagation(); match.handler(); return;
+      }
+      if (eligible.some(binding => binding.key.startsWith(`${sequence} `))) {
+        event.preventDefault(); event.stopPropagation();
+        chordRef.current = sequence;
+        setPendingChord(sequence);
+        timerRef.current = setTimeout(clearChord, CHORD_TIMEOUT_MS);
+      }
+    };
+    window.addEventListener('keydown', keydown);
+    document.addEventListener('focusin', clearChord);
+    window.addEventListener('blur', clearChord);
+    return () => {
+      window.removeEventListener('keydown', keydown);
+      document.removeEventListener('focusin', clearChord);
+      window.removeEventListener('blur', clearChord);
+      if (timerRef.current) clearTimeout(timerRef.current);
+      chordRef.current = null;
+    };
+  }, [clearChord]);
+  return { pendingChord };
 }
-
-/**
- * 构建按键组合字符串。
- */
-function buildCombo(e: KeyboardEvent): string {
-  const parts: string[] = [];
-  if (e.ctrlKey) parts.push('ctrl');
-  if (e.altKey) parts.push('alt');
-  if (e.shiftKey) parts.push('shift');
-  if (e.metaKey) parts.push('meta');
-
-  const key = normalizeKey(e.key);
-  if (!['Control', 'Alt', 'Shift', 'Meta'].includes(e.key)) {
-    parts.push(key);
-  }
-
-  return parts.join('+');
-}
-
-/**
- * 标准化键名。
- */
-function normalizeKey(key: string): string {
-  switch (key) {
-    case 'Escape': return 'escape';
-    case 'Enter': return 'enter';
-    case ' ': return 'space';
-    case 'ArrowUp': return 'up';
-    case 'ArrowDown': return 'down';
-    case 'ArrowLeft': return 'left';
-    case 'ArrowRight': return 'right';
-    case 'Backspace': return 'backspace';
-    case 'Delete': return 'delete';
-    case 'Tab': return 'tab';
-    case 'PageUp': return 'pageup';
-    case 'PageDown': return 'pagedown';
-    case 'Home': return 'home';
-    case 'End': return 'end';
-    default: return key.toLowerCase();
-  }
-}
-
 export default useKeybinding;

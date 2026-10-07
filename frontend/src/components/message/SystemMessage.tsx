@@ -10,7 +10,7 @@
  */
 
 import React from 'react';
-import { Info, Scissors, Terminal, Minimize2, Loader2 } from 'lucide-react';
+import { Info, Scissors, Terminal, Minimize2, Loader2, AlertTriangle } from 'lucide-react';
 import type { Message } from '@/types';
 import { GitDiffPanel } from '@/components/git/GitDiffPanel';
 import { GitCommitPanel } from '@/components/git/GitCommitPanel';
@@ -26,6 +26,25 @@ interface SystemMessageProps {
 const SystemMessage: React.FC<SystemMessageProps> = ({ message }) => {
     const subtype = message.subtype;
     const metadata = (message as any).metadata as Record<string, unknown> | undefined;
+
+    // 任务边界标记 —— 仅供轮次任务分节推导（store/selectors/turnSections）
+    // 消费的结构化数据，不渲染成聊天气泡
+    if (subtype === 'task_boundary') {
+        return null;
+    }
+
+    if (subtype === 'session_merge') {
+        return (
+            <section className="system-message m-3 rounded-xl border border-hairline bg-sunken2 p-4 text-sm text-t2" aria-label="合并交接">
+                <p className="font-medium text-t1">合并交接已就绪</p>
+                <p className="mt-2">来源资料已保留，可以在此继续工作。历史内容仅供参考，新的操作仍遵循当前会话权限。</p>
+                <details className="mt-3">
+                    <summary className="cursor-pointer text-accent2-ink">查看交接摘要与来源记录</summary>
+                    <pre className="mt-3 max-h-96 overflow-auto whitespace-pre-wrap break-words text-[13px] leading-relaxed">{message.content}</pre>
+                </details>
+            </section>
+        );
+    }
 
     // JSX result — route by metadata.action
     if (subtype === 'jsx_result' && metadata) {
@@ -55,7 +74,7 @@ const SystemMessage: React.FC<SystemMessageProps> = ({ message }) => {
                             changedFiles: metadata.changedFiles as string[],
                             fileCount: metadata.fileCount as number,
                         }}
-                        onCommit={(msg) => sendSlashCommand('commit', `"${msg}"`)}
+                        onCommit={(msg) => sendSlashCommand('commit', msg)}
                     />
                 </div>
             );
@@ -100,12 +119,12 @@ const SystemMessage: React.FC<SystemMessageProps> = ({ message }) => {
     if (subtype === 'compact_boundary' || subtype === 'microcompact_boundary') {
         return (
             <div className="system-message flex items-center gap-2 px-4 py-2 my-1">
-                <div className="flex-1 h-px bg-gray-700" />
-                <div className="flex items-center gap-1.5 text-xs text-gray-500">
+                <div className="flex-1 h-px bg-hairline" />
+                <div className="flex items-center gap-1.5 text-[13px] text-t3">
                     <Minimize2 size={12} />
                     <span>{message.content || 'Context compacted'}</span>
                 </div>
-                <div className="flex-1 h-px bg-gray-700" />
+                <div className="flex-1 h-px bg-hairline" />
             </div>
         );
     }
@@ -114,12 +133,12 @@ const SystemMessage: React.FC<SystemMessageProps> = ({ message }) => {
     if (subtype === 'snip_boundary' || subtype === 'snip_marker') {
         return (
             <div className="system-message flex items-center gap-2 px-4 py-2 my-1">
-                <div className="flex-1 h-px bg-yellow-700/50" />
-                <div className="flex items-center gap-1.5 text-xs text-yellow-600">
+                <div className="flex-1 h-px bg-warnsoft" />
+                <div className="flex items-center gap-1.5 text-[13px] text-warn">
                     <Scissors size={12} />
                     <span>{message.content || 'Context truncated'}</span>
                 </div>
-                <div className="flex-1 h-px bg-yellow-700/50" />
+                <div className="flex-1 h-px bg-warnsoft" />
             </div>
         );
     }
@@ -128,8 +147,8 @@ const SystemMessage: React.FC<SystemMessageProps> = ({ message }) => {
     if (subtype === 'command') {
         return (
             <div className="system-message px-4 py-1 my-0.5">
-                <div className="flex items-center gap-1.5 text-xs text-gray-500">
-                    <Terminal size={12} className="text-gray-600" />
+                <div className="flex items-center gap-1.5 text-[13px] text-t3">
+                    <Terminal size={12} className="text-t4" />
                     <span>{message.content}</span>
                 </div>
             </div>
@@ -140,9 +159,9 @@ const SystemMessage: React.FC<SystemMessageProps> = ({ message }) => {
     if (subtype === 'command_result') {
         return (
             <div className="system-message px-4 py-2 my-1">
-                <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-gray-800/50 border border-gray-700/50">
-                    <Terminal size={14} className="text-gray-500 flex-shrink-0 mt-0.5" />
-                    <pre className="text-xs text-gray-400 whitespace-pre-wrap flex-1">
+                <div className="flex items-start gap-2 px-3 py-2 rounded-[14px] bg-sunken2 border border-hairline">
+                    <Terminal size={14} className="text-t3 shrink-0 mt-0.5" />
+                    <pre className="text-[13px] text-t3 whitespace-pre-wrap flex-1">
                         {message.content}
                     </pre>
                 </div>
@@ -154,9 +173,9 @@ const SystemMessage: React.FC<SystemMessageProps> = ({ message }) => {
     if (subtype === 'prompt_executing') {
         return (
             <div className="system-message px-4 py-1 my-0.5">
-                <div className="flex items-center gap-1.5 text-xs text-blue-400/70">
+                <div className="flex items-center gap-1.5 text-[13px] text-accent2-ink">
                     <Loader2 size={12} className="animate-spin" />
-                    <span className="text-gray-500">{message.content}</span>
+                    <span className="text-t3">{message.content}</span>
                 </div>
             </div>
         );
@@ -166,11 +185,31 @@ const SystemMessage: React.FC<SystemMessageProps> = ({ message }) => {
     if (subtype === 'local_command') {
         return (
             <div className="system-message px-4 py-2 my-1">
-                <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-gray-800/50 border border-gray-700/50">
-                    <Terminal size={14} className="text-gray-500 flex-shrink-0" />
-                    <pre className="text-xs text-gray-400 whitespace-pre-wrap flex-1">
+                <div className="flex items-center gap-2 px-3 py-2 rounded-[14px] bg-sunken2 border border-hairline">
+                    <Terminal size={14} className="text-t3 shrink-0" />
+                    <pre className="text-[13px] text-t3 whitespace-pre-wrap flex-1">
                         {message.content}
                     </pre>
+                </div>
+            </div>
+        );
+    }
+
+    // Provider 错误横幅 — 配额/权限类错误必须醒目可见 (subtype: provider_error)
+    if (subtype === 'provider_error') {
+        const httpStatus = metadata?.httpStatus as number | undefined;
+        return (
+            <div className="system-message px-4 py-2 my-1" data-testid="provider-error-banner">
+                <div className="flex items-start gap-2.5 px-3.5 py-3 rounded-[14px] bg-errsoft border-2 border-err">
+                    <AlertTriangle size={16} className="text-err shrink-0 mt-0.5" />
+                    <div className="flex-1 min-w-0">
+                        <div className="text-sm text-errstrong dark:text-err font-medium whitespace-pre-wrap">
+                            {message.content}
+                        </div>
+                        <div className="text-[13px] text-err mt-1">
+                            {message.errorCode}{httpStatus !== undefined ? ` · HTTP ${httpStatus}` : ''}
+                        </div>
+                    </div>
                 </div>
             </div>
         );
@@ -180,17 +219,17 @@ const SystemMessage: React.FC<SystemMessageProps> = ({ message }) => {
     if (message.errorCode) {
         return (
             <div className="system-message px-4 py-2 my-1">
-                <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-red-900/20 border border-red-700/50">
-                    <Info size={14} className="text-red-400 flex-shrink-0 mt-0.5" />
+                <div className="flex items-start gap-2 px-3 py-2 rounded-[14px] bg-errsoft border border-err">
+                    <Info size={14} className="text-err shrink-0 mt-0.5" />
                     <div className="flex-1 min-w-0">
-                        <div className="text-xs text-red-400 font-medium mb-0.5">
+                        <div className="text-[13px] text-errstrong dark:text-err font-medium mb-0.5">
                             Error: {message.errorCode}
                         </div>
-                        <div className="text-xs text-red-300 whitespace-pre-wrap">
+                        <div className="text-[13px] text-err whitespace-pre-wrap">
                             {message.content}
                         </div>
                         {message.retryable && (
-                            <div className="text-xs text-red-400/60 mt-1 italic">
+                            <div className="text-[13px] text-err mt-1 italic">
                                 This error may be retryable
                             </div>
                         )}
@@ -203,12 +242,12 @@ const SystemMessage: React.FC<SystemMessageProps> = ({ message }) => {
     // Default system text
     return (
         <div className="system-message flex items-center gap-2 px-4 py-2 my-1">
-            <div className="flex-1 h-px bg-gray-700/50" />
-            <div className="flex items-center gap-1.5 text-xs text-gray-500 max-w-md text-center">
-                <Info size={12} className="flex-shrink-0" />
+            <div className="flex-1 h-px bg-hairline" />
+            <div className="flex items-center gap-1.5 text-[13px] text-t3 max-w-md text-center">
+                <Info size={12} className="shrink-0" />
                 <span>{message.content}</span>
             </div>
-            <div className="flex-1 h-px bg-gray-700/50" />
+            <div className="flex-1 h-px bg-hairline" />
         </div>
     );
 };

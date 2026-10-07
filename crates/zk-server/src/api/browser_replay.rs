@@ -13,6 +13,7 @@ use std::time::{Duration, SystemTime};
 
 use axum::Json;
 use axum::extract::{Path as AxumPath, State};
+use axum::http::HeaderMap;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -253,10 +254,37 @@ fn set_private_file_permissions(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+async fn require_replay_owner(
+    state: &AppState,
+    id: &str,
+    headers: &HeaderMap,
+) -> Result<(), ApiError> {
+    if crate::session_access::require_session_header(headers)? != id
+        || state.db.is_merge_billing_session(id).await?
+    {
+        return Err(ApiError::session_not_found(id));
+    }
+    if state.db.session_retention(id).await? != zk_db::content::ContentRetention::Persistent {
+        return Err(ApiError::validation_with_code(
+            "EPHEMERAL_OPERATION_UNSUPPORTED",
+            "Temporary browser observations are available as Run evidence, not a disk replay timeline",
+        ));
+    }
+    let session = state
+        .db
+        .get_session(id)
+        .await?
+        .ok_or_else(|| ApiError::session_not_found(id))?;
+    crate::workspace::require_current_binding(&state.config, &session.working_dir)?;
+    Ok(())
+}
+
 pub(crate) async fn get_replay(
     State(state): State<AppState>,
     AxumPath(replay_id): AxumPath<String>,
+    headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
+    require_replay_owner(&state, &replay_id, &headers).await?;
     match state.browser_replay.get(&replay_id) {
         Ok(Some(data)) => Ok(Json(data)),
         Ok(None) => Err(ApiError::not_found(
@@ -273,7 +301,9 @@ pub(crate) async fn get_replay(
 pub(crate) async fn delete_replay(
     State(state): State<AppState>,
     AxumPath(replay_id): AxumPath<String>,
+    headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
+    require_replay_owner(&state, &replay_id, &headers).await?;
     match state.browser_replay.remove(&replay_id) {
         Ok(true) => Ok(Json(json!({ "status": "deleted", "replayId": replay_id }))),
         Ok(false) => Err(ApiError::not_found(

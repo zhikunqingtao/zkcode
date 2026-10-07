@@ -37,6 +37,7 @@ use zk_db::Db;
 #[derive(Debug)]
 pub struct FakeModes {
     mode: Mutex<PermissionMode>,
+    script: Mutex<std::collections::VecDeque<PermissionMode>>,
 }
 
 impl Default for FakeModes {
@@ -50,16 +51,24 @@ impl FakeModes {
     pub fn new(mode: PermissionMode) -> Self {
         Self {
             mode: Mutex::new(mode),
+            script: Mutex::new(std::collections::VecDeque::new()),
         }
     }
 
     pub fn set(&self, mode: PermissionMode) {
         *self.mode.lock().expect("modes lock") = mode;
     }
+
+    pub fn script(&self, modes: impl IntoIterator<Item = PermissionMode>) {
+        *self.script.lock().expect("script lock") = modes.into_iter().collect();
+    }
 }
 
 impl ModeProvider for FakeModes {
     fn mode(&self, _root_session_id: &str) -> PermissionMode {
+        if let Some(mode) = self.script.lock().expect("script lock").pop_front() {
+            self.set(mode);
+        }
         *self.mode.lock().expect("modes lock")
     }
 }

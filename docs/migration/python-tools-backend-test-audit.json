@@ -1,0 +1,1233 @@
+{
+  "sourceRange": "3e536438..053adf90",
+  "method": "Read complete source net test hunks and inspect native assertions. Partial/different/legacy cases are explicit; no source JUnit execution is claimed. Real gaps found in image cancellation, screenshot MIME, attachment metadata/filenames and temporary cleanup were fixed during this review.",
+  "paths": {
+    "backend/src/test/java/com/aicodeassistant/controller/AttachmentControllerTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/controller/AttachmentControllerTest.java",
+      "sourceRange": "3e536438..053adf90",
+      "sourceDiffSha256": "c0d0594535971c4e4ee5ff6a56b81f4ca0ced3d0872cae4952457a569ce2fed4",
+      "reviewStatus": "reviewed_changed_assertions",
+      "changedMethods": [
+        "chineseUploadPublishesMetadataAndRestoresOriginalNameAfterRebuild",
+        "oldAttachmentWithoutMetadataFallsBackToStorageFileName",
+        "corruptedOrMismatchedMetadataFallsBackToStorageFileName",
+        "rejectsShortPrefixesAndNonCanonicalUuids",
+        "multipleCandidatesReturnConflictAndTempFilesAreNotCandidates",
+        "tempAndDirectoryEntriesAreIgnored",
+        "legitimatePartAndTmpSuffixesStayDownloadableWhileHiddenTempsAreIgnored",
+        "symlinkedCandidateIsIgnored",
+        "uploadsAndDownloadsThroughRealAndSymlinkedRoots",
+        "hardensExtensionToAsciiAlphanumericOrNothing",
+        "uploadFailureCleansThisAttemptsTempFileAndHalfPublishedState",
+        "initFailsFastWhenMetadataPathIsOccupiedByARegularFile",
+        "oversizeUploadIsRejectedWithoutWritingAnyFile"
+      ],
+      "sourceAssertions": [
+        "Chinese original display name survives reconstructed reader; metadata mismatches/corruption safely fall back.",
+        "Full canonical UUID only; ambiguous candidates409, no symlink/directory/temp candidates.",
+        "Bounded extension,10MiB upload, atomic payload/metadata cleanup, symlinked upload roots."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/api/attachment.rs"
+      ],
+      "actualNativeAssertions": [
+        "unicode_metadata_survives_reopen_and_corruption_falls_back_to_storage_name",
+        "exact_uuid_conflict_and_symlinks_never_return_arbitrary_candidate",
+        "metadata_failure_leaves_no_payload_and_symlinked_upload_root_is_supported",
+        "attachment_names_and_lookup_are_bounded"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "The test audit found missing metadata/409/UTF8 download behavior and implemented it. Six native attachment tests pass /tmp/zk-attachment-final-tests.log.",
+      "uncoveredOrDifferentAssertions": [
+        "Exact Java .upload temporary-prefix spelling is not copied; native UUID hidden temps are never candidates.",
+        "No Java historical-data import; a bare existing local payload has safe filename fallback only.",
+        "10MiB HTTP upload and failure after metadata link are implemented but not all source fault-injection cases have independent new Rust tests."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/controller/FileControllerWorkspaceTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/controller/FileControllerWorkspaceTest.java",
+      "sourceRange": "3e536438..053adf90",
+      "sourceDiffSha256": "74b190003bd6be73d27309e9545f38294bb91fd125db7d828a783ff3890d2447",
+      "reviewStatus": "reviewed_changed_assertions",
+      "changedMethods": [
+        "previewsChineseFilenamesWithInlineUtf8Disposition"
+      ],
+      "sourceAssertions": [
+        "Chinese inline filename with RFC5987 and nosniff."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/api/file.rs",
+        "crates/zk-server/src/api/attachment.rs"
+      ],
+      "actualNativeAssertions": [
+        "preview_filename_is_ascii_safe_and_preserves_utf8"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Native authorized session preview uses common safe Content-Disposition. Existing router/file scope retained. The full workspace gate passes preview_filename_is_ascii_safe_and_preserves_utf8.",
+      "uncoveredOrDifferentAssertions": [
+        "Source mocks SessionFileAccessService; native policy is production session/project authorization."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "priorVerificationNotes": [
+        "Native authorized session preview uses common safe Content-Disposition. Existing router/file scope retained; final server gate pending."
+      ],
+      "latestNativeVerification": {
+        "path": "/tmp/zk-workspace-tests-resume7.txt",
+        "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7",
+        "exitCode": 0
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/util/ContentDispositionEncoderTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/util/ContentDispositionEncoderTest.java",
+      "sourceRange": "3e536438..053adf90",
+      "sourceDiffSha256": "5e55185cc6768f314bb7d132e651f4772325f0b854465cd85fc575ed33689729",
+      "reviewStatus": "reviewed_changed_assertions",
+      "changedMethods": [
+        "encodesChineseNamesWithAsciiFallbackAndUtf8PercentEncoding",
+        "keepsAsciiNamesAndPercentEncodesSpecialCharacters",
+        "preservesRfc5987AttrCharsAndEncodesTheRest",
+        "encodesEmojiWithoutSplittingTheSurrogatePair",
+        "stripsControlCharactersAndPreventsCrlfInjection",
+        "removesBidiControlsFromBothFilenameFormsAndFallback",
+        "fallsBackWhenBidiControlsAreTheEntireName",
+        "preservesLegitimateTextAndNonBidiFormatting",
+        "sanitizesDispositionTypeAgainstHeaderInjection",
+        "extractsBasenameFromUnixAndWindowsPaths",
+        "fallsBackToTheProvidedNameWhenTheRawNameIsEmpty",
+        "fallsBackToLiteralFileWhenBothNamesAreEmpty",
+        "truncatesTo200Utf8BytesWithoutCuttingCharacters",
+        "preservesOfficeExtensionsInBothFilenameFormsForLongChineseNames",
+        "preservesOfficeExtensionsInBothFilenameFormsForLongEmojiNames",
+        "retainsOrdinaryTruncationForUnsafeOrOverlongSuffixes",
+        "doesNotTruncateNamesAtOrBelowTheLimit",
+        "headerAlwaysCarriesBothAsciiAndUtf8Forms"
+      ],
+      "sourceAssertions": [
+        "Bidi controls removed, legitimate ZWJ/ZWNJ/language text preserved; basename extraction.",
+        "200 UTF8 bytes with intact code points and Office extensions; ASCII fallback and RFC5987 encoding; CRLF rejected."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/api/attachment.rs",
+        "crates/zk-server/src/api/file.rs"
+      ],
+      "actualNativeAssertions": [
+        "display_names_remove_bidi_but_preserve_unicode_and_complete_office_extensions",
+        "preview_filename_is_ascii_safe_and_preserves_utf8"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Native names/header code unified after this audit; new attachment6pass.",
+      "uncoveredOrDifferentAssertions": [
+        "Native disposition kind is allowlisted to inline/attachment rather than source arbitrary sanitized type.",
+        "All uncommon RFC attr characters are implemented but not individually parameterized in native test."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/service/PythonCapabilityAwareClientCorrelationTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/service/PythonCapabilityAwareClientCorrelationTest.java",
+      "sourceRange": "3e536438..053adf90",
+      "sourceDiffSha256": "b6933c5e49cff2785d5d5f79cb9a229a65c3407adfa25f2938ac553477d20ec7",
+      "reviewStatus": "reviewed_changed_assertions",
+      "changedMethods": [
+        "journeyRefusalsPreserveCodeWithoutRetry",
+        "unknownJourneyErrorsKeepGenericFallbackWithoutRetry"
+      ],
+      "sourceAssertions": [
+        "Seven stable journey refusals survive HTTP status codes without retry; unknown error bodies never leak."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/python/client.rs",
+        "crates/zk-server/tests/python_sidecar.rs"
+      ],
+      "actualNativeAssertions": [
+        "journey_errors_allow_only_stable_refusals_without_response_details",
+        "journey_refusals_are_stable_and_side_effects_are_not_retried"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Real UDS8requests/8responses for7codes+unknown; /tmp/zk-journey-refusal-tests.log pass. Source Java HTTP mocks replaced by actual UDS.",
+      "uncoveredOrDifferentAssertions": [],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": true
+    },
+    "backend/src/test/java/com/aicodeassistant/service/PythonProcessManagerTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/service/PythonProcessManagerTest.java",
+      "sourceRange": "3e536438..053adf90",
+      "sourceDiffSha256": "f9036ac9737fcd69890ba5d4eea7ef37acf84049a2765761e5da5bb81e6ad81e",
+      "reviewStatus": "reviewed_changed_assertions",
+      "changedMethods": [
+        "unconfirmedOldGenerationIsRetainedAndBlocksRestart",
+        "successfulCleanupAlsoHandlesAnExitedRootAndClearsOwnership"
+      ],
+      "sourceAssertions": [
+        "Unconfirmed process generation remains owned and blocks restart; exited parent still cleans owned descendants."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/python/sidecar.rs"
+      ],
+      "actualNativeAssertions": [
+        "stopping_reaped_parent_still_releases_owned_orphan_group",
+        "missing_group_identity_retains_owner_and_prevents_restart"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Real POSIX PGID subprocess tests; /tmp/zk-python-final-audit-tests2.log53pass. Native capturedPGID independent of reaped Child::id.",
+      "uncoveredOrDifferentAssertions": [],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": true
+    },
+    "backend/src/test/java/com/aicodeassistant/tool/impl/FileEditToolUnitTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/tool/impl/FileEditToolUnitTest.java",
+      "sourceRange": "3e536438..053adf90",
+      "sourceDiffSha256": "7a9dbc3758b3d5af535fb7e3cb008ef7e7bb2aa1b2d3eeb490046d3c637d8a68",
+      "reviewStatus": "reviewed_changed_assertions",
+      "changedMethods": [
+        "actualDiffUsesMatchedFileTextAndAllReplacements",
+        "displayBoundsDoNotTruncateTheFileOrOriginalDiff",
+        "hugeSingleLinePreviewEndsBeforeTheIncompleteLine",
+        "displayRetainsCompleteChangedLineEndingExactlyAtCharacterLimit",
+        "displayRetainsExactlyFiveHundredLinesWithoutTruncation",
+        "bookkeepingFailureKeepsAppliedResultWithoutInventingDiff",
+        "useRealReadState",
+        "rejectsEmptyOldStringForExistingFiles",
+        "rejectsEmptyMatchProducedByNormalization",
+        "missingFileStillAllowsCreation",
+        "doubleEmptyStringsKeepNoChangePriority",
+        "unreadNonemptyInputStillRequiresRead",
+        "staleReadStillRequiresReread",
+        "realWhitespaceMatchesRemainEditable",
+        "normalizedSearchMayBeEmptyWhenActualMatchIsNot"
+      ],
+      "sourceAssertions": [
+        "Actual matched file text determines diff, replace_all covers all occurrences.",
+        "Display limited to complete lines64KiB/500lines while disk/full diff intact.",
+        "Empty literal/normalization matches cannot write; read/stale/CAS checks keep priority; missing files may create."
+      ],
+      "nativeImplementation": [
+        "crates/zk-tools/src/file_edit.rs"
+      ],
+      "actualNativeAssertions": [
+        "display_diff_is_bounded_without_cutting_unicode_or_long_lines",
+        "existing_file_empty_match_never_inserts_even_with_replace_all",
+        "replaces_unique_occurrence_and_reports_diff_and_emits_artifact_receipt",
+        "detects_external_modification_as_stale",
+        "digest_cas_detects_mutation_even_when_mtime_does_not_advance",
+        "fuzzy_matching_covers_all_five_strategies"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Native349tools gate previouslypassed; preview is UTF8 byte ceiling preserving valuable native CAS/receipt.",
+      "uncoveredOrDifferentAssertions": [
+        "Source counts Java UTF16 display characters; native64KiB is stricter byte bound.",
+        "Exact500line and64KiB edge/newline equality and post-commit bookkeeping failure do not yet each have a dedicated equivalent assertion."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/tool/impl/GrepToolPagingTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/tool/impl/GrepToolPagingTest.java",
+      "sourceRange": "3e536438..053adf90",
+      "sourceDiffSha256": "343cfcb5664e3b7448ac52ab565ab6a7f5ef3aa7ddee6a73e9e7fcb0092e507a",
+      "reviewStatus": "reviewed_changed_assertions",
+      "changedMethods": [
+        "setUp",
+        "positiveLimitAndOffsetReturnTheRequestedPage",
+        "contextAndPagingCountOutputLinesNotOnlyMatches",
+        "nonPositiveLimitDisablesPagingAndIgnoresOffset",
+        "disablingPagingStillRetainsTheOutputCharacterLimit",
+        "defaultPagingAndZeroContextKeepAllMatches",
+        "representableIntegerStringsRetainRuntimeCompatibility",
+        "exactReadCountBoundaryDoesNotIntroduceASmallerPagingLimit",
+        "disabledPagingDoesNotValidateAnUnusedOffset",
+        "nonContentModeStillIgnoresUnusedContextValues",
+        "invalidNumbersReturnValidationBeforePathAccessOrSearchStarts"
+      ],
+      "sourceAssertions": [
+        "Checked integer/string32bit numbers and offset+limit+sentinel bounds before IO.",
+        "Positive offset/limit pages output/context lines; nonpositive limits ignore unused offset but retain global output cap."
+      ],
+      "nativeImplementation": [
+        "crates/zk-tools/src/grep.rs"
+      ],
+      "actualNativeAssertions": [
+        "exact_paging_context_validation_and_disabled_offset",
+        "content_mode_emits_line_numbers_and_context",
+        "head_limit_truncates_and_bad_inputs_are_rejected",
+        "broad_search_excludes_protected_descendants_but_explicit_root_is_searchable"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Native in-process regex scan retained; all numeric invalid cases share parser. Existing tools349pass.",
+      "uncoveredOrDifferentAssertions": [
+        "Native relative directory-result paths retained instead of Java absolute rg output.",
+        "Native global10000line/20000char bound retained; source can scan beyond10000 before output cap."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/tool/impl/GrepToolPathRestorationTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/tool/impl/GrepToolPathRestorationTest.java",
+      "sourceRange": "3e536438..053adf90",
+      "sourceDiffSha256": "e0355442f6418f9df6f2fc7c4c74e0551904f54240415747e5f4319f0e9c94b2",
+      "reviewStatus": "reviewed_changed_assertions",
+      "changedMethods": [
+        "restoresForwardSlashOutputWithoutChangingMatchText",
+        "doesNotDuplicateTrailingSeparatorOrChangeEmptyOutput",
+        "restoresWindowsPrefixesForDriveAndUncRoots",
+        "preservesLiteralBackslashesOnUnix"
+      ],
+      "sourceAssertions": [
+        "Only result-path prefixes change; literal slash/backslash match text unaffected; Unix root/trailing separator cases."
+      ],
+      "nativeImplementation": [
+        "crates/zk-tools/src/grep.rs"
+      ],
+      "actualNativeAssertions": [
+        "content_mode_emits_line_numbers_and_context",
+        "lists_matching_files_by_default"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Native renders matches from Path directly, so no shell rg-prefix restoration stage or text replacement.",
+      "uncoveredOrDifferentAssertions": [
+        "Windows drive/UNC tests excluded on Apple Silicon macOS.",
+        "Native established relative result paths retained; exact Java absolute-path spelling not copied."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/mcp/McpToolAdapterResultTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/mcp/McpToolAdapterResultTest.java",
+      "sourceRange": "3e536438..053adf90",
+      "sourceDiffSha256": "0a3304a40d5e2bedd03b4aa1b73750cf9a3bc200bb6b61ad06af6242c9bda74d",
+      "reviewStatus": "reviewed_changed_assertions",
+      "changedMethods": [
+        "onlyBooleanTrueChangesSuccessfulResults",
+        "remoteToolErrorIsExplicitConservativeAndNeverCachedOrRetried",
+        "errorPrefixSurvivesEmptyAndTruncatedDiagnostics",
+        "successfulOutputRetainsExistingTruncationExactly",
+        "exceptionsAfterSuccessKeepTheirOriginalErrorCodesInsteadOfReplayingSuccess",
+        "disconnectedServerCannotReceiveAnotherServersSameNameAndArgumentsResult",
+        "disconnectedWriteToolCannotReplayItsPreviousSuccessfulWrite",
+        "uncachedDisconnectedCallStillReportsTheOriginalConnectionFailure",
+        "cancellationCallbackStillUsesTheRegisteredProgressToken",
+        "actualAdapterBodyReachesChatAndResponsesRequests"
+      ],
+      "sourceAssertions": [
+        "Only boolean true means remote error, with truthful prefix/UNKNOWN/NEVER; errors never replay earlier success.",
+        "Success repeated RPC still calls remote; server identity isolation,1MiB truncation,cancel token cleanup.",
+        "Tool error text survives chat/Responses projection."
+      ],
+      "nativeImplementation": [
+        "crates/zk-mcp/src/tool_adapter.rs",
+        "crates/zk-llm/src/responses.rs",
+        "crates/zk-llm/src/openai_compat.rs"
+      ],
+      "actualNativeAssertions": [
+        "tool_level_is_error_never_enters_success_cache",
+        "successful_observations_never_mask_later_connection_or_timeout_failures",
+        "cache_key_is_scoped_by_server_and_tool",
+        "result_is_truncated_at_one_megabyte",
+        "progress_tracker_is_registered_and_always_unregistered",
+        "cancellation_during_call_sends_cancelled_notification"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Native adapter180tests pass in capability evidence; no external MCP success is claimed.",
+      "uncoveredOrDifferentAssertions": [
+        "Source integrated adapter-to-two-provider projection not reproduced as one chained test; native adapter and provider projection tested separately."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/tool/impl/OfficeToolchainExecutionTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/tool/impl/OfficeToolchainExecutionTest.java",
+      "sourceRange": "3e536438..053adf90",
+      "sourceDiffSha256": "31d5c750e8f5005727b45c5811930b89fa9b72e90f95875a52afa05b1fd4c680",
+      "reviewStatus": "reviewed_changed_assertions",
+      "changedMethods": [
+        "fixtureGeneratorProducesXlsxFixturesThroughRealBashTool",
+        "structureCheckAcceptsGeneratedPositiveXlsx",
+        "structureCheckFlagsNegativeXlsxWithReasonCode"
+      ],
+      "sourceAssertions": [
+        "Actual Bash invokes Python fixture generator and positive/negative XLSX checker with exit0/2 and exact reason code."
+      ],
+      "nativeImplementation": [
+        "crates/zk-tools/tests/office_toolchain.rs",
+        "tools/office-regression/native_runner.py"
+      ],
+      "actualNativeAssertions": [
+        "real_bash_generates_and_checks_positive_and_negative_office_artifacts"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Added true Rust Bash→owned process→Python integration after source test audit: /tmp/zk-office-bash-tests.log1pass. Separate native Office41actual LibreOffice/PDF/Chromium tests alreadypassed. No Docker or Java mocks executed.",
+      "uncoveredOrDifferentAssertions": [],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": true
+    },
+    "backend/src/test/java/com/aicodeassistant/tool/impl/WebBrowserToolInteractionFailureTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/tool/impl/WebBrowserToolInteractionFailureTest.java",
+      "sourceRange": "3e536438..053adf90",
+      "sourceDiffSha256": "375c0133d88e66f7755ea248d991a105d7ce2a6e74eb796858b03d223e13a3c1",
+      "reviewStatus": "reviewed_changed_assertions",
+      "changedMethods": [
+        "setUp",
+        "pythonFailureKeepsInteractionFactsWithoutSerializingOtherData",
+        "legacyFailureWithoutDataKeepsOriginalContract",
+        "absentWarningIsNotInventedAndUnrelatedActionIsUnchanged",
+        "nativeAndFallbackSuccessRetainOriginalJson",
+        "unavailableResponseKeepsExistingPolicy"
+      ],
+      "sourceAssertions": [
+        "click/type failure exposes only bounded method/warning, stable errorcode, no fake success or sideeffect retry.",
+        "Legacy no-data and unrelated evaluate remain truthful; successful original facts kept."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/python/tools/web_browser.rs",
+        "crates/zk-server/tests/python_sidecar.rs"
+      ],
+      "actualNativeAssertions": [
+        "interaction_failure_keeps_only_bounded_truthful_facts",
+        "sidecar_business_failure_propagates_python_error_code"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "/tmp/zk-python-final-audit-tests2.log53pass; actual Python browser lifecycle279 suite passed.",
+      "uncoveredOrDifferentAssertions": [
+        "Individual4 native/fallback success permutations use existing Python tests, no new Java mock replication."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/tool/verify/VerifyJourneyObservabilityTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/tool/verify/VerifyJourneyObservabilityTest.java",
+      "sourceRange": "3e536438..053adf90",
+      "sourceDiffSha256": "c17747455a76ad7b5b00129ace21f6f1f18f986a34755ddffc7bc9d763e6558a",
+      "reviewStatus": "reviewed_changed_assertions",
+      "changedMethods": [
+        "evidencePersistFailureIsObservedAsCompletedWithoutFailedVerdict"
+      ],
+      "sourceAssertions": [
+        "Evidence persistence failure retains completed journey verdict, marks unpersisted, cannot relabel failed verification."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/python/tools/verify_journey.rs",
+        "crates/zk-engine/src/engine.rs"
+      ],
+      "actualNativeAssertions": [
+        "journey_steps_and_screenshots_become_a_bounded_uncommitted_receipt"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Native tool returns uncommitted receipt and engine atomically persists artifact/evidence/terminal result. Storage failure uses native VERIFY_EVIDENCE_STORE_FAILED; no rerun.",
+      "uncoveredOrDifferentAssertions": [
+        "Native observability does not emit Java runtime_verification_started/completed events.",
+        "No dedicated injected busy-database observability test through this exact VerifyJourney path; final engine receipt rollback coverage is separate."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/verify/BrowserVerifierTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/verify/BrowserVerifierTest.java",
+      "sourceRange": "3e536438..053adf90",
+      "sourceDiffSha256": "3cf17ad0020018722e98c12b65ac1839f10b81744a08e6ea16092051cfb3df31",
+      "reviewStatus": "reviewed_changed_assertions",
+      "changedMethods": [
+        "verify_expectedRefusalPreservesItsCode",
+        "verify_reservesCleanupHeadroomInHttpTimeout"
+      ],
+      "sourceAssertions": [
+        "Invocation-owned browser resource IDs,120second absolute workdeadline plus130second transport cleanup allowance; stable refusal codes, unavailability."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/python/tools/verify_journey.rs",
+        "crates/zk-server/tests/python_sidecar.rs"
+      ],
+      "actualNativeAssertions": [
+        "journey_refusals_are_stable_and_side_effects_are_not_retried",
+        "real_browser_and_http_journeys_archive_evidence_and_release_owned_resources"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Real UDS stable errors and actual Chromium owned resource releases /tmp/zk-journey-native-final.log pass.",
+      "uncoveredOrDifferentAssertions": [
+        "No dedicated assertion compares two concurrent invocationIDs; construction uses independent fullUUID."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/verify/DevServerLauncherTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/verify/DevServerLauncherTest.java",
+      "sourceRange": "3e536438..053adf90",
+      "sourceDiffSha256": "43de0e8cba6ce599d29d4ac6a5b4aa43fcfc71bcd110b9cbc4710821a4be3d8d",
+      "reviewStatus": "reviewed_changed_assertions",
+      "changedMethods": [],
+      "sourceAssertions": [
+        "Occupied port rejects before code execution; exitedprocess notready; unconfirmed cleanup must keep ownedhandle and blocksuccess.",
+        "Preserve primary installfailure with cleanupfailure."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/python/tools/journey_resources.rs"
+      ],
+      "actualNativeAssertions": [
+        "preview_detection_is_bounded_and_explicit",
+        "managed_preview_releases_its_process_and_port"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Native creates tracked processGroup lease, confirms ownedPGID cleanup, and preserves unreleased ledger for recovery.",
+      "uncoveredOrDifferentAssertions": [
+        "Java automatic npm-install path is intentionally absent: native dependency installation is formal dev sync, so install interrupt/error suppression source assertions do not apply.",
+        "Occupiedport/exitedprocess and cleanupunconfirmed paths exist but only successful owned process+port release has dedicated native previewtest."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/verify/JourneyStepValidatorTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/verify/JourneyStepValidatorTest.java",
+      "sourceRange": "3e536438..053adf90",
+      "sourceDiffSha256": "6fe3de58397d0769782ed9fbe53f27dbc9ad49395ad0e0dbeafae9beff3c4a60",
+      "reviewStatus": "reviewed_changed_assertions",
+      "changedMethods": [],
+      "sourceAssertions": [
+        "Reject wrong DSL expected_code/status, unsupportedactions, selectorless assert_text, js wait_for; accept documented browser/http."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/python/tools/verify_journey.rs",
+        "python-service/src/api/browser.py"
+      ],
+      "actualNativeAssertions": [
+        "new_and_legacy_journey_dsl_preserve_modes_and_recording",
+        "validates_before_python_io"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Native validates both DSLs before IO; Python Pydantic and actual browser/http tests maintain native old aliases.",
+      "uncoveredOrDifferentAssertions": [
+        "Source Java mode-specific malformedfield matrix is not copied verbatim; native compatibility aliases intentionally accepted."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/verify/ScreenshotFormatTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/verify/ScreenshotFormatTest.java",
+      "sourceRange": "3e536438..053adf90",
+      "sourceDiffSha256": "1138e2a9133eb26a6be4d92983632146004afed712897a20122f0906231898f4",
+      "reviewStatus": "reviewed_changed_assertions",
+      "changedMethods": [
+        "detectsRealPngAndJpegWithoutChangingBytes",
+        "rejectsMissingTrailersAndUnsupportedImages",
+        "rejectsSignaturesAndTrailersWithoutImageMetadata",
+        "doesNotInflateOptionalPngTextMetadata"
+      ],
+      "sourceAssertions": [
+        "RealPNG/JPEGmetadata+trailer required; rejectbare signatures/SVG/GIF/truncation; do not inflate PNG ancillary text."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/api/evidence.rs",
+        "crates/zk-llm/src/payload_guard.rs"
+      ],
+      "actualNativeAssertions": [
+        "screenshot_headers_require_metadata_and_complete_trailers_without_inflating_png_text",
+        "actual_png_jpeg_webp_and_gif_headers_are_bounded_without_decoding_rasters"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Audit found signature-only gap and fixed header+trailer. /tmp/zk-screenshot-final-tests.log2pass.",
+      "uncoveredOrDifferentAssertions": [
+        "DedicatedScreenshotJPEGtruncation is asserted via code/header logic plus general actualJPEGheader test; no standalone new screenshotJPEGfixture."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/verify/EvidenceControllerBlobTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/verify/EvidenceControllerBlobTest.java",
+      "sourceRange": "3e536438..053adf90",
+      "sourceDiffSha256": "ae27a62309acc4edd27ff2aa8313d7b2f828af782838d098027d95b4a7d5e187",
+      "reviewStatus": "reviewed_changed_assertions",
+      "changedMethods": [
+        "servesBlobAsAttachmentWithBothFilenameForms",
+        "missingBlobRemainsNotFound",
+        "previewUsesActualImageTypeAndPreservesBytes",
+        "previewDoesNotRenderArbitraryOrBrokenContent",
+        "endpointPreviewIsOptionalAndNormalImageDownloadRemainsAttachment"
+      ],
+      "sourceAssertions": [
+        "Downloads attachment/octet-stream; preview only actualPNG/JPEGinline+nosniff; bytes unchanged, optionalquery."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/api/evidence.rs",
+        "crates/zk-server/tests/evidence_api.rs"
+      ],
+      "actualNativeAssertions": [
+        "image_preview_requires_authorization_and_detects_blob_corruption",
+        "evidence_bundle_and_blob_round_trip_with_session_authorization"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Native retains X-Session-Id authorization and digest validation with common RFC5987 filename handling. Both listed actual evidence API assertions pass in the full workspace gate.",
+      "uncoveredOrDifferentAssertions": [
+        "Unsupported preview returns explicit EVIDENCE_PREVIEW_UNSUPPORTED rather than source200 attachment fallback; existing native contract retained."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "priorVerificationNotes": [
+        "Native retains stronger X-Session-Id authorization and digestvalidation. Common RFC5987filename added. Final updated evidencegate pending."
+      ],
+      "latestNativeVerification": {
+        "path": "/tmp/zk-workspace-tests-resume7.txt",
+        "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7",
+        "exitCode": 0
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/verify/EvidenceStoreTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/verify/EvidenceStoreTest.java",
+      "sourceRange": "3e536438..053adf90",
+      "sourceDiffSha256": "64413fe90b7fb08264e71446fb98e8fccbe741fa3dddee2c7936929b61b63131",
+      "reviewStatus": "reviewed_changed_assertions",
+      "changedMethods": [
+        "save_missingBundleId_generatesFullUuid",
+        "builder_defaultBundleId_isFullUuid"
+      ],
+      "sourceAssertions": [
+        "INSERT immutability rather than replace; fullUUID defaults; bundle/items order and metadata roundtrip."
+      ],
+      "nativeImplementation": [
+        "crates/zk-db/src/evidence.rs"
+      ],
+      "actualNativeAssertions": [
+        "bundle_is_immutable_exact_retries_are_idempotent_and_reviews_append",
+        "evidence_tables_reject_update_and_delete"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "The full workspace gate passes immutable exact-retry evidence storage and database-level update/delete protection assertions.",
+      "uncoveredOrDifferentAssertions": [
+        "Native exact receipt retry is deliberately idempotent; conflicts with differentcontents fail rather than source blanketduplicatefailure."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "priorVerificationNotes": [
+        "Root dbfull gatepassed earlier; final workspace regression pending."
+      ],
+      "latestNativeVerification": {
+        "path": "/tmp/zk-workspace-tests-resume7.txt",
+        "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7",
+        "exitCode": 0
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/verify/EvidenceStoreEdgeCaseTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/verify/EvidenceStoreEdgeCaseTest.java",
+      "sourceRange": "3e536438..053adf90",
+      "sourceDiffSha256": "f8390a981ddaa85bac4b6f29fa2d99d7b15bcaba2413aa67e1658a8e3db1e12f",
+      "reviewStatus": "reviewed_changed_assertions",
+      "changedMethods": [
+        "saveBlob_rejectsExistingTruncatedContentWithoutOverwritingIt",
+        "saveBlob_rejectsExistingSameLengthWrongHash",
+        "saveBlob_partialWriteFailureDoesNotPublishAndCleansTemporaryFile",
+        "saveBlob_reusedConcurrentPublicationStillReportsCleanupFailure",
+        "saveBlob_writeFailureKeepsCleanupFailureSuppressed",
+        "saveBlob_unsupportedAtomicMoveFailsWithoutNonAtomicFallback",
+        "saveBlob_readersCannotSeeAnInProgressWrite",
+        "readBlob_hexWhitelist_acceptsValidHexAndRejectsNonHex",
+        "save_metaSerializationFailure_failsWithoutAnyWrite"
+      ],
+      "sourceAssertions": [
+        "Atomic blob publication/no partial reads; duplicatehash reuse only exactcontent; corruptsame-length reject; pathwhitelist.",
+        "Temp cleanup failure must not claim success or mask primaryfailure; unsupportedatomicity no nonatomicfallback.",
+        "Serialization must fail before DBwrite rather than silentlydropmetadata."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/api/evidence.rs",
+        "crates/zk-server/tests/evidence_api.rs",
+        "crates/zk-db/src/evidence.rs"
+      ],
+      "actualNativeAssertions": [
+        "cleanup_failure_never_turns_publication_into_success_or_masks_primary_failure",
+        "image_preview_requires_authorization_and_detects_blob_corruption",
+        "evidence_blob_store_rejects_symlink_escape"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Found swallowed tempcleanup failure in source-test audit and fixed. Source cyclicJavaMap impossible for serde_json::Value. Native hardlink atomic publication gives no replacement.",
+      "uncoveredOrDifferentAssertions": [
+        "Source concurrentwriters/interruptedpartialwrite/lackatomicmove fault-injection variants not each reproduced; native existing-corrupt/escape and cleanup-composition coverage is explicit.",
+        "Source read allows mismatching hash bytes under syntactically-validkey; native requiresactualhash and rejects corruption."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/verify/EvidenceStoreTransactionTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/verify/EvidenceStoreTransactionTest.java",
+      "sourceRange": "3e536438..053adf90",
+      "sourceDiffSha256": "3707201a762e9b35d5a5334f7deecdacc4eb148fb6e889e715b42fb262295258",
+      "reviewStatus": "reviewed_changed_assertions",
+      "changedMethods": [
+        "setUp",
+        "tearDown",
+        "saveThenFindById_roundTripsCompleteEvidence",
+        "save_duplicateBundleId_failsAndKeepsOriginal",
+        "save_secondItemDuplicates_rollsBackWholeBundle",
+        "save_duplicateItemWithinSameBundle_rollsBackWholeBundle",
+        "save_metaSerializationFailure_throwsAndWritesNothing",
+        "save_concurrentDifferentIds_bothSucceed",
+        "save_concurrentSameId_exactlyOneWins",
+        "save_writeLockBusy_timesOutWithoutRecord",
+        "save_interruptedWhileWaitingLock_writesNothingAndKeepsFlag",
+        "findById_readsLegacyShortIdsAndToleratesCorruptMeta"
+      ],
+      "sourceAssertions": [
+        "Real SQLite atomic bundle+item insertion, duplicateconflict rollback, concurrentIDs/onewinner, busy/interruptno writes, metadata failures."
+      ],
+      "nativeImplementation": [
+        "crates/zk-db/src/evidence.rs",
+        "crates/zk-db/src/lib.rs"
+      ],
+      "actualNativeAssertions": [
+        "bundle_is_immutable_exact_retries_are_idempotent_and_reviews_append",
+        "evidence_tables_reject_update_and_delete",
+        "terminal_machine_evidence_requires_the_same_succeeded_invocation_per_item"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Native transaction, immutabletriggers, producer/sessionbinding stronger than Java store; exact retries safe idempotent.",
+      "uncoveredOrDifferentAssertions": [
+        "Java historicalshortID upgrade/read support excluded by fresh DB decision.",
+        "Java thread interruptflag does not map to asyncRust; root centralizedwriter cancel/admission contracts tested separately.",
+        "No per-Evidence test reproduces all sameID/differentID parallel barrier cases."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/verify/VerifyJourneyEdgeCaseTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/verify/VerifyJourneyEdgeCaseTest.java",
+      "sourceRange": "3e536438..053adf90",
+      "sourceDiffSha256": "4ed196afbcc10e58c0aad7e63ee64417bfa2c1f5d5de5f49f82a2f5665747f53",
+      "reviewStatus": "reviewed_changed_assertions",
+      "changedMethods": [
+        "concurrentJourneysKeepBusinessSessionButOwnDistinctSnapshotAndCloseIds",
+        "testEvidenceStoreSaveThrows_returnsEvidencePersistFailed",
+        "testEvidenceStoreSaveGenericFailure_returnsSanitizedPersistError",
+        "testEvidencePersistFailure_httpMode_matchesBrowserBehavior",
+        "testEvidencePersistFailure_browserFailedVerdict_keepsRealVerdictInContent",
+        "testEvidencePersistFailure_httpUnavailableVerdict_keepsRealVerdictInContent",
+        "httpStartCommandIsRejectedWithoutExecutingAnything",
+        "explicitBrowserPortIsUsedForServerReadiness",
+        "invalidManagedBaseUrlIsRejectedBeforeStartingServer"
+      ],
+      "sourceAssertions": [
+        "Concurrentbrowser resources distinct and strict failuresnapshot before close; persistenceerror preservesrealverdict and sanitizedmessage.",
+        "HTTPstart unsupported; explicitloopbackport checked beforeprojectcode."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/python/tools/verify_journey.rs",
+        "crates/zk-server/src/python/tools/journey_resources.rs"
+      ],
+      "actualNativeAssertions": [
+        "validates_before_python_io",
+        "new_and_legacy_journey_dsl_preserve_modes_and_recording",
+        "managed_preview_releases_its_process_and_port",
+        "real_browser_and_http_journeys_archive_evidence_and_release_owned_resources"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Native resourcelease closes afterstrictsnapshot; failedreceipt does not rerun sideeffects or claimstored.",
+      "uncoveredOrDifferentAssertions": [
+        "Two concurrent same-session journey barrier test and every injected DBfailureverdict combination not independently replicated.",
+        "Native newDSL start_command uses existing authz+ledger, sourceJava mockcallcountspelling differs."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/verify/VerifyJourneyEvidenceTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/verify/VerifyJourneyEvidenceTest.java",
+      "sourceRange": "3e536438..053adf90",
+      "sourceDiffSha256": "96529a2aa4d3005a84bc869aba78fa17f9844347f429dd268dc5f6521805ac61",
+      "reviewStatus": "reviewed_changed_assertions",
+      "changedMethods": [
+        "blobFailureUsesPersistenceErrorAndNeverRunsJourneyAgain"
+      ],
+      "sourceAssertions": [
+        "Actualscreenshotbytes→SHAblob→authorizedpreview;5MiB each/20MiB totalincludingduplicate refs, skipbad/overlarge whileacceptlatersmall.",
+        "Missing/invalid screenshot preservesjourney verdict and showsgap; method/warningtruth; HTTPnoimagegap.",
+        "Blob/DBpersistfailure neverrerunsjourney."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/python/tools/verify_journey.rs",
+        "crates/zk-server/tests/evidence_api.rs",
+        "crates/zk-server/tests/verify_journey_native.rs"
+      ],
+      "actualNativeAssertions": [
+        "journey_steps_and_screenshots_become_a_bounded_uncommitted_receipt",
+        "receipt_limits_preserve_failed_verdict_and_fifty_steps",
+        "real_browser_and_http_journeys_archive_evidence_and_release_owned_resources"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Actual Chromium screenshots/boundedreceipts/resources passed. Updated genuinePNGfixture and trailer checks await finalsamegate.",
+      "uncoveredOrDifferentAssertions": [
+        "Exact5MiB+1 base64samelen and20MiBduplicatebudget fixtures not individually reproduced; implementation checks decodedbytecounts.",
+        "Source screenshotStatus/reason labels adapted to native screenshot_archive_error/screenshot_stored_as_evidence rather than Java DTO exactkeys."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/engine/UserImageTranscoderTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/engine/UserImageTranscoderTest.java",
+      "sourceRange": "3e536438..053adf90",
+      "sourceDiffSha256": "d7017467a0937c7aa3139b73d5109d1be4e298fb1cd01190306e390068ad4db9",
+      "reviewStatus": "reviewed_changed_assertions",
+      "changedMethods": [],
+      "sourceAssertions": [
+        "CurrentRunimages mandatory across toolturns, max8/modelcap, historyrecent-first omissions and budget aftercurrent.",
+        "Originals unchanged, successcache bounded/scoped, failure nevercached; strictheader/10MiB/40Mpixels.",
+        "No redirects; downloadcancel closes actualconnection."
+      ],
+      "nativeImplementation": [
+        "crates/zk-llm/src/user_images.rs",
+        "crates/zk-llm/tests/image_wire.rs",
+        "crates/zk-engine/src/context/image_budget.rs"
+      ],
+      "actualNativeAssertions": [
+        "current_images_take_priority_and_originals_remain_unchanged",
+        "current_invalid_or_excess_images_fail_without_degrading_current",
+        "history_budget_omits_oldest_first_and_keeps_current",
+        "real_http_history_failure_continues_and_cache_is_run_scoped",
+        "redirects_and_oversized_downloads_are_rejected_before_followup",
+        "cache_weight_expiry_and_owner_isolation_are_bounded",
+        "url_capable_provider_keeps_native_image_representation",
+        "cancellation_drops_active_image_download_before_any_provider_request",
+        "chunked_image_body_over_limit_closes_download_before_any_provider_request"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "7nativeunitpass plus realwire2pass /tmp/zk-image-wire-tests4.log. Own hyperconnection fixes reqwestdrop socketleak. Real chunked 10MiB+1 transport test passed within image_wire (3/3) in /tmp/zk-workspace-tests-resume6.txt: immediate size error, actual socket closure before response terminator and no provider request. The containing workspace run remains failed elsewhere.",
+      "uncoveredOrDifferentAssertions": [
+        "OSS-trusted URLs and5MiBpublic-upload cap excluded; preserve native authorizedURLs and10MiBinputcap.",
+        "Cache is narrower perimmutablecurrentmessageID rather than crosssessionURLcache, prevents authorization reuse."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/engine/UserImageRequestIntegrationTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/engine/UserImageRequestIntegrationTest.java",
+      "sourceRange": "3e536438..053adf90",
+      "sourceDiffSha256": "79655e1f9f6d1bb2c909e800dd5e94fe719feabc8f4f6c476d637d725c5568a1",
+      "reviewStatus": "reviewed_changed_assertions",
+      "changedMethods": [
+        "sendsLargePngThroughBothRealGuardsAndKeepsUrlHistory",
+        "onEvent",
+        "onComplete",
+        "onError"
+      ],
+      "sourceAssertions": [
+        "ActuallargePNGdownload→guards→providerHTTP preserves exactbytes and immutableURLhistory."
+      ],
+      "nativeImplementation": [
+        "crates/zk-llm/tests/image_wire.rs",
+        "crates/zk-engine/src/context/image_budget.rs"
+      ],
+      "actualNativeAssertions": [
+        "real_chat_anthropic_and_responses_preserve_image_bytes_without_internal_identity"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Real localHTTP640x640>1.1MiBPNG passes currentvalidation and finalwireguard unchanged. OriginalinputURL retained.",
+      "uncoveredOrDifferentAssertions": [
+        "Engine-budget andproviderwirepipeline are separately tested modules, not sameintegrationfactory; runtime owner handles productionengineboundary."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/llm/FinalProviderPayloadGuardTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/llm/FinalProviderPayloadGuardTest.java",
+      "sourceRange": "3e536438..053adf90",
+      "sourceDiffSha256": "b691d0a582e0ed44076ba492b20f6a52a69f5b212ad32dd69c3ac2301d187e4b",
+      "reviewStatus": "reviewed_changed_assertions",
+      "changedMethods": [
+        "decodedRasterBudgetIsConsistentForMapAndJsonWhileOpaqueDataStaysConservative",
+        "toolArgumentsAreOpaqueButRealNestedToolResultImagesAreVisual",
+        "encodedImageSafetyLimitStillAppliesBeforeDecoding",
+        "wireLimitIsIndependentOfImageTokenEstimate"
+      ],
+      "sourceAssertions": [
+        "Rasterestimate onlytruewiremedia; toolarguments/signaturesopaque, unknownmodelconservative; Map/JSONsamevalue.",
+        "Encoded10MiBpredecode+independent64MiBserializedwirelimit."
+      ],
+      "nativeImplementation": [
+        "crates/zk-llm/src/payload_guard.rs"
+      ],
+      "actualNativeAssertions": [
+        "only_real_media_parts_receive_raster_estimate",
+        "huge_dimensions_rejected_from_small_headers_and_unknown_bytes_stay_conservative",
+        "opaque_signature_and_unicode_use_conservative_counts",
+        "wire_limit_is_independent_of_raster_and_character_estimates"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "7nativepayloadguardtests pass /tmp/zk-payload-guard-tests-final.log; one serde_json Value representation avoids Java Map/JsonNode divergentwalking.",
+      "uncoveredOrDifferentAssertions": [],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": true
+    },
+    "backend/src/test/java/com/aicodeassistant/llm/InlineImageBudgetTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/llm/InlineImageBudgetTest.java",
+      "sourceRange": "3e536438..053adf90",
+      "sourceDiffSha256": "45c602c6c5b099d40d45b80fe88216a3c9622f3b5e5ea8f62d5ffd9d959f5f09",
+      "reviewStatus": "reviewed_changed_assertions",
+      "changedMethods": [],
+      "sourceAssertions": [
+        "WebP canvas dimensions no pixeldecode; animation remainsbytebudget;40Mpixelbombfails beforeallocation; unknown/malformed notfixedsmallestimate."
+      ],
+      "nativeImplementation": [
+        "crates/zk-llm/src/payload_guard.rs"
+      ],
+      "actualNativeAssertions": [
+        "actual_png_jpeg_webp_and_gif_headers_are_bounded_without_decoding_rasters",
+        "webp_extended_animation_and_truncated_markers_do_not_escape_header_checks",
+        "raster_metadata_is_not_decompressed_and_animation_is_structural",
+        "huge_dimensions_rejected_from_small_headers_and_unknown_bytes_stay_conservative"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Pureboundedheaderimplementation additionally avoidsImageReader PNG ancillarydecompression; 7nativepayloadtests pass.",
+      "uncoveredOrDifferentAssertions": [],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": true
+    },
+    "backend/src/test/java/com/aicodeassistant/llm/OutboundImageWireIdentityTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/llm/OutboundImageWireIdentityTest.java",
+      "sourceRange": "3e536438..053adf90",
+      "sourceDiffSha256": "f202d1ab4d53d27b606bf138431711ee9bb149380cb6bd93d44b1db2ece11619",
+      "reviewStatus": "reviewed_changed_assertions",
+      "changedMethods": [
+        "anthropicWireSendsRetainedBase64SourceAndKeepsInternalMappingOut",
+        "responsesWireSendsRetainedInputImageAndKeepsInternalMappingOut"
+      ],
+      "sourceAssertions": [
+        "ActualAnthropic andResponsesHTTP sendsretainedimagebytes withcorrectwiretype; source identitymaps neverleaveprocess."
+      ],
+      "nativeImplementation": [
+        "crates/zk-llm/tests/image_wire.rs"
+      ],
+      "actualNativeAssertions": [
+        "real_chat_anthropic_and_responses_preserve_image_bytes_without_internal_identity"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "ActuallocalproviderHTTP2tests pass inclChat,Anthropic,Responses; decodedbytes equal valid640PNG, allprivateID/metadataabsent.",
+      "uncoveredOrDifferentAssertions": [
+        "Source phase2retainedhash projection is tested separately inengine; this integration directly sendsnativeimages withprivate metadata."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/engine/ImageIdentityConfirmationFlowTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/engine/ImageIdentityConfirmationFlowTest.java",
+      "sourceRange": "3e536438..053adf90",
+      "sourceDiffSha256": "859ccd4f4dc55b1af8033cf73acb1cb1315b5bfe728a4e92c72b558673a4f1af",
+      "reviewStatus": "reviewed_changed_assertions",
+      "changedMethods": [
+        "setUp",
+        "failedDeliveryDoesNotConfirmAndRetryReinjects",
+        "successfulDeliveryConfirmsAndNextTurnSkipsInjection",
+        "base64OnlySecondTranscodePreservesBytesAndConfirms",
+        "multipleSourcesWithOnePayloadAreAllConfirmedAcrossTurns",
+        "imageOmittedBySecondTranscodeIsNotConfirmed"
+      ],
+      "sourceAssertions": [
+        "Actual two-turn engine: failed529/fallback leaves source unconfirmed and reinjects; successful delivery confirms and suppresses next injection.",
+        "BASE64_ONLY second conversion preserves exact image identity; multiple BMP sources with equal PNG payload all confirm; images dropped by conversion never confirm."
+      ],
+      "nativeImplementation": [
+        "crates/zk-engine/src/context/image_budget.rs",
+        "crates/zk-engine/src/engine.rs",
+        "crates/zk-llm/src/user_images.rs",
+        "crates/zk-tools/src/image_read.rs",
+        "crates/zk-engine/tests/image_roundtrip.rs",
+        "crates/zk-db/tests/merge_tool_images.rs"
+      ],
+      "actualNativeAssertions": [
+        "source_identity_survives_thumbnail_and_shared_mandatory_payload_is_protected",
+        "builtin_images_require_real_digest_and_cannot_be_injected_by_arbitrary_tools",
+        "actual_read_confirms_all_source_identities_only_after_successful_delivery",
+        "different_bmp_sources_keep_distinct_identities_when_png_payloads_match",
+        "native_images_survive_source_deletion_and_reopen_without_trusting_forged_metadata"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Native Read→Engine→real local HTTP fixture passed: two distinct BMP source hashes produce equal PNG payloads, both are dispatched and confirmed after a complete successful provider turn, the following tool turn does not reinject them, and durable replay retains both original source identities. Read format/resource/path tests and sealed archive ownership/deletion/reopen tests also pass. Failed or omitted physical attempts cannot populate successful confirmation by implementation; exact source five-case flow matrix is not claimed executed.",
+      "uncoveredOrDifferentAssertions": [
+        "The exact five source failed-delivery/BASE64_ONLY/secondary-omission two-turn combinations are not each duplicated as a full native engine fixture; converter and cancellation behavior have separate actual transport tests."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "priorVerificationNotes": [
+        "Native unit proves shared payload-to-source set and trusted Handoff provenance; real provider wire byte identity tested separately. Source five full two-turn cases are not yet reproduced. Runtime owner notified of missing confirmation stage."
+      ],
+      "latestNativeVerification": {
+        "path": "/tmp/zk-workspace-tests-resume7.txt",
+        "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7"
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/engine/ImageInjectionIdentityAcceptanceTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/engine/ImageInjectionIdentityAcceptanceTest.java",
+      "sourceRange": "3e536438..053adf90",
+      "sourceDiffSha256": "2442de178bfe1f8cf0ac5970e62a4067405495abe6440989a2ad8fdd5439469a",
+      "reviewStatus": "reviewed_changed_assertions",
+      "changedMethods": [
+        "injectionThroughNormalizationConfirmsEveryRetainedSourceIdentity",
+        "originalImageWithinBudgetConfirmsSourceIdentity",
+        "onlySuccessfulInjectionsAreRecorded",
+        "multipleSourcesSharingOnePayloadAreAllConfirmed",
+        "thumbnailDegradationConfirmsAllSourcesSharingOnePayload",
+        "partiallyDegradableSourceSetMakesWholePayloadUndegradable",
+        "thumbnailDegradationStillConfirmsSourceIdentity",
+        "textSummaryReplacementDoesNotConfirm",
+        "removalDoesNotConfirm",
+        "collidingMandatoryAttachmentImageSurvivesDegradationAndStaysConfirmable",
+        "mismatchedFinalBlocksAreNeverConfirmed",
+        "imageOmittedByRealTranscoderIsNotConfirmed",
+        "emptyIdentityMapRetainsNothingAndDegradesNothing"
+      ],
+      "sourceAssertions": [
+        "PNG/BMP injection records source-to-final-payload identity only on successful file read, supported model and unconfirmed input.",
+        "Many sources sharing payload survive thumbnail identity mapping; mixed mandatory/degradable source sets protect whole payload.",
+        "Text replacement/removal/mismatched or absent final payload do not confirm; real secondary converter count omission never confirms."
+      ],
+      "nativeImplementation": [
+        "crates/zk-engine/src/context/image_budget.rs",
+        "crates/zk-engine/src/engine.rs",
+        "crates/zk-llm/src/user_images.rs",
+        "crates/zk-tools/src/image_read.rs",
+        "crates/zk-engine/tests/image_roundtrip.rs"
+      ],
+      "actualNativeAssertions": [
+        "source_identity_survives_thumbnail_and_shared_mandatory_payload_is_protected",
+        "actual_request_budget_keeps_user_images_and_reduces_only_trusted_injections",
+        "phase2_removes_all_images_and_flags_over_budget",
+        "thumbnail_downscales_to_640_and_reencodes_as_jpeg",
+        "actual_read_confirms_all_source_identities_only_after_successful_delivery",
+        "different_bmp_sources_keep_distinct_identities_when_png_payloads_match"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Full workspace pass includes native Phase2 source-set/thumbnail/mandatory-collision tests and actual native BMP Read→provider identity confirmation. Original files and stored user images remain unchanged; only authorized native producers enter the transient channel.",
+      "uncoveredOrDifferentAssertions": [
+        "Actual secondary converter omission followed by engine confirmation is still tested through component invariants rather than one dedicated chained fixture."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "priorVerificationNotes": [
+        "Existing native Phase2 tests directly cover thumbnail source-set preservation and shared-payload mandatory protection, but not all source injection-to-provider chaining."
+      ],
+      "latestNativeVerification": {
+        "path": "/tmp/zk-workspace-tests-resume7.txt",
+        "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7"
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/engine/MandatoryCollisionProtectionTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/engine/MandatoryCollisionProtectionTest.java",
+      "sourceRange": "3e536438..053adf90",
+      "sourceDiffSha256": "14c680a9a0ef8d0fcf72f0bec4d2514c5d833abd02e64644b5e3a901d5b527ab",
+      "reviewStatus": "reviewed_changed_assertions",
+      "changedMethods": [
+        "setUp",
+        "bmpCollisionOverBudgetFailsLoudly",
+        "bmpCollisionWithinBudgetKeepsBothImagesAndConfirmsToolSource",
+        "bmpToolImageWithoutCollisionStillDegradesOnlyToolImage",
+        "directFormatPngCollisionOverBudgetFailsLoudly",
+        "multipleSourcesWithSamePayloadAreAllProtected",
+        "urlMandatoryAttachmentCollisionIsProtected",
+        "strategyOneThumbnailPathProtectsMandatory"
+      ],
+      "sourceAssertions": [
+        "Real engine handles BMP source hash distinct from PNG payload colliding with mandatory image: too-small budget sends no request, sufficient budget keeps both and confirms tool identity.",
+        "Noncollision may degrade tool image only; PNG same-format collision, multi-source shared payload, downloaded URL collision and JPEG thumbnail-control pair all protect mandatory original bytes."
+      ],
+      "nativeImplementation": [
+        "crates/zk-engine/src/context/image_budget.rs",
+        "crates/zk-engine/src/engine.rs",
+        "crates/zk-llm/src/user_images.rs",
+        "crates/zk-engine/tests/image_roundtrip.rs"
+      ],
+      "actualNativeAssertions": [
+        "source_identity_survives_thumbnail_and_shared_mandatory_payload_is_protected",
+        "actual_request_budget_keeps_user_images_and_reduces_only_trusted_injections",
+        "actual_read_confirms_all_source_identities_only_after_successful_delivery",
+        "url_capable_provider_keeps_native_image_representation"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Native source-set mandatory protection and actual request-copy tests pass, as does the real BMP shared-payload engine fixture. Native URL-capable providers retain their model-specific count (including Qwen20); BASE64_ONLY is capped at min(model limit,8). All current mandatory input survives or the request fails explicitly.",
+      "uncoveredOrDifferentAssertions": [
+        "The exact seven full-engine BMP/URL/thumbnail mandatory-collision combinations are not independently reproduced; native collision/budget unit tests and real shared-BMP transport fixture cover separate stages."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "priorVerificationNotes": [
+        "Native exact source-set unit and mandatory request-copy budget assert preservation. Source seven actual engine cross-format/URL/thumbnail matrix cases are not claimed executed."
+      ],
+      "latestNativeVerification": {
+        "path": "/tmp/zk-workspace-tests-resume7.txt",
+        "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7"
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/engine/ImageRefInjectorMetadataTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/engine/ImageRefInjectorMetadataTest.java",
+      "sourceRange": "3e536438..053adf90",
+      "sourceDiffSha256": "687b52741bf9d3a79e8b3e66f34871341fef421e7daa6f0398e93bd1228b0822",
+      "reviewStatus": "reviewed_changed_assertions",
+      "changedMethods": [],
+      "sourceAssertions": [
+        "Injection and copy preserve steering metadata, originating assistant UUID, system task-boundary metadata and original immutable user content; only request projection gains image."
+      ],
+      "nativeImplementation": [
+        "crates/zk-engine/src/context/image_budget.rs",
+        "crates/zk-engine/src/engine.rs",
+        "crates/zk-llm/src/user_images.rs",
+        "crates/zk-engine/tests/image_roundtrip.rs",
+        "crates/zk-db/src/convert.rs"
+      ],
+      "actualNativeAssertions": [
+        "durable_images_and_thinking_are_reconstructed_for_provider_history",
+        "request_copy_prioritizes_run_original_images_over_newer_steering_and_history",
+        "builtin_images_require_real_digest_and_cannot_be_injected_by_arbitrary_tools",
+        "actual_read_confirms_all_source_identities_only_after_successful_delivery"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Native immutable record IDs override untrusted sourceMessageId during replay. Authorized tool images are separate request messages and private producer/payload metadata is filtered from REST, WebSocket and physical provider wire. Actual Read→provider and durable replay tests pass, without mutating stored source records.",
+      "uncoveredOrDifferentAssertions": [
+        "One combined fixture carrying every arbitrary user/system steering metadata field through native Read injection is not present; metadata replay, boundaries and native image injection are tested separately."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "priorVerificationNotes": [
+        "Native metadata remains on cloned provider-neutral ChatMessage, actual DB record ID overrides spoofable sourceMessageId; Handoff tool images use separate trusted transient messages."
+      ],
+      "latestNativeVerification": {
+        "path": "/tmp/zk-workspace-tests-resume7.txt",
+        "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7"
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/engine/QueryEngineMediaRecoveryTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/engine/QueryEngineMediaRecoveryTest.java",
+      "sourceRange": "3e536438..053adf90",
+      "sourceDiffSha256": "ba071055af6da04d792b866cce07719d0a96d43e9a368d52e635961826b0e397",
+      "reviewStatus": "reviewed_changed_assertions",
+      "changedMethods": [
+        "setUp",
+        "media400MustFailWithoutStrippingEvenWithOneTurn",
+        "nonMediaError400_doesNotStripOrRetry",
+        "realBudgetAndCapabilitiesAcceptLargePngWithoutChangingHistory",
+        "currentImageDownloadFailurePersistsAndPushesNoticeWithoutCallingProvider",
+        "currentToolImageTakesSlotBeforeEightHistoricalAttachments",
+        "existingImageEstimateIsNotChargedAgainDuringPreparation",
+        "imageBudgetCompactsHistoryOnceWithoutSpendingTheOnlyModelTurn",
+        "mediaStripPreservesUserMetadata"
+      ],
+      "sourceAssertions": [
+        "Media/nonmedia HTTP400 fail once, retain original images, do not strip/retry/compact; recognize unsupported image url.",
+        "Actual large Kimi PNG reaches request as base64 while durable URL remains unchanged.",
+        "Current download failure persists and pushes image_notice with no provider call; tool image takes slot before historical attachments; historical omissions visible.",
+        "Do not double-charge existing image budget; exactly one history compaction can rescue image budget without consuming the only model turn; current image/steering metadata remains."
+      ],
+      "nativeImplementation": [
+        "crates/zk-engine/src/context/image_budget.rs",
+        "crates/zk-engine/src/engine.rs",
+        "crates/zk-llm/src/user_images.rs",
+        "crates/zk-llm/tests/image_wire.rs",
+        "crates/zk-engine/src/recovery.rs"
+      ],
+      "actualNativeAssertions": [
+        "real_chat_anthropic_and_responses_preserve_image_bytes_without_internal_identity",
+        "current_images_take_priority_and_originals_remain_unchanged",
+        "history_budget_omits_oldest_first_and_keeps_current",
+        "current_invalid_or_excess_images_fail_without_degrading_current"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Large-image provider wire and current/history converter tests pass. The engine now persists attributed image_notice system messages before publishing them, deduplicates notices per Run, and fails closed if that write fails. ContextRecovery.prepare_images performs at most one scoped history compaction for image-budget failure before any model turn, preserves mandatory input and charges any summary through existing execution accounting. Full workspace passes; exact source media-recovery fixture matrix is not claimed executed.",
+      "uncoveredOrDifferentAssertions": [
+        "No dedicated native fixture combines media400 versus nonmedia400, all notice persistence fault cases, and single-turn image recovery; provider error classification, DB system ownership, image budgets and compaction each have native coverage.",
+        "Exact5000x5000 duplicate-image no-double-charge boundary has no dedicated equivalent native assertion."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "priorVerificationNotes": [
+        "Real large-PNG HTTP wire identity and immutable URL source pass; current/history converter tests pass. Preflight failures are known-zero physical LLM usage. Image-specific engine persisted notice and single history-compaction behavior reported to runtime owner as open pipeline gaps."
+      ],
+      "latestNativeVerification": {
+        "path": "/tmp/zk-workspace-tests-resume7.txt",
+        "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7"
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/llm/OpenAiCompatibleProviderVisionTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/llm/OpenAiCompatibleProviderVisionTest.java",
+      "sourceRange": "3e536438..053adf90",
+      "sourceDiffSha256": "3bd2efb46caabbb315b3f0a132fee0660162f1ddc53d6ad2c3ee3064da4b50da",
+      "reviewStatus": "reviewed_changed_assertions",
+      "changedMethods": [
+        "visionRequestUsesOpenAiImageUrlAndV41ThinkingParams"
+      ],
+      "sourceAssertions": [
+        "Changed DeepSeek vision model to deepseek-flash and deepseek-v4.1-flash, preserving OpenAI image_url while emitting thinking.type enabled and reasoning_effort max."
+      ],
+      "nativeImplementation": [
+        "crates/zk-llm/src/openai_compat.rs"
+      ],
+      "actualNativeAssertions": [
+        "summary_wire_override_supports_low_off_without_changing_chat",
+        "openai_request_serializes_validated_user_images_as_content_parts",
+        "openai_request_sends_trusted_remote_image_url_verbatim"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Both request builder and public thinking_params_for now recognize deepseek-flash/deepseek-v4.1-flash. Flash max reasoning, summary low/off override and image wire serialization each pass their native tests; the legacy explicitly configured vision model remains compatible.",
+      "uncoveredOrDifferentAssertions": [
+        "A combined vision+thinking request test parameterized over both new DeepSeek IDs is not a separate native assertion; builder branches and wire parts are tested individually."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "priorVerificationNotes": [
+        "Builder includes both new IDs, image wire serialization and flash max are separately tested. Old explicit vision-exp native identity stays supported for compatibility."
+      ],
+      "latestNativeVerification": {
+        "path": "/tmp/zk-workspace-tests-resume7.txt",
+        "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7"
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/llm/DeepSeekVisionLiveTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/llm/DeepSeekVisionLiveTest.java",
+      "sourceRange": "3e536438..053adf90",
+      "sourceDiffSha256": "82ba493c0222831d8055e093caf263077c49f7d2b9747351b3963acee603a6ac",
+      "reviewStatus": "reviewed_changed_assertions",
+      "changedMethods": [],
+      "sourceAssertions": [
+        "Net change only LIVE test model ID from deepseek-v4-flash-vision-exp to deepseek-flash; existing explicit environment gate remains."
+      ],
+      "nativeImplementation": [
+        "crates/zk-llm/src/openai_compat.rs"
+      ],
+      "actualNativeAssertions": [],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "No remote paid DeepSeek vision API call was executed. Local mock-HTTP wire tests do not establish provider vision quality or availability.",
+      "uncoveredOrDifferentAssertions": [
+        "Live external DeepSeek vision request intentionally not claimed passed; source environment-gated test was not executed."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/artifact/ArtifactVerificationListenerTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/artifact/ArtifactVerificationListenerTest.java",
+      "sourceRange": "3e536438..053adf90",
+      "sourceDiffSha256": "ef962869c042ddc3839d8b21ec243e83b6f786ffbb1fd38ec9917f8e75a0f168",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceAssertions": [
+        "Automatic manifest verification pending/verified detail carries scope=artifact_manifest plus exact manifestId.",
+        "Verification exception still retains known manifestId and explicit result=verification_exception."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/api/artifact.rs",
+        "crates/zk-db/src/artifact.rs",
+        "crates/zk-server/tests/artifact_api.rs"
+      ],
+      "actualNativeAssertions": [
+        "artifact_manifest_detects_mutation_and_authorizes_the_run",
+        "stale_artifact_invalidates_run_task_evidence_and_acceptance_atomically"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Native manifest verification is isolated by manifestId-backed rows and explicitly leaves Run/Task NotRequested after integrity success; same-size mutation atomically stales related prior evidence. Both listed native assertions, including the NotRequested check, pass in the full workspace gate. No global automatic verification_completed event can mislabel task acceptance.",
+      "uncoveredOrDifferentAssertions": [
+        "Native does not copy Java asynchronous global Run verification state transitions/detail strings. Scope isolation uses explicit manifest relation and one-way invalidation.",
+        "No separate injected manifest verifier exception test asserting Java detail spelling; API returns scoped error and cannot set task passed."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "priorVerificationNotes": [
+        "Native manifest verification is isolated by manifestId-backed rows and explicitly leaves Run/Task NotRequested after integrity success; same-size mutation atomically stales related prior evidence. Root added the NotRequested assertion; final shared gate pending. No global automatic verification_completed event can mislabel task acceptance."
+      ],
+      "latestNativeVerification": {
+        "path": "/tmp/zk-workspace-tests-resume7.txt",
+        "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7",
+        "exitCode": 0
+      }
+    }
+  }
+}

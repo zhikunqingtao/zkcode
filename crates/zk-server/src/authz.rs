@@ -141,14 +141,13 @@ impl ShellStatePort for ShellStateBridge {
 
 // ===================== ModeProvider =====================
 
-/// 会话权限模式登记表——逐字移植旧 `PermissionModeManager`（76 行）。
-///
-/// 旧源以 `ConcurrentHashMap<String, PermissionMode>` 持有会话态，进程重启即丢
-/// （非持久化，旧源同）。`set_mode` 在模式真实变化时推 `permission_mode_changed`
-/// 下行，涉 `AUTO_APPROVE` 用 `warn` 否则 `info`（旧 L47-52）。
+/// Session permissions from `SQLite`; private verifier overrides are isolated.
 pub struct PermissionModeRegistry {
     modes: std::sync::Mutex<std::collections::HashMap<String, PermissionMode>>,
     hub: Option<WsHub>,
+    db: Option<Db>,
+    ephemeral: std::sync::Mutex<std::collections::HashMap<String, PermissionMode>>,
+    update_lock: tokio::sync::Mutex<()>,
 }
 
 impl std::fmt::Debug for PermissionModeRegistry {
@@ -165,32 +164,129 @@ impl PermissionModeRegistry {
         Self {
             modes: std::sync::Mutex::new(std::collections::HashMap::new()),
             hub,
+            db: None,
+            ephemeral: std::sync::Mutex::new(std::collections::HashMap::new()),
+            update_lock: tokio::sync::Mutex::new(()),
         }
     }
 
-    /// 旧 `getMode`（L28-30）：未登记时返回 `DEFAULT`。
-    #[must_use]
-    pub fn get_mode(&self, session_id: &str) -> PermissionMode {
-        self.lock()
-            .get(session_id)
-            .copied()
-            .unwrap_or(PermissionMode::Default)
+    /// Load authoritative permissions before engine/transport use.
+    pub fn persisted(hub: Option<WsHub>, db: Db) -> Self {
+        let stored = db.permission_modes_at_startup();
+        let registry = Self {
+            db: Some(db),
+            ..Self::new(hub)
+        };
+        match stored {
+            Ok(modes) => {
+                let mut cache = registry.lock();
+                for (id, mode) in modes {
+                    if let Some(mode) = PermissionMode::parse(&mode) {
+                        cache.insert(id, mode);
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::error!(%error, "permission modes unavailable; authorization reads will fail closed");
+            }
+        }
+        registry
     }
 
-    /// 旧 `hasExplicitMode`（L35-37）：是否显式设置过（区别于回退默认）。
+    /// Private verification stacks may choose a mode without changing user state.
+    pub fn set_ephemeral_mode(&self, session_id: &str, mode: PermissionMode) {
+        self.ephemeral
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(session_id.to_owned(), mode);
+    }
+
+    /// Read current authoritative state, including changes from another registry instance.
+    /// # Errors
+    /// Missing sessions, invalid modes and storage failures cannot reuse cached authority.
+    pub fn checked_mode(&self, session_id: &str) -> Result<PermissionMode, zk_db::DbError> {
+        if let Some(mode) = self
+            .ephemeral
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(session_id)
+            .copied()
+        {
+            return Ok(mode);
+        }
+        if let Some(db) = &self.db {
+            return match db.session_permission_mode(session_id)? {
+                Some(raw) => PermissionMode::parse(&raw).ok_or_else(|| {
+                    zk_db::DbError::Validation("INVALID_STORED_PERMISSION_MODE".into())
+                }),
+                None => Ok(PermissionMode::Default),
+            };
+        }
+        Ok(self
+            .lock()
+            .get(session_id)
+            .copied()
+            .unwrap_or(PermissionMode::Default))
+    }
+
+    /// Synchronous authorization port: an unreadable mode permits only PLAN-safe work.
+    #[must_use]
+    pub fn get_mode(&self, session_id: &str) -> PermissionMode {
+        self.checked_mode(session_id).unwrap_or_else(|error| {
+            tracing::error!(%error, session_id, "permission lookup failed; PLAN restrictions applied");
+            PermissionMode::Plan
+        })
+    }
+
+    /// Whether an explicit setting exists; lookup errors are never treated as an unset value.
     #[must_use]
     pub fn has_explicit_mode(&self, session_id: &str) -> bool {
-        self.lock().contains_key(session_id)
+        if self
+            .ephemeral
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_key(session_id)
+        {
+            return true;
+        }
+        self.db.as_ref().map_or_else(
+            || self.lock().contains_key(session_id),
+            |db| !matches!(db.session_permission_mode(session_id), Ok(None)),
+        )
     }
 
     /// 旧 `setMode`（L42-62）：`put` 取旧值（null → `DEFAULT`），仅在变化时记日志
     /// 并推下行；推送失败旧源只 `debug`、不上抛（non-fatal）。
-    pub async fn set_mode(&self, session_id: &str, mode: PermissionMode) {
-        let stored_previous = self.lock().insert(session_id.to_owned(), mode);
-        let previous = stored_previous.unwrap_or(PermissionMode::Default);
-        if previous == mode {
-            return;
+    /// # Errors
+    /// Returns storage errors before changing the cached permission.
+    pub async fn set_mode(
+        &self,
+        session_id: &str,
+        mode: PermissionMode,
+    ) -> Result<(), zk_db::DbError> {
+        self.set_mode_with_request(session_id, mode, None).await
+    }
+
+    /// Confirm only after durable storage, including an idempotent no-op.
+    /// # Errors
+    /// Returns storage errors without emitting a successful confirmation.
+    pub async fn set_mode_with_request(
+        &self,
+        session_id: &str,
+        mode: PermissionMode,
+        request_id: Option<String>,
+    ) -> Result<(), zk_db::DbError> {
+        let _guard = self.update_lock.lock().await;
+        let previous = self.checked_mode(session_id)?;
+        if let Some(db) = &self.db {
+            db.set_session_permission_mode(session_id.to_owned(), mode.as_str().to_owned())
+                .await?;
         }
+        self.lock().insert(session_id.to_owned(), mode);
+        self.ephemeral
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(session_id);
         if mode == PermissionMode::AutoApprove || previous == PermissionMode::AutoApprove {
             tracing::warn!(
                 session_id,
@@ -210,17 +306,23 @@ impl PermissionModeRegistry {
             hub.push(
                 session_id,
                 ServerMessage::PermissionModeChanged {
+                    request_id,
                     mode: mode.as_str().to_owned(),
                     previous: Some(previous.as_str().to_owned()),
                 },
             )
             .await;
         }
+        Ok(())
     }
 
     /// 旧 `clearSession`（L67-69）。
     pub fn clear_session(&self, session_id: &str) {
         self.lock().remove(session_id);
+        self.ephemeral
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(session_id);
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, PermissionMode>> {
@@ -233,6 +335,110 @@ impl PermissionModeRegistry {
 impl ModeProvider for PermissionModeRegistry {
     fn mode(&self, root_session_id: &str) -> PermissionMode {
         self.get_mode(root_session_id)
+    }
+
+    fn mode_in_current_write(&self, conn: &rusqlite::Connection, session: &str) -> PermissionMode {
+        if let Some(mode) = self
+            .ephemeral
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(session)
+            .copied()
+        {
+            return mode;
+        }
+        if self.db.is_some() {
+            return conn
+                .query_row(
+                    "SELECT permission_mode FROM sessions WHERE id=?1",
+                    [session],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .ok()
+                .and_then(|raw| match raw {
+                    Some(raw) => PermissionMode::parse(&raw),
+                    None => Some(PermissionMode::Default),
+                })
+                .unwrap_or(PermissionMode::Plan);
+        }
+        self.get_mode(session)
+    }
+}
+
+#[cfg(test)]
+mod migration_permission_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn persisted_permissions_observe_other_writers_and_deleted_sessions_fail_closed() {
+        let db = Db::open_in_memory().unwrap();
+        db.create_session_with_id("s", "model", "/tmp")
+            .await
+            .unwrap();
+        let first = PermissionModeRegistry::persisted(None, db.clone());
+        let second = PermissionModeRegistry::persisted(None, db.clone());
+        assert_eq!(first.checked_mode("s").unwrap(), PermissionMode::Default);
+        second
+            .set_mode("s", PermissionMode::AutoApprove)
+            .await
+            .unwrap();
+        assert_eq!(
+            first.checked_mode("s").unwrap(),
+            PermissionMode::AutoApprove
+        );
+        second.set_mode("s", PermissionMode::Plan).await.unwrap();
+        assert_eq!(first.checked_mode("s").unwrap(), PermissionMode::Plan);
+        db.with_conn_blocking(|conn| {
+            conn.execute("DELETE FROM sessions WHERE id='s'", [])?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(first.checked_mode("s").is_err());
+        assert_eq!(first.get_mode("s"), PermissionMode::Plan);
+        assert!(
+            first
+                .set_mode("s", PermissionMode::AutoApprove)
+                .await
+                .is_err()
+        );
+        db.with_conn_blocking(|conn| {
+            conn.execute_batch(
+                "ALTER TABLE sessions RENAME COLUMN permission_mode TO unavailable_mode",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(first.checked_mode("s").is_err());
+        assert_eq!(first.get_mode("s"), PermissionMode::Plan);
+    }
+
+    #[tokio::test]
+    async fn persistence_precedes_cache_and_private_verification_is_ephemeral() {
+        let db = Db::open_in_memory().unwrap();
+        db.create_session_with_id("s", "model", "/tmp")
+            .await
+            .unwrap();
+        let registry = PermissionModeRegistry::persisted(None, db.clone());
+        registry
+            .set_mode("s", PermissionMode::DontAsk)
+            .await
+            .unwrap();
+        assert_eq!(
+            PermissionModeRegistry::persisted(None, db.clone()).get_mode("s"),
+            PermissionMode::DontAsk
+        );
+        let verification = PermissionModeRegistry::persisted(None, db.clone());
+        verification.set_ephemeral_mode("s", PermissionMode::AutoApprove);
+        assert_eq!(registry.get_mode("s"), PermissionMode::DontAsk);
+        assert_eq!(db.permission_modes_at_startup().unwrap()["s"], "DONT_ASK");
+        db.with_conn_blocking(|conn|{conn.execute_batch("CREATE TRIGGER reject_mode BEFORE UPDATE OF permission_mode ON sessions BEGIN SELECT RAISE(ABORT,'disk failure'); END;")?;Ok(())}).unwrap();
+        assert!(
+            registry
+                .set_mode("s", PermissionMode::AutoApprove)
+                .await
+                .is_err()
+        );
+        assert_eq!(registry.get_mode("s"), PermissionMode::DontAsk);
     }
 }
 
@@ -317,12 +523,14 @@ impl WorkspaceTrustProbe for ProjectWorkspaceTrust {
 /// [`ToolFacts`] 适配器：把注册表里的 [`Tool`] 收窄成授权判定所需的身份面。
 pub struct RegistryToolFacts {
     tool: Arc<dyn Tool>,
+    safe_internal_projection: bool,
 }
 
 impl std::fmt::Debug for RegistryToolFacts {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RegistryToolFacts")
             .field("name", &self.tool.name())
+            .field("safe_internal_projection", &self.safe_internal_projection)
             .finish()
     }
 }
@@ -331,13 +539,20 @@ impl RegistryToolFacts {
     /// 包裹一件已注册工具。
     #[must_use]
     pub fn new(tool: Arc<dyn Tool>) -> Self {
-        Self { tool }
+        Self {
+            tool,
+            safe_internal_projection: false,
+        }
     }
 }
 
 impl ToolFacts for RegistryToolFacts {
     fn name(&self) -> &str {
         self.tool.name()
+    }
+
+    fn is_safe_internal_projection(&self) -> bool {
+        self.safe_internal_projection
     }
 
     fn is_mcp(&self) -> bool {
@@ -523,6 +738,7 @@ impl crate::interaction::InteractionPublisher for WsInteractionPublisher {
 
 /// 权限管线聚合装配（旧 Spring 容器里的一组授权单例）。
 pub struct AuthzStack {
+    pub(crate) db: Db,
     /// 交互权威（落库 / CAS 决策 / 重投 / 恢复）。
     pub interactions: Arc<DurableInteractionService>,
     /// Run 取消协调器（旧 `RunTerminationCoordinator` bean）。
@@ -589,7 +805,7 @@ impl AuthzStack {
         if let Some(publisher) = &ws_publisher {
             publisher.bind(&interactions);
         }
-        let modes = Arc::new(PermissionModeRegistry::new(hub));
+        let modes = Arc::new(PermissionModeRegistry::persisted(hub, db.clone()));
         let authorization = Arc::new(AuthorizationService::new(
             AuthorizationSubjectResolver::new(db.clone()),
             analyzers,
@@ -606,6 +822,7 @@ impl AuthzStack {
             db.clone(),
         ));
         Self {
+            db: db.clone(),
             interactions,
             terminations,
             authorization,
@@ -648,6 +865,17 @@ impl EngineAdmission {
         }
     }
 
+    /// External MCP keeps DEFAULT admission even if the local user later changes
+    /// ordinary Session preferences. Existing scoped grants remain authoritative.
+    #[must_use]
+    pub fn new_external_default(stack: Arc<AuthzStack>, tools: Arc<ToolRegistry>) -> Self {
+        Self {
+            stack,
+            tools,
+            mode_override: Some(PermissionMode::Default),
+        }
+    }
+
     /// Reverse MCP admission: preserve all analysis/grant/gateway checks but never create
     /// an interaction request when no interactive transport exists.
     #[must_use]
@@ -660,8 +888,55 @@ impl EngineAdmission {
     }
 
     async fn decide(&self, request: AdmissionRequest<'_>) -> Admission {
-        let facts: Box<dyn ToolFacts> = match self.tools.get(request.tool_name) {
-            Some(tool) => Box::new(RegistryToolFacts::new(tool)),
+        self.decide_bound(request, self.tools.get(request.tool_name))
+            .await
+    }
+
+    #[allow(clippy::too_many_lines)] // Freeze/admit/recheck and durable shell-state propagation form one authorization decision.
+    async fn decide_bound(
+        &self,
+        request: AdmissionRequest<'_>,
+        tool: Option<Arc<dyn Tool>>,
+    ) -> Admission {
+        if tool
+            .as_ref()
+            .is_some_and(|tool| tool.name() != request.tool_name)
+        {
+            return Admission::Denied {
+                code: "TOOL_BINDING_MISMATCH".into(),
+                message: "The resolved tool does not match its invocation".into(),
+            };
+        }
+        let native_bash = tool
+            .as_ref()
+            .is_some_and(|tool| tool.name() == "Bash" && tool.mcp_identity().is_none());
+        let shell_session = if native_bash {
+            match self.stack.db.find_run_by_id(request.run_id).await {
+                Ok(Some(run)) => run.session_id,
+                _ => {
+                    return Admission::Failed {
+                        code: "BASH_RUN_OWNER_UNAVAILABLE".into(),
+                        message: "Shell execution owner could not be resolved".into(),
+                    };
+                }
+            }
+        } else {
+            request.session_id.to_owned()
+        };
+        let facts: Box<dyn ToolFacts> = match tool {
+            Some(tool) => {
+                let Ok(safe_internal_projection) = self.self_task_display(&tool, &request).await
+                else {
+                    return Admission::Failed {
+                        code: "AUTHORIZATION_STORE_UNAVAILABLE".into(),
+                        message: "Task display ownership could not be verified".into(),
+                    };
+                };
+                Box::new(RegistryToolFacts {
+                    tool,
+                    safe_internal_projection,
+                })
+            }
             None => Box::new(UnknownToolFacts::new(request.tool_name)),
         };
         // 旧 L384-386：冻结失败 = `ToolInputValidationException` → 不推下行。
@@ -680,7 +955,7 @@ impl EngineAdmission {
             Some(request.session_id.to_owned()),
         )
         .with_shell(
-            Some(request.session_id.to_owned()),
+            Some(shell_session),
             request.working_directory.map(str::to_owned),
         );
         let authorization = &self.stack.authorization;
@@ -708,9 +983,35 @@ impl EngineAdmission {
             .admit(facts.as_ref(), &allowed, &context)
             .await
         {
-            Ok(()) => Admission::Allow {
-                execution_input: allowed.execution_input,
-            },
+            Ok(()) => {
+                if native_bash && allowed.descriptor.analyzer_id == "bash-v2" {
+                    let Some(resource) = allowed
+                        .descriptor
+                        .resources
+                        .iter()
+                        .find(|resource| resource.kind == "cwd")
+                    else {
+                        return Admission::Failed {
+                            code: "BASH_CWD_BINDING_MISSING".into(),
+                            message: "Shell authorization did not bind a working directory".into(),
+                        };
+                    };
+                    let cwd = std::path::PathBuf::from(&resource.value);
+                    let cwd = if cwd.is_absolute() {
+                        cwd
+                    } else {
+                        allowed.subject.authorization_root.join(cwd)
+                    };
+                    Admission::AllowWithShellCwd {
+                        execution_input: allowed.execution_input,
+                        authorized_shell_cwd: cwd,
+                    }
+                } else {
+                    Admission::Allow {
+                        execution_input: allowed.execution_input,
+                    }
+                }
+            }
             // 旧 L335-343：网关内抛出的 `AuthorizationException` 同样推下行。
             Err(GatewayError::Denied(denied)) => classify_authz_error(denied),
             // 旧 L344-354：`AdmissionException` 只回 `ToolResult.failed(VALIDATION, ...)`。
@@ -734,6 +1035,50 @@ impl EngineAdmission {
                 }
             }
         }
+    }
+
+    async fn self_task_display(
+        &self,
+        tool: &Arc<dyn Tool>,
+        request: &AdmissionRequest<'_>,
+    ) -> Result<bool, zk_db::DbError> {
+        if tool.name() != "TaskUpdate"
+            || tool.mcp_identity().is_some()
+            || tool.child_view().is_none_or(|view| {
+                view.child_access() != zk_tools::ChildToolAccess::SelfTaskDisplay
+            })
+        {
+            return Ok(false);
+        }
+        let Some(input) = request.input.as_object() else {
+            return Ok(false);
+        };
+        if !input.get("output").is_some_and(Value::is_string)
+            || input
+                .keys()
+                .any(|key| !matches!(key.as_str(), "output" | "taskId"))
+            || input.get("taskId").is_some_and(|id| !id.is_string())
+        {
+            return Ok(false);
+        }
+        let (run_id, session_id) = (request.run_id.to_owned(), request.session_id.to_owned());
+        let task_id = input
+            .get("taskId")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        self.stack
+            .db
+            .with_reader(move |conn| {
+                conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM run_envelopes r JOIN tasks t ON t.id=r.task_id \
+             WHERE r.id=?1 AND r.session_id=?2 AND t.current_run_id=r.id \
+             AND t.parent_task_id IS NOT NULL AND (?3 IS NULL OR t.id=?3))",
+                    rusqlite::params![run_id, session_id, task_id],
+                    |row| row.get(0),
+                )
+                .map_err(Into::into)
+            })
+            .await
     }
 }
 
@@ -772,5 +1117,13 @@ impl ToolAdmission for EngineAdmission {
         request: AdmissionRequest<'a>,
     ) -> futures::future::BoxFuture<'a, Admission> {
         Box::pin(self.decide(request))
+    }
+
+    fn admit_bound<'a>(
+        &'a self,
+        request: AdmissionRequest<'a>,
+        tool: Arc<dyn Tool>,
+    ) -> futures::future::BoxFuture<'a, Admission> {
+        Box::pin(self.decide_bound(request, Some(tool)))
     }
 }

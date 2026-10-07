@@ -31,6 +31,23 @@ class ExecEnvTests(unittest.TestCase):
         self.assertEqual(values["ZK_LLM_BASE_URL"], "https://example.test/v1")
         self.assertEqual(warnings, [])
 
+    def test_documented_summary_and_speech_configuration_is_forwarded_as_data(self) -> None:
+        values, warnings = self.parse(
+            "LLM_COMPACT_PROVIDER=deepseek\n"
+            "LLM_COMPACT_MODEL=deepseek-flash\n"
+            "LLM_COMPACT_MAX_COMPLETION_TOKENS=8192\n"
+            "ASR_CORRECTIONS=zkcode:z k code,$(not-executed)\n"
+        )
+        self.assertEqual(values["LLM_COMPACT_PROVIDER"], "deepseek")
+        self.assertEqual(values["LLM_COMPACT_MAX_COMPLETION_TOKENS"], "8192")
+        self.assertEqual(values["ASR_CORRECTIONS"], "zkcode:z k code,$(not-executed)")
+        self.assertEqual(warnings, [])
+
+    def test_current_env_example_has_no_silently_ignored_keys(self) -> None:
+        values, warnings = EXEC_ENV.parse_env(Path(__file__).parents[3] / ".env.example")
+        self.assertTrue(values)
+        self.assertEqual(warnings, [])
+
     def test_command_substitution_is_never_evaluated(self) -> None:
         values, _ = self.parse("ZK_DEFAULT_MODEL=$(touch /tmp/never-run)\n")
         self.assertEqual(values["ZK_DEFAULT_MODEL"], "$(touch /tmp/never-run)")

@@ -5,18 +5,35 @@
 依赖 BROWSER_AUTOMATION 能力域（与 browser 路由同域注册）。
 """
 
+import asyncio
 import base64
 import time
 import uuid
 import logging
+from urllib.parse import urljoin
 from typing import Dict, Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException, Request
 
+from services.browser_service import BrowserAdmissionError
 from services.journey_models import JourneyRunRequest, JourneyRunResponse, StepResultModel
+
+from services.content_privacy import ephemeral_request, require_body_free_browser_logging
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+# Match BrowserVerifier: <=120s work, <=6s cleanup join, 4s transport headroom
+# inside its 130s HTTP timeout. Java's later snapshot/close have separate budgets.
+JOURNEY_EXECUTION_TIMEOUT_SECONDS = 120.0
+DISCONNECT_POLL_SECONDS = 0.25
+# Retain late cleanup tasks after the HTTP cleanup budget expires.
+_pending_cleanup_tasks: set[asyncio.Task] = set()
+
+
+def _cleanup_finished(task):
+    _pending_cleanup_tasks.discard(task)
+    if not task.cancelled():
+        task.exception()
 
 
 def _error_messages(errors: list) -> list[str]:
@@ -27,35 +44,139 @@ def _error_messages(errors: list) -> list[str]:
 
 
 @router.post("/journey/run")
-async def journey_run(request: JourneyRunRequest) -> JourneyRunResponse:
+@ephemeral_request
+async def journey_run(request: JourneyRunRequest, http_request: Request = None) -> JourneyRunResponse:
     """执行用户旅程验证 — 逐步执行 steps DSL，首个失败即停止"""
     from routers.browser import browser_service
 
-    # 生成 session_id
-    session_id = request.session_id or f"rv-{uuid.uuid4().hex[:8]}"
+    if request.ephemeral_content:
+        require_body_free_browser_logging()
+    remaining = JOURNEY_EXECUTION_TIMEOUT_SECONDS
+    if request.deadline_epoch_ms is not None:
+        remaining = min(remaining, request.deadline_epoch_ms / 1000 - time.time())
+    if remaining <= 0:
+        raise HTTPException(status_code=504, detail="JOURNEY_DEADLINE_EXCEEDED")
 
-    # 创建带录制能力的新 session
-    session = await browser_service._create_context_for_journey(
-        session_id, request.record, request.viewport
-    )
+    stop_watcher = asyncio.Event()
+    execution = asyncio.create_task(_run_owned_journey(browser_service, request))
+    disconnected = (asyncio.create_task(_wait_for_disconnect(http_request, stop_watcher))
+                    if http_request is not None else None)
+    try:
+        watched = {execution, disconnected} if disconnected is not None else {execution}
+        done, _ = await asyncio.wait(watched, timeout=remaining, return_when=asyncio.FIRST_COMPLETED)
+        if execution in done:
+            try:
+                return await execution
+            except BrowserAdmissionError as error:
+                raise HTTPException(status_code=error.status_code, detail=error.code) from error
+            except asyncio.CancelledError:
+                # A close_session cancelled the child; do not swallow cancellation
+                # of the HTTP handler itself.
+                if asyncio.current_task().cancelling():
+                    raise
+                raise HTTPException(status_code=409, detail="JOURNEY_CANCELLED")
+        if disconnected is not None and disconnected in done:
+            disconnected.result()  # Receive failures are not client disconnects.
+            raise HTTPException(status_code=499, detail="JOURNEY_CLIENT_DISCONNECTED")
+        raise HTTPException(status_code=504, detail="JOURNEY_DEADLINE_EXCEEDED")
+    finally:
+        stop_watcher.set()
+        for task in watched:
+            _pending_cleanup_tasks.add(task)
+            task.add_done_callback(_cleanup_finished)
+            if not task.done():
+                task.cancel()
+        # wait_for(gather(...)) can itself wait forever for suppressed cancellation.
+        # asyncio.wait bounds the join without cancelling Playwright cleanup again.
+        _, pending = await asyncio.wait(
+            watched, timeout=getattr(browser_service, "cleanup_timeout", 5.0) + 1.0
+        )
+        if pending:
+            logger.warning("Journey cleanup still pending: %d task(s)", len(pending))
+
+
+async def _wait_for_disconnect(request: Request, stopped: asyncio.Event):
+    while not stopped.is_set():
+        if await request.is_disconnected():
+            return
+        # Request.is_disconnected may absorb Task.cancel inside AnyIO's scope.
+        # The explicit stop flag still ends this watcher after that call returns.
+        if stopped.is_set():
+            return
+        try:
+            await asyncio.wait_for(stopped.wait(), timeout=DISCONNECT_POLL_SECONDS)
+        except asyncio.TimeoutError:
+            pass
+
+
+async def _run_owned_journey(browser_service, request: JourneyRunRequest) -> JourneyRunResponse:
+    session_id = request.session_id or f"rv-{uuid.uuid4().hex[:8]}"
+    # Creation itself is cancellation-safe; do not close by ID if creation fails
+    # (a duplicate request must never close the existing owner's context).
+    if request.ephemeral_content:
+        session = await browser_service._create_context_for_journey(
+            session_id, request.record, request.viewport, ephemeral_content=True
+        )
+    else:
+        session = await browser_service._create_context_for_journey(
+            session_id, request.record, request.viewport
+        )
+    # A cancelled Playwright await abandons its protocol response future. Let
+    # closing the owned context resolve the active RPC before cancelling its
+    # Python task, so late TargetClosed errors are received by their caller.
+    work = asyncio.create_task(_execute_journey(browser_service, request, session_id, session))
+    try:
+        return await asyncio.shield(work)
+    except BaseException:
+        # Normal step failures are results and retain the context for Java's
+        # failure semantic snapshot. Only aborted execution is released here.
+        try:
+            await browser_service.close_session(session_id, expected_session=session)
+        except Exception:
+            # Keep the original failure/cancellation. BrowserService retains
+            # failed cleanup for retry; do not silently claim it was released.
+            logger.warning("Journey cleanup unconfirmed for %s", session_id)
+        if not work.done():
+            await asyncio.wait({work}, timeout=0.25)
+        if not work.done():
+            work.cancel()
+        _pending_cleanup_tasks.add(work)
+        work.add_done_callback(_cleanup_finished)
+        await asyncio.wait({work}, timeout=0.25)
+        raise
+    finally:
+        await browser_service.release_session(session_id, session)
+
+
+async def _execute_journey(browser_service, request, session_id, session) -> JourneyRunResponse:
 
     step_results = []
 
     for i, step in enumerate(request.steps):
         timeout = step.get("timeout", browser_service.default_timeout)
         start_time = time.time()
+        result = {}
+        interaction_evidence = {}
+        screenshot_b64 = None
+        screenshot_error = "Not captured: screenshot collection was not reached"
 
         try:
-            result = await _execute_step(browser_service, session_id, session, step, timeout)
+            if step.get("action") == "navigate":
+                step = {**step, "url": urljoin(request.base_url.rstrip("/") + "/", step.get("url", ""))}
+            result = await _execute_step(
+                browser_service, session_id, session, step, timeout,
+                interaction_evidence=interaction_evidence,
+            )
             duration_ms = int((time.time() - start_time) * 1000)
 
             # 每步截图 (JPEG quality=80)
-            screenshot_b64 = None
+            screenshot_error = None
             try:
                 screenshot_bytes = await session.page.screenshot(type="jpeg", quality=80)
                 screenshot_b64 = base64.b64encode(screenshot_bytes).decode()
             except Exception as e:
-                logger.warning(f"Step {i} screenshot failed: {e}")
+                screenshot_error = f"{type(e).__name__}: {e}"
+                logger.warning("Journey step %d screenshot failed (%s)", i, type(e).__name__)
 
             # 获取 console errors
             console_errors = _error_messages(
@@ -72,6 +193,9 @@ async def journey_run(request: JourneyRunRequest) -> JourneyRunResponse:
                 screenshot_base64=screenshot_b64,
                 error=result.get("error"),
                 console_errors=console_errors,
+                method=result.get("method"),
+                warning=result.get("warning"),
+                screenshot_error=screenshot_error,
             )
             step_results.append(step_result)
 
@@ -81,14 +205,22 @@ async def journey_run(request: JourneyRunRequest) -> JourneyRunResponse:
 
         except Exception as e:
             duration_ms = int((time.time() - start_time) * 1000)
+            # Result validation can fail after a successful capture. Preserve the
+            # collected evidence, but do not reuse invalid optional model fields.
+            metadata = result if isinstance(result, dict) else {}
+            method = interaction_evidence.get("method", metadata.get("method"))
+            warning = metadata.get("warning")
             step_results.append(StepResultModel(
                 index=i,
                 action=step.get("action", "unknown"),
                 ok=False,
                 duration_ms=duration_ms,
                 error=str(e),
-                screenshot_base64=None,
+                screenshot_base64=screenshot_b64,
                 console_errors=[],
+                method=method if isinstance(method, str) else None,
+                warning=warning if isinstance(warning, str) else None,
+                screenshot_error=screenshot_error,
             ))
             break
 
@@ -105,7 +237,13 @@ async def journey_run(request: JourneyRunRequest) -> JourneyRunResponse:
             await session.context.tracing.stop(path=trace_path)
             artifacts["trace_path"] = trace_path
         except Exception as e:
-            logger.warning(f"Trace stop failed: {e}")
+            logger.warning("Trace stop failed (%s)", type(e).__name__)
+
+    context_options = getattr(session, "_context_kwargs", {})
+    if context_options.get("record_har_path"):
+        artifacts["har_path"] = context_options["record_har_path"]
+    if context_options.get("record_video_dir"):
+        artifacts["video_dir"] = context_options["record_video_dir"]
 
     final_url = session.page.url
 
@@ -119,7 +257,8 @@ async def journey_run(request: JourneyRunRequest) -> JourneyRunResponse:
 
 
 async def _execute_step(
-    service, session_id: str, session, step: Dict[str, Any], timeout: int
+    service, session_id: str, session, step: Dict[str, Any], timeout: int,
+    *, interaction_evidence: Dict[str, str] | None = None,
 ) -> Dict[str, Any]:
     """将 step DSL 映射到 browser_service 现有方法"""
     action = step["action"]
@@ -130,22 +269,36 @@ async def _execute_step(
         return {"success": True, **(result if isinstance(result, dict) else {})}
 
     elif action == "click":
-        result = await service.click(session_id, step["selector"], timeout=timeout)
-        if isinstance(result, dict) and "error" in result:
-            return {"success": False, "error": result["error"]}
-        return {"success": True}
+        # A timed-out click may already have taken effect. Do not retry it via JS
+        # (the general browser helper does), which can undo a toggle or submit twice.
+        # Resolve inputs before the call boundary: a missing selector/page is not
+        # evidence that Playwright attempted the interaction.
+        selector = step["selector"]
+        native_click = session.page.click
+        try:
+            await native_click(selector, timeout=timeout)
+        except Exception:
+            if interaction_evidence is not None:
+                interaction_evidence["method"] = "playwright"
+            raise
+        return {"success": True, "method": "playwright"}
 
     elif action == "type":
         result = await service.type_text(session_id, step["selector"], step["text"], timeout=timeout)
+        interaction = ({"method": result.get("method"), "warning": result.get("warning")}
+                       if isinstance(result, dict) else {})
         if isinstance(result, dict) and result.get("success") is False:
-            return {"success": False, "error": result.get("error", "type_text failed")}
-        return {"success": True}
+            return {"success": False,
+                    "error": result.get("error") or result.get("error_message") or "type_text failed",
+                    **interaction}
+        return {"success": True, **interaction}
 
     elif action == "wait_for":
         result = await service.wait_for(
             session_id,
             wait_until=step.get("wait_until"),
             selector=step.get("selector"),
+            state=step.get("state", "visible"),
             timeout=timeout,
         )
         if isinstance(result, dict) and "error" in result:

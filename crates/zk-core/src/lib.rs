@@ -23,5 +23,6 @@
 pub mod feature_flags;
 pub mod migrate;
 pub mod paths;
+pub mod protected_paths;
 
 pub use feature_flags::{FeatureFlags, FlagValue};

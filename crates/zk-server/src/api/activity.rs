@@ -31,6 +31,48 @@ use crate::state::AppState;
 /// 旧 `ActivityController.MAX_LIMIT`。
 const MAX_LIMIT: i32 = 100;
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum ActivityDecision {
+    Approved,
+    Rejected,
+}
+
+#[derive(serde::Deserialize)]
+pub(crate) struct ActivityDecisionRequest {
+    decision: ActivityDecision,
+}
+
+/// Records a UI review decision; never grants tool or Git authorization.
+pub(crate) async fn update_decision(
+    State(state): State<AppState>,
+    AxumPath((session_id, activity_id)): AxumPath<(String, String)>,
+    request: Result<Json<ActivityDecisionRequest>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let Json(request) = request.map_err(|_| {
+        ApiError::validation_with_code(
+            "ACTIVITY_DECISION_INVALID",
+            "decision must be approved or rejected",
+        )
+    })?;
+    let decision = match request.decision {
+        ActivityDecision::Approved => "approved",
+        ActivityDecision::Rejected => "rejected",
+    };
+    let result =
+        json!({"success":true,"id":activity_id,"sessionId":session_id,"decision":decision});
+    let changed = state.db.with_writer(move |conn| {
+        Ok(conn.execute("UPDATE activities SET decision=?1,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?2 AND session_id=?3", rusqlite::params![decision,activity_id,session_id])? > 0)
+    }).await?;
+    if !changed {
+        return Err(ApiError::not_found(
+            "ACTIVITY_NOT_FOUND",
+            "Activity not found in this session",
+        ));
+    }
+    Ok(Json(result))
+}
+
 /// `GET /api/sessions/{sessionId}/activities`——会话活动分页（旧 `getActivities`）。
 #[utoipa::path(
     get,

@@ -36,6 +36,8 @@ pub struct ElicitationOption {
 /// 与旧 `@Deprecated requestAndWait` 的 `RUN_ID_REQUIRED` 同义）。
 #[derive(Clone, Debug)]
 pub struct ElicitationRequest {
+    /// Whether an answer may contain multiple selected options.
+    pub multi_select: bool,
     /// 归属会话。
     pub session_id: String,
     /// 归属 Run。
@@ -46,15 +48,17 @@ pub struct ElicitationRequest {
     pub options: Vec<ElicitationOption>,
 }
 
-/// 发问结局（旧 `ElicitationResponse.Status` 四态）。
+/// 发问结局（含送达失败与用户作答期限的独立状态）。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ElicitationOutcome {
     /// 用户已作答（`None` = 终态无 `response_json`，旧亦为合法的 null 值）。
     Success(Option<serde_json::Value>),
     /// 用户取消 / 拒绝。
     Cancelled,
-    /// 过期或不可投递。
+    /// 已送达后作答期限耗尽。
     Timeout,
+    /// 问题未成功送达（携阶段原因，不能解释为用户未作答）。
+    Undeliverable(String),
     /// 其他失败（携原因文案）。
     Error(String),
 }
@@ -90,6 +94,7 @@ mod tests {
             std::sync::Arc::new(StubSink(ElicitationOutcome::Cancelled));
         let outcome = sink
             .request_and_wait(ElicitationRequest {
+                multi_select: false,
                 session_id: "s".to_owned(),
                 run_id: Some("r".to_owned()),
                 question: "pick".to_owned(),

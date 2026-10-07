@@ -3,6 +3,7 @@
  * 使用 @xyflow/react + dagre 渲染代码变更的影响传播图
  */
 
+import { useReducedMotion } from 'framer-motion';
 import { useMemo, useState, useCallback, useEffect, memo } from 'react';
 import {
   ReactFlow,
@@ -40,43 +41,56 @@ import {
 import { computeDAGLayout } from '@/utils/dag-layout';
 import {
   useChangeImpactStore,
+  cancelPendingChangeImpactAnalysis,
   type ChangeImpactNode,
   type ChangeImpactEdge,
   type ChangeImpactSummary,
 } from '@/store/changeImpactStore';
+import { getChartColors, resolveTheme } from '@/styles/design-tokens';
+import { useConfigStore } from '@/store/configStore';
+import { useSessionStore } from '@/store/sessionStore';
 
 // ── 节点类型配置 ──
 
-const nodeTypeConfig: Record<string, { color: string; icon: LucideIcon; label: string }> = {
-  api:        { color: '#3b82f6', icon: Globe,    label: 'API' },
-  service:    { color: '#22c55e', icon: Cog,      label: 'Service' },
-  repository: { color: '#a855f7', icon: Database, label: 'Repository' },
-  scheduler:  { color: '#f97316', icon: Clock,    label: 'Scheduler' },
-  config:     { color: '#6b7280', icon: Settings, label: 'Config' },
-  function:   { color: '#06b6d4', icon: Code,     label: 'Function' },
-  class:      { color: '#8b5cf6', icon: Box,      label: 'Class' },
-};
+/** 当前主题模式 + 强调色的图表色板（§4.1 动态版；glass 归一为 light） */
+function useChartColors(): string[] {
+  const mode = useConfigStore(s => s.theme.mode);
+  const accentColor = useConfigStore(s => s.theme.accentColor);
+  return useMemo(() => getChartColors(resolveTheme(mode), accentColor), [mode, accentColor]);
+}
+
+function getNodeTypeConfig(colors: string[]): Record<string, { color: string; icon: LucideIcon; label: string }> {
+  return {
+    api:        { color: colors[4], icon: Globe,    label: 'API' },
+    service:    { color: colors[1], icon: Cog,      label: 'Service' },
+    repository: { color: colors[5], icon: Database, label: 'Repository' },
+    scheduler:  { color: colors[2], icon: Clock,    label: 'Scheduler' },
+    config:     { color: colors[7], icon: Settings, label: 'Config' },
+    function:   { color: colors[0], icon: Code,     label: 'Function' },
+    class:      { color: colors[6], icon: Box,      label: 'Class' },
+  };
+}
 
 const impactLevelStyles: Record<string, { border: string; shadow: string; dashArray?: string }> = {
-  direct:    { border: '#ef4444', shadow: '0 0 8px rgba(239,68,68,0.3)' },
-  indirect:  { border: '#f97316', shadow: '0 0 6px rgba(249,115,22,0.2)' },
-  potential: { border: '#9ca3af', shadow: 'none', dashArray: '4,4' },
+  direct:    { border: 'var(--v2-err)', shadow: '0 2px 8px rgba(0,0,0,0.08)' },
+  indirect:  { border: 'var(--v2-warn)', shadow: '0 2px 8px rgba(0,0,0,0.06)' },
+  potential: { border: 'var(--v2-text-3)', shadow: 'none', dashArray: '4,4' },
 };
 
 const confidenceBadge: Record<string, { bg: string; text: string; label: string }> = {
-  high:   { bg: 'bg-green-100 dark:bg-green-900/40', text: 'text-green-700 dark:text-green-300', label: 'High' },
-  medium: { bg: 'bg-yellow-100 dark:bg-yellow-900/40', text: 'text-yellow-700 dark:text-yellow-300', label: 'Medium' },
-  low:    { bg: 'bg-gray-100 dark:bg-gray-700/40', text: 'text-gray-600 dark:text-gray-400', label: 'Low' },
+  high:   { bg: 'bg-oksoft', text: 'text-ok', label: '高' },
+  medium: { bg: 'bg-warnsoft', text: 'text-warn', label: '中' },
+  low:    { bg: 'bg-sunken2', text: 'text-t2', label: '低' },
 };
 
 // ── 边样式 ──
 
-function getEdgeStyle(type: string): React.CSSProperties {
+function getEdgeStyle(type: string, colors: string[]): React.CSSProperties {
   switch (type) {
-    case 'call':       return { stroke: '#3b82f6', strokeWidth: 2 };
-    case 'dependency': return { stroke: '#6b7280', strokeWidth: 1.5, strokeDasharray: '5,5' };
-    case 'data-flow':  return { stroke: '#8b5cf6', strokeWidth: 1.5, strokeDasharray: '2,4' };
-    default:           return { stroke: '#9ca3af', strokeWidth: 1 };
+    case 'call':       return { stroke: colors[4], strokeWidth: 2 };
+    case 'dependency': return { stroke: colors[7], strokeWidth: 1.5, strokeDasharray: '5,5' };
+    case 'data-flow':  return { stroke: colors[5], strokeWidth: 1.5, strokeDasharray: '2,4' };
+    default:           return { stroke: 'var(--v2-text-3)', strokeWidth: 1 };
   }
 }
 
@@ -133,7 +147,7 @@ function convertToFlowNodes(impactNodes: ChangeImpactNode[], changedFile: string
   return nodes;
 }
 
-function convertToFlowEdges(impactEdges: ChangeImpactEdge[], impactNodes: ChangeImpactNode[]): Edge[] {
+function convertToFlowEdges(impactEdges: ChangeImpactEdge[], impactNodes: ChangeImpactNode[], colors: string[]): Edge[] {
   const edges: Edge[] = [];
 
   // 将变更源连接到所有 direct 节点
@@ -145,7 +159,7 @@ function convertToFlowEdges(impactEdges: ChangeImpactEdge[], impactNodes: Change
       target: node.id,
       type: 'smoothstep',
       animated: true,
-      style: { stroke: '#ef4444', strokeWidth: 2 },
+      style: { stroke: 'var(--v2-err)', strokeWidth: 2 },
     });
   });
 
@@ -157,8 +171,10 @@ function convertToFlowEdges(impactEdges: ChangeImpactEdge[], impactNodes: Change
       target: edge.target,
       type: 'smoothstep',
       animated: edge.type === 'call',
-      style: getEdgeStyle(edge.type),
+      style: getEdgeStyle(edge.type, colors),
       label: edge.type,
+      labelStyle: { fill: 'var(--v2-text-1)', fontSize: 13 },
+      labelBgStyle: { fill: 'var(--v2-bg-surface)' },
     });
   });
 
@@ -168,7 +184,7 @@ function convertToFlowEdges(impactEdges: ChangeImpactEdge[], impactNodes: Change
 function layoutElements(nodes: Node[], edges: Edge[]): { nodes: Node[]; edges: Edge[] } {
   if (nodes.length === 0) return { nodes, edges };
 
-  const rawNodes = nodes.map(n => ({ id: n.id, width: 220, height: 90 }));
+  const rawNodes = nodes.map(n => ({ id: n.id, width: 220, height: 110 }));
   const rawEdges = edges.map(e => ({ source: e.source, target: e.target }));
 
   const layout = computeDAGLayout(rawNodes, rawEdges, 'TB');
@@ -176,7 +192,7 @@ function layoutElements(nodes: Node[], edges: Edge[]): { nodes: Node[]; edges: E
 
   const layoutedNodes = nodes.map(node => {
     const pos = posMap.get(node.id) || { x: 0, y: 0 };
-    return { ...node, position: { x: pos.x - 110, y: pos.y - 45 } };
+    return { ...node, position: { x: pos.x - 110, y: pos.y - 55 } };
   });
 
   return { nodes: layoutedNodes, edges };
@@ -186,6 +202,8 @@ function layoutElements(nodes: Node[], edges: Edge[]): { nodes: Node[]; edges: E
 
 function ImpactNodeComponent({ data }: NodeProps) {
   const d = data as unknown as ImpactNodeData;
+  const colors = useChartColors();
+  const nodeTypeConfig = getNodeTypeConfig(colors);
   const config = nodeTypeConfig[d.nodeType] || nodeTypeConfig.function;
   const impact = impactLevelStyles[d.impactLevel] || impactLevelStyles.potential;
   const badge = confidenceBadge[d.confidence] || confidenceBadge.low;
@@ -198,46 +216,45 @@ function ImpactNodeComponent({ data }: NodeProps) {
 
   return (
     <div
-      className="w-[220px] min-h-[80px] rounded-lg px-3 py-2.5 bg-white dark:bg-gray-900 transition-shadow"
+      className="w-[220px] min-h-[100px] rounded-[14px] px-3 py-2.5 bg-surfacev2 transition-shadow"
       style={{
-        border: isSource ? '2px solid #ef4444' : borderStyle,
-        boxShadow: isSource ? '0 0 12px rgba(239,68,68,0.4)' : impact.shadow,
-        animation: isSource ? 'pulse-border 2s ease-in-out infinite' : undefined,
+        border: isSource ? '2px solid var(--v2-err)' : borderStyle,
+        boxShadow: isSource ? '0 2px 8px rgba(0,0,0,0.08)' : impact.shadow,
       }}
     >
-      <Handle type="target" position={Position.Top} className="!bg-gray-400 !w-2 !h-2" />
+      <Handle type="target" position={Position.Top} className="!bg-t3 !w-2 !h-2" />
 
       {/* Header: type icon + label */}
       <div className="flex items-center gap-1.5 mb-1">
         {isSource ? (
-          <FileCode className="w-3.5 h-3.5 flex-shrink-0" style={{ color: '#ef4444' }} />
+          <FileCode className="w-3.5 h-3.5 shrink-0" style={{ color: 'var(--v2-err)' }} />
         ) : (
-          <Icon className="w-3.5 h-3.5 flex-shrink-0" style={{ color: config.color }} />
+          <Icon className="w-3.5 h-3.5 shrink-0" style={{ color: config.color }} />
         )}
         <span
-          className="text-[10px] px-1.5 py-0.5 rounded font-medium"
+          className="text-[13px] px-1.5 py-0.5 rounded-sm font-medium"
           style={{
-            backgroundColor: isSource ? 'rgba(239,68,68,0.1)' : `${config.color}15`,
-            color: isSource ? '#ef4444' : config.color,
+            backgroundColor: 'var(--v2-bg-sunken)',
+            color: 'var(--v2-text-2)',
           }}
         >
-          {isSource ? 'Changed' : config.label}
+          {isSource ? '变更源' : config.label}
         </span>
       </div>
 
       {/* Name */}
-      <p className="text-sm font-semibold text-gray-800 dark:text-gray-200 truncate leading-tight mb-1">
+      <p className="text-sm font-semibold text-t1 truncate leading-tight mb-1">
         {d.label}
       </p>
 
       {/* Confidence badge */}
       {!isSource && (
-        <span className={`text-[10px] px-1.5 py-0.5 rounded ${badge.bg} ${badge.text}`}>
-          {badge.label}
+        <span className={`text-[13px] px-1.5 py-0.5 rounded-sm ${badge.bg} ${badge.text}`}>
+          置信度：{badge.label}
         </span>
       )}
 
-      <Handle type="source" position={Position.Bottom} className="!bg-gray-400 !w-2 !h-2" />
+      <Handle type="source" position={Position.Bottom} className="!bg-t3 !w-2 !h-2" />
     </div>
   );
 }
@@ -260,38 +277,38 @@ function SummaryBar({
   elapsedMs: number | null;
 }) {
   return (
-    <div className="border-b border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/50 px-4 py-2.5">
-      <div className="flex items-center justify-between mb-1.5">
+    <div className="border-b border-border-hairline bg-surface2 px-4 py-2.5">
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-1.5">
         <div className="flex items-center gap-2 min-w-0">
-          <FileCode className="w-4 h-4 text-red-500 flex-shrink-0" />
-          <span className="text-sm font-medium text-gray-800 dark:text-gray-200 truncate">
+          <FileCode className="w-4 h-4 text-err shrink-0" />
+          <span className="text-sm font-medium text-t1 truncate">
             {changedFile}
           </span>
-          <span className="text-xs text-gray-500 flex-shrink-0">
+          <span className="text-[13px] text-t2 shrink-0">
             L{changedLines[0]}–{changedLines[changedLines.length - 1]}
           </span>
         </div>
         {elapsedMs != null && (
-          <span className="text-[10px] text-gray-400 flex-shrink-0 font-mono">
+          <span className="text-[13px] text-t2 shrink-0 font-mono">
             {elapsedMs}ms
           </span>
         )}
       </div>
-      <div className="flex items-center gap-4 text-xs">
+      <div className="flex items-center gap-x-4 gap-y-2 flex-wrap text-[13px]">
         <span className="flex items-center gap-1">
-          <span className="w-2 h-2 rounded-full bg-red-500 inline-block" />
-          <span className="text-gray-600 dark:text-gray-400">直接影响: {summary.direct_count}</span>
+          <span className="w-2 h-2 rounded-full bg-err inline-block" />
+          <span className="text-t2">直接影响: {summary.direct_count}</span>
         </span>
         <span className="flex items-center gap-1">
-          <span className="w-2 h-2 rounded-full bg-orange-500 inline-block" />
-          <span className="text-gray-600 dark:text-gray-400">间接影响: {summary.indirect_count}</span>
+          <span className="w-2 h-2 rounded-full bg-warn inline-block" />
+          <span className="text-t2">间接影响: {summary.indirect_count}</span>
         </span>
         <span className="flex items-center gap-1">
-          <span className="w-2 h-2 rounded-full bg-gray-400 inline-block" />
-          <span className="text-gray-600 dark:text-gray-400">潜在风险: {summary.potential_count}</span>
+          <span className="w-2 h-2 rounded-full bg-t3 inline-block" />
+          <span className="text-t2">潜在风险: {summary.potential_count}</span>
         </span>
         {summary.affected_apis.length > 0 && (
-          <span className="text-gray-500 dark:text-gray-400 truncate">
+          <span className="text-t2 truncate">
             API: {summary.affected_apis.join(', ')}
           </span>
         )}
@@ -309,67 +326,70 @@ function NodeDetailPanel({
   node: ChangeImpactNode | null;
   onClose: () => void;
 }) {
+  const colors = useChartColors();
   if (!node) return null;
 
+  const nodeTypeConfig = getNodeTypeConfig(colors);
   const config = nodeTypeConfig[node.type] || nodeTypeConfig.function;
   const badge = confidenceBadge[node.confidence] || confidenceBadge.low;
   const Icon = config.icon;
 
   return (
-    <div className="absolute right-0 top-0 bottom-0 w-72 bg-white dark:bg-gray-900 border-l border-gray-200 dark:border-gray-700 shadow-lg z-20 overflow-y-auto">
-      <div className="flex items-center justify-between p-3 border-b border-gray-200 dark:border-gray-700">
-        <span className="text-sm font-semibold text-gray-800 dark:text-gray-200">节点详情</span>
+    <div className="absolute right-0 top-0 bottom-0 w-72 max-w-full bg-surfacev2 border-l border-border-hairline shadow-e3 z-20 overflow-y-auto">
+      <div className="flex items-center justify-between p-3 border-b border-border-hairline">
+        <span className="text-sm font-semibold text-t1">节点详情</span>
         <button
+          aria-label="关闭影响节点详情"
           onClick={onClose}
-          className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800"
+          className="panel-control p-1 rounded-sm hover:bg-hover2"
         >
-          <X className="w-4 h-4 text-gray-500" />
+          <X className="w-4 h-4 text-t2" />
         </button>
       </div>
-      <div className="p-3 space-y-3">
+      <div className="p-3 space-y-3 [overflow-wrap:anywhere]">
         <div>
-          <label className="text-[10px] uppercase font-semibold text-gray-500">名称</label>
-          <p className="text-sm font-medium text-gray-800 dark:text-gray-200">{node.name}</p>
+          <label className="text-[13px] uppercase font-semibold text-t2">名称</label>
+          <p className="text-sm font-medium text-t1">{node.name}</p>
         </div>
         <div>
-          <label className="text-[10px] uppercase font-semibold text-gray-500">类型</label>
+          <label className="text-[13px] uppercase font-semibold text-t2">类型</label>
           <div className="flex items-center gap-1.5 mt-0.5">
             <Icon className="w-3.5 h-3.5" style={{ color: config.color }} />
-            <span className="text-xs text-gray-600 dark:text-gray-400">{config.label}</span>
+            <span className="text-[13px] text-t2">{config.label}</span>
           </div>
         </div>
         <div>
-          <label className="text-[10px] uppercase font-semibold text-gray-500">文件</label>
-          <p className="text-xs text-gray-600 dark:text-gray-400 break-all">{node.file_path}</p>
+          <label className="text-[13px] uppercase font-semibold text-t2">文件</label>
+          <p className="text-[13px] text-t2 break-all">{node.file_path}</p>
         </div>
         {node.line_range.length >= 2 && (
           <div>
-            <label className="text-[10px] uppercase font-semibold text-gray-500">行范围</label>
-            <p className="text-xs text-gray-600 dark:text-gray-400 font-mono">
+            <label className="text-[13px] uppercase font-semibold text-t2">行范围</label>
+            <p className="text-[13px] text-t2 font-mono">
               L{node.line_range[0]}–{node.line_range[1]}
             </p>
           </div>
         )}
         <div>
-          <label className="text-[10px] uppercase font-semibold text-gray-500">影响层级</label>
+          <label className="text-[13px] uppercase font-semibold text-t2">影响层级</label>
           <div className="flex items-center gap-1.5 mt-0.5">
             <span
               className="w-2 h-2 rounded-full inline-block"
-              style={{ backgroundColor: impactLevelStyles[node.impact_level]?.border || '#9ca3af' }}
+              style={{ backgroundColor: impactLevelStyles[node.impact_level]?.border || 'var(--v2-text-3)' }}
             />
-            <span className="text-xs text-gray-600 dark:text-gray-400 capitalize">{node.impact_level}</span>
+            <span className="text-[13px] text-t2 capitalize">{node.impact_level}</span>
           </div>
         </div>
         <div>
-          <label className="text-[10px] uppercase font-semibold text-gray-500">置信度</label>
-          <span className={`text-[10px] px-1.5 py-0.5 rounded ${badge.bg} ${badge.text}`}>
-            {badge.label}
+          <label className="text-[13px] uppercase font-semibold text-t2">置信度</label>
+          <span className={`text-[13px] px-1.5 py-0.5 rounded-sm ${badge.bg} ${badge.text}`}>
+            置信度：{badge.label}
           </span>
         </div>
         {node.language && (
           <div>
-            <label className="text-[10px] uppercase font-semibold text-gray-500">语言</label>
-            <p className="text-xs text-gray-600 dark:text-gray-400">{node.language}</p>
+            <label className="text-[13px] uppercase font-semibold text-t2">语言</label>
+            <p className="text-[13px] text-t2">{node.language}</p>
           </div>
         )}
       </div>
@@ -380,6 +400,7 @@ function NodeDetailPanel({
 // ── 主图组件（需在 ReactFlowProvider 内） ──
 
 function ChangeImpactGraphInner() {
+  const reduceMotion = useReducedMotion();
   const { fitView } = useReactFlow();
   const impactData = useChangeImpactStore(s => s.impactData);
   const isLoading = useChangeImpactStore(s => s.isLoading);
@@ -390,12 +411,14 @@ function ChangeImpactGraphInner() {
 
   const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
 
+  const chartColors = useChartColors();
+
   const graphData = useMemo(() => {
     if (!impactData) return { nodes: [], edges: [] };
     const flowNodes = convertToFlowNodes(impactData.impact_nodes, impactData.changed_file);
-    const flowEdges = convertToFlowEdges(impactData.impact_edges, impactData.impact_nodes);
+    const flowEdges = convertToFlowEdges(impactData.impact_edges, impactData.impact_nodes, chartColors);
     return layoutElements(flowNodes, flowEdges);
-  }, [impactData]);
+  }, [impactData, chartColors]);
 
   const [nodes, setNodes, onNodesChange] = useNodesState(graphData.nodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(graphData.edges);
@@ -428,6 +451,11 @@ function ChangeImpactGraphInner() {
     });
   }, [edges, hoveredNodeId]);
 
+  const displayEdges = useMemo(() => {
+    const visible = hoveredNodeId ? highlightedEdges : edges;
+    return reduceMotion ? visible.map(edge => ({ ...edge, animated: false })) : visible;
+  }, [hoveredNodeId, highlightedEdges, edges, reduceMotion]);
+
   const highlightedNodes = useMemo(() => {
     if (!hoveredNodeId) return nodes;
     const connectedIds = new Set<string>([hoveredNodeId]);
@@ -459,8 +487,8 @@ function ChangeImpactGraphInner() {
   if (isLoading) {
     return (
       <div className="flex flex-col items-center justify-center h-full">
-        <Loader2 className="w-8 h-8 text-blue-500 animate-spin mb-3" />
-        <p className="text-sm text-gray-500 dark:text-gray-400">正在分析变更影响...</p>
+        <Loader2 className="w-8 h-8 text-accent2-ink animate-spin mb-3" />
+        <p className="text-sm text-t2">正在分析变更影响...</p>
       </div>
     );
   }
@@ -469,15 +497,15 @@ function ChangeImpactGraphInner() {
   if (error) {
     return (
       <div className="flex flex-col items-center justify-center h-full text-center p-6">
-        <AlertTriangle className="w-10 h-10 text-red-400 mb-3" />
-        <p className="text-sm text-gray-700 dark:text-gray-300 mb-1">分析失败</p>
-        <p className="text-xs text-gray-500 dark:text-gray-400 mb-3">{error}</p>
+        <AlertTriangle className="w-10 h-10 text-err mb-3" />
+        <p className="text-sm text-t1 mb-1">分析失败</p>
+        <p className="text-[13px] text-t2 mb-3">{error}</p>
         <button
           onClick={() => useChangeImpactStore.getState().reset()}
-          className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-md bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 hover:bg-blue-100 dark:hover:bg-blue-900/50 transition-colors"
+          className="panel-control flex items-center gap-1.5 px-3 py-1.5 text-[13px] rounded-md bg-accent2-soft text-accent2-ink hover:bg-hover2 transition-colors"
         >
           <RefreshCw className="w-3.5 h-3.5" />
-          重试
+          清除错误
         </button>
       </div>
     );
@@ -487,10 +515,10 @@ function ChangeImpactGraphInner() {
   if (!impactData) {
     return (
       <div className="flex flex-col items-center justify-center h-full text-center p-6">
-        <Network className="w-12 h-12 text-gray-300 dark:text-gray-600 mb-3" />
-        <p className="text-sm text-gray-500 dark:text-gray-400 font-medium">暂无影响分析数据</p>
-        <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">
-          选择文件变更后，影响链路将自动显示
+        <Network className="w-12 h-12 text-t3 mb-3" />
+        <p className="text-sm text-t2 font-medium">暂无影响分析数据</p>
+        <p className="text-[13px] text-t2 mt-1">
+          输入文件和变更行号后开始分析
         </p>
       </div>
     );
@@ -500,17 +528,18 @@ function ChangeImpactGraphInner() {
   if (impactData.impact_nodes.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center h-full text-center p-6">
-        <Network className="w-12 h-12 text-green-300 dark:text-green-600 mb-3" />
-        <p className="text-sm text-gray-500 dark:text-gray-400 font-medium">无影响</p>
-        <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">
-          该变更未检测到受影响的依赖方
+        <Network className="w-12 h-12 text-ok mb-3" />
+        <p className="text-sm text-t2 font-medium">未识别到依赖</p>
+        <p className="text-[13px] text-t2 mt-1">
+          辅助分析未识别到依赖方；这不代表变更已经验证通过。
         </p>
       </div>
     );
   }
 
   return (
-    <div className="flex flex-col w-full h-full bg-white dark:bg-gray-900">
+    <div className="impact-graph flex flex-col w-full h-full bg-surfacev2">
+      {impactData.truncated && <p role="status" className="p-2 text-sm text-warn">结果已截断，仅展示部分影响；请缩小文件范围或分析深度。</p>}
       <SummaryBar
         changedFile={impactData.changed_file}
         changedLines={impactData.changed_lines}
@@ -521,7 +550,7 @@ function ChangeImpactGraphInner() {
       <div className="relative flex-1 min-h-0">
         <ReactFlow
           nodes={hoveredNodeId ? highlightedNodes : nodes}
-          edges={hoveredNodeId ? highlightedEdges : edges}
+          edges={displayEdges}
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
           onNodeClick={handleNodeClick}
@@ -535,36 +564,65 @@ function ChangeImpactGraphInner() {
         >
           <MiniMap
             nodeStrokeWidth={2}
-            className="!bg-gray-50 dark:!bg-gray-800"
+            className="!bg-surface2"
           />
           <Background variant={BackgroundVariant.Dots} gap={16} size={1} />
           <Controls
             showInteractive={false}
-            className="!bg-white/90 dark:!bg-gray-800/90 !border-gray-200 dark:!border-gray-700 !shadow-sm"
+            className="!bg-surfacev2 !border-border-hairline !shadow-e1"
           />
         </ReactFlow>
 
         <NodeDetailPanel node={selectedNode} onClose={() => setSelectedNode(null)} />
       </div>
 
-      {/* 脉冲动画 keyframes */}
-      <style>{`
-        @keyframes pulse-border {
-          0%, 100% { box-shadow: 0 0 4px rgba(239,68,68,0.3); }
-          50% { box-shadow: 0 0 16px rgba(239,68,68,0.6); }
-        }
-      `}</style>
     </div>
   );
 }
 
-/** 对外导出的变更影响图组件（包裹 ReactFlowProvider） */
+function ChangeImpactRequestForm({ hint }: { hint: Record<string, unknown> | null }) {
+  const loading = useChangeImpactStore(state => state.isLoading);
+  const [error, setError] = useState<string | null>(null);
+  const file = hint?.filePath ?? hint?.file_path ?? hint?.path ?? '';
+  const root = hint?.projectRoot ?? hint?.project_root ?? '';
+  const lines = hint?.changedLines ?? hint?.changed_lines ?? [];
+  return <form className="space-y-2 border-b border-border-hairline p-3" onSubmit={event => {
+    event.preventDefault();
+    const data = new FormData(event.currentTarget);
+    const filePath = String(data.get('filePath') ?? '').trim();
+    const rawLines = String(data.get('changedLines') ?? '').trim();
+    const tokens = rawLines ? rawLines.split(/[,，\s]+/) : [];
+    if (!filePath || tokens.length > 10000 || tokens.some(token => !/^\d+$/.test(token) || Number(token) < 1 || Number(token) > 10000000)) {
+      setError('请填写文件路径，行号使用正整数并以逗号或空格分隔。'); return;
+    }
+    setError(null);
+    void useChangeImpactStore.getState().fetchChangeImpact(filePath, [...new Set(tokens.map(Number))], String(data.get('projectRoot') ?? '').trim(), Number(data.get('depth')));
+  }}>
+    <p className="text-[13px] text-t2">辅助分析，非验证结果；仍需运行实际测试。</p>
+    <label className="block text-[13px] text-t2">文件路径<input name="filePath" aria-label="影响分析文件路径" defaultValue={typeof file === 'string' ? file : ''} required className="panel-control mt-1 w-full rounded border border-border-hairline bg-surface2 p-2 text-t1" /></label>
+    <label className="block text-[13px] text-t2">变更行号（留空分析整个文件）<input name="changedLines" aria-label="影响分析变更行号" defaultValue={Array.isArray(lines) ? lines.join(', ') : ''} className="panel-control mt-1 w-full rounded border border-border-hairline bg-surface2 p-2 text-t1" /></label>
+    <details><summary className="cursor-pointer text-[13px] text-t2">分析范围</summary>
+      <label className="block text-[13px] text-t2">已授权项目目录（留空使用当前会话）<input name="projectRoot" aria-label="影响分析项目目录" defaultValue={typeof root === 'string' ? root : ''} className="panel-control mt-1 w-full rounded border border-border-hairline bg-surface2 p-2 text-t1" /></label>
+      <label className="block text-[13px] text-t2">深度<select name="depth" aria-label="影响分析深度" defaultValue="3" className="panel-control m-2 rounded bg-surface2 p-1">{[1, 2, 3, 4, 5].map(value => <option key={value} value={value}>{value}</option>)}</select></label>
+    </details>
+    {error && <p role="alert" className="text-sm text-err">{error}</p>}
+    <div className="flex gap-2"><button type="submit" disabled={loading} className="panel-control rounded bg-accent2-soft px-3 py-1.5 text-sm text-accent2-ink disabled:opacity-50">分析影响</button>
+      {loading && <button type="button" onClick={cancelPendingChangeImpactAnalysis} className="panel-control rounded bg-surface2 px-3 py-1.5 text-sm text-t1">取消分析</button>}
+    </div>
+  </form>;
+}
+
+/** Requests and results are scoped to the visible panel and its captured owner. */
 export function ChangeImpactGraph() {
+  const sessionId = useSessionStore(state => state.sessionId);
+  const hint = useChangeImpactStore(state => state.lastHint);
+  useEffect(() => () => cancelPendingChangeImpactAnalysis(), []);
   return (
-    <div className="w-full h-full">
-      <ReactFlowProvider>
+    <div className="flex h-full w-full flex-col">
+      <ChangeImpactRequestForm key={`${sessionId}:${JSON.stringify(hint)}`} hint={hint} />
+      <div className="min-h-0 flex-1"><ReactFlowProvider>
         <ChangeImpactGraphInner />
-      </ReactFlowProvider>
+      </ReactFlowProvider></div>
     </div>
   );
 }

@@ -20,8 +20,8 @@ use crate::time::{format_rfc3339_micros, now_millis, parse_rfc3339_millis};
 /// `RETURNING seq_num`（见 [`insert_message`]）。
 const INSERT_MESSAGE_SQL: &str = "INSERT OR IGNORE INTO messages (
     id, session_id, role, content_json, stop_reason,
-    input_tokens, output_tokens, task_id, run_id, origin, source_task_id, created_at, seq_num)
- VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+    input_tokens, output_tokens, task_id, run_id, origin, source_task_id, created_at, metadata_json, seq_num)
+ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
     (SELECT COALESCE(MAX(seq_num), 0) + 1 FROM messages WHERE session_id = ?2))
  RETURNING seq_num";
 
@@ -55,9 +55,8 @@ impl MessageAttribution {
 /// - `seq_num` 由 `SELECT COALESCE(MAX(seq_num), 0) + 1` 子查询在 INSERT 语句内
 ///   原子分配（对齐旧 `addMessage`；`UNIQUE(session_id, seq_num)` 兜底）；
 /// - INSERT 与 touch 会话 `updated_at` 同事务（比旧系统两条独立 UPDATE 更紧）；
-/// - `INSERT OR IGNORE`：主键已存在时静默跳过且**不** touch（对齐旧
-///   `addMessageWithId` 的 `rows > 0` 判定；`append_message` 的全新 UUID
-///   不会触发该分支）；
+/// - 已存在 ID 仅在身份、正文、metadata、用量及归属完全相等时幂等跳过；
+///   冲突失败且不 touch；JSON 对象键顺序不影响等价判定。
 /// - 外键违例归一为 [`DbError::SessionNotFound`]（会话不存在）。
 pub(crate) fn insert_message_in_current_write(
     conn: &Connection,
@@ -68,7 +67,28 @@ pub(crate) fn insert_message_in_current_write(
 ) -> Result<Option<MessageRecord>, DbError> {
     let now_ms = now_millis();
     let now_iso = format_rfc3339_micros(now_ms);
-    let content_json = serde_json::to_string(&msg.content)?;
+    if conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM messages WHERE id=?1)",
+        [message_id],
+        |row| row.get::<_, bool>(0),
+    )? {
+        return if matches_existing_message(conn, message_id, session_id, msg, attribution)? {
+            Ok(None)
+        } else {
+            Err(DbError::Conflict("MESSAGE_ID_CONFLICT".into()))
+        };
+    }
+    let content_json =
+        crate::content::store_text(conn, session_id, &serde_json::to_string(&msg.content)?)?;
+    let metadata_json = crate::content::store_optional(
+        conn,
+        session_id,
+        msg.meta
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?
+            .as_deref(),
+    )?;
     let seq_num: Option<i64> = conn
         .query_row(
             INSERT_MESSAGE_SQL,
@@ -88,7 +108,8 @@ pub(crate) fn insert_message_in_current_write(
                     attribution.origin.as_str()
                 },
                 attribution.source_task_id,
-                now_iso
+                now_iso,
+                metadata_json
             ],
             |row| row.get(0),
         )
@@ -99,6 +120,9 @@ pub(crate) fn insert_message_in_current_write(
             other => Err(map_fk_violation(session_id, other)),
         })?;
     let Some(seq_num) = seq_num else {
+        if !matches_existing_message(conn, message_id, session_id, msg, attribution)? {
+            return Err(DbError::Conflict("MESSAGE_ID_CONFLICT".to_owned()));
+        }
         return Ok(None);
     };
     conn.execute(
@@ -106,6 +130,7 @@ pub(crate) fn insert_message_in_current_write(
         params![now_iso, session_id],
     )?;
     Ok(Some(MessageRecord {
+        meta: msg.meta.clone(),
         id: message_id.to_owned(),
         session_id: session_id.to_owned(),
         role: msg.role,
@@ -116,6 +141,42 @@ pub(crate) fn insert_message_in_current_write(
         seq_num,
         created_at: now_ms,
     }))
+}
+
+fn matches_existing_message(
+    conn: &Connection,
+    message_id: &str,
+    session_id: &str,
+    message: &NewMessage,
+    attribution: &MessageAttribution,
+) -> Result<bool, DbError> {
+    let content = serde_json::to_value(&message.content)?;
+    let metadata = message.meta.clone().unwrap_or(serde_json::Value::Null);
+    let origin = if attribution.origin.is_empty() {
+        "conversation"
+    } else {
+        &attribution.origin
+    };
+    Ok(conn.query_row(
+        "SELECT session_id,role,content_json,stop_reason,input_tokens,output_tokens,metadata_json,task_id,run_id,origin,source_task_id FROM messages WHERE id=?1",
+        [message_id],
+        |row| {
+            let owner:String=row.get(0)?;
+            let saved_content = serde_json::from_str::<serde_json::Value>(&crate::content::load_row_text(conn,&owner,row.get(2)?)?).ok();
+            let saved_metadata = crate::content::load_optional(conn,&owner,row.get(6)?)?.map_or(Some(serde_json::Value::Null), |raw|serde_json::from_str(&raw).ok());
+            Ok(row.get::<_,String>(0)? == session_id
+                && row.get::<_,String>(1)? == message.role.as_str()
+                && saved_content.as_ref() == Some(&content)
+                && row.get::<_,Option<String>>(3)? == message.stop_reason
+                && row.get::<_,i64>(4)? == message.input_tokens
+                && row.get::<_,i64>(5)? == message.output_tokens
+                && saved_metadata.as_ref() == Some(&metadata)
+                && row.get::<_,Option<String>>(7)? == attribution.task_id
+                && row.get::<_,Option<String>>(8)? == attribution.run_id
+                && row.get::<_,String>(9)? == origin
+                && row.get::<_,Option<String>>(10)? == attribution.source_task_id)
+        },
+    ).optional()?.unwrap_or(false))
 }
 
 fn insert_message(
@@ -141,7 +202,7 @@ pub(super) fn load_message_rows(
 ) -> Result<Vec<MessageRecord>, DbError> {
     let mut stmt = conn.prepare(
         "SELECT id, session_id, role, content_json, stop_reason,
-                input_tokens, output_tokens, created_at, seq_num
+                input_tokens, output_tokens, created_at, seq_num, metadata_json
          FROM messages WHERE session_id = ?1 ORDER BY seq_num ASC",
     )?;
     let rows = stmt
@@ -150,21 +211,38 @@ pub(super) fn load_message_rows(
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
+                crate::content::load_row_text(conn, &row.get::<_, String>(1)?, row.get(3)?)?,
                 row.get::<_, Option<String>>(4)?,
                 row.get::<_, i64>(5)?,
                 row.get::<_, i64>(6)?,
                 row.get::<_, String>(7)?,
                 row.get::<_, i64>(8)?,
+                parse_metadata(crate::content::load_optional(
+                    conn,
+                    &row.get::<_, String>(1)?,
+                    row.get(9)?,
+                )?)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows
         .into_iter()
         .filter_map(
-            |(id, sid, role, content_json, stop_reason, in_tok, out_tok, created_iso, seq)| {
+            |(
+                id,
+                sid,
+                role,
+                content_json,
+                stop_reason,
+                in_tok,
+                out_tok,
+                created_iso,
+                seq,
+                meta,
+            )| {
                 let role = MessageRole::parse(&role)?;
                 Some(MessageRecord {
+                    meta,
                     id,
                     session_id: sid,
                     role,
@@ -180,7 +258,96 @@ pub(super) fn load_message_rows(
         .collect())
 }
 
+fn validate_attribution(
+    conn: &Connection,
+    session_id: &str,
+    attribution: &MessageAttribution,
+) -> Result<(), DbError> {
+    if !matches!(
+        attribution.origin.as_str(),
+        "conversation" | "tool_result" | "task_result" | "runtime"
+    ) {
+        return Err(DbError::Invalid("MESSAGE_ORIGIN_INVALID".to_owned()));
+    }
+    if let Some(task_id) = attribution.task_id.as_deref() {
+        let owned: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM tasks t
+         JOIN sessions s ON s.id=?1
+         WHERE t.id=?2 AND (t.session_id=s.id OR s.parent_session_id=t.session_id)",
+            params![session_id, task_id],
+            |row| row.get(0),
+        )?;
+        if owned != 1 {
+            return Err(DbError::Invalid("MESSAGE_TASK_NOT_OWNED".to_owned()));
+        }
+    }
+    if let Some(run_id) = attribution.run_id.as_deref() {
+        let owned: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM run_envelopes r
+         WHERE r.id=?1 AND (?2 IS NULL OR r.task_id=?2)",
+            params![run_id, attribution.task_id],
+            |row| row.get(0),
+        )?;
+        if owned != 1 {
+            return Err(DbError::Invalid("MESSAGE_RUN_NOT_OWNED".to_owned()));
+        }
+    }
+    Ok(())
+}
+
 impl crate::Db {
+    /// Idempotently queue a user instruction on its active root Run.
+    /// # Errors
+    /// Rejects changed payloads, cross-session ids and inactive/child Runs.
+    pub async fn append_steering_message(
+        &self,
+        session_id: &str,
+        run_id: &str,
+        input_id: &str,
+        text: &str,
+        meta: Option<serde_json::Value>,
+    ) -> Result<Option<MessageRecord>, DbError> {
+        if input_id.trim().is_empty() || input_id.len() > 200 || text.trim().is_empty() {
+            return Err(DbError::Validation(
+                "steering requires a stable request id and nonblank text".into(),
+            ));
+        }
+        let (session_id, run_id, message_id, text) = (
+            session_id.to_owned(),
+            run_id.to_owned(),
+            format!("steering:{input_id}"),
+            text.to_owned(),
+        );
+        let mut metadata = meta
+            .and_then(|m| m.as_object().cloned())
+            .unwrap_or_default();
+        metadata.insert("steering".into(), serde_json::Value::Bool(true));
+        let message = NewMessage {
+            meta: Some(serde_json::Value::Object(metadata)),
+            role: MessageRole::User,
+            content: vec![StoredBlock::Text { text }],
+            stop_reason: None,
+            input_tokens: 0,
+            output_tokens: 0,
+        };
+        self.with_writer(move |conn| {
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let existing: Option<(String,String,String,Option<String>)> = tx.query_row("SELECT session_id,run_id,content_json,metadata_json FROM messages WHERE id=?1", [&message_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
+            if let Some((owner, run, content, metadata)) = existing {
+                let content=crate::content::load_text(&tx,&owner,&content)?;
+                let metadata=crate::content::load_optional(&tx,&owner,metadata)?;
+                if owner != session_id || run != run_id || parse_blocks(&content) != message.content || metadata.map(|raw|serde_json::from_str::<serde_json::Value>(&raw)).transpose()? != message.meta {
+                    return Err(DbError::Conflict("steering request id already used with different ownership or payload".into()));
+                }
+                return Ok(None);
+            }
+            let task: Option<String> = tx.query_row("SELECT r.task_id FROM run_envelopes r JOIN tasks t ON t.id=r.task_id WHERE r.id=?1 AND r.session_id=?2 AND t.parent_task_id IS NULL AND r.status IN ('running','waitingDependencies','waitingInteraction')", params![run_id,session_id], |r|r.get(0)).optional()?;
+            let task_id = task.ok_or_else(|| DbError::Conflict("steering requires an active root run".into()))?;
+            let inserted = insert_message_in_current_write(&tx, &message_id, &session_id, &message, &MessageAttribution { task_id: Some(task_id), run_id: Some(run_id), origin: "conversation".into(), source_task_id: None })?;
+            tx.commit()?;
+            Ok(inserted)
+        }).await
+    }
     /// 追加消息（`POST resume` 后 WS 流程 / compact / export 的数据来源）。
     ///
     /// 生成 `UUIDv4` 主键；事务内分配 `seq_num` 并 touch 会话。
@@ -254,35 +421,7 @@ impl crate::Db {
         let session_id = session_id.to_owned();
         let inserted = self
             .with_writer(move |conn| {
-                if !matches!(
-                    attribution.origin.as_str(),
-                    "conversation" | "tool_result" | "task_result" | "runtime"
-                ) {
-                    return Err(DbError::Invalid("MESSAGE_ORIGIN_INVALID".to_owned()));
-                }
-                if let Some(task_id) = attribution.task_id.as_deref() {
-                    let owned: i64 = conn.query_row(
-                        "SELECT COUNT(*) FROM tasks t
-                         JOIN sessions s ON s.id=?1
-                         WHERE t.id=?2 AND (t.session_id=s.id OR s.parent_session_id=t.session_id)",
-                        params![session_id, task_id],
-                        |row| row.get(0),
-                    )?;
-                    if owned != 1 {
-                        return Err(DbError::Invalid("MESSAGE_TASK_NOT_OWNED".to_owned()));
-                    }
-                }
-                if let Some(run_id) = attribution.run_id.as_deref() {
-                    let owned: i64 = conn.query_row(
-                        "SELECT COUNT(*) FROM run_envelopes r
-                         WHERE r.id=?1 AND (?2 IS NULL OR r.task_id=?2)",
-                        params![run_id, attribution.task_id],
-                        |row| row.get(0),
-                    )?;
-                    if owned != 1 {
-                        return Err(DbError::Invalid("MESSAGE_RUN_NOT_OWNED".to_owned()));
-                    }
-                }
+                validate_attribution(conn, &session_id, &attribution)?;
                 insert_message(
                     conn,
                     &message_id_for_insert,
@@ -293,6 +432,44 @@ impl crate::Db {
             })
             .await?;
         inserted.ok_or_else(|| DbError::Invalid(format!("MESSAGE_ID_COLLISION:{message_id}")))
+    }
+
+    /// Append one input batch atomically while preserving each user message boundary.
+    /// # Errors
+    /// Ownership, capacity, or any insert failure leaves the entire batch unchanged.
+    pub async fn append_user_input_batch(
+        &self,
+        session_id: &str,
+        messages: Vec<NewMessage>,
+        attribution: MessageAttribution,
+    ) -> Result<Vec<MessageRecord>, DbError> {
+        if messages.is_empty()
+            || messages.len() > 257
+            || messages.iter().any(|msg| msg.role != MessageRole::User)
+        {
+            return Err(DbError::Validation("USER_INPUT_BATCH_INVALID".into()));
+        }
+        let session_id = session_id.to_owned();
+        self.with_writer(move |conn| {
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            validate_attribution(&tx, &session_id, &attribution)?;
+            let mut records = Vec::with_capacity(messages.len());
+            for message in messages {
+                records.push(
+                    insert_message_in_current_write(
+                        &tx,
+                        &uuid::Uuid::new_v4().to_string(),
+                        &session_id,
+                        &message,
+                        &attribution,
+                    )?
+                    .ok_or_else(|| DbError::Invalid("MESSAGE_ID_COLLISION".into()))?,
+                );
+            }
+            tx.commit()?;
+            Ok(records)
+        })
+        .await
     }
 
     /// Ensure a successful Task/Run has one durable final Assistant message.
@@ -333,6 +510,7 @@ impl crate::Db {
                 )
                 .optional()?
             {
+                let content_json = crate::content::load_text(conn, &session_id, &content_json)?;
                 let persisted = parse_blocks(&content_json)
                     .iter()
                     .filter_map(|block| match block {
@@ -354,6 +532,7 @@ impl crate::Db {
                 &message_id,
                 &session_id,
                 &NewMessage {
+                    meta: None,
                     role: MessageRole::Assistant,
                     content: vec![StoredBlock::Text { text: content }],
                     stop_reason: Some("end_turn".to_owned()),
@@ -412,7 +591,7 @@ impl crate::Db {
             }
             let mut stmt = conn.prepare(
                 "SELECT id, session_id, role, content_json, stop_reason,
-                        input_tokens, output_tokens, created_at, seq_num
+                        input_tokens, output_tokens, created_at, seq_num, metadata_json
                  FROM messages WHERE session_id = ?1
                  ORDER BY seq_num ASC LIMIT ?2 OFFSET ?3",
             )?;
@@ -422,12 +601,21 @@ impl crate::Db {
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
+                        crate::content::load_row_text(
+                            conn,
+                            &row.get::<_, String>(1)?,
+                            row.get(3)?,
+                        )?,
                         row.get::<_, Option<String>>(4)?,
                         row.get::<_, i64>(5)?,
                         row.get::<_, i64>(6)?,
                         row.get::<_, String>(7)?,
                         row.get::<_, i64>(8)?,
+                        parse_metadata(crate::content::load_optional(
+                            conn,
+                            &row.get::<_, String>(1)?,
+                            row.get(9)?,
+                        )?)?,
                     ))
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -446,9 +634,11 @@ impl crate::Db {
                         out_tok,
                         created_iso,
                         seq,
+                        meta,
                     )| {
                         let role = MessageRole::parse(&role)?;
                         Some(MessageRecord {
+                            meta,
                             id,
                             session_id: sid,
                             role,
@@ -510,7 +700,7 @@ impl crate::Db {
             let row = conn
                 .query_row(
                     "SELECT id, session_id, role, content_json, stop_reason,
-                            input_tokens, output_tokens, created_at, seq_num
+                            input_tokens, output_tokens, created_at, seq_num, metadata_json
                      FROM messages WHERE id = ?1",
                     params![message_id],
                     |row| {
@@ -518,20 +708,41 @@ impl crate::Db {
                             row.get::<_, String>(0)?,
                             row.get::<_, String>(1)?,
                             row.get::<_, String>(2)?,
-                            row.get::<_, String>(3)?,
+                            crate::content::load_row_text(
+                                conn,
+                                &row.get::<_, String>(1)?,
+                                row.get(3)?,
+                            )?,
                             row.get::<_, Option<String>>(4)?,
                             row.get::<_, i64>(5)?,
                             row.get::<_, i64>(6)?,
                             row.get::<_, String>(7)?,
                             row.get::<_, i64>(8)?,
+                            parse_metadata(crate::content::load_optional(
+                                conn,
+                                &row.get::<_, String>(1)?,
+                                row.get(9)?,
+                            )?)?,
                         ))
                     },
                 )
                 .optional()?;
             Ok(row.and_then(
-                |(id, sid, role, content_json, stop_reason, in_tok, out_tok, created_iso, seq)| {
+                |(
+                    id,
+                    sid,
+                    role,
+                    content_json,
+                    stop_reason,
+                    in_tok,
+                    out_tok,
+                    created_iso,
+                    seq,
+                    meta,
+                )| {
                     let role = MessageRole::parse(&role)?;
                     Some(MessageRecord {
+                        meta,
                         id,
                         session_id: sid,
                         role,
@@ -547,4 +758,17 @@ impl crate::Db {
         })
         .await
     }
+}
+
+fn parse_metadata(raw: Option<String>) -> rusqlite::Result<Option<serde_json::Value>> {
+    raw.map(|raw| {
+        serde_json::from_str(&raw).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                9,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })
+    })
+    .transpose()
 }

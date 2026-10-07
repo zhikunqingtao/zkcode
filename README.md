@@ -14,9 +14,28 @@
 - 持久化：Session、Run、Task、Snapshot、Evidence、Artifact、Workbench（单库 SQLite）
 - 多 Agent 协作：可靠的 attached 子 Agent；Team/Swarm 在统一运行时门禁通过前失败关闭
 - MCP Client/Server、Python UDS sidecar、Playwright 浏览器回放
-- 多 LLM Provider：DashScope、DeepSeek、Moonshot、Zhipu、MiniMax、Anthropic、OpenAI 等
+- 多 LLM Provider：DashScope、DeepSeek、Moonshot、Kimi Code、OpenRouter、ZenMux、Zhipu、MiniMax、Anthropic、OpenAI 等
 - 默认模型：`qwen3.8-max-0902`（普通 DashScope）；另内置百炼订阅模型 `qwen3.8-max`、`qwen3.8-flash`，以及智谱模型 `glm-5.3-flash`
 - GFM/工作区图片渲染，以及基于 DashScope 的语音输入和助手消息朗读
+
+## 2026 年 10 月能力同步
+
+本轮以 ZhikunCode `053adf90` 为固定来源。迁移范围、逐提交对应及验证状态见
+[`docs/migration`](docs/migration/2026-10-upstream.json)，未通过或未运行的门禁独立记录。
+
+- 对话采用轮次视图，默认 balanced：展开问题与最终答复，折叠执行过程。增加液态玻璃、
+  飞船、花果山／凌霄与 Jelly 主题；强动效默认关闭，保留 system 主题，统一使用开发工作台。
+- Worktree 和写 Agent 提供隔离开发、可追溯产物与保留路径。任务完成不自动提交或合入，
+  显式操作会检查活动任务、目标变化、冲突及未交付更改。
+- 支持会话搜索、运行状态、权限持久化和 2–5 个会话的可恢复合并。合并结果继承主会话权限；
+  封存来源和产物通过 HandoffRead 查阅，原始记录只作为参考，不授予新的执行权限。
+- 新增 Shell 任务和显式 attached／detached 生命周期。独立任务仍有会话归属、预算、输出与停止入口。
+- Skill 页面使用全局开关，影响所有项目；记忆支持条目编辑和 Markdown 整体编辑，
+  以 SQLite 条目为唯一来源，并发修改冲突时要求重新加载。
+- 当前会话模型与新会话默认模型分开设置。ASR 最近对话上下文为可选开关，默认关闭；
+  热词可通过 `ASR_CORRECTIONS` 配置。停止按钮需确认，Ctrl+C 立即停止。
+- 本机 Office、PDF、媒体、OCR 工具链随 `./dev sync` 安装及验证，
+  原生文档回归入口为 `./dev test office`。
 
 ## 模型、Markdown 与语音
 
@@ -26,7 +45,7 @@
 - 输入区可通过“引用本地文件路径”选择任意本机文件。选择器不上传文件内容，
   仅将规范化后的绝对路径随消息发送给模型服务商；Word、PDF 等二进制文件不会因此自动解析。
 - `qwen3.8-flash` 支持思考、图片和工具调用；内置 GLM 视觉模型已更新为
-  `glm-5.3-flash`。旧的 `glm-5v-turbo` ID 不提供兼容别名，升级后的旧 Session 需要手动选择新模型。
+  `glm-5.3-flash`。旧模型配置保持兼容；可用性仍取决于配置的供应商。
 - 语音输入使用 `qwen3-asr-flash`，录音最长 120 秒；助手消息完成后可使用
   `qwen3-tts-flash`、`Cherry` 音色朗读可见正文。
 - ASR/TTS 只使用普通 DashScope 密钥（设置项 `dashscope` 或
@@ -270,7 +289,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 - 仅支持 Apple Silicon Mac
 - 完全干净机器的工具链安装仍需独立发行验收
 - Beta 阶段，API 可能变化
-- Worktree 功能默认关闭
+- Worktree 提交和合入需显式触发；冲突或清理未确认时保留工作树
 
 ## 许可证
 

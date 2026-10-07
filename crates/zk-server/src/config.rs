@@ -143,8 +143,8 @@ pub struct Config {
     /// 进程级顶层 Coordinator 模式开关。启动期严格解析
     /// `ZHIKUN_COORDINATOR_MODE=0|1`，默认关闭且运行时不可改写。
     pub coordinator_mode_enabled: bool,
-    /// 子代理写工具开关。默认关闭；显式开启后仍逐调用经过统一 Admission；
-    /// 不会把 Write/Edit/Bash 暴露进子代理工具规格。
+    /// 子代理写工具开关。生产默认开启，逐调用经过统一 Admission。
+    /// 仅已授权的 worktree/sharedWorkspace 写隔离允许 Write/Edit/Bash；readOnly 保持只读。
     pub agent_write_enabled: bool,
     /// sharedWorkspace 独立安全门禁。默认关闭；即使显式开启，也必须同时满足
     /// Agent、写工具和进程级 workspace lease 均真实装配后才可执行。
@@ -155,7 +155,7 @@ pub struct Config {
     /// 持久 Cron 能力总开关。默认关闭；即使开启，也只有在统一 Agent
     /// `TaskRuntime` 真实装配后才注册工具并启动 scheduler。
     pub cron_enabled: bool,
-    /// Worktree 能力总开关。真实 Git 验收完成前必须保持关闭。
+    /// Worktree 能力总开关。真实 Git/写子代理验收后生产默认开启；显式配置 false 可关闭。
     pub worktree_enabled: bool,
     /// Swarm 能力总开关。默认关闭，完成 Coordinator/重启门禁后才可显式开启。
     pub swarm_enabled: bool,
@@ -296,11 +296,11 @@ impl Config {
             )?),
             agent_enabled,
             coordinator_mode_enabled,
-            agent_write_enabled: parse_bool_env("ZK_AGENT_WRITE_ENABLED", false)?,
+            agent_write_enabled: parse_bool_env("ZK_AGENT_WRITE_ENABLED", true)?,
             shared_workspace_enabled: parse_bool_env("ZK_SHARED_WORKSPACE_ENABLED", false)?,
             auto_resume_safe_tasks: parse_bool_env("ZK_AUTO_RESUME_SAFE_TASKS", false)?,
             cron_enabled: parse_bool_env("ZK_CRON_ENABLED", false)?,
-            worktree_enabled: parse_bool_env("ZK_WORKTREE_ENABLED", false)?,
+            worktree_enabled: parse_bool_env("ZK_WORKTREE_ENABLED", true)?,
             swarm_enabled: parse_bool_env("ZK_SWARM_ENABLED", false)?,
             feature_web_browser_tool: feature_flags.is_enabled(feature_flags::WEB_BROWSER_TOOL),
             feature_git_enhanced_tool: feature_flags.is_enabled(feature_flags::GIT_ENHANCED_TOOL),

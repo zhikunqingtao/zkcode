@@ -1,0 +1,1955 @@
+{
+  "schemaVersion": 1,
+  "owner": "decision_runtime",
+  "sourceRange": "3e536438..053adf90",
+  "targetBaseline": "08cbdc45",
+  "scope": "Engine, context, summary, provider stream, child Agent, Worktree and Shell source test changed assertions",
+  "method": "Inspect each source test net diff; net-empty touched tests inspect intermediate commits. Large classes review all changed assertion groups and relevant fixtures. Record native design adaptations and named existing tests separately from actual execution; no Java execution or full matrix coverage is inferred.",
+  "paths": {
+    "backend/src/test/java/com/aicodeassistant/agent/ConcurrencyControlTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/agent/ConcurrencyControlTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "01adc3a53d1a93581c2bfd98ed62c7b8ed50268791419c54a99ee7c9377fc6a4",
+      "changedMethods": [],
+      "sourceAssertions": [
+        "50 simultaneous acquisitions hold capacity until all attempts finish; two rounds verify slot reuse and exact active counts."
+      ],
+      "nativeImplementation": [
+        "crates/zk-engine/src/concurrency.rs",
+        "crates/zk-engine/src/task/runtime.rs"
+      ],
+      "actualNativeAssertions": [
+        "global_limit_admits_30_and_rejects_31st",
+        "raii_drop_releases_all_three_layers",
+        "root_admission_never_executes_more_than_four_children"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Native mutex-protected atomic acquisition and RAII release retain existing 30/global and 10/session controls; TaskRuntime adds its independent root admission limit. Source 50-thread repeated scheduling matrix is not independently reproduced.",
+        "Java fixtures were read, not executed. Native assertions named here exist; latest passing native execution is linked by verificationEvidenceRefs; full release readiness remains a separate gate.",
+        "Native verification updated from actual passing log lines in workspace_resume7; strict_clippy_resume10 also passed. These outcomes do not turn omitted Java fixtures, live external services, pending user decisions or untested permutations into completed coverage."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "listed_native_regressions_passed",
+      "verificationEvidenceRefs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ],
+      "nativeAssertionResults": {
+        "global_limit_admits_30_and_rejects_31st": "passed",
+        "raii_drop_releases_all_three_layers": "passed",
+        "root_admission_never_executes_more_than_four_children": "passed"
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/config/AgentTimeoutConfigTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/config/AgentTimeoutConfigTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "2ea617ff695aa9749830ddb4428ee5c20c5343456b7b1e97494f396e48822aa9",
+      "changedMethods": [
+        "shippedWaitBudgetCoversChildDeadlineAndGracefulExit",
+        "explicitWaitBudgetRemainsConfigurable"
+      ],
+      "sourceAssertions": [
+        "Shipped wait budget covers child deadline/grace; explicit wait override stays configurable."
+      ],
+      "nativeImplementation": [
+        "crates/zk-engine/src/agent/executor.rs",
+        "crates/zk-engine/src/task/runtime.rs"
+      ],
+      "actualNativeAssertions": [
+        "timeout_config_defaults",
+        "execute_sync_timeout",
+        "attached_submission_defaults_to_the_thirty_minute_ceiling",
+        "hard_deadline_includes_time_waiting_for_an_execution_slot"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Rust TaskOutput has an independent per-read wait, while execution deadline and cleanup grace remain durable Task authority. Preserve configured native budgets; Java YAML property names are not a Rust compatibility obligation.",
+        "Java fixtures were read, not executed. Native assertions named here exist; latest passing native execution is linked by verificationEvidenceRefs; full release readiness remains a separate gate.",
+        "Native verification updated from actual passing log lines in workspace_resume7; strict_clippy_resume10 also passed. These outcomes do not turn omitted Java fixtures, live external services, pending user decisions or untested permutations into completed coverage."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "listed_native_regressions_passed",
+      "verificationEvidenceRefs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ],
+      "nativeAssertionResults": {
+        "timeout_config_defaults": "passed",
+        "execute_sync_timeout": "passed",
+        "attached_submission_defaults_to_the_thirty_minute_ceiling": "passed",
+        "hard_deadline_includes_time_waiting_for_an_execution_slot": "passed"
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/engine/ApiRetryServiceRetryClassificationTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/engine/ApiRetryServiceRetryClassificationTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "6a750ac8a06f5d198bd4c9d72dc266f460f54eacb29b79b8871fc3c8e22f6f8a",
+      "sourceAssertions": [
+        "Read all new retry classification assertions. Fixed typed connect failure short three-attempt policy, deterministic 400/401/402/403 suppression even with a mistaken true flag, explicit retry suppression for 429/503/529. Native typed errors replace arbitrary cyclic Java cause walks; existing Rust breaker budgets retained."
+      ],
+      "nativeImplementation": [
+        "crates/zk-llm/src/error.rs",
+        "crates/zk-llm/src/retry.rs",
+        "crates/zk-llm/src/registry.rs"
+      ],
+      "actualNativeAssertions": [
+        "connect_failures_have_three_attempts_and_suppression_always_wins",
+        "fatal_errors_are_never_retried"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Source Java test assertions reviewed; Java tests were not executed. Latest native workspace and Clippy evidence is referenced below.",
+        "Native implementation inspected and fixes retained; source Java fixtures are not an execution result.",
+        "Native verification updated from actual passing log lines in workspace_resume7; strict_clippy_resume10 also passed. These outcomes do not turn omitted Java fixtures, live external services, pending user decisions or untested permutations into completed coverage."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "listed_native_regressions_passed",
+      "verificationEvidenceRefs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ],
+      "nativeAssertionResults": {
+        "connect_failures_have_three_attempts_and_suppression_always_wins": "passed",
+        "fatal_errors_are_never_retried": "passed"
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/engine/CompactConfigurationTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/engine/CompactConfigurationTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "e7b22716139e3f4640525131e131ed713894896a44ce1920ce8615cc14e62c71",
+      "sourceAssertions": [
+        "Read wire profiles, exact provider route/model isolation, direct and official Bailian output fields, raw missing usage, one 429 retry/deadline, cancellation and malformed optional settings. Native isolated registry accepts existing explicit single-provider custom endpoints by user configuration-preservation decision; no summary fallback. Java legacy message mirror cases are not new Rust data and are outside greenfield compatibility scope."
+      ],
+      "nativeImplementation": [
+        "crates/zk-llm/src/summary_transport.rs",
+        "crates/zk-llm/tests/summary_wire.rs",
+        "crates/zk-engine/src/llm_summarizer.rs"
+      ],
+      "actualNativeAssertions": [
+        "summary_modes_match_supported_model_matrix",
+        "summary_request_is_toolless_bounded_and_thinking_disabled",
+        "compaction_phase_has_one_attempt_and_cancellation_prevents_external_call"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Source Java test assertions reviewed; Java tests were not executed. Latest native workspace and Clippy evidence is referenced below.",
+        "Native implementation inspected and fixes retained; source Java fixtures are not an execution result.",
+        "Native verification updated from actual passing log lines in workspace_resume7; strict_clippy_resume10 also passed. These outcomes do not turn omitted Java fixtures, live external services, pending user decisions or untested permutations into completed coverage."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "listed_native_regressions_passed",
+      "verificationEvidenceRefs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ],
+      "nativeAssertionResults": {
+        "summary_modes_match_supported_model_matrix": "passed",
+        "summary_request_is_toolless_bounded_and_thinking_disabled": "passed",
+        "compaction_phase_has_one_attempt_and_cancellation_prevents_external_call": "passed"
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/engine/CompactServiceUnitTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/engine/CompactServiceUnitTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "9cf1fb3f85fee0eb7d75ea07821cab785502b41818825a0a8fce7baf342a6761",
+      "sourceAssertions": [
+        "Read all changed assertions and fixtures: scope is passed through each cascade/recovery stage, neutral truncation markers, faithful complete tool pair fixtures, strict summary-only envelope and direct independent route. Existing native local fallback remains safe when optional summary config/provider is unavailable."
+      ],
+      "nativeImplementation": [
+        "crates/zk-engine/src/context/cascade.rs",
+        "crates/zk-engine/src/context/compact.rs",
+        "crates/zk-engine/src/recovery.rs"
+      ],
+      "actualNativeAssertions": [
+        "scoped_summary_persists_attribution_and_authoritative_usage",
+        "compaction_reference_contains_corrections_but_not_ui_or_provider_secrets"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Source Java test assertions reviewed; Java tests were not executed. Latest native workspace and Clippy evidence is referenced below.",
+        "Native implementation inspected and fixes retained; source Java fixtures are not an execution result.",
+        "Native verification updated from actual passing log lines in workspace_resume7; strict_clippy_resume10 also passed. These outcomes do not turn omitted Java fixtures, live external services, pending user decisions or untested permutations into completed coverage."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "listed_native_regressions_passed",
+      "verificationEvidenceRefs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ],
+      "nativeAssertionResults": {
+        "scoped_summary_persists_attribution_and_authoritative_usage": "passed",
+        "compaction_reference_contains_corrections_but_not_ui_or_provider_secrets": "passed"
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/engine/CompactionHistoryRecoveryTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/engine/CompactionHistoryRecoveryTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "135967c0f55d6b76eb317d03f9ac0ea754865d65c4cf3508298b204b94732313",
+      "sourceAssertions": [
+        "Read full new file: request-only missing-result placeholders explicitly say effects unknown; repeated projection idempotent; real sibling results retained; invalid duplicate/orphan tool transactions not summarized. Updated replay placeholder wording; native durable per-invocation identity replaces Java legacy assistant UUID mirror and collision namespace, with no legacy-data migration."
+      ],
+      "nativeImplementation": [
+        "crates/zk-engine/src/normalize.rs",
+        "crates/zk-engine/src/engine.rs",
+        "crates/zk-engine/src/context/compact.rs"
+      ],
+      "actualNativeAssertions": [
+        "injects_synthetic_results_for_multiple_orphans_in_order",
+        "parallel_tool_batch_is_retained_or_omitted_in_its_entirety"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Source Java test assertions reviewed; Java tests were not executed. Latest native workspace and Clippy evidence is referenced below.",
+        "Native implementation inspected and fixes retained; source Java fixtures are not an execution result.",
+        "Native verification updated from actual passing log lines in workspace_resume7; strict_clippy_resume10 also passed. These outcomes do not turn omitted Java fixtures, live external services, pending user decisions or untested permutations into completed coverage."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "listed_native_regressions_passed",
+      "verificationEvidenceRefs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ],
+      "nativeAssertionResults": {
+        "injects_synthetic_results_for_multiple_orphans_in_order": "passed",
+        "parallel_tool_batch_is_retained_or_omitted_in_its_entirety": "passed"
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/engine/ContextCascadeE2ETest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/engine/ContextCascadeE2ETest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "a2216745902b4862e3a08844c26d42d8295cf9bfcebc4d24650deca4688a5314",
+      "sourceAssertions": [
+        "Read all changed assertions and fixtures: scope is passed through each cascade/recovery stage, neutral truncation markers, faithful complete tool pair fixtures, strict summary-only envelope and direct independent route. Existing native local fallback remains safe when optional summary config/provider is unavailable."
+      ],
+      "nativeImplementation": [
+        "crates/zk-engine/src/context/cascade.rs",
+        "crates/zk-engine/src/context/compact.rs",
+        "crates/zk-engine/src/recovery.rs"
+      ],
+      "actualNativeAssertions": [
+        "pre_api_cascade_applies_lower_levels_on_long_history",
+        "error_recovery_cascade_drains_then_reacts"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Source Java test assertions reviewed; Java tests were not executed. Latest native workspace and Clippy evidence is referenced below.",
+        "Native implementation inspected and fixes retained; source Java fixtures are not an execution result.",
+        "Native verification updated from actual passing log lines in workspace_resume7; strict_clippy_resume10 also passed. These outcomes do not turn omitted Java fixtures, live external services, pending user decisions or untested permutations into completed coverage."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "listed_native_regressions_passed",
+      "verificationEvidenceRefs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ],
+      "nativeAssertionResults": {
+        "pre_api_cascade_applies_lower_levels_on_long_history": "passed",
+        "error_recovery_cascade_drains_then_reacts": "passed"
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/engine/ContextCollapseServiceTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/engine/ContextCollapseServiceTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "ce2eb67a7ae1a3c281f47a8b40fe6b459831d0c2f883c41930c1b3f5762a5f10",
+      "sourceAssertions": [
+        "Read all changed assertions and fixtures: scope is passed through each cascade/recovery stage, neutral truncation markers, faithful complete tool pair fixtures, strict summary-only envelope and direct independent route. Existing native local fallback remains safe when optional summary config/provider is unavailable."
+      ],
+      "nativeImplementation": [
+        "crates/zk-engine/src/context/cascade.rs",
+        "crates/zk-engine/src/context/compact.rs",
+        "crates/zk-engine/src/recovery.rs"
+      ],
+      "actualNativeAssertions": [
+        "progressive_collapse_always_preserves_user_messages",
+        "context_collapse_candidates_share_the_same_batch_floor"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Source Java test assertions reviewed; Java tests were not executed. Latest native workspace and Clippy evidence is referenced below.",
+        "Native implementation inspected and fixes retained; source Java fixtures are not an execution result.",
+        "Native verification updated from actual passing log lines in workspace_resume7; strict_clippy_resume10 also passed. These outcomes do not turn omitted Java fixtures, live external services, pending user decisions or untested permutations into completed coverage."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "listed_native_regressions_passed",
+      "verificationEvidenceRefs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ],
+      "nativeAssertionResults": {
+        "progressive_collapse_always_preserves_user_messages": "passed",
+        "context_collapse_candidates_share_the_same_batch_floor": "passed"
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/engine/ContextCompactionContinuationLiveTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/engine/ContextCompactionContinuationLiveTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "2936c95acaca0943f10cb765c74d6f5b451ad848ec028681c3f6ff02b7fc230f",
+      "changedMethods": [
+        "continuation",
+        "onEvent",
+        "onComplete"
+      ],
+      "sourceAssertions": [
+        "Live model continuation retains fact/key paths, changed decisions, latest instructions, tool effects and actionable next step after real compaction."
+      ],
+      "nativeImplementation": [
+        "crates/zk-engine/src/context/compact.rs",
+        "crates/zk-engine/src/llm_summarizer.rs",
+        "crates/zk-llm/tests/summary_wire.rs"
+      ],
+      "actualNativeAssertions": [
+        "mandatory_user_images_metadata_and_literal_markers_survive_compaction",
+        "parallel_tool_batch_is_retained_or_omitted_in_its_entirety",
+        "compaction_reference_contains_corrections_but_not_ui_or_provider_secrets",
+        "summary_http_is_nonstreaming_retries_once_with_same_key_and_keeps_partial_usage_unknown"
+      ],
+      "disposition": "reviewed_live_validation_not_executed",
+      "verificationNotes": [
+        "Source live model fixtures read but remote credentialed semantic evaluation has NOT run. Deterministic native structural retention and loopback HTTP validate mechanics only, not a remote model semantic score.",
+        "Java fixtures were read, not executed. Native assertions named here exist; latest passing native execution is linked by verificationEvidenceRefs; full release readiness remains a separate gate.",
+        "Native verification updated from actual passing log lines in workspace_resume7; strict_clippy_resume10 also passed. These outcomes do not turn omitted Java fixtures, live external services, pending user decisions or untested permutations into completed coverage."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "local_structural_regressions_passed_remote_live_not_executed",
+      "verificationEvidenceRefs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ],
+      "nativeAssertionResults": {
+        "mandatory_user_images_metadata_and_literal_markers_survive_compaction": "passed",
+        "parallel_tool_batch_is_retained_or_omitted_in_its_entirety": "passed",
+        "compaction_reference_contains_corrections_but_not_ui_or_provider_secrets": "passed",
+        "summary_http_is_nonstreaming_retries_once_with_same_key_and_keeps_partial_usage_unknown": "passed"
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/engine/ContextCompactorTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/engine/ContextCompactorTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "0ce6d050e6676b74014dfe0789f5bfa102c60589f1c7aae58292974eef550049",
+      "sourceAssertions": [
+        "Read new assertions including complete removed/reference text, error state, UI metadata exclusion, strict tags, whole batches, immutable source, cancellation/one phase, separate summary input vs execution output budget, mandatory users, and repeated omission rounds. Found gaps: reference omitted retained tools, error state absent, local omission froze optional history; fixes now preserve trusted error metadata, include all retained references, and distinguish omission from summary freeze markers. Latest regression pending."
+      ],
+      "nativeImplementation": [
+        "crates/zk-engine/src/context/compact.rs",
+        "crates/zk-engine/src/normalize.rs",
+        "crates/zk-engine/src/llm_summarizer.rs",
+        "crates/zk-engine/src/recovery.rs"
+      ],
+      "actualNativeAssertions": [
+        "llm_summary_level_applies_when_summarizer_available",
+        "local_omission_does_not_freeze_optional_history_on_later_compaction",
+        "summary_quality_requires_file_paths_when_history_touched_files",
+        "compaction_reference_contains_corrections_but_not_ui_or_provider_secrets"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Source Java test assertions reviewed; Java tests were not executed. Latest native workspace and Clippy evidence is referenced below.",
+        "Native implementation inspected and fixes retained; source Java fixtures are not an execution result.",
+        "Native verification updated from actual passing log lines in workspace_resume7; strict_clippy_resume10 also passed. These outcomes do not turn omitted Java fixtures, live external services, pending user decisions or untested permutations into completed coverage."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "listed_native_regressions_passed",
+      "verificationEvidenceRefs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ],
+      "nativeAssertionResults": {
+        "llm_summary_level_applies_when_summarizer_available": "passed",
+        "local_omission_does_not_freeze_optional_history_on_later_compaction": "passed",
+        "summary_quality_requires_file_paths_when_history_touched_files": "passed",
+        "compaction_reference_contains_corrections_but_not_ui_or_provider_secrets": "passed"
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/engine/ContextManagementTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/engine/ContextManagementTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "c6711034e266d628da2b73b8cf7861c2cf331b8f867d95f743741aac404ad637",
+      "sourceAssertions": [
+        "Read all changed assertions and fixtures: scope is passed through each cascade/recovery stage, neutral truncation markers, faithful complete tool pair fixtures, strict summary-only envelope and direct independent route. Existing native local fallback remains safe when optional summary config/provider is unavailable."
+      ],
+      "nativeImplementation": [
+        "crates/zk-engine/src/context/cascade.rs",
+        "crates/zk-engine/src/context/compact.rs",
+        "crates/zk-engine/src/recovery.rs"
+      ],
+      "actualNativeAssertions": [
+        "auto_compact_guards_reject_short_and_system_only_history",
+        "auto_compact_triggers_above_threshold",
+        "recover_exhausts_when_no_strategy_applies"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Source Java test assertions reviewed; Java tests were not executed. Latest native workspace and Clippy evidence is referenced below.",
+        "Native implementation inspected and fixes retained; source Java fixtures are not an execution result.",
+        "Native verification updated from actual passing log lines in workspace_resume7; strict_clippy_resume10 also passed. These outcomes do not turn omitted Java fixtures, live external services, pending user decisions or untested permutations into completed coverage."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "listed_native_regressions_passed",
+      "verificationEvidenceRefs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ],
+      "nativeAssertionResults": {
+        "auto_compact_guards_reject_short_and_system_only_history": "passed",
+        "auto_compact_triggers_above_threshold": "passed",
+        "recover_exhausts_when_no_strategy_applies": "passed"
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/engine/HandoffContextServiceTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/engine/HandoffContextServiceTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "9eea9cdb7028a5d957189c68b058530646a85eefae39afdb2549456e82292904",
+      "changedMethods": [],
+      "sourceAssertions": [
+        "Only actual merged-session binding enables bounded low-trust digest and HandoffRead guidance; missing binding does not invent source access."
+      ],
+      "nativeImplementation": [
+        "crates/zk-engine/src/context/handoff.rs",
+        "crates/zk-engine/src/engine.rs",
+        "crates/zk-engine/tests/runtime_migration.rs",
+        "crates/zk-server/src/handoff.rs"
+      ],
+      "actualNativeAssertions": [
+        "handoff_is_bounded_reference_and_restricted_tools_do_not_claim_access",
+        "sealed_handoff_replay_is_transient_user_reference_and_not_system_authority"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Native durable binding and per-call source ownership replace Java metadata flags. Global tool catalog exposure alone never grants handoff access; historical content stays reference material and cannot grant permissions.",
+        "Java fixtures were read, not executed. Native assertions named here exist; latest passing native execution is linked by verificationEvidenceRefs; full release readiness remains a separate gate.",
+        "Native verification updated from actual passing log lines in workspace_resume7; strict_clippy_resume10 also passed. These outcomes do not turn omitted Java fixtures, live external services, pending user decisions or untested permutations into completed coverage."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "listed_native_regressions_passed",
+      "verificationEvidenceRefs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ],
+      "nativeAssertionResults": {
+        "handoff_is_bounded_reference_and_restricted_tools_do_not_claim_access": "passed",
+        "sealed_handoff_replay_is_transient_user_reference_and_not_system_authority": "passed"
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/engine/MessageNormalizerTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/engine/MessageNormalizerTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "cc3c599dfc976621c2bcc7b3074318f7509b5c1f8556229c53fb1c0a52eded50",
+      "changedMethods": [
+        "dropsPlaceholderTurnBeforeMergingUsersWithoutMutatingHistory",
+        "keepsToolCallsReasoningAndResultsIntact",
+        "keepsMeaningfulAssistantTextAndOtherBracketedContent",
+        "keepsUserPlaceholderLiteral",
+        "keepsOpaqueProviderStateAndNonTextPayloads",
+        "cleansPlaceholderProducedByCollapse"
+      ],
+      "sourceAssertions": [
+        "Drop replay-only pure compression markers including repeated flattened blocks; preserve thinking, real tool calls, user boundaries, and nonplaceholder body."
+      ],
+      "nativeImplementation": [
+        "crates/zk-engine/src/normalize.rs",
+        "crates/zk-engine/src/engine.rs"
+      ],
+      "actualNativeAssertions": [
+        "repeated_marker_blocks_drop_only_the_replay_copy_and_preserve_tool_pairs",
+        "compression_marker_is_not_a_reply_example_but_user_literal_survives",
+        "normalization_keeps_opaque_or_image_only_assistant_boundaries",
+        "does_not_merge_consecutive_user_messages"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Fixed repeated-marker projection while retaining immutable stored originals. Native keeps distinct user messages rather than lossy adjacent-user flattening; tool identity and provider state remain explicit.",
+        "Java fixtures were read, not executed. Native assertions named here exist; latest passing native execution is linked by verificationEvidenceRefs; full release readiness remains a separate gate.",
+        "Native verification updated from actual passing log lines in workspace_resume7; strict_clippy_resume10 also passed. These outcomes do not turn omitted Java fixtures, live external services, pending user decisions or untested permutations into completed coverage."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "listed_native_regressions_passed",
+      "verificationEvidenceRefs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ],
+      "nativeAssertionResults": {
+        "repeated_marker_blocks_drop_only_the_replay_copy_and_preserve_tool_pairs": "passed",
+        "compression_marker_is_not_a_reply_example_but_user_literal_survives": "passed",
+        "normalization_keeps_opaque_or_image_only_assistant_boundaries": "passed",
+        "does_not_merge_consecutive_user_messages": "passed"
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/engine/QueryEngineErrorRecoveryTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/engine/QueryEngineErrorRecoveryTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "f749b09a9802064f65c3817f0346722e91cf3e29d411da0027ef7454c81d9f31",
+      "changedMethods": [
+        "setUp",
+        "close",
+        "finalResponseAfterThreeFailuresCompletesWithoutAnotherModelCall",
+        "emptyFinalResponseAfterThreeFailuresStillRequiresAVisibleAnswer",
+        "finalResponseAfterThreeFailuresStillHonorsBlockingStopHooks",
+        "thirdFourthAndFifthFailuresShareOneHintAndStillAllowCorrection",
+        "fiveMissingFilesInOneBatchDoNotStopBeforeTheModelCanCorrectItsPaths",
+        "batchCrossingFromTwoToFourFailuresStillReceivesOneHint",
+        "resetOutcomeInsideABatchAllowsAHintForTheNewFailureStreak",
+        "permissionDenialsAloneDoNotCauseRecoveryHints",
+        "priorToolErrorsDoNotBlockOutputLimitRecovery",
+        "hintSuppressionDoesNotExtendTheHardTurnLimit"
+      ],
+      "sourceAssertions": [
+        "One recovery hint per actual failure streak; success/permission resets; 3/4/5 errors still permit correction, final response and token-output recovery, without extending hard turn limits."
+      ],
+      "nativeImplementation": [
+        "crates/zk-engine/src/engine.rs",
+        "crates/zk-engine/src/tool_tracker.rs",
+        "crates/zk-engine/src/termination.rs",
+        "crates/zk-engine/tests/engine_flow.rs"
+      ],
+      "actualNativeAssertions": [
+        "recovery_hint_once_per_failure_streak_preserves_counts",
+        "completed_final_answer_wins_over_previous_tool_errors_but_not_budget",
+        "max_tokens_truncation_escalates_then_injects_recovery_message"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Native retains existing ten-error safety ceiling and hard token/turn/amount budgets. Three-error hint does not zero counters or repeatedly alter strategy. Java soft-stop permutations are not claimed all executed individually.",
+        "Java fixtures were read, not executed. Native assertions named here exist; latest passing native execution is linked by verificationEvidenceRefs; full release readiness remains a separate gate.",
+        "Native verification updated from actual passing log lines in workspace_resume7; strict_clippy_resume10 also passed. These outcomes do not turn omitted Java fixtures, live external services, pending user decisions or untested permutations into completed coverage."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "listed_native_regressions_passed",
+      "verificationEvidenceRefs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ],
+      "nativeAssertionResults": {
+        "recovery_hint_once_per_failure_streak_preserves_counts": "passed",
+        "completed_final_answer_wins_over_previous_tool_errors_but_not_budget": "passed",
+        "max_tokens_truncation_escalates_then_injects_recovery_message": "passed"
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/engine/QueryEngineSanitizeInternalMarkersTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/engine/QueryEngineSanitizeInternalMarkersTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "changedMethods": [],
+      "sourceAssertions": [
+        "Intermediate 931a9bee added generic body marker stripping; 698299aa deleted that behavior and test, requiring literal body preservation and bounded empty/placeholder recovery instead."
+      ],
+      "nativeImplementation": [
+        "crates/zk-engine/src/engine.rs",
+        "crates/zk-engine/src/normalize.rs",
+        "crates/zk-engine/tests/runtime_migration.rs"
+      ],
+      "actualNativeAssertions": [
+        "explicitly_requested_placeholder_is_a_valid_literal_answer",
+        "trailing_compression_echo_preserves_original_and_recovers_once"
+      ],
+      "disposition": "superseded_in_source_range",
+      "verificationNotes": [
+        "Net diff is empty: read both adding and deleting intermediate commits. Do not resurrect a removed sanitizer. Native persisted/provider text is preserved; only request-copy omission markers and bounded final-answer recovery are handled.",
+        "Java fixtures were read, not executed. Native assertions named here exist; latest passing native execution is linked by verificationEvidenceRefs; full release readiness remains a separate gate.",
+        "Native verification updated from actual passing log lines in workspace_resume7; strict_clippy_resume10 also passed. These outcomes do not turn omitted Java fixtures, live external services, pending user decisions or untested permutations into completed coverage."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "listed_native_regressions_passed",
+      "verificationEvidenceRefs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ],
+      "nativeAssertionResults": {
+        "explicitly_requested_placeholder_is_a_valid_literal_answer": "passed",
+        "trailing_compression_echo_preserves_original_and_recovers_once": "passed"
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/engine/QueryEngineUnitTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/engine/QueryEngineUnitTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "e647cce9f72ad9c23404a5f5dc65a589a189786efd44cbbef96ac2523524eb04",
+      "changedMethods": [
+        "useRunAdmission",
+        "failureBeforeRegistrationPublishesOnlyInternalEvidenceAndNeverStartsWork",
+        "partialRegistrationWithUncertainCleanupDoesNotPublishUnstartedEvidence",
+        "reusedStateClearsPriorEvidenceBeforeAnUncertainRegistrationAttempt",
+        "editDiffReachesUiAndPersistedMessagesButNotNextModelRequest",
+        "resumesIncompleteHistoryWithoutReexecutingOrPersistingHistoricalTool",
+        "streamChatParametersPassed",
+        "endTurnStopsLoop",
+        "emptyFinalResponse_retriesOnceAndSucceeds",
+        "emptyFinalResponse_failsAfterOneRetry",
+        "useRealNormalizationAndRunAdmission",
+        "emptyFinalAtTurnLimitFailsWithoutAnotherModelCall",
+        "emptyFinalHonorsStopHookPreventContinuation",
+        "emptyFinalBlockedByHookAtTurnLimitFails",
+        "emptyFinalAtTokenBudgetLimitFailsWithoutRetry",
+        "blockingHookCanRecoverEmptyFinalWithoutAnAdditionalRecoveryPrompt",
+        "markerOnlyFinalIsPreserved",
+        "trailingTruncationEchoTriggersRecovery",
+        "trailingCompressionEchoTriggersRecovery",
+        "recoveryExhaustedOnPersistentEcho",
+        "repeatedTrailingMarkersRecoverWithoutStackOverflow",
+        "midTextBracketPreserved",
+        "emptyContentRecovers",
+        "blankTextRecovers",
+        "collapseMarkerOnlyFinalTriggersRecovery",
+        "combinedMarkersOnlyAlsoRecovers",
+        "iniSectionNamesStayFidelity",
+        "repeatedEmptyFinalFailsRunAndCleansAdmission",
+        "visibleTextDoesNotRetry",
+        "reusedStateClearsStartupFailureBeforeNormalExecution",
+        "visibleFinalAtTurnLimitStillSucceeds",
+        "toolUseWithoutTextDoesNotTriggerEmptyFinalRecovery",
+        "recoveryToolUseAtTurnLimitDoesNotCompleteAnUnrecoveredRun",
+        "maxTurnsProjectionIgnoresAbortCausedByTerminalTransition",
+        "recoveryThroughToolUseCanStillSucceed",
+        "explicitCancellationDuringRecoveryRemainsCancellation",
+        "steeringAcceptedDuringRecoveryAndAppliedBeforeCompletion",
+        "partialToolStreamFallbackPreservesCallsCompletedResultsAndUnknownOutcomes",
+        "oneInvalidToolInputRejectsTheWholeTurnBeforeAnyToolStarts",
+        "truncatedToolTurnStartsNoTools",
+        "providerErrorTakesPrecedenceOverTruncatedToolInput",
+        "assistantPersistenceFailureStartsNoTools",
+        "stopHookPersistenceFailureCannotCompleteTheRun",
+        "unknownToolRejectsWholeBatchAndAllowsModelSelfCorrection",
+        "toolResultPersistenceFailurePreventsAnotherModelRequest",
+        "mandatoryContextOverBudgetFailsBeforeProviderCallWithActionableMessage",
+        "textToolTextOrderIsPreservedAndToolStartsExactlyOnce",
+        "backgroundResultsCompletedEarlyAreDeliveredOnceWithStatusAndFilePath",
+        "backgroundDeliveryWrapsCompleteTruncatedAndPlainOutputs",
+        "backgroundLateResultResumesMainModelBeforeRunCompletes",
+        "cancellationDuringBackgroundWaitStopsWithoutConsolidation",
+        "backgroundWaitTimeoutReturnsErrorWithPartialTextAndUsage",
+        "backgroundResultsDoNotBypassTurnLimit",
+        "eachBackgroundWaitWaveReceivesFullIndependentBudget",
+        "disabledBackgroundWaitKeepsExistingImmediateReturn",
+        "wireEngineWithRunAuthority",
+        "accumulatesReportedUsageAcrossTurnsAndPushesSnapshots",
+        "explicitZeroUsageCountsAsReported",
+        "missingUsageIsMarkedUnknownWithoutEstimation",
+        "singleResponseIsConvergedExactlyOnceAcrossCallbacks",
+        "partialResponseUsageIsRetainedExactlyOnce",
+        "responseKeepsLatestCumulativeUsageAcrossNullAndRepeatedDeltas",
+        "compatibleProviderMissingUsageRemainsUnknownThroughEngine",
+        "reportedUsageBeforeProviderErrorIsRetained",
+        "reportedUsageBeforeRuntimeFailureIsRetained",
+        "parseFailureDiagnosticsPreserveRawUsageAndOriginalError",
+        "cancellationAfterStreamBeforeParsingKeepsExistingCancellationPath",
+        "unreportedFailureAfterKnownTurnMarksPartial",
+        "localPayloadRejectionDoesNotInventAnUnreportedResponse",
+        "cancellationBeforeStreamChatDoesNotInventAnUnreportedResponse",
+        "cancellationExceptionAfterUsageDoesNotDoubleCount",
+        "usageIsConvergedBeforeMessagePersistenceFailure",
+        "wireRealSkillToolExecution",
+        "inlineSkillBodyDeliveredAsToolResultContent",
+        "bundledReviewScopeDeliveredInNextModelRequest",
+        "unknownSkillYieldsErrorNotSuccessBody",
+        "cumulativeSkillContentBeyondFormerLimitsReachesNextModelRequests",
+        "disabledSkillIsAbsentFromActualModelRequestsAndSuggestions",
+        "disabledSkillRejectsStaleToolCallsBeforeRendering",
+        "nextRootRequestsReflectAllDisabledAndReenabledSkills",
+        "nextSubAgentRequestsReflectAllDisabledAndReenabledSkills",
+        "handoffProjectionOnlyRunsForExplicitlyMergedSessions",
+        "mergedEntryCapacityUsesTheExistingContextFailureResult"
+      ],
+      "sourceAssertions": [
+        "Durable admission precedes tools; complete stream/whole batch validation rejects malformed, truncated or unknown mixed tool batches before effects.",
+        "Empty or placeholder-only final response has bounded recovery; exact literal user requests and substantive bracket text survive. Tool/text block declaration order must survive persistence and UI replay.",
+        "Partial/absent usage stays unknown; converged real observations precede message persistence without double count; failures and unknown termination never become success.",
+        "Skill body arrives as actual tool result with parameters preserved and private metadata omitted; global toggles and durable Handoff source references constrain later calls.",
+        "Background completion, output/status/paths and hard budgets remain attributable to the correct run; mandatory context overflow fails before a model request."
+      ],
+      "nativeImplementation": [
+        "crates/zk-engine/src/engine.rs",
+        "crates/zk-engine/tests/engine_flow.rs",
+        "crates/zk-engine/tests/runtime_migration.rs",
+        "crates/zk-engine/src/task/runtime.rs",
+        "crates/zk-engine/src/context/compact.rs",
+        "crates/zk-engine/src/llm_ledger.rs"
+      ],
+      "actualNativeAssertions": [
+        "complete_batch_validation_precedes_every_tool_start",
+        "unknown_tool_rejects_the_entire_batch_before_effects_and_allows_correction",
+        "empty_final_answer_gets_one_durable_recovery_then_fails",
+        "failed_recovery_message_storage_prevents_second_physical_call",
+        "intermediate_segment_and_task_boundary_replay_the_same_durable_message_ids",
+        "provider_failure_after_tool_draft_never_publishes_tool_start",
+        "tool_result_storage_failure_never_publishes_tool_or_run_completion",
+        "failed_partial_answer_storage_prevents_a_recovery_request"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Read all changed assertion groups and relevant fixtures; 2953-line diff also tracked by hash/method list. Fixed whole-batch unknown-tool admission and text/tool/text storage order. Root and child share ordered collector projection; existing provider-neutral flat ChatMessage wire is retained.",
+        "Native SQLite invocation/result ledger and Task lifecycle replace Java in-memory background tracker. Skill detailed body/toggle verification is owned by root integration; this broad source class is not treated as complete execution coverage.",
+        "Java fixtures were read, not executed. Native assertions named here exist; latest passing native execution is linked by verificationEvidenceRefs; full release readiness remains a separate gate.",
+        "Unified resume6 exposed missing persistence of a rejected partial answer before recovery. Fixed root and child to preserve actual ordered assistant blocks/usage before a correction request, mark machine recovery metadata, and fail closed when that write fails; new write-failure regression passed in workspace_resume7.",
+        "Native verification updated from actual passing log lines in workspace_resume7; strict_clippy_resume10 also passed. These outcomes do not turn omitted Java fixtures, live external services, pending user decisions or untested permutations into completed coverage."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "listed_native_regressions_passed",
+      "verificationEvidenceRefs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ],
+      "nativeAssertionResults": {
+        "complete_batch_validation_precedes_every_tool_start": "passed",
+        "unknown_tool_rejects_the_entire_batch_before_effects_and_allows_correction": "passed",
+        "empty_final_answer_gets_one_durable_recovery_then_fails": "passed",
+        "failed_recovery_message_storage_prevents_second_physical_call": "passed",
+        "intermediate_segment_and_task_boundary_replay_the_same_durable_message_ids": "passed",
+        "provider_failure_after_tool_draft_never_publishes_tool_start": "passed",
+        "tool_result_storage_failure_never_publishes_tool_or_run_completion": "passed",
+        "failed_partial_answer_storage_prevents_a_recovery_request": "passed"
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/engine/QueryFlowIntegrationTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/engine/QueryFlowIntegrationTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "5022a1b36f7caf17632e718e74740b5ca7d22c3c90dc08b71d55966301f6d83b",
+      "changedMethods": [],
+      "sourceAssertions": [
+        "Tool-loop fixture now emits stable provider tool-use identifiers compatible with complete-batch validation."
+      ],
+      "nativeImplementation": [
+        "crates/zk-engine/src/engine.rs",
+        "crates/zk-engine/tests/engine_flow.rs"
+      ],
+      "actualNativeAssertions": [
+        "complete_batch_validation_precedes_every_tool_start",
+        "unknown_tool_feeds_error_result_and_continues"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Source change corrects test fixture identity rather than adding product behavior; native durable per-invocation identity stays authoritative.",
+        "Java fixtures were read, not executed. Native assertions named here exist; latest passing native execution is linked by verificationEvidenceRefs; full release readiness remains a separate gate.",
+        "Native verification updated from actual passing log lines in workspace_resume7; strict_clippy_resume10 also passed. These outcomes do not turn omitted Java fixtures, live external services, pending user decisions or untested permutations into completed coverage."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "listed_native_regressions_passed",
+      "verificationEvidenceRefs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ],
+      "nativeAssertionResults": {
+        "complete_batch_validation_precedes_every_tool_start": "passed",
+        "unknown_tool_feeds_error_result_and_continues": "passed"
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/engine/RunResultProjectionTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/engine/RunResultProjectionTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "0dc6f59c9eae887f73d6ce11022d424f3f989899f7c9496f6116275c9f0a0ec5",
+      "changedMethods": [
+        "committedTerminalWinsOverGracefulReturn"
+      ],
+      "sourceAssertions": [
+        "Committed cancellation/timeout/failure beats late graceful return; committed completion beats late cancellation; missing/unreadable/nonterminal authority and unknown exit reason cannot claim success."
+      ],
+      "nativeImplementation": [
+        "crates/zk-engine/src/engine.rs",
+        "crates/zk-engine/src/task/runtime.rs",
+        "crates/zk-engine/tests/runtime_migration.rs"
+      ],
+      "actualNativeAssertions": [
+        "timeout_preserves_executor_output_as_partial",
+        "parent_tool_cancellation_is_not_misreported_as_user_cancelled",
+        "busy_conversation_cannot_replace_options_or_read_another_runs_result",
+        "permanent_terminal_commit_failure_becomes_durable_needs_attention_not_success"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Native immutable TaskResult and Run CAS replace an after-the-fact Java projection. Cleanup remains an orthogonal dimension; cancellation cause is not overwritten by cleanup uncertainty. Java no-authority success fallback is deliberately not used for production durable runs.",
+        "Java fixtures were read, not executed. Native assertions named here exist; latest passing native execution is linked by verificationEvidenceRefs; full release readiness remains a separate gate.",
+        "Native verification updated from actual passing log lines in workspace_resume7; strict_clippy_resume10 also passed. These outcomes do not turn omitted Java fixtures, live external services, pending user decisions or untested permutations into completed coverage."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "listed_native_regressions_passed",
+      "verificationEvidenceRefs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ],
+      "nativeAssertionResults": {
+        "timeout_preserves_executor_output_as_partial": "passed",
+        "parent_tool_cancellation_is_not_misreported_as_user_cancelled": "passed",
+        "busy_conversation_cannot_replace_options_or_read_another_runs_result": "passed",
+        "permanent_terminal_commit_failure_becomes_durable_needs_attention_not_success": "passed"
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/engine/SystemMarkerDetectionTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/engine/SystemMarkerDetectionTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "1602fd593fd8d3d07b6c78e237978fd79a9f8f45aa0269412d0d530e891eae2d",
+      "changedMethods": [
+        "preservesExistingSuffixDetection",
+        "checksAnyTextBlockButIgnoresThinkingAndEmptyContent",
+        "handlesLongTrailingWhitespaceWithoutBacktracking",
+        "handlesRepeatedMarkersWithoutStackOverflow"
+      ],
+      "sourceAssertions": [
+        "Case-insensitive compression/truncation marker suffix grammar preserves Java ASCII whitespace and optional terminal Unicode line-separator boundaries; long strings do not cause regex backtracking."
+      ],
+      "nativeImplementation": [
+        "crates/zk-engine/src/engine.rs",
+        "crates/zk-engine/tests/runtime_migration.rs"
+      ],
+      "actualNativeAssertions": [
+        "system_marker_suffix_recovers_partial_answers_without_regex_backtracking",
+        "trailing_compression_echo_preserves_original_and_recovers_once"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Implemented bounded linear suffix parser and collapsed-only scanner; partial text is retained before one recovery attempt, without generic body rewriting.",
+        "Java fixtures were read, not executed. Native assertions named here exist; latest passing native execution is linked by verificationEvidenceRefs; full release readiness remains a separate gate.",
+        "The marker suffix regression initially failed because recovery discarded original assistant content. Implementation now persists and includes the original partial answer in correction context; latest root rerun passed; evidence is referenced below.",
+        "Native verification updated from actual passing log lines in workspace_resume7; strict_clippy_resume10 also passed. These outcomes do not turn omitted Java fixtures, live external services, pending user decisions or untested permutations into completed coverage."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "listed_native_regressions_passed",
+      "verificationEvidenceRefs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ],
+      "nativeAssertionResults": {
+        "system_marker_suffix_recovers_partial_answers_without_regex_backtracking": "passed",
+        "trailing_compression_echo_preserves_original_and_recovers_once": "passed"
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/engine/strategy/DefaultTerminationStrategyTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/engine/strategy/DefaultTerminationStrategyTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "4456ba66b1c77c00594af7daf92735fdca63d00af095dd2d888c1d2fbe502aa3",
+      "changedMethods": [
+        "completedFinalResponseIsNotBlockedByEarlierFailures",
+        "budgetStillTakesPriorityOverFinalResponseAfterFailures",
+        "fiveActualFailuresStillUseSoftRecoveryInsteadOfEnablingANewStopRule"
+      ],
+      "sourceAssertions": [
+        "Substantive final response wins over earlier tool errors; budget remains first; actual repeated errors receive one soft-recovery hint."
+      ],
+      "nativeImplementation": [
+        "crates/zk-engine/src/termination.rs",
+        "crates/zk-engine/src/tool_tracker.rs",
+        "crates/zk-engine/src/engine.rs"
+      ],
+      "actualNativeAssertions": [
+        "completed_final_answer_wins_over_previous_tool_errors_but_not_budget",
+        "recovery_hint_once_per_failure_streak_preserves_counts"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Retain native hard safety thresholds and real monetary budget rather than importing Java dynamic error-expanded turn limit or 95-percent token rule.",
+        "Java fixtures were read, not executed. Native assertions named here exist; latest passing native execution is linked by verificationEvidenceRefs; full release readiness remains a separate gate.",
+        "Native verification updated from actual passing log lines in workspace_resume7; strict_clippy_resume10 also passed. These outcomes do not turn omitted Java fixtures, live external services, pending user decisions or untested permutations into completed coverage."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "listed_native_regressions_passed",
+      "verificationEvidenceRefs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ],
+      "nativeAssertionResults": {
+        "completed_final_answer_wins_over_previous_tool_errors_but_not_budget": "passed",
+        "recovery_hint_once_per_failure_streak_preserves_counts": "passed"
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/engine/tracking/ToolCallTrackerTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/engine/tracking/ToolCallTrackerTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "d7a9ea5f0845d82edf5f9e5d364f276b9c531b96d60107067a07d24c053ba7ea",
+      "changedMethods": [
+        "recoveryHintDoesNotResetErrorsAndSuccessStartsANewStreak",
+        "expectedPermissionOutcomeClearsTheRecoveryHint",
+        "resetClearsRecoveryHintAlongWithHistory"
+      ],
+      "sourceAssertions": [
+        "Recovery hint never resets error counts; successful or expected permission result starts a new streak; reset clears both history and hint."
+      ],
+      "nativeImplementation": [
+        "crates/zk-engine/src/tool_tracker.rs"
+      ],
+      "actualNativeAssertions": [
+        "recovery_hint_once_per_failure_streak_preserves_counts",
+        "permission_errors_excluded_from_consecutive_and_windows",
+        "recent_records_saturates_and_reset_clears"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Single-run mutable tracker replaces Java cross-thread locking; only execution owner mutates it.",
+        "Java fixtures were read, not executed. Native assertions named here exist; latest passing native execution is linked by verificationEvidenceRefs; full release readiness remains a separate gate.",
+        "Native verification updated from actual passing log lines in workspace_resume7; strict_clippy_resume10 also passed. These outcomes do not turn omitted Java fixtures, live external services, pending user decisions or untested permutations into completed coverage."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "listed_native_regressions_passed",
+      "verificationEvidenceRefs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ],
+      "nativeAssertionResults": {
+        "recovery_hint_once_per_failure_streak_preserves_counts": "passed",
+        "permission_errors_excluded_from_consecutive_and_windows": "passed",
+        "recent_records_saturates_and_reset_clears": "passed"
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/llm/OpenAiCompatibleProviderToolCallStreamingTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/llm/OpenAiCompatibleProviderToolCallStreamingTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "36e3cf7a53f70047dcafc57fa365bec33c5aa7ba00d609f2007e9bef88876c2e",
+      "changedMethods": [
+        "openRouterUnionUsesChatCompletionsAndAcceptsToolDeltas",
+        "rejectsIdentityChangesForTheSameToolIndex",
+        "rejectsEofAndDoneWithoutFinishReason",
+        "acceptsValidFinishAtEofForOrdinaryCompatibleProvider",
+        "incompleteStreamLogIdentifiesIgnoredFinishFrameWithoutLoggingContent",
+        "diagnosticAppenderFailureDoesNotReplaceStreamError",
+        "truncatedStreamEndingWithoutNewlineIsDiagnosedAsIncomplete",
+        "truncatedTailAfterFinishKeepsStreamErrorWithoutMissingFinishDiagnostic",
+        "canceledTruncatedTailIsNotDiagnosedAsMissingFinishReason",
+        "canceledBufferedDoneOrEofDoesNotLogMissingFinish",
+        "incompleteStreamDiagnosticsDistinguishTruncatedFrameFromExactLimit"
+      ],
+      "sourceAssertions": [
+        "Stream requires complete stable id/name before execution; anonymous/mutated/duplicate tool fragments and malformed second call reject whole batch; error/EOF/cancel cannot create a successful tool finish; trailing usage survives."
+      ],
+      "nativeImplementation": [
+        "crates/zk-llm/src/openai_compat.rs",
+        "crates/zk-llm/tests/sse_stream.rs",
+        "crates/zk-engine/src/engine.rs",
+        "crates/zk-engine/tests/engine_flow.rs"
+      ],
+      "actualNativeAssertions": [
+        "parse_chunk_blank_identity_is_fatal",
+        "parse_chunk_arguments_before_identity_is_fatal",
+        "parse_chunk_tool_calls_accumulate_across_chunks",
+        "pending_finish_is_discarded_on_cancel",
+        "stream_end_without_done_marker_still_terminates_cleanly",
+        "complete_batch_validation_precedes_every_tool_start"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Native SSE accepts standards-compliant data: without a following space; source parser fixture that ignores such a line is not copied. Finish/EOF validation and final stable identity are enforced before tool effects; direct-provider Java callback API is replaced by typed stream events.",
+        "Java fixtures were read, not executed. Native assertions named here exist; latest passing native execution is linked by verificationEvidenceRefs; full release readiness remains a separate gate.",
+        "Native verification updated from actual passing log lines in workspace_resume7; strict_clippy_resume10 also passed. These outcomes do not turn omitted Java fixtures, live external services, pending user decisions or untested permutations into completed coverage."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "listed_native_regressions_passed",
+      "verificationEvidenceRefs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ],
+      "nativeAssertionResults": {
+        "parse_chunk_blank_identity_is_fatal": "passed",
+        "parse_chunk_arguments_before_identity_is_fatal": "passed",
+        "parse_chunk_tool_calls_accumulate_across_chunks": "passed",
+        "pending_finish_is_discarded_on_cancel": "passed",
+        "stream_end_without_done_marker_still_terminates_cleanly": "passed",
+        "complete_batch_validation_precedes_every_tool_start": "passed"
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/llm/OpenRouterReasoningTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/llm/OpenRouterReasoningTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "3d33782b6e79d6a0086783237eff684218a1a40d657297794d30fe2909aa592f",
+      "changedMethods": [
+        "strongestReasoningStreamsAndReplaysExactStateOnlyOnSameRoute",
+        "truncatedAndInBandErrorStreamsNeverReportSuccess",
+        "synchronousRequestsAlsoUseUpstreamIdAndMaxEffort",
+        "onEvent",
+        "onError",
+        "onComplete",
+        "thinking"
+      ],
+      "sourceAssertions": [
+        "Same provider/model continuation includes opaque reasoning details with stable identity, supported thinking options, and safe usage/termination."
+      ],
+      "nativeImplementation": [
+        "crates/zk-llm/src/openai_compat.rs",
+        "crates/zk-llm/src/provider.rs",
+        "crates/zk-llm/tests/provider_routing_wire.rs"
+      ],
+      "actualNativeAssertions": [
+        "openrouter_streamed_reasoning_reassembles_only_same_identity"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Provider state is origin scoped; frontend agent owns independent actual loopback HTTP routing/wire regression and its execution record.",
+        "Java fixtures were read, not executed. Native assertions named here exist; latest passing native execution is linked by verificationEvidenceRefs; full release readiness remains a separate gate.",
+        "Native verification updated from actual passing log lines in workspace_resume7; strict_clippy_resume10 also passed. These outcomes do not turn omitted Java fixtures, live external services, pending user decisions or untested permutations into completed coverage."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "listed_native_regressions_passed",
+      "verificationEvidenceRefs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ],
+      "nativeAssertionResults": {
+        "openrouter_streamed_reasoning_reassembles_only_same_identity": "passed"
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/llm/ProviderErrorClassifierTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/llm/ProviderErrorClassifierTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "af05515841146788cefa6b122c7f95d1fbfb64c015a3f44f45304da202ef5775",
+      "sourceAssertions": [
+        "Read all new retry classification assertions. Fixed typed connect failure short three-attempt policy, deterministic 400/401/402/403 suppression even with a mistaken true flag, explicit retry suppression for 429/503/529. Native typed errors replace arbitrary cyclic Java cause walks; existing Rust breaker budgets retained."
+      ],
+      "nativeImplementation": [
+        "crates/zk-llm/src/error.rs",
+        "crates/zk-llm/src/retry.rs",
+        "crates/zk-llm/src/registry.rs"
+      ],
+      "actualNativeAssertions": [
+        "http_retryable_classification_matches_legacy",
+        "category_retryable_flags"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Source Java test assertions reviewed; Java tests were not executed. Latest native workspace and Clippy evidence is referenced below.",
+        "Native implementation inspected and fixes retained; source Java fixtures are not an execution result.",
+        "Native verification updated from actual passing log lines in workspace_resume7; strict_clippy_resume10 also passed. These outcomes do not turn omitted Java fixtures, live external services, pending user decisions or untested permutations into completed coverage."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "listed_native_regressions_passed",
+      "verificationEvidenceRefs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ],
+      "nativeAssertionResults": {
+        "http_retryable_classification_matches_legacy": "passed",
+        "category_retryable_flags": "passed"
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/llm/ProviderUsageReportingTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/llm/ProviderUsageReportingTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "2f36fa7bed9cda546b0ea822310d57177a13768888e7d95821bc4b5faae5aa21",
+      "sourceAssertions": [
+        "Read complete parser fixtures: absent/null/empty usage is unknown, explicit zero retained, Anthropic start usage must be observable before error/EOF, null later snapshots must not erase cumulative counters. Found and fixed the latter two parser gaps. Responses/OpenAI require both token counters before a complete snapshot."
+      ],
+      "nativeImplementation": [
+        "crates/zk-llm/src/anthropic.rs",
+        "crates/zk-llm/src/openai_compat.rs",
+        "crates/zk-llm/src/responses.rs"
+      ],
+      "actualNativeAssertions": [
+        "incomplete_usage_is_unknown_and_explicit_zero_is_known",
+        "reported_start_usage_survives_null_deltas_and_transport_failure",
+        "parse_chunk_usage_only_and_null_usage"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Source Java test assertions reviewed; Java tests were not executed. Latest native workspace and Clippy evidence is referenced below.",
+        "Native implementation inspected and fixes retained; source Java fixtures are not an execution result.",
+        "Native verification updated from actual passing log lines in workspace_resume7; strict_clippy_resume10 also passed. These outcomes do not turn omitted Java fixtures, live external services, pending user decisions or untested permutations into completed coverage."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "listed_native_regressions_passed",
+      "verificationEvidenceRefs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ],
+      "nativeAssertionResults": {
+        "incomplete_usage_is_unknown_and_explicit_zero_is_known": "passed",
+        "reported_start_usage_survives_null_deltas_and_transport_failure": "passed",
+        "parse_chunk_usage_only_and_null_usage": "passed"
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/llm/ZenMuxResponsesProviderTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/llm/ZenMuxResponsesProviderTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "90188bf39ecb0643eee2a16a1b399eadf2759f637ed66862e8899ab82ce637fb",
+      "changedMethods": [
+        "assistantHistoryTextIsEncodedAsOutputTextNotInputText"
+      ],
+      "sourceAssertions": [
+        "Assistant historical text uses output_text while user input uses input_text; provider-state response continuation keeps native output item shape."
+      ],
+      "nativeImplementation": [
+        "crates/zk-llm/src/responses.rs"
+      ],
+      "actualNativeAssertions": [
+        "assistant_history_uses_output_text_and_provider_state_is_origin_scoped",
+        "tool_history_is_flattened_and_call_id_is_preserved"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Responses and Chat Completions retain separate wire builders; no Chat-style assistant input_text fallback.",
+        "Java fixtures were read, not executed. Native assertions named here exist; latest passing native execution is linked by verificationEvidenceRefs; full release readiness remains a separate gate.",
+        "Native verification updated from actual passing log lines in workspace_resume7; strict_clippy_resume10 also passed. These outcomes do not turn omitted Java fixtures, live external services, pending user decisions or untested permutations into completed coverage."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "listed_native_regressions_passed",
+      "verificationEvidenceRefs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ],
+      "nativeAssertionResults": {
+        "assistant_history_uses_output_text_and_provider_state_is_origin_scoped": "passed",
+        "tool_history_is_flattened_and_call_id_is_preserved": "passed"
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/llm/impl/SummaryTransportClientTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/llm/impl/SummaryTransportClientTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "91a3b89dea096c8b691b39d9616561a49cc9731be7601803b9f86a610e117a9c",
+      "sourceAssertions": [
+        "Read wire profiles, exact provider route/model isolation, direct and official Bailian output fields, raw missing usage, one 429 retry/deadline, cancellation and malformed optional settings. Native isolated registry accepts existing explicit single-provider custom endpoints by user configuration-preservation decision; no summary fallback. Java legacy message mirror cases are not new Rust data and are outside greenfield compatibility scope."
+      ],
+      "nativeImplementation": [
+        "crates/zk-llm/src/summary_transport.rs",
+        "crates/zk-llm/tests/summary_wire.rs",
+        "crates/zk-engine/src/llm_summarizer.rs"
+      ],
+      "actualNativeAssertions": [
+        "summary_http_is_nonstreaming_retries_once_with_same_key_and_keeps_partial_usage_unknown",
+        "summary_wire_preserves_usage_and_uses_endpoint_output_limit"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Source Java test assertions reviewed; Java tests were not executed. Latest native workspace and Clippy evidence is referenced below.",
+        "Native implementation inspected and fixes retained; source Java fixtures are not an execution result.",
+        "Native verification updated from actual passing log lines in workspace_resume7; strict_clippy_resume10 also passed. These outcomes do not turn omitted Java fixtures, live external services, pending user decisions or untested permutations into completed coverage."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "listed_native_regressions_passed",
+      "verificationEvidenceRefs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ],
+      "nativeAssertionResults": {
+        "summary_http_is_nonstreaming_retries_once_with_same_key_and_keeps_partial_usage_unknown": "passed",
+        "summary_wire_preserves_usage_and_uses_endpoint_output_limit": "passed"
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/prompt/SystemPromptBuilderTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/prompt/SystemPromptBuilderTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "0eac65924e31e073d02e888318cfed6f05cae9f6df6c06afc5bbfae02592fecb",
+      "changedMethods": [
+        "effectiveMainPromptAndShellSchemasUseActualToolNamesWithoutChangingOverrides",
+        "sessionGuidanceGatesOnRealAgentAndSkillToolNames",
+        "assembledSessionGuidanceDoesNotUseLegacyToolNamesOrDeadReferences",
+        "agentExecutionModeGuidanceMatchesRealAgentParameters",
+        "boundaryConditionsTemplateMatchesRealSearchAndBashContracts",
+        "toolExamplesTemplateMatchesRealReadAndGrepSchemas"
+      ],
+      "sourceAssertions": [
+        "Tool descriptions/guidance use actual registered names, preserve custom override/append priorities, and gate Agent/Skill guidance on actual tools.",
+        "Bash timeout wording reports attempted termination and requires confirmed result; Worktree guidance discloses committed snapshot, explicit delivery and retained recovery paths. Search limits match native tools."
+      ],
+      "nativeImplementation": [
+        "crates/zk-engine/src/system_prompt.rs",
+        "crates/zk-engine/src/prompt/dynamic.rs",
+        "crates/zk-engine/src/agent/executor.rs",
+        "crates/zk-tools/src/bash.rs"
+      ],
+      "actualNativeAssertions": [
+        "session_guidance_recognizes_production_registry_names",
+        "prompts_follow_the_actual_tool_directory",
+        "unconfirmed_scope_is_never_a_success_or_retryable_result",
+        "static_sections_match_reviewed_native_char_counts"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Rust baseline prompt overrides and actual tool schemas remain authoritative. PowerShell fixture is excluded by approved Apple Silicon scope; Java-specific search counts are not imported if they contradict native implementation.",
+        "Java fixtures were read, not executed. Native assertions named here exist; latest passing native execution is linked by verificationEvidenceRefs; full release readiness remains a separate gate.",
+        "Native verification updated from actual passing log lines in workspace_resume7; strict_clippy_resume10 also passed. These outcomes do not turn omitted Java fixtures, live external services, pending user decisions or untested permutations into completed coverage."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "listed_native_regressions_passed",
+      "verificationEvidenceRefs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ],
+      "nativeAssertionResults": {
+        "session_guidance_recognizes_production_registry_names": "passed",
+        "prompts_follow_the_actual_tool_directory": "passed",
+        "unconfirmed_scope_is_never_a_success_or_retryable_result": "passed",
+        "static_sections_match_reviewed_native_char_counts": "passed"
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/tool/ToolPromptContractTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/tool/ToolPromptContractTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "66ea905eb6e3d167d5465f01849681786104831735faba83f25dd8224b849946",
+      "changedMethods": [
+        "taskDefinitionsDescribeBackgroundExecutionAndActualRecords",
+        "planToolsReportUnavailabilityWithoutClaimingEffects",
+        "questionDefinitionDoesNotInventPlanApprovalOrVisibility",
+        "questionApiDescriptionExplainsCountLimitsAndPreservesChoices",
+        "questionApiSchemaEnforcesCountsPerQuestion",
+        "briefDefinitionAndResultsDescribeOnlyAvailableContext",
+        "taskStopPromptUsesSchemaParameterName",
+        "replPromptUsesSchemaParameterName",
+        "todoWritePromptListsSchemaTaskStatesWithoutActiveForm",
+        "configPromptUsesActionKeyValueSchema",
+        "grepSchemaCoversAllImplementedParameters",
+        "bashPromptDoesNotPromiseAFixedDefaultTimeout"
+      ],
+      "sourceAssertions": [
+        "TaskCreate describes execution and real agent/shell types; TaskUpdate does not falsely claim start/stop; TaskStop/schema names align.",
+        "Questions enforce per-question counts and preserve multi-select choices; Brief truthfully describes context; Config scope and Grep/REPL/Bash parameters match implementation."
+      ],
+      "nativeImplementation": [
+        "crates/zk-tools/src/task_tools.rs",
+        "crates/zk-tools/src/ask_user_question.rs",
+        "crates/zk-tools/src/repl/mod.rs",
+        "crates/zk-tools/src/bash.rs",
+        "crates/zk-tools/src/grep.rs",
+        "crates/zk-engine/src/system_prompt.rs"
+      ],
+      "actualNativeAssertions": [],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Explicit exclusions remove local_workflow/monitor_mcp/dream aliases. Preserve native working plan tools instead of Java PLAN_MODE_UNAVAILABLE stubs; Rust Python/Node/Ruby and legacy parameter compatibility remain. Actual generated schema gate validates native interface rather than comparing Java mock strings verbatim.",
+        "Java fixtures were read, not executed. Native assertions named here exist; latest passing native execution is linked by verificationEvidenceRefs; full release readiness remains a separate gate.",
+        "Native verification updated from actual passing log lines in workspace_resume7; strict_clippy_resume10 also passed. These outcomes do not turn omitted Java fixtures, live external services, pending user decisions or untested permutations into completed coverage."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "workspace_gate_passed_no_path_specific_execution_claim",
+      "verificationEvidenceRefs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ],
+      "nativeAssertionResults": {}
+    },
+    "backend/src/test/java/com/aicodeassistant/tool/agent/AgentToolGoldenTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/tool/agent/AgentToolGoldenTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "323f92ff0f72bd2575e9b3e4784a459f0a5e0eb959424a0f7b3abe87828b7eec",
+      "changedMethods": [
+        "unknownWorktreeHasUnknownDelivery",
+        "unknownWorktreeCannotBeFinalized",
+        "worktreePromptExplainsSnapshotAndSafeDelivery"
+      ],
+      "sourceAssertions": [
+        "Golden Agent descriptions reflect canonical schema and truthful isolation, synchronous/background behavior and retained artifacts."
+      ],
+      "nativeImplementation": [
+        "crates/zk-tools/src/agent_tool.rs",
+        "crates/zk-engine/src/agent/executor.rs",
+        "crates/zk-engine/src/agent/worktree.rs"
+      ],
+      "actualNativeAssertions": [
+        "prompts_follow_the_actual_tool_directory",
+        "worktree_creation_failure_never_falls_back_to_parent_directory"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Native explicit commit/merge delivery differs intentionally from source automatic finishWorktree. Keep existing Rust permission and nested-agent defaults.",
+        "Java fixtures were read, not executed. Native assertions named here exist; latest passing native execution is linked by verificationEvidenceRefs; full release readiness remains a separate gate.",
+        "Native verification updated from actual passing log lines in workspace_resume7; strict_clippy_resume10 also passed. These outcomes do not turn omitted Java fixtures, live external services, pending user decisions or untested permutations into completed coverage."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "listed_native_regressions_passed",
+      "verificationEvidenceRefs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ],
+      "nativeAssertionResults": {
+        "prompts_follow_the_actual_tool_directory": "passed",
+        "worktree_creation_failure_never_falls_back_to_parent_directory": "passed"
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/tool/agent/StopScriptWorktreeTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/tool/agent/StopScriptWorktreeTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "9999b7ab3ec57c03f134b74004e84c154254162efc67354bf0c2b2b54c5f00f6",
+      "changedMethods": [
+        "stoppingPreservesDirtyCommittedConflictAndUserWorktrees"
+      ],
+      "sourceAssertions": [
+        "Stopping services must retain dirty, committed, conflicted or user-managed worktrees and must not run automatic delivery."
+      ],
+      "nativeImplementation": [
+        "dev",
+        "crates/zk-engine/src/agent/worktree.rs"
+      ],
+      "actualNativeAssertions": [
+        "clean_but_unmerged_commits_are_never_deleted_or_merged_implicitly",
+        "explicit_merge_conflict_preserves_target_and_child_for_manual_resolution"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Source isolated stop-script fixtures read. Native dev stop lifecycle preserves worktrees; root owns shell/script gate evidence. No test stops the user active application as a fixture.",
+        "Java fixtures were read, not executed. Native assertions named here exist; latest passing native execution is linked by verificationEvidenceRefs; full release readiness remains a separate gate.",
+        "Native verification updated from actual passing log lines in workspace_resume7; strict_clippy_resume10 also passed. These outcomes do not turn omitted Java fixtures, live external services, pending user decisions or untested permutations into completed coverage."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "listed_native_regressions_passed",
+      "verificationEvidenceRefs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ],
+      "nativeAssertionResults": {
+        "clean_but_unmerged_commits_are_never_deleted_or_merged_implicitly": "passed",
+        "explicit_merge_conflict_preserves_target_and_child_for_manual_resolution": "passed"
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/tool/agent/SubAgentExecutorStatusPropagationTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/tool/agent/SubAgentExecutorStatusPropagationTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "c223d3c34811104dae0c0e26a8a2d51b5ac2e1d0974afe6b629fd9c8ee432ec8",
+      "changedMethods": [
+        "cancellationAndTimeoutTakePrecedenceOverGenericError",
+        "failedNotificationSummaryContainsErrorReason",
+        "nonCoordinatorFailedResultContainsErrorReason",
+        "forkPathFailedResultContainsErrorReasonWithoutFormatter"
+      ],
+      "sourceAssertions": [
+        "Provider and child termination reasons survive status translation; partial content, timeout and cancellation are not mislabeled as completed."
+      ],
+      "nativeImplementation": [
+        "crates/zk-engine/src/agent/executor.rs",
+        "crates/zk-engine/src/engine.rs",
+        "crates/zk-engine/src/task/runtime.rs"
+      ],
+      "actualNativeAssertions": [
+        "stable_child_runtime_failures_keep_agent_result_classification_and_code",
+        "timeout_preserves_executor_output_as_partial",
+        "caller_cancellation_reaches_the_child_engine_factory"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Typed runtime/accounting failure codes and immutable TaskResult take precedence; no substring inference from user text.",
+        "Java fixtures were read, not executed. Native assertions named here exist; latest passing native execution is linked by verificationEvidenceRefs; full release readiness remains a separate gate.",
+        "Native verification updated from actual passing log lines in workspace_resume7; strict_clippy_resume10 also passed. These outcomes do not turn omitted Java fixtures, live external services, pending user decisions or untested permutations into completed coverage."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "listed_native_regressions_passed",
+      "verificationEvidenceRefs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ],
+      "nativeAssertionResults": {
+        "stable_child_runtime_failures_keep_agent_result_classification_and_code": "passed",
+        "timeout_preserves_executor_output_as_partial": "passed",
+        "caller_cancellation_reaches_the_child_engine_factory": "passed"
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/tool/agent/SubAgentMessageHandlerUsageTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/tool/agent/SubAgentMessageHandlerUsageTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "dafbfd568f557301ecdf59d5ab8ecf575264c8f6e7ca77b3d0031edbdfc34671",
+      "changedMethods": [
+        "checkpointReportsObservedUsageOnceWhenBothCallbacksFireRepeatedly",
+        "assistantAndUsageCallbacksDoNotAccumulateOnTheirOwn",
+        "everyCheckpointSnapshotsTheLatestObservedTotal"
+      ],
+      "sourceAssertions": [
+        "Each response usage observation contributes once; missing observations do not reset counters and cumulative usage remains correctly attributed."
+      ],
+      "nativeImplementation": [
+        "crates/zk-engine/src/engine.rs",
+        "crates/zk-engine/src/llm_ledger.rs",
+        "crates/zk-engine/src/task/runtime.rs"
+      ],
+      "actualNativeAssertions": [
+        "stable_child_runtime_failures_keep_agent_result_classification_and_code",
+        "scoped_summary_persists_attribution_and_authoritative_usage"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Actual Rust physical-call ledger and usage sequence CAS replace Java listener-side cumulative counters; source callback invocation counts are not copied as implementation requirements.",
+        "Java fixtures were read, not executed. Native assertions named here exist; latest passing native execution is linked by verificationEvidenceRefs; full release readiness remains a separate gate.",
+        "Native verification updated from actual passing log lines in workspace_resume7; strict_clippy_resume10 also passed. These outcomes do not turn omitted Java fixtures, live external services, pending user decisions or untested permutations into completed coverage."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "listed_native_regressions_passed",
+      "verificationEvidenceRefs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ],
+      "nativeAssertionResults": {
+        "stable_child_runtime_failures_keep_agent_result_classification_and_code": "passed",
+        "scoped_summary_persists_attribution_and_authoritative_usage": "passed"
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/tool/agent/SubAgentToolPoolTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/tool/agent/SubAgentToolPoolTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "f16e4a35322dd07d67ca3b5611ea3b0bbce4ee1f215f3b6dbf8327438bfcbd62",
+      "changedMethods": [
+        "deliversRoleToolPoolToQueryEngineForOrdinaryAndForkAgents"
+      ],
+      "sourceAssertions": [
+        "Agent type policy exposes only supported tools; verification/exploration prompts follow actual directory; disabled or unsupported capabilities are not falsely advertised."
+      ],
+      "nativeImplementation": [
+        "crates/zk-engine/src/agent/executor.rs",
+        "crates/zk-tools/src/lib.rs"
+      ],
+      "actualNativeAssertions": [
+        "child_registry_tracks_late_dynamic_tools_with_explicit_access_policy",
+        "live_read_only_type_policy_preserves_the_caller_catalog",
+        "verification_tool_policy_matrix_is_fail_closed",
+        "task_update_is_visible_only_as_the_narrow_child_projection"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Preserve native explicit ChildToolAccess and read-only restrictions; Java broad Bash/MCP membership does not widen existing Rust permissions. PowerShell excluded; dynamic MCP tools still require explicit child access policy.",
+        "Java fixtures were read, not executed. Native assertions named here exist; latest passing native execution is linked by verificationEvidenceRefs; full release readiness remains a separate gate.",
+        "Native verification updated from actual passing log lines in workspace_resume7; strict_clippy_resume10 also passed. These outcomes do not turn omitted Java fixtures, live external services, pending user decisions or untested permutations into completed coverage."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "listed_native_regressions_passed",
+      "verificationEvidenceRefs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ],
+      "nativeAssertionResults": {
+        "child_registry_tracks_late_dynamic_tools_with_explicit_access_policy": "passed",
+        "live_read_only_type_policy_preserves_the_caller_catalog": "passed",
+        "verification_tool_policy_matrix_is_fail_closed": "passed",
+        "task_update_is_visible_only_as_the_narrow_child_projection": "passed"
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/tool/agent/SubAgentWorktreeLifecycleTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/tool/agent/SubAgentWorktreeLifecycleTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "d3a1923ece76a3db19021d96eb36e2aab94932302075b5270209ab01e05674b3",
+      "changedMethods": [
+        "setUp",
+        "usesActualCwdAndEmptyCacheThenInvalidatesParentAfterDelivery",
+        "unsuccessfulResultsNeverDeliverOrDelete",
+        "timeoutKeepsActualSlotLeaseAndResourcesUntilWorkerExitsAndNeverLateDelivers",
+        "successDuringGraceCannotReverseTimeout",
+        "interruptRequestsCancellationButDoesNotPrematurelyReleaseWorker",
+        "cancellationBeforeRunRegistrationIsRemembered",
+        "finishedWorkerWithOutstandingRunWorkKeepsLeaseAndDoesNotDeliver",
+        "liveBackgroundServicePreservesWorkspaceWithoutMisclassifyingNoDeliveryTasks",
+        "initializationFailurePreservesCreatedTreeAndReleasesUnstartedResources",
+        "rejectedSubmissionRetainsCreatedTreeAndReleasesUnstartedResourcesExactlyOnce",
+        "actualEngineStartupFailureReleasesOnlyItsOwnLeasesAndRetainsFailedTree",
+        "startupFailureDoesNotReleaseLeaseWhileBackgroundIsActiveOrUnknown",
+        "startupFailureDoesNotReclaimAConflictingSessionRun",
+        "missingChildIdentityNeverCancelsOrClosesTheParentRun",
+        "mismatchedPublishedRunIsNeverClosedEvenAfterActualWorkerExit",
+        "deliveredResultStaysCompletedWhenOnlyCleanupFails",
+        "deliveryFailureAndCleanupWarningKeepTheirDistinctResultStatesAndInvalidateCache",
+        "unconfirmedGitInvalidatesAgainWhenTheOperationActuallySettles",
+        "outputFileFailurePreservesRecoveryFactsInActualParentFormatter",
+        "ordinaryAgentTimeoutDoesNotClaimTerminationConfirmed",
+        "realGitDeliveryAcrossExecutorManagerAndRunner"
+      ],
+      "sourceAssertions": [
+        "Sub-agent uses actual Worktree execution directory and fresh read authority; cancellation/timeout wins, child ownership remains until cleanup and final persistence.",
+        "Startup failure releases only child-owned state; late graceful return and retained hooks never implicitly authorize parent delivery."
+      ],
+      "nativeImplementation": [
+        "crates/zk-engine/src/agent/executor.rs",
+        "crates/zk-engine/src/agent/worktree.rs",
+        "crates/zk-engine/src/engine.rs",
+        "crates/zk-engine/src/task/runtime.rs",
+        "crates/zk-engine/tests/runtime_migration.rs"
+      ],
+      "actualNativeAssertions": [
+        "worktree_creation_failure_never_falls_back_to_parent_directory",
+        "precreated_execution_uses_durable_identity_path",
+        "resumed_child_discards_read_authority_without_touching_other_sessions",
+        "execute_sync_timeout",
+        "cancellation_waits_for_cooperative_cleanup_before_cancelled_result"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Read changed assertions and lifecycle fixtures. Source automatic successful commit/merge/branch cleanup explicitly excluded by user decision 5. Native retains checkout/branch for explicit operations and durable resource ownership; not every Java timing permutation separately exercised.",
+        "Java fixtures were read, not executed. Native assertions named here exist; latest passing native execution is linked by verificationEvidenceRefs; full release readiness remains a separate gate.",
+        "Native verification updated from actual passing log lines in workspace_resume7; strict_clippy_resume10 also passed. These outcomes do not turn omitted Java fixtures, live external services, pending user decisions or untested permutations into completed coverage."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "listed_native_regressions_passed",
+      "verificationEvidenceRefs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ],
+      "nativeAssertionResults": {
+        "worktree_creation_failure_never_falls_back_to_parent_directory": "passed",
+        "precreated_execution_uses_durable_identity_path": "passed",
+        "resumed_child_discards_read_authority_without_touching_other_sessions": "passed",
+        "execute_sync_timeout": "passed",
+        "cancellation_waits_for_cooperative_cleanup_before_cancelled_result": "passed"
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/tool/agent/WorktreeDeliveryEdgesTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/tool/agent/WorktreeDeliveryEdgesTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "aaeeecc3d54ba28e7f3806a8bc914a50df05fc1538ea2a5efc74144358f68f51",
+      "changedMethods": [
+        "hiddenUntrackedResultAndRenameAreDeliveredButIgnoredOutputIsNotAdded",
+        "submoduleIgnoreConfigurationCannotHideUncommittedInternalContent",
+        "parallelDeliveriesFromOneBaselinePreserveBothResults",
+        "noPendingDeliveryCompletesWithoutChangingDirtyParent",
+        "dirtyParentStillRejectsActualPendingDelivery",
+        "linkedCheckoutAndPathAliasBindTheirOwnTargetNotTheServiceRepository",
+        "unbornAndDetachedHeadsAreRejectedBeforeAnyManagedTreeExists",
+        "targetOrAgentHistoryRollbackIsNeverMerged",
+        "cleanAgentCommitAddedAfterMergeIsRetainedRatherThanDeletedUsingOldTip",
+        "failedMergePreservesExternalSavesAndIndex",
+        "preservedMergeBlocksDeliveriesUntilExplicitResolutionWithoutReplayingAttempts",
+        "stagedGitlinkRemainsDeliverableWhenDiffConfigurationHidesSubmodules"
+      ],
+      "sourceAssertions": [
+        "Real Git edge cases cover changed target branch/head, active operations, divergence/conflict, retained hooks, invalid identity, status/merge failure and submodule behavior."
+      ],
+      "nativeImplementation": [
+        "crates/zk-engine/src/agent/worktree.rs",
+        "crates/zk-tools/src/git_process.rs"
+      ],
+      "actualNativeAssertions": [
+        "clean_but_unmerged_commits_are_never_deleted_or_merged_implicitly",
+        "explicit_commit_merge_and_remove_are_separate_and_preserve_branch",
+        "explicit_merge_conflict_preserves_target_and_child_for_manual_resolution",
+        "unicode_ref_suffix_remains_part_of_captured_target_identity",
+        "rewritten_target_history_blocks_delivery_without_mutating_either_tree",
+        "dirty_submodules_cannot_be_hidden_by_user_git_configuration",
+        "active_worker_and_switched_target_are_fail_closed"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Read all changed assertion groups. Native target may advance while baseline remains ancestor, but rollback/rewrite fails closed; conflict preserves both trees. Source automatic-delivery success shapes are deliberately not cloned; root owns process/hook-specific regression gate.",
+        "Java fixtures were read, not executed. Native assertions named here exist; latest passing native execution is linked by verificationEvidenceRefs; full release readiness remains a separate gate.",
+        "Native verification updated from actual passing log lines in workspace_resume7; strict_clippy_resume10 also passed. These outcomes do not turn omitted Java fixtures, live external services, pending user decisions or untested permutations into completed coverage."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "listed_native_regressions_passed",
+      "verificationEvidenceRefs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ],
+      "nativeAssertionResults": {
+        "clean_but_unmerged_commits_are_never_deleted_or_merged_implicitly": "passed",
+        "explicit_commit_merge_and_remove_are_separate_and_preserve_branch": "passed",
+        "explicit_merge_conflict_preserves_target_and_child_for_manual_resolution": "passed",
+        "unicode_ref_suffix_remains_part_of_captured_target_identity": "passed",
+        "rewritten_target_history_blocks_delivery_without_mutating_either_tree": "passed",
+        "dirty_submodules_cannot_be_hidden_by_user_git_configuration": "passed",
+        "active_worker_and_switched_target_are_fail_closed": "passed"
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/tool/agent/WorktreeHookLifecycleTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/tool/agent/WorktreeHookLifecycleTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "bc291f564a6d22eedf4d0cc4d30eac0b485ccf32bbfa10825cf652b80e25d100",
+      "changedMethods": [
+        "naturalGitExitRetainsHookAndBlocksTargetUntilPassiveReclamation",
+        "quotedPath",
+        "release"
+      ],
+      "sourceAssertions": [
+        "Live hook/descendant ownership gates new Worktree mutations until physical quiescence; cancellation must preserve uncertain work and cannot authorize automatic retry/delivery."
+      ],
+      "nativeImplementation": [
+        "crates/zk-engine/src/agent/worktree.rs",
+        "crates/zk-tools/src/git_process.rs",
+        "crates/zk-tools/src/process.rs"
+      ],
+      "actualNativeAssertions": [
+        "active_worker_and_switched_target_are_fail_closed",
+        "clean_but_unmerged_commits_are_never_deleted_or_merged_implicitly"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Full changed hook fixtures read. Root owns real process/hook regression and launch-gate fixes. Native durable retained resource lease replaces Java passive cleanup cache; no generic wall-time sleep is treated as proof of cleanup.",
+        "Java fixtures were read, not executed. Native assertions named here exist; latest passing native execution is linked by verificationEvidenceRefs; full release readiness remains a separate gate.",
+        "Native verification updated from actual passing log lines in workspace_resume7; strict_clippy_resume10 also passed. These outcomes do not turn omitted Java fixtures, live external services, pending user decisions or untested permutations into completed coverage."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "listed_native_regressions_passed",
+      "verificationEvidenceRefs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ],
+      "nativeAssertionResults": {
+        "active_worker_and_switched_target_are_fail_closed": "passed",
+        "clean_but_unmerged_commits_are_never_deleted_or_merged_implicitly": "passed"
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/tool/agent/WorktreeManagerTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/tool/agent/WorktreeManagerTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "108619ee0f120d7742aa50f650448e9e1464b361d5d0877b91fa92a4155c51c0",
+      "changedMethods": [
+        "setUp",
+        "removeOnlyTestOwnedFixtures",
+        "bindsTrustedProjectAndMapsSubdirectoryWithoutCopyingParentDirtyContent",
+        "selectedSubdirectoryIsNotSilentlyPromotedToParentRepository",
+        "committedCleanWorkIsDeliveredAndNormalCleanupRemovesOnlyItsResources",
+        "unstagedAndMixedResultsAreCommittedOnceThenDeliveredByThreeWayMerge",
+        "cleanNoChangeTreeDoesNotCreateCommitAndManualEmptyTreeCanBeRemoved",
+        "manualRemovePreservesCreatorOrCallerBackgroundServiceUntilItStops",
+        "manualToolRemovePreservesRelatedForegroundAndAllowsCleanupAfterExit",
+        "manualRemoveRetainsCallerForegroundCleanupResidueUntilConfirmed",
+        "manualRemoveChecksSavedRunEvenWhenCurrentSessionLookupIsIdle",
+        "manualRemoveRetainsWhenForegroundInspectionIsUnknown",
+        "manualRemoveRechecksMappingImmediatelyBeforeDirectoryDeletion",
+        "manualRemoveRetainsWorktreeWhenBackgroundInspectionFails",
+        "stoppedSubAgentDeliveryIsNotBlockedByParentSessionBackgroundWork",
+        "explicitRemoveRejectsActiveUndeliveredUnknownAndWrongProjectTrees",
+        "switchedTargetAndPreexistingTargetChangesArePreserved",
+        "mergeConflictIsPreservedWithExplicitRecoveryGuidance",
+        "preexistingGitOperationAndChangedAgentBranchAreNeverCleaned",
+        "rejectedCommitHookRetainsFilesAndNeverMergesOrRetries",
+        "statusFailureOrTruncationIsUnknownAndCannotDeleteArtifacts",
+        "unconfirmedWorkerGitScopeBlocksSameTargetUntilReadOnlyStopConfirmation",
+        "runtimeTransportFailureWithLiveScopeBlocksEverySubsequentTargetOperation",
+        "cleanupFailureKeepsCompletedDeliveryAndDoesNotRecommit",
+        "cleanupExceptionKeepsWarningAndListAvailableWithoutReportingRemovalSuccess",
+        "nullStoppedProofNeverCommitsOrDeletes",
+        "unicodeWhitespaceInRefCannotBeStrippedIntoAnotherTargetIdentity",
+        "partiallySuccessfulCreationKeepsRecoveryRecordWithoutInventingActiveWorker",
+        "creationExceptionKeepsRecoveryRecordListableAndPreservesCause",
+        "branchDeletionFailureReportsOnlyRemainingBranchAndExplicitCleanupDoesNotRedeliver",
+        "manualBranchOnlyCleanupDoesNotRequireSessionBackgroundToStop",
+        "singleCpuVirtualThreadCanDeliverAndRemoveWorktrees"
+      ],
+      "sourceAssertions": [
+        "Capture actual repository, branch/ref identity, committed baseline and relative subdirectory; do not include parent dirty files.",
+        "Guard target branch/history change, child identity/ancestry, in-progress Git operations, active sessions/resources, clean-but-undelivered commits and submodule dirt.",
+        "Explicit safe delivery preserves conflict/recovery artifacts and reports uncertainty rather than resetting or hiding failure."
+      ],
+      "nativeImplementation": [
+        "crates/zk-engine/src/agent/worktree.rs",
+        "crates/zk-tools/src/worktree.rs"
+      ],
+      "actualNativeAssertions": [
+        "captures_committed_snapshot_and_relative_directory_of_actual_repository",
+        "clean_but_unmerged_commits_are_never_deleted_or_merged_implicitly",
+        "explicit_commit_merge_and_remove_are_separate_and_preserve_branch",
+        "explicit_merge_conflict_preserves_target_and_child_for_manual_resolution",
+        "unicode_ref_suffix_remains_part_of_captured_target_identity",
+        "rewritten_target_history_blocks_delivery_without_mutating_either_tree",
+        "dirty_submodules_cannot_be_hidden_by_user_git_configuration"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Read all changed assertion groups and relevant real-Git fixtures. Fixed Unicode ref/path trimming, target baseline ancestry and configuration-hidden submodule dirty status.",
+        "Native remove never force-discards and retains branch. Automatic source commit/merge/removal assertions are replaced by user-approved separate explicit operations, with Rust SQLite managed inventory surviving restart.",
+        "Java fixtures were read, not executed. Native assertions named here exist; latest passing native execution is linked by verificationEvidenceRefs; full release readiness remains a separate gate.",
+        "Native verification updated from actual passing log lines in workspace_resume7; strict_clippy_resume10 also passed. These outcomes do not turn omitted Java fixtures, live external services, pending user decisions or untested permutations into completed coverage."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "listed_native_regressions_passed",
+      "verificationEvidenceRefs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ],
+      "nativeAssertionResults": {
+        "captures_committed_snapshot_and_relative_directory_of_actual_repository": "passed",
+        "clean_but_unmerged_commits_are_never_deleted_or_merged_implicitly": "passed",
+        "explicit_commit_merge_and_remove_are_separate_and_preserve_branch": "passed",
+        "explicit_merge_conflict_preserves_target_and_child_for_manual_resolution": "passed",
+        "unicode_ref_suffix_remains_part_of_captured_target_identity": "passed",
+        "rewritten_target_history_blocks_delivery_without_mutating_either_tree": "passed",
+        "dirty_submodules_cannot_be_hidden_by_user_git_configuration": "passed"
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/tool/impl/BashToolFailureClassificationTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/tool/impl/BashToolFailureClassificationTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "841ea3624271d56a77f2ab3212e3475d80133b462443a7cac65c2c4f0dd023c2",
+      "changedMethods": [
+        "foregroundExitZeroDoesNotHideUnconfirmedCleanup"
+      ],
+      "sourceAssertions": [
+        "Exit zero with unconfirmed process termination remains an error; retain diagnostic/truncation facts and do not update shell snapshot."
+      ],
+      "nativeImplementation": [
+        "crates/zk-tools/src/bash.rs",
+        "crates/zk-tools/src/process.rs"
+      ],
+      "actualNativeAssertions": [
+        "unconfirmed_scope_is_never_a_success_or_retryable_result"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Root owns process start/cleanup proof changes and latest process gates; this path records Bash-level source assertion separately.",
+        "Java fixtures were read, not executed. Native assertions named here exist; latest passing native execution is linked by verificationEvidenceRefs; full release readiness remains a separate gate.",
+        "Native verification updated from actual passing log lines in workspace_resume7; strict_clippy_resume10 also passed. These outcomes do not turn omitted Java fixtures, live external services, pending user decisions or untested permutations into completed coverage."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "listed_native_regressions_passed",
+      "verificationEvidenceRefs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ],
+      "nativeAssertionResults": {
+        "unconfirmed_scope_is_never_a_success_or_retryable_result": "passed"
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/tool/impl/WorktreeToolTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/tool/impl/WorktreeToolTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "be14d1196075123a04704fd1f14b8c32cf74c48f78674ce2e0be61a383a1d61d",
+      "changedMethods": [],
+      "sourceAssertions": [
+        "Trusted context reaches manager; returned directory/snapshot are actual; creation/removal failure retains recovery text and is never successful or an instruction to repeat side effects."
+      ],
+      "nativeImplementation": [
+        "crates/zk-tools/src/worktree.rs",
+        "crates/zk-engine/src/agent/worktree.rs"
+      ],
+      "actualNativeAssertions": [
+        "captures_committed_snapshot_and_relative_directory_of_actual_repository",
+        "active_worker_and_switched_target_are_fail_closed",
+        "explicit_commit_merge_and_remove_are_separate_and_preserve_branch"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Production installs ManagedWorktreeTool and exact ToolContext. Existing legacy standalone tool remains compatibility code, while native manager removal deliberately retains refs instead of source automatic branch deletion.",
+        "Java fixtures were read, not executed. Native assertions named here exist; latest passing native execution is linked by verificationEvidenceRefs; full release readiness remains a separate gate.",
+        "Native verification updated from actual passing log lines in workspace_resume7; strict_clippy_resume10 also passed. These outcomes do not turn omitted Java fixtures, live external services, pending user decisions or untested permutations into completed coverage."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "listed_native_regressions_passed",
+      "verificationEvidenceRefs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ],
+      "nativeAssertionResults": {
+        "captures_committed_snapshot_and_relative_directory_of_actual_repository": "passed",
+        "active_worker_and_switched_target_are_fail_closed": "passed",
+        "explicit_commit_merge_and_remove_are_separate_and_preserve_branch": "passed"
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/tool/task/TaskShellExecutorTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/tool/task/TaskShellExecutorTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "79340bebafd6bc8f32aa81e3345a410867af1973548d675e2bbbf6b4db736781",
+      "changedMethods": [
+        "setUp",
+        "cancellationClaimIsRetriedAfterItsFinalizationThrows",
+        "failedFinalCancellationWriteCannotLeakExitedRunOrSession",
+        "failedRunRegistrationNeverStartsToolsAndClosesOnlyItsCreatedSession",
+        "cancellationAfterReturnKeepsExactChildOwnership",
+        "failedExitInspectionRetainsSessionAndParentLeaseUntilConfirmed",
+        "cancellationAcceptedBeforeStartupCreatesNoRunOrExecution",
+        "timeoutReasonSurvivesRepeatedCancellationAndCleanup"
+      ],
+      "sourceAssertions": [
+        "Shell starts only after durable child identity, uses inherited effective cwd and child session/run ownership, never cancels parent services.",
+        "Cancellation/final persistence retry and uncertain resource inspection retain cleanup ownership; success is not published while cleanup or terminal persistence is unknown."
+      ],
+      "nativeImplementation": [
+        "crates/zk-engine/src/engine.rs",
+        "crates/zk-engine/src/task/runtime.rs",
+        "crates/zk-server/src/engine_bridge.rs",
+        "crates/zk-tools/src/bash/shell_state.rs"
+      ],
+      "actualNativeAssertions": [
+        "shell_task_executes_once_and_commits_result_and_cleanup",
+        "shell_nonzero_and_permission_denial_cannot_report_success",
+        "parent_tool_cancellation_is_not_misreported_as_user_cancelled",
+        "terminal_commit_reaper_retains_owner_past_legacy_retry_limit_then_recovers_once",
+        "deadline_retries_persistence_before_signalling_execution"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Native inherited_shell_directory validates canonical parent shell cwd inside authorized workspace. Durable TaskRuntime with attached/detached ownership replaces Java transient child sessions/parent background lease.",
+        "Preserve existing durable-cancellation-before-local-signal invariant while user decision on DB-write-failure stop fallback is pending; never claim that unresolved policy has been changed or tested as source behavior.",
+        "Java fixtures were read, not executed. Native assertions named here exist; latest passing native execution is linked by verificationEvidenceRefs; full release readiness remains a separate gate.",
+        "Native verification updated from actual passing log lines in workspace_resume7; strict_clippy_resume10 also passed. These outcomes do not turn omitted Java fixtures, live external services, pending user decisions or untested permutations into completed coverage."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "listed_native_regressions_passed",
+      "verificationEvidenceRefs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ],
+      "nativeAssertionResults": {
+        "shell_task_executes_once_and_commits_result_and_cleanup": "passed",
+        "shell_nonzero_and_permission_denial_cannot_report_success": "passed",
+        "parent_tool_cancellation_is_not_misreported_as_user_cancelled": "passed",
+        "terminal_commit_reaper_retains_owner_past_legacy_retry_limit_then_recovers_once": "passed",
+        "deadline_retries_persistence_before_signalling_execution": "passed"
+      }
+    }
+  },
+  "verificationEvidence": {
+    "workspace_resume7": {
+      "logPath": "/tmp/zk-workspace-tests-resume7.txt",
+      "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7",
+      "scope": "Complete Cargo workspace with all features",
+      "status": "passed",
+      "topLevelHarnesses": 106,
+      "passed": 2852,
+      "failed": 0,
+      "ignored": 8,
+      "countingMethod": "Take the final result per Cargo Running/Doc-tests header; do not count the nested 1-test process fixture again.",
+      "ignoredTests": [
+        "dashscope_live ... ignored, requires real LLM_PROVIDER_DASHSCOPE_API_KEY",
+        "dashscope_token_plan_live ... ignored, requires real LLM_PROVIDER_DASHSCOPE_TOKEN_PLAN_API_KEY",
+        "deepseek_live ... ignored, requires real LLM_PROVIDER_DEEPSEEK_API_KEY",
+        "moonshot_kimi_live ... ignored, requires real LLM_PROVIDER_MOONSHOT_API_KEY",
+        "api::swarm::tests::real_router_exposes_closed_gate_and_shared_swarm_state ... ignored, legacy Swarm coordinator is retained only as a future adapter test until the unified runtime gate passes",
+        "api::swarm::tests::two_read_only_workers_dispatch_through_shared_runtime_and_persist_tasks ... ignored, legacy Swarm coordinator is retained only as a future adapter test until the unified runtime gate passes",
+        "mcp_search::tests::dashscope_web_search_live ... ignored, requires a real DashScope key and makes one bounded network search",
+        "real_browser_and_http_journeys_archive_evidence_and_release_owned_resources ... ignored, requires the synchronized native Python/Chromium environment; runs in source-bootstrap CI"
+      ]
+    },
+    "strict_clippy_resume10": {
+      "logPath": "/tmp/zk-workspace-clippy-resume10.txt",
+      "sha256": "d2c539975b17f1983e2c2f9465869204726adf8cf656244c3e35b4ca27489d0c",
+      "scope": "Workspace strict Clippy across all targets and features, warnings denied",
+      "status": "passed"
+    }
+  },
+  "previousNativeGateObservation": {
+    "log": "/tmp/zk-workspace-tests-resume6.txt",
+    "status": "incomplete_failed_requires_rerun",
+    "passedRelevantNewAssertions": [
+      "unicode_ref_suffix_remains_part_of_captured_target_identity",
+      "rewritten_target_history_blocks_delivery_without_mutating_either_tree",
+      "dirty_submodules_cannot_be_hidden_by_user_git_configuration",
+      "intermediate_segment_and_task_boundary_replay_the_same_durable_message_ids",
+      "unknown_tool_rejects_the_entire_batch_before_effects_and_allows_correction"
+    ],
+    "fixedAfterThisRun": [
+      "context compactor strict summary envelope and actual-path test fixtures",
+      "reviewed native system prompt text length",
+      "root/child preservation of partial answer before recovery"
+    ],
+    "remainingSharedFailure": "Frontend agent reproduced ambient proxy preconnection causing a zero-byte accepted socket. Native loopback summary/image fixtures now inject a no_proxy client, retain strict request assertions, and await next root run; production proxy configuration remains unchanged."
+  },
+  "latestNativeGateObservation": {
+    "evidenceRefs": [
+      "workspace_resume7",
+      "strict_clippy_resume10"
+    ],
+    "status": "local_native_workspace_and_strict_clippy_passed",
+    "previousFailuresResolved": [
+      "Strict summary envelope and source-path fixtures",
+      "Reviewed native system prompt text length",
+      "Preservation of original assistant output before bounded recovery",
+      "Loopback HTTP fixtures explicitly bypass ambient proxy without changing production proxy settings"
+    ],
+    "limitations": [
+      "Source Java tests not executed",
+      "Credentialed remote provider and semantic continuation tests not executed",
+      "Eight ignored workspace tests are not counted as passed",
+      "No claim that all source assertion permutations have independent native coverage"
+    ]
+  },
+  "subsequentCancellationPolicyUpdate": {
+    "userDecision": "approved best-effort local stop after failed cancellation storage",
+    "implementation": "Run-scoped fence and retained reconciliation; no false durable success or cleanup confirmation",
+    "verification": "Native fault-injection evidence in runtime-capabilities.json and full-alignment-runtime.md; prior complete-workspace gate is not current-tree validation"
+  }
+}

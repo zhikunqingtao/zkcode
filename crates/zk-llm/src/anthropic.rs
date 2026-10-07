@@ -135,12 +135,21 @@ impl ChatProvider for AnthropicProvider {
         &self.config.name
     }
 
+    fn validate_request_options(&self, request: &ChatRequest) -> Result<(), ProviderError> {
+        if request.reasoning_effort.is_some() {
+            return Err(ProviderError::Preflight {
+                message: "UNSUPPORTED_REASONING_EFFORT: Anthropic native adapter supports thinking modes/token budgets, not an unverified effort override".into(),
+            });
+        }
+        crate::validate_request_options(request, &self.config.name)
+    }
+
     fn chat_stream(
         &self,
         request: ChatRequest,
         cancel: CancellationToken,
     ) -> Result<futures::stream::BoxStream<'static, ProviderEvent>, ProviderError> {
-        let body = build_request_body(&request);
+        self.validate_request_options(&request)?;
         let url = messages_url(&self.config.base_url);
         if self.config.api_keys.is_empty() {
             return Err(ProviderError::Config {
@@ -150,8 +159,13 @@ impl ChatProvider for AnthropicProvider {
         let keys = self.config.api_keys.clone();
         let provider = self.config.name.clone();
         let client = self.client.clone();
-
+        let image_cancel = cancel.clone();
         let byte_source = futures::stream::once(async move {
+            let request =
+                crate::user_images::prepare_inline_images(request, &provider, image_cancel).await?;
+            let body = build_request_body(&request);
+            crate::payload_guard::validate(&body, &request.model, request.max_tokens)?;
+            crate::user_images::record_dispatched_image_sources(&request);
             let key = keys.next_key().ok_or_else(|| ProviderError::Config {
                 message: format!("provider '{provider}' has empty api key"),
             })?;
@@ -159,9 +173,7 @@ impl ChatProvider for AnthropicProvider {
             let response = client
                 .execute(signed)
                 .await
-                .map_err(|e| ProviderError::Network {
-                    message: e.to_string(),
-                })?;
+                .map_err(|error| ProviderError::from_transport(&error))?;
             let status = response.status();
             if !status.is_success() {
                 if status.as_u16() == 429 {
@@ -185,11 +197,7 @@ impl ChatProvider for AnthropicProvider {
             |result: Result<reqwest::Response, ProviderError>| match result {
                 Ok(response) => response
                     .bytes_stream()
-                    .map(|r| {
-                        r.map_err(|e| ProviderError::Network {
-                            message: e.to_string(),
-                        })
-                    })
+                    .map(|r| r.map_err(|error| ProviderError::from_transport(&error)))
                     .left_stream(),
                 Err(error) => {
                     futures::stream::once(futures::future::ready(Err(error))).right_stream()
@@ -215,7 +223,7 @@ fn map_anthropic_http(status: u16, body_text: &str, retry_after: Option<&str>) -
                 .map(str::to_owned)
         })
         .unwrap_or_else(|| format!("HTTP {status}"));
-    let retry_after_ms = if status == 429 {
+    let retry_after_ms = if matches!(status, 429 | 529) {
         retry_after
             .and_then(|raw| raw.trim().parse::<u64>().ok())
             .map(|seconds| seconds.saturating_mul(1000))
@@ -236,6 +244,9 @@ fn build_request_body(request: &ChatRequest) -> Value {
     root.insert("model".into(), json!(request.model));
     root.insert("max_tokens".into(), json!(request.max_tokens));
     root.insert("stream".into(), json!(true));
+    if !request.stop_sequences.is_empty() {
+        root.insert("stop_sequences".into(), json!(request.stop_sequences));
+    }
 
     // system 独立字段 + cache_control ephemeral（费用节省 50-90%，旧 L158-163）；
     // 有分段视图时逐段成块并在可缓存段末尾落断点（prompt caching 断点 #1）。
@@ -485,7 +496,15 @@ where
                 if st.done {
                     return None;
                 }
-                match st.source.as_mut().next().await {
+                let next = {
+                    let mut source = st.source.as_mut();
+                    tokio::select! {
+                        biased;
+                        () = st.cancel.cancelled() => return None,
+                        event = source.next() => event,
+                    }
+                };
+                match next {
                     None => {
                         if let Some(line) = st.splitter.flush() {
                             st.parser.feed_line(&line, &mut st.pending, &mut st.done);
@@ -519,8 +538,8 @@ where
 struct SseParser {
     pending_event_type: Option<String>,
     tool_ids: BTreeMap<u64, String>,
-    input_tokens: i64,
-    output_tokens: i64,
+    input_tokens: Option<i64>,
+    output_tokens: Option<i64>,
     cache_read_input_tokens: i64,
     cache_creation_input_tokens: i64,
 }
@@ -568,7 +587,7 @@ impl SseParser {
             .or_else(|| self.pending_event_type.clone())
             .unwrap_or_else(|| "unknown".to_owned());
         match event_type.as_str() {
-            "message_start" => self.on_message_start(&event),
+            "message_start" => self.on_message_start(&event, pending),
             "content_block_start" => self.on_block_start(&event, pending),
             "content_block_delta" => self.on_block_delta(&event, pending, done),
             "message_delta" => self.on_message_delta(&event, pending),
@@ -579,12 +598,22 @@ impl SseParser {
     }
 
     /// `message_start`：暂存输入侧 usage（旧 L262-271）。
-    fn on_message_start(&mut self, event: &Value) {
+    fn on_message_start(&mut self, event: &Value, pending: &mut VecDeque<ProviderEvent>) {
         let usage = event.pointer("/message/usage");
         if let Some(usage) = usage {
-            self.input_tokens = json_i64(usage, "input_tokens");
+            self.input_tokens = usage
+                .get("input_tokens")
+                .and_then(Value::as_i64)
+                .filter(|n| *n >= 0);
             self.cache_read_input_tokens = json_i64(usage, "cache_read_input_tokens");
             self.cache_creation_input_tokens = json_i64(usage, "cache_creation_input_tokens");
+            self.output_tokens = usage
+                .get("output_tokens")
+                .and_then(Value::as_i64)
+                .filter(|n| *n >= 0);
+            if let Some(usage) = self.usage_snapshot() {
+                pending.push_back(ProviderEvent::UsageUpdate { usage });
+            }
         }
     }
 
@@ -654,15 +683,15 @@ impl SseParser {
 
     /// `message_delta`：`stop_reason` 有值 → Finish，否则 usage-only（旧 L305-318）。
     fn on_message_delta(&mut self, event: &Value, pending: &mut VecDeque<ProviderEvent>) {
-        if let Some(usage) = event.get("usage") {
-            self.output_tokens = json_i64(usage, "output_tokens");
+        if let Some(output_tokens) = event.get("usage").and_then(|usage| {
+            usage
+                .get("output_tokens")
+                .and_then(Value::as_i64)
+                .filter(|n| *n >= 0)
+        }) {
+            self.output_tokens = Some(output_tokens);
         }
-        let usage = Usage {
-            input_tokens: self.input_tokens,
-            output_tokens: self.output_tokens,
-            cache_read_input_tokens: self.cache_read_input_tokens,
-            cache_creation_input_tokens: self.cache_creation_input_tokens,
-        };
+        let usage = self.usage_snapshot();
         let stop_reason = event
             .pointer("/delta/stop_reason")
             .filter(|value| !value.is_null())
@@ -670,10 +699,25 @@ impl SseParser {
         match stop_reason {
             Some(raw) => pending.push_back(ProviderEvent::Finish {
                 finish_reason: finish_reason_from_anthropic(raw),
-                usage: Some(usage),
+                usage,
             }),
-            None => pending.push_back(ProviderEvent::UsageUpdate { usage }),
+            None => {
+                if let Some(usage) = usage {
+                    pending.push_back(ProviderEvent::UsageUpdate { usage });
+                }
+            }
         }
+    }
+
+    fn usage_snapshot(&self) -> Option<Usage> {
+        self.input_tokens
+            .zip(self.output_tokens)
+            .map(|(input_tokens, output_tokens)| Usage {
+                input_tokens,
+                output_tokens,
+                cache_read_input_tokens: self.cache_read_input_tokens,
+                cache_creation_input_tokens: self.cache_creation_input_tokens,
+            })
     }
 }
 
@@ -740,6 +784,24 @@ mod tests {
             vec!["claude-sonnet-4-6".into()],
         )
         .with_protocol(crate::config::ProviderProtocol::AnthropicNative)
+    }
+
+    #[test]
+    fn custom_native_adapter_cannot_inherit_effort_from_a_model_name() {
+        let config = ProviderConfig::new(
+            "custom",
+            "https://example.invalid/",
+            ApiKey::new("test-key"),
+            "deepseek-flash",
+            vec!["deepseek-flash".into()],
+        )
+        .with_protocol(crate::config::ProviderProtocol::AnthropicNative);
+        let provider = AnthropicProvider::new(config).unwrap();
+        let mut request = ChatRequest::new("deepseek-flash");
+        request.thinking = crate::ThinkingMode::Adaptive;
+        assert!(provider.validate_request_options(&request).is_ok());
+        request.reasoning_effort = Some(crate::ReasoningEffort::Max);
+        assert!(provider.validate_request_options(&request).is_err());
     }
 
     /// 逐行喂入 fixture（模拟真实 SSE：`event:` + `data:` 两行 + 空行）。
@@ -1130,6 +1192,9 @@ mod tests {
     #[test]
     fn message_delta_without_stop_reason_is_usage_only() {
         let fixture = concat!(
+            "event: message_start\n",
+            r#"data: {"type":"message_start","message":{"usage":{"input_tokens":0}}}"#,
+            "\n\n",
             "event: message_delta\n",
             r#"data: {"type":"message_delta","delta":{"stop_reason":null},"usage":{"output_tokens":11}}"#,
             "\n\n",
@@ -1147,6 +1212,32 @@ mod tests {
                 }
             }]
         );
+    }
+
+    #[test]
+    fn reported_start_usage_survives_null_deltas_and_transport_failure() {
+        let start = "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n\n";
+        let (initial, done) = parse_lines(start);
+        assert!(!done);
+        assert!(
+            matches!(initial.as_slice(), [ProviderEvent::UsageUpdate { usage }] if usage.input_tokens == 10 && usage.output_tokens == 0)
+        );
+        let (events, _) = parse_lines(&format!(
+            "{start}data: {{\"type\":\"message_delta\",\"delta\":{{}},\"usage\":{{\"output_tokens\":5}}}}\n\ndata: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"end_turn\"}},\"usage\":null}}\n\n"
+        ));
+        assert!(
+            matches!(events.last(), Some(ProviderEvent::Finish { usage: Some(usage), .. }) if usage.input_tokens == 10 && usage.output_tokens == 5)
+        );
+        let (failed, _) = parse_lines(&format!(
+            "{start}event: error\ndata: {{\"error\":{{\"type\":\"api_error\",\"message\":\"failed\"}}}}\n\n"
+        ));
+        assert!(matches!(
+            failed.as_slice(),
+            [
+                ProviderEvent::UsageUpdate { .. },
+                ProviderEvent::Error { .. }
+            ]
+        ));
     }
 
     /// `stop_reason` 全域映射（`Anthropic` 值即内部统一名）。
@@ -1306,12 +1397,7 @@ mod tests {
                 ProviderEvent::TextDelta { text: "hi".into() },
                 ProviderEvent::Finish {
                     finish_reason: FinishReason::EndTurn,
-                    usage: Some(Usage {
-                        input_tokens: 0,
-                        output_tokens: 2,
-                        cache_read_input_tokens: 0,
-                        cache_creation_input_tokens: 0,
-                    }),
+                    usage: None,
                 },
             ]
         );
@@ -1364,5 +1450,15 @@ mod tests {
             "https://bkt.oss.example.com/zhikuncode-artifacts/clipboard/a.png"
         );
         assert!(messages[0]["content"][1]["source"].get("data").is_none());
+    }
+    #[test]
+    fn explicit_stop_sequences_use_native_field_and_preserve_bytes() {
+        let mut request = ChatRequest::new("claude-sonnet-4-20250514");
+        assert!(build_request_body(&request).get("stop_sequences").is_none());
+        request.stop_sequences = vec!["\n END ".into()];
+        crate::validate_request_options(&request, "anthropic").unwrap();
+        let body = build_request_body(&request);
+        assert_eq!(body["stop_sequences"], json!(["\n END "]));
+        assert!(body.get("stop").is_none());
     }
 }

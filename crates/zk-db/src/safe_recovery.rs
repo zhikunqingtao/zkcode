@@ -415,6 +415,32 @@ fn assess_candidate(
     startup_epoch: i64,
 ) -> Result<SafeRecoveryCandidate, DbError> {
     let owner = load_owner(connection, task_id)?;
+    if crate::content::session_retention(connection, &owner.transcript_session_id)?
+        == crate::content::ContentRetention::Ephemeral
+    {
+        return Ok(SafeRecoveryCandidate {
+            task_id: owner.task_id,
+            previous_run_id: owner.run_id,
+            transcript_session_id: owner.transcript_session_id,
+            parent_task_id: owner.parent_task_id,
+            parent_run_id: owner.parent_run_id,
+            attempt: owner.attempt,
+            task_version: owner.task_version,
+            model: owner.model,
+            working_dir: owner.working_dir,
+            prompt: String::new(),
+            execution_config: Value::Null,
+            execution_config_sha256: String::new(),
+            permission_fingerprint: String::new(),
+            workspace_binding_sha256: String::new(),
+            checkpoint_id: String::new(),
+            checkpoint: Value::Null,
+            eligibility: rejected(
+                "EPHEMERAL_RECOVERY_UNSUPPORTED",
+                "ephemeral executions cannot recover conversation content after restart",
+            ),
+        });
+    }
     let execution_config: Value = serde_json::from_str(&owner.execution_config_json)?;
     let execution_config_sha256 = sha256_hex(owner.execution_config_json.as_bytes());
     let permission_policy = json!({

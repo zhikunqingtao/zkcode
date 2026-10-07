@@ -8,17 +8,10 @@
 //! - 入参 Schema：缺失 → `{"type":"object"}`；
 //! - 执行上限 5 分钟（`getMaxExecutionTimeMs() == 300_000`），与注册表配置的
 //!   **单次 JSON-RPC 请求超时** `timeoutMs` 是两个独立值；
-//! - 非 `CONNECTED` 时：`DEGRADED` / `PENDING` 先轮询等待 3s（每 200ms）；
-//!   等待失败或其他状态直接走缓存降级；
-//! - `tools/call` 前生成 `UUIDv4` `progressToken` 注册进度追踪、注册取消回调，
-//!   `finally` 注销（无论成功/失败/超时）；
-//! - 结果按 MCP `content[]` 仅取 `type == "text"` 项拼接；无 `content` 键时
-//!   退化为整体 JSON 字面量（`null` → `"{}"`）；
-//! - 结果超 1MB 截断并追加 `"\n[Truncated: exceeded 1048576 chars]"`；
-//! - 成功且非实时性工具的结果写入 TTL 5min / 上限 200 条的**进程级共享**缓存；
-//!   失败时命中缓存则返回 `"[cached] " + 缓存值` 并标记 `cached=true`；
-//! - 实时性工具（名字含 `search`/`web`/`fetch`/`browse`/`realtime`/`live`）既不
-//!   写缓存也不读缓存。
+//! - Unavailable connections wait at most 3 seconds for recovery, then fail.
+//! - Calls register progress and durable resource ownership; all terminal paths release tracking.
+//! - Results are bounded to 1 MiB. Provider errors keep their identity in both text and metadata.
+//! - Previous successful results never substitute for failed, disconnected, or timed-out calls.
 //!
 //! 形态差异（Rust 侧必然）：
 //! - Java `Tool` 接口的 `getGroup()` / `getPermissionRequirement()` /
@@ -99,13 +92,11 @@ const CODE_DEADLINE_EXCEEDED: &str = "MCP_CALL_DEADLINE_EXCEEDED";
 /// 协议错误的错误码（对照 Java `"MCP_PROTOCOL_ERROR"`）。
 const CODE_PROTOCOL_ERROR: &str = "MCP_PROTOCOL_ERROR";
 /// 服务端成功响应中明确标记的工具执行错误。
-const CODE_TOOL_ERROR: &str = "MCP_TOOL_ERROR";
+const CODE_TOOL_ERROR: &str = "MCP_TOOL_REPORTED_ERROR";
 /// 本地取消码。
 const CODE_CALL_CANCELLED: &str = "MCP_CALL_CANCELLED";
 
-/// 实时性工具的名字关键词（对照 Java `isRealtimeTool()` 的六个 `contains`）。
-const REALTIME_KEYWORDS: [&str; 6] = ["search", "web", "fetch", "browse", "realtime", "live"];
-
+/// Legacy cache utility retained for source compatibility; tool calls do not use it.
 /// 进程级共享的降级缓存（对照 Java `private static final Cache RESULT_CACHE`）。
 static SHARED_RESULT_CACHE: LazyLock<Arc<ResultCache>> =
     LazyLock::new(|| Arc::new(ResultCache::new()));
@@ -247,6 +238,7 @@ pub struct McpToolAdapter {
     /// Trusted local policy for child-Agent exposure. Remote discovery cannot
     /// opt itself in; the capability registry must set this explicitly.
     child_access: ChildToolAccess,
+    execution_gate: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 }
 
 impl std::fmt::Debug for McpToolAdapter {
@@ -300,9 +292,21 @@ impl McpToolAdapter {
                 config_hash,
             },
             child_access: ChildToolAccess::Denied,
+            execution_gate: None,
         };
         adapter.description = adapter.resolve_description();
         adapter
+    }
+
+    /// Recheck trusted host policy for adapters retained across directory changes.
+    #[must_use]
+    pub fn with_execution_gate(mut self, gate: Arc<dyn Fn() -> bool + Send + Sync>) -> Self {
+        self.execution_gate = Some(gate);
+        self
+    }
+
+    fn is_enabled(&self) -> bool {
+        self.execution_gate.as_ref().is_none_or(|gate| gate())
     }
 
     /// 应用注册表覆盖（对照 Java 增强构造函数的 `enhancedDescription` /
@@ -397,14 +401,6 @@ impl McpToolAdapter {
         )
     }
 
-    /// 是否为实时性工具（对照 Java `isRealtimeTool()`）。
-    fn is_realtime_tool(&self) -> bool {
-        let lower = self.original_tool_name.to_lowercase();
-        REALTIME_KEYWORDS
-            .iter()
-            .any(|keyword| lower.contains(keyword))
-    }
-
     /// 轮询等待重连（对照 Java `waitForReconnect()`：3s 上限、每 200ms 一次）。
     ///
     /// 用 [`tokio::time::Instant`] 而非 [`std::time::Instant`] 计时，使虚拟时钟
@@ -420,33 +416,13 @@ impl McpToolAdapter {
         self.connection.status() == McpConnectionStatus::Connected
     }
 
-    /// 降级：命中缓存则返回 `"[cached] …"`，否则返回带错误码的失败结果
-    /// （对照 Java `fallbackToCacheOrError`）。
+    /// Preserve the current call's failure; previous successful observations are not results.
     fn fallback_to_cache_or_error(
         &self,
-        cache_key: &str,
+        _cache_key: &str,
         error_code: &str,
         error_message: &str,
     ) -> ToolOutput {
-        if !self.is_realtime_tool()
-            && let Some(cached) = self.cache.get(cache_key)
-        {
-            tracing::info!(
-                server = %self.connection.name(),
-                tool = %self.original_tool_name,
-                reason = error_message,
-                "Returning cached result for MCP tool (connection issue)"
-            );
-            return ToolOutput {
-                content: format!("[cached] {cached}"),
-                is_error: false,
-                metadata: Some(json!({
-                    "mcpServer": self.connection.name(),
-                    "mcpTool": self.original_tool_name,
-                    "cached": "true",
-                })),
-            };
-        }
         ToolOutput {
             content: format!("{error_code}: {error_message}"),
             is_error: true,
@@ -454,6 +430,8 @@ impl McpToolAdapter {
                 "mcpServer": self.connection.name(),
                 "mcpTool": self.original_tool_name,
                 "errorCode": error_code,
+                "retryability": "NEVER",
+                "effectState": "UNKNOWN",
             })),
         }
     }
@@ -495,7 +473,7 @@ impl McpToolAdapter {
     /// 将 `tools/call` 结果映射为 [`ToolOutput`]（对照 Java 的 try / catch 三分支）。
     fn finish(
         &self,
-        cache_key: String,
+        cache_key: &str,
         outcome: Result<Option<Value>, McpProtocolError>,
     ) -> ToolOutput {
         match outcome {
@@ -504,20 +482,22 @@ impl McpToolAdapter {
                 // tool result.  It must never warm (or fall back through) the
                 // success cache.
                 ToolOutput {
-                    content: truncate_result(extract_text_content(Some(&result))),
+                    content: truncate_result(format!(
+                        "MCP tool reported an error ({CODE_TOOL_ERROR}); effects are unknown:\n{}",
+                        extract_text_content(Some(&result))
+                    )),
                     is_error: true,
                     metadata: Some(json!({
                         "mcpServer": self.connection.name(),
                         "mcpTool": self.original_tool_name,
                         "errorCode": CODE_TOOL_ERROR,
+                        "retryability": "NEVER",
+                        "effectState": "UNKNOWN",
                     })),
                 }
             }
             Ok(result) => {
                 let content = truncate_result(extract_text_content(result.as_ref()));
-                if !self.is_realtime_tool() && !content.is_empty() {
-                    self.cache.put(cache_key, content.clone());
-                }
                 ToolOutput {
                     content,
                     is_error: false,
@@ -535,7 +515,7 @@ impl McpToolAdapter {
                     "MCP tool call timed out"
                 );
                 self.fallback_to_cache_or_error(
-                    &cache_key,
+                    cache_key,
                     CODE_DEADLINE_EXCEEDED,
                     &format!(
                         "MCP tool call timed out after {}ms",
@@ -551,7 +531,7 @@ impl McpToolAdapter {
                     "MCP tool call failed"
                 );
                 self.fallback_to_cache_or_error(
-                    &cache_key,
+                    cache_key,
                     CODE_PROTOCOL_ERROR,
                     &format!("MCP error: {}", error.message()),
                 )
@@ -630,6 +610,9 @@ impl McpToolAdapter {
     /// 单次调用主体（对照 Java `call(input, context)` 的方法体）。
     async fn invoke(&self, input: Value, ctx: ToolContext) -> ToolOutput {
         let cache_key = self.cache_key(&input);
+        if !self.is_enabled() {
+            return ToolOutput::error("MCP tool or service is disabled");
+        }
 
         // 连接不可用：DEGRADED/PENDING 先等一小会儿重连，其余直接降级。
         if let Some(fallback) = self.ensure_connected(&cache_key).await {
@@ -667,7 +650,7 @@ impl McpToolAdapter {
             progress_token,
         ) {
             Ok(call) => call,
-            Err(error) => return self.finish(cache_key, Err(error)),
+            Err(error) => return self.finish(&cache_key, Err(error)),
         };
         // The transport's real JSON-RPC ID is reserved before its request future
         // is polled. Persist it now so cancellation, disconnect and process
@@ -677,6 +660,15 @@ impl McpToolAdapter {
             Err(output) => return output,
         };
 
+        if !self.is_enabled() {
+            if let Err(output) = self
+                .finish_outbound_request(&ctx, request_resource, &request_id, true)
+                .await
+            {
+                return output;
+            }
+            return ToolOutput::error("MCP tool or service was disabled before dispatch");
+        }
         let outcome = if ctx.cancel.is_cancelled() {
             self.connection
                 .send_cancel_notification_on(&transport, &request_id, Some("user_cancelled"))
@@ -714,7 +706,7 @@ impl McpToolAdapter {
         }
 
         match outcome {
-            Some(outcome) => self.finish(cache_key, outcome),
+            Some(outcome) => self.finish(&cache_key, outcome),
             None => ToolOutput {
                 content: format!("{CODE_CALL_CANCELLED}: MCP tool call cancelled"),
                 is_error: true,
@@ -762,7 +754,7 @@ impl Tool for McpToolAdapter {
     }
 
     fn is_connection_generation_current(&self, generation: u64) -> bool {
-        self.connection.is_transport_generation_current(generation)
+        self.is_enabled() && self.connection.is_transport_generation_current(generation)
     }
 }
 
@@ -812,7 +804,7 @@ fn normalize_schema(schema: Option<Value>, tool_name: &str) -> Value {
                     "normalized non-standard fields in MCP tool input schema"
                 );
             }
-            schema
+            crate::schema::compact_schema(schema)
         }
     }
 }
@@ -1593,42 +1585,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cached_result_serves_next_failure_but_not_realtime_tools() {
+    async fn successful_observations_never_mask_later_connection_or_timeout_failures() {
         let cache = Arc::new(ResultCache::new());
-        let ok = connected(StubTransport::ok(json!({
-            "content": [{ "type": "text", "text": "cached body" }]
-        })) as Arc<dyn McpTransport>);
+        let ok = connected(StubTransport::ok(
+            json!({"content":[{"type":"text","text":"prior success"}]}),
+        ) as Arc<dyn McpTransport>);
         let warm = adapter(ok, "compute").with_result_cache(Arc::clone(&cache));
-        let first = warm.execute(json!({ "q": 1 }), ctx()).await;
-        assert_eq!(first.content, "cached body");
-        assert_eq!(cache.len(), 1);
-
-        // 同一入参 + 断连 → 命中缓存，标 [cached] 且不算错误。
+        assert_eq!(
+            warm.execute(json!({"q":1}), ctx()).await.content,
+            "prior success"
+        );
+        assert!(cache.is_empty());
+        // Even a cache injected by a caller must never become a current result.
+        cache.put(warm.cache_key(&json!({"q":1})), "prior success");
         let down = McpServerConnection::new(stdio_config("weather"));
         down.set_status(McpConnectionStatus::Failed);
-        let degraded = adapter(down, "compute").with_result_cache(Arc::clone(&cache));
-        let second = degraded.execute(json!({ "q": 1 }), ctx()).await;
-        assert!(!second.is_error);
-        assert_eq!(second.content, "[cached] cached body");
-        assert_eq!(second.metadata.expect("metadata")["cached"], json!("true"));
-
-        // 入参不同 → 键不同 → 未命中。
-        let down = McpServerConnection::new(stdio_config("weather"));
-        down.set_status(McpConnectionStatus::Failed);
-        let miss = adapter(down, "compute")
+        let output = adapter(down, "compute")
             .with_result_cache(Arc::clone(&cache))
-            .execute(json!({ "q": 2 }), ctx())
+            .execute(json!({"q":1}), ctx())
             .await;
-        assert!(miss.is_error);
-
-        // 实时性工具既不写也不读缓存。
-        let realtime_cache = Arc::new(ResultCache::new());
-        let ok = connected(StubTransport::ok(json!({
-            "content": [{ "type": "text", "text": "fresh" }]
-        })) as Arc<dyn McpTransport>);
-        let realtime = adapter(ok, "web_search").with_result_cache(Arc::clone(&realtime_cache));
-        assert_eq!(realtime.execute(json!({}), ctx()).await.content, "fresh");
-        assert_eq!(realtime_cache.len(), 0);
+        assert!(output.is_error);
+        assert!(output.content.starts_with(CODE_CONNECTION_UNAVAILABLE));
+        assert!(!output.content.contains("prior success"));
+        assert_eq!(output.metadata.as_ref().unwrap()["effectState"], "UNKNOWN");
+        let error = McpProtocolError::from_rpc(JsonRpcError::new(REQUEST_TIMEOUT, "timeout"));
+        let output = adapter(
+            connected(StubTransport::failing(error) as Arc<dyn McpTransport>),
+            "compute",
+        )
+        .with_result_cache(cache)
+        .execute(json!({"q":1}), ctx())
+        .await;
+        assert!(output.is_error);
+        assert!(output.content.starts_with(CODE_DEADLINE_EXCEEDED));
     }
 
     #[tokio::test]
@@ -1643,7 +1632,12 @@ mod tests {
 
         let output = adapter.execute(json!({"q": 1}), ctx()).await;
         assert!(output.is_error);
-        assert_eq!(output.content, "remote validation failed");
+        assert!(
+            output
+                .content
+                .starts_with("MCP tool reported an error (MCP_TOOL_REPORTED_ERROR)")
+        );
+        assert!(output.content.ends_with("remote validation failed"));
         assert_eq!(
             output.metadata.as_ref().unwrap()["errorCode"],
             json!(CODE_TOOL_ERROR)
@@ -1652,27 +1646,6 @@ mod tests {
             cache.is_empty(),
             "isError=true must never warm fallback cache"
         );
-    }
-
-    #[test]
-    fn realtime_keywords_match_java_predicate() {
-        let connection = McpServerConnection::new(stdio_config("weather"));
-        for tool in [
-            "WebSearch",
-            "search_docs",
-            "fetchPage",
-            "browse_site",
-            "realtime_quote",
-            "live-feed",
-        ] {
-            assert!(
-                adapter(Arc::clone(&connection), tool).is_realtime_tool(),
-                "{tool} should be realtime"
-            );
-        }
-        for tool in ["forecast", "compute", "read_file"] {
-            assert!(!adapter(Arc::clone(&connection), tool).is_realtime_tool());
-        }
     }
 
     #[test]

@@ -165,6 +165,7 @@ struct ProviderSlot {
     provider: Arc<dyn ChatProvider>,
     breaker: Arc<CircuitBreaker>,
     concurrency: Arc<Semaphore>,
+    model_cooldowns: Arc<crate::model_cooldown::ModelCooldowns>,
 }
 
 /// 多提供商注册表（自身即 [`ChatProvider`]）。
@@ -276,6 +277,7 @@ impl ProviderRegistry {
             ProviderSlot {
                 provider,
                 breaker: Arc::new(CircuitBreaker::new()),
+                model_cooldowns: Arc::default(),
                 concurrency: Arc::new(Semaphore::new(provider_concurrency_limit(&name))),
             },
         );
@@ -395,6 +397,26 @@ impl ProviderRegistry {
         &self.model_order
     }
 
+    /// Pin auxiliary work to one configured provider/model, sharing its concurrency
+    /// and breaker state while retaining the registry's physical-call ledger.
+    #[must_use]
+    pub fn isolated_provider(&self, name: &str, model: &str) -> Option<Self> {
+        if self.resolve_provider(model) != Some(name) {
+            return None;
+        }
+        let slot = self.providers.get(name)?.clone();
+        let mut isolated = Self::new();
+        isolated.providers.insert(name.to_owned(), slot);
+        isolated.order.push(name.to_owned());
+        isolated
+            .model_index
+            .insert(model.to_owned(), name.to_owned());
+        isolated.model_order.push(model.to_owned());
+        model.clone_into(&mut isolated.default_model);
+        isolated.retry_policy = self.retry_policy.clone();
+        Some(isolated)
+    }
+
     /// 模型的**严格**归属 provider（未注册该模型时 `None`）。
     #[must_use]
     pub fn model_owner(&self, model: &str) -> Option<&str> {
@@ -443,10 +465,44 @@ impl ProviderRegistry {
         models
     }
 
+    /// Resolve an explicit request chain without changing the global defaults.
+    ///
+    /// # Errors
+    /// Explicit fallback models must be registered; typos never inherit the
+    /// legacy unknown-primary-model fallback to the first provider.
+    pub fn request_candidate_models(
+        &self,
+        request: &ChatRequest,
+    ) -> Result<Vec<String>, ProviderError> {
+        let Some(chain) = &request.fallback_models else {
+            return Ok(self.candidate_models(&request.model));
+        };
+        if chain.len() >= MAX_FALLBACK_DEPTH {
+            return Err(ProviderError::Preflight {
+                message: format!(
+                    "INVALID_FALLBACK_CHAIN: at most {} fallback models are allowed",
+                    MAX_FALLBACK_DEPTH - 1
+                ),
+            });
+        }
+        let mut models = vec![request.model.clone()];
+        for model in chain {
+            if self.model_owner(model).is_none() {
+                return Err(ProviderError::Preflight {
+                    message: format!("UNCONFIGURED_FALLBACK_MODEL: '{model}'"),
+                });
+            }
+            if !models.contains(model) {
+                models.push(model.clone());
+            }
+        }
+        Ok(models)
+    }
+
     /// 候选槽位序（路由 + 熔断过滤；全部降级时 fail-open 返回未过滤序列）。
-    fn candidates_for(&self, model: &str) -> Vec<Candidate> {
+    fn candidates_for(&self, models: Vec<String>) -> Vec<Candidate> {
         let mut candidates: Vec<Candidate> = Vec::new();
-        for model in self.candidate_models(model) {
+        for model in models {
             let Some(name) = self.resolve_provider(&model) else {
                 continue;
             };
@@ -465,6 +521,7 @@ impl ProviderRegistry {
                 provider: slot.provider.clone(),
                 breaker: slot.breaker.clone(),
                 concurrency: Arc::clone(&slot.concurrency),
+                model_cooldowns: Arc::clone(&slot.model_cooldowns),
                 retry_policy: self.retry_policy.clone(),
             });
         }
@@ -473,7 +530,17 @@ impl ProviderRegistry {
             .filter(|candidate| candidate.breaker.is_available())
             .cloned()
             .collect();
-        if available.is_empty() {
+        // Model overload never cools a sibling model or another provider. If
+        // every configured target is cooling, preserve the existing fail-open
+        // route and bounded foreground retry policy (no background probe cost).
+        let ready: Vec<_> = available
+            .iter()
+            .filter(|candidate| candidate.model_cooldowns.available(&candidate.model))
+            .cloned()
+            .collect();
+        if !ready.is_empty() {
+            ready
+        } else if available.is_empty() {
             candidates
         } else {
             available
@@ -490,6 +557,7 @@ struct Candidate {
     breaker: Arc<CircuitBreaker>,
     concurrency: Arc<Semaphore>,
     retry_policy: RetryPolicy,
+    model_cooldowns: Arc<crate::model_cooldown::ModelCooldowns>,
 }
 
 impl Candidate {
@@ -544,6 +612,7 @@ impl Candidate {
             // physical-call observer before network execution.
             physical.max_tokens = physical.max_tokens.min(capabilities.max_output_tokens);
         }
+        self.provider.validate_request_options(&physical)?;
         Ok(physical)
     }
 
@@ -809,11 +878,11 @@ impl Drop for Attempt {
                 let _permit = permit;
                 match terminal_task.await {
                     Ok(Ok(())) => {}
-                    Ok(Err(error)) => {
-                        tracing::error!(%call_id, %error, "failed to persist physical LLM completion after stream drop");
+                    Ok(Err(_)) => {
+                        tracing::error!(%call_id, error_code = "LLM_LEDGER_FINISH_FAILED", "failed to persist physical LLM completion after stream drop");
                     }
-                    Err(error) => {
-                        tracing::error!(%call_id, %error, "physical LLM completion task failed after stream drop");
+                    Err(_) => {
+                        tracing::error!(%call_id, error_code = "LLM_LEDGER_FINISH_TASK_FAILED", "physical LLM completion task failed after stream drop");
                     }
                 }
             });
@@ -846,15 +915,14 @@ impl Drop for Attempt {
                             usage,
                             error_code: Some("STREAM_DROPPED".to_owned()),
                         };
-                        if let Err(error) =
-                            persist_completion_with_retry(&observer, &completion).await
+                        if persist_completion_with_retry(&observer, &completion).await.is_err()
                         {
-                            tracing::error!(%error, "failed to close dropped in-flight LLM start");
+                            tracing::error!(call_id = %completion.call_id, error_code = "LLM_LEDGER_FINISH_FAILED", "failed to close dropped in-flight LLM start");
                         }
                     }
                     Ok(Err(_)) => {}
-                    Err(error) => {
-                        tracing::error!(%error, "physical LLM start task failed after stream drop");
+                    Err(_) => {
+                        tracing::error!(error_code = "LLM_LEDGER_START_TASK_FAILED", "physical LLM start task failed after stream drop");
                     }
                 }
             });
@@ -877,8 +945,8 @@ impl Drop for Attempt {
         };
         runtime.spawn(async move {
             let _permit = permit;
-            if let Err(error) = persist_completion_with_retry(&observer, &completion).await {
-                tracing::error!(%error, "failed to persist dropped physical LLM call completion");
+            if persist_completion_with_retry(&observer, &completion).await.is_err() {
+                tracing::error!(call_id = %completion.call_id, error_code = "LLM_LEDGER_FINISH_FAILED", "failed to persist dropped physical LLM call completion");
             }
         });
     }
@@ -903,12 +971,30 @@ impl ChatProvider for ProviderRegistry {
         "registry"
     }
 
+    fn validate_request_options(&self, request: &ChatRequest) -> Result<(), ProviderError> {
+        self.request_candidate_models(request)?;
+        let name = self
+            .resolve_provider(&request.model)
+            .ok_or_else(|| ProviderError::Config {
+                message: format!("no provider registered for model '{}'", request.model),
+            })?;
+        let slot = self
+            .providers
+            .get(name)
+            .ok_or_else(|| ProviderError::Config {
+                message: format!("no provider registered for model '{}'", request.model),
+            })?;
+        slot.provider.validate_request_options(request)
+    }
+
     fn chat_stream(
         &self,
         request: ChatRequest,
         cancel: CancellationToken,
     ) -> Result<BoxStream<'static, ProviderEvent>, ProviderError> {
-        let candidates = self.candidates_for(&request.model);
+        self.validate_request_options(&request)?;
+        let models = self.request_candidate_models(&request)?;
+        let candidates = self.candidates_for(models);
         if candidates.is_empty() {
             return Err(ProviderError::Config {
                 message: format!("no provider registered for model '{}'", request.model),
@@ -1150,6 +1236,10 @@ fn fallback_stream(state: FallbackState) -> impl Stream<Item = ProviderEvent> + 
                         }
 
                         completed.breaker.record_success();
+                        completed
+                            .candidate
+                            .model_cooldowns
+                            .success(&completed.candidate.model);
                         state
                             .ready_events
                             .append(&mut completed.deferred_terminal_events);
@@ -1205,6 +1295,19 @@ fn fallback_stream(state: FallbackState) -> impl Stream<Item = ProviderEvent> + 
                     return None;
                 }
                 Some(ProviderEvent::Error { error }) => {
+                    if let Some(attempt) = &state.current {
+                        attempt
+                            .candidate
+                            .model_cooldowns
+                            .record(&attempt.candidate.model, &error);
+                    }
+                    if matches!(error, ProviderError::Preflight { .. })
+                        && let Some(attempt) = state.current.as_mut()
+                    {
+                        // Explicit transport proof: this request never reached the LLM.
+                        // This is not a replacement for absent provider-reported usage.
+                        attempt.usage = Some(zk_protocol::Usage::default());
+                    }
                     let finish_pending = state
                         .current
                         .as_ref()
@@ -1317,15 +1420,31 @@ fn fallback_stream(state: FallbackState) -> impl Stream<Item = ProviderEvent> + 
                     // ① 同 provider 重试（旧 ApiRetryService.executeWithRetry 内层
                     //    循环）：已吐字的尝试不透明重试（状态已污染，旧
                     //    collector.hasReceivedEvents() 同）。
-                    let may_switch = error.is_retryable() && !produced && !error_already_exposed;
+                    let summary = state.request.summary_thinking.is_some();
+                    let summary_retry = summary
+                        && state.next_physical_attempt == 2
+                        && matches!(error, ProviderError::Http { status: 429, .. });
+                    let may_switch = error.is_retryable()
+                        && !produced
+                        && !error_already_exposed
+                        && (!summary || summary_retry);
                     let mut finalized_for_switch = false;
                     if may_switch {
-                        let decision = state
-                            .current
-                            .as_mut()
-                            .expect("current attempt checked above")
-                            .retry
-                            .on_error(&error);
+                        let decision = if summary_retry {
+                            match &error {
+                                ProviderError::Http { retry_after_ms, .. } => {
+                                    Some(retry_after_ms.unwrap_or(1000))
+                                }
+                                _ => None,
+                            }
+                        } else {
+                            state
+                                .current
+                                .as_mut()
+                                .expect("current attempt checked above")
+                                .retry
+                                .on_error(&error)
+                        };
                         // 已熔断的 provider 不值得再等退避。
                         if let Some(delay_ms) = decision.filter(|_| breaker.is_available()) {
                             if let Err(ledger_error) = state
@@ -1402,6 +1521,9 @@ fn fallback_stream(state: FallbackState) -> impl Stream<Item = ProviderEvent> + 
                         breaker.record_error(&error);
                         state.current = None;
                         state.pending_error = Some(error);
+                        if summary {
+                            state.queue.clear();
+                        }
                         while let Some(candidate) = state.queue.pop_front() {
                             let physical_attempt = state.next_physical_attempt;
                             state.next_physical_attempt =
@@ -1469,6 +1591,7 @@ fn fallback_stream(state: FallbackState) -> impl Stream<Item = ProviderEvent> + 
                         }
 
                         let kind = match event {
+                            ProviderEvent::ResponseState { .. } => "response_state",
                             ProviderEvent::TextDelta { .. } => "text_delta",
                             ProviderEvent::ThinkingDelta { .. } => "thinking_delta",
                             ProviderEvent::ToolUseStart { .. } => "tool_use_start",
@@ -1500,7 +1623,8 @@ fn fallback_stream(state: FallbackState) -> impl Stream<Item = ProviderEvent> + 
                     }
 
                     match &event {
-                        ProviderEvent::TextDelta { .. }
+                        ProviderEvent::ResponseState { .. }
+                        | ProviderEvent::TextDelta { .. }
                         | ProviderEvent::ThinkingDelta { .. }
                         | ProviderEvent::ToolUseStart { .. }
                         | ProviderEvent::ToolInputDelta { .. } => {
@@ -1534,9 +1658,11 @@ fn provider_error_code(error: &ProviderError) -> String {
     match error {
         ProviderError::Http { status, .. } => format!("HTTP_{status}"),
         ProviderError::Network { .. } => "PROVIDER_NETWORK".to_owned(),
+        ProviderError::Connect { .. } => "PROVIDER_UNREACHABLE".to_owned(),
         ProviderError::Cancelled => "PROVIDER_CANCELLED".to_owned(),
         ProviderError::Parse { .. } => "PROVIDER_PARSE".to_owned(),
         ProviderError::Config { .. } => "PROVIDER_CONFIG".to_owned(),
+        ProviderError::Preflight { .. } => "PROVIDER_PREFLIGHT".to_owned(),
     }
 }
 
@@ -2026,6 +2152,33 @@ mod tests {
     }
 
     #[test]
+    fn isolated_provider_preserves_empty_catalog_routing_without_fallback() {
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "openai-compat",
+            Arc::new(ScriptedProvider::new("openai-compat", Vec::new())),
+            Vec::new(),
+        );
+        let registry = registry
+            .with_default_model("qwen3.8-max-0902")
+            .with_fallback_chain(vec!["kimi-k3".into()]);
+
+        assert_eq!(registry.model_owner("qwen3.8-max-0902"), None);
+        let isolated = registry
+            .isolated_provider("openai-compat", "qwen3.8-max-0902")
+            .expect("legacy single-provider configuration has a valid route");
+        assert_eq!(isolated.names(), ["openai-compat"]);
+        assert_eq!(isolated.models(), ["qwen3.8-max-0902"]);
+        assert_eq!(isolated.effective_default_model(), "qwen3.8-max-0902");
+        assert!(isolated.fallback_chain().is_empty());
+        assert!(
+            registry
+                .isolated_provider("other", "qwen3.8-max-0902")
+                .is_none()
+        );
+    }
+
+    #[test]
     fn resolve_provider_falls_back_to_default_model_owner_then_first() {
         let mut registry = ProviderRegistry::new();
         registry.register(
@@ -2075,6 +2228,129 @@ mod tests {
             ProviderRegistry::new().candidate_models("kimi-k3"),
             ["kimi-k3"]
         );
+    }
+
+    #[tokio::test]
+    async fn independent_summary_retries_only_one_429_and_accounts_every_attempt() {
+        for (status, attempts) in [(429, 2), (503, 1), (529, 1)] {
+            let primary = ScriptedProvider::new(
+                "primary",
+                vec![ProviderEvent::Error {
+                    error: ProviderError::Http {
+                        status,
+                        message: "summary failure".into(),
+                        retry_after_ms: Some(0),
+                        retryable: true,
+                    },
+                }],
+            );
+            let seen = primary.seen_models.clone();
+            let fallback = ScriptedProvider::new("fallback", text_then_finish("must not run"));
+            let fallback_seen = fallback.seen_models.clone();
+            let observer = Arc::new(RecordingCallObserver::default());
+            let mut registry = ProviderRegistry::new()
+                .with_retry_policy(RetryPolicy::immediate(8))
+                .with_fallback_chain(vec!["deepseek-flash".into(), "other".into()]);
+            registry.register("primary", Arc::new(primary), vec!["deepseek-flash".into()]);
+            registry.register("fallback", Arc::new(fallback), vec!["other".into()]);
+            let mut request = ChatRequest::new("deepseek-flash").with_execution(
+                LlmExecutionAttribution::new("t", "r", "summary"),
+                observer.clone(),
+            );
+            request.summary_thinking = Some(crate::SummaryThinkingMode::Max);
+            let events: Vec<_> = registry
+                .chat_stream(request, CancellationToken::new())
+                .unwrap()
+                .collect()
+                .await;
+            assert!(matches!(events.last(), Some(ProviderEvent::Error { .. })));
+            assert_eq!(seen.lock().unwrap().len(), attempts);
+            assert!(fallback_seen.lock().unwrap().is_empty());
+            assert_eq!(observer.started.lock().unwrap().len(), attempts);
+            assert_eq!(observer.finished.lock().unwrap().len(), attempts);
+        }
+    }
+
+    #[tokio::test]
+    async fn explicitly_non_retryable_5xx_never_retries_or_falls_back() {
+        for status in [503, 529] {
+            let primary = ScriptedProvider::new(
+                "primary",
+                vec![ProviderEvent::Error {
+                    error: ProviderError::Http {
+                        status,
+                        message: "suppressed".into(),
+                        retry_after_ms: None,
+                        retryable: false,
+                    },
+                }],
+            );
+            let seen = primary.seen_models.clone();
+            let fallback = ScriptedProvider::new(
+                "fallback",
+                vec![ProviderEvent::Finish {
+                    finish_reason: FinishReason::EndTurn,
+                    usage: None,
+                }],
+            );
+            let fallback_seen = fallback.seen_models.clone();
+            let mut registry = ProviderRegistry::new()
+                .with_retry_policy(RetryPolicy::immediate(5))
+                .with_fallback_chain(vec!["model".into(), "other".into()]);
+            registry.register("primary", Arc::new(primary), vec!["model".into()]);
+            registry.register("fallback", Arc::new(fallback), vec!["other".into()]);
+            let events = drain(&registry, "model").await.unwrap();
+            assert!(matches!(events.last(), Some(ProviderEvent::Error { .. })));
+            assert_eq!(seen.lock().unwrap().len(), 1);
+            assert!(fallback_seen.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn local_preflight_is_known_zero_while_remote_missing_usage_remains_unknown() {
+        for (error, expected_usage) in [
+            (
+                ProviderError::Preflight {
+                    message: "CONTEXT_BUDGET_EXCEEDED".into(),
+                },
+                Some(zk_protocol::Usage::default()),
+            ),
+            (
+                ProviderError::Http {
+                    status: 400,
+                    message: "remote rejection without usage".into(),
+                    retry_after_ms: None,
+                    retryable: false,
+                },
+                None,
+            ),
+        ] {
+            let provider = ScriptedProvider::new(
+                "primary",
+                vec![ProviderEvent::Error {
+                    error: error.clone(),
+                }],
+            );
+            let observer = Arc::new(RecordingCallObserver::default());
+            let mut registry = ProviderRegistry::new();
+            registry.register("primary", Arc::new(provider), vec!["model".into()]);
+            let request = ChatRequest::new("model").with_execution(
+                LlmExecutionAttribution::new("task", "run", "conversation"),
+                observer.clone(),
+            );
+            let events = registry
+                .chat_stream(request, CancellationToken::new())
+                .unwrap()
+                .collect::<Vec<_>>()
+                .await;
+            assert!(
+                matches!(events.first(), Some(ProviderEvent::Error { error: actual }) if actual == &error)
+            );
+            let finished = observer.finished.lock().unwrap();
+            assert_eq!(finished.len(), 1);
+            assert_eq!(finished[0].status, LlmCallStatus::Failed);
+            assert_eq!(finished[0].usage, expected_usage);
+        }
     }
 
     #[tokio::test]
@@ -3836,6 +4112,164 @@ mod tests {
         assert_eq!(
             crate::anthropic::messages_url(catalog_entry("anthropic").expect("anthropic").base_url),
             "https://api.anthropic.com/v1/messages"
+        );
+    }
+    #[tokio::test]
+    async fn request_fallback_is_isolated_and_accounts_each_actual_call() {
+        let failing = Arc::new(ScriptedProvider::new("primary", vec![error_event(503)]));
+        let success = vec![
+            ProviderEvent::TextDelta {
+                text: "done".into(),
+            },
+            ProviderEvent::Finish {
+                finish_reason: FinishReason::EndTurn,
+                usage: Some(zk_protocol::Usage::default()),
+            },
+        ];
+        let alternate = Arc::new(ScriptedProvider::new("alternate", success.clone()));
+        let global = Arc::new(ScriptedProvider::new("global", success));
+        let mut registry = ProviderRegistry::new()
+            .with_fallback_chain(vec!["global-model".into()])
+            .with_retry_policy(RetryPolicy::none());
+        registry.register("primary", failing.clone(), vec!["primary-model".into()]);
+        registry.register(
+            "alternate",
+            alternate.clone(),
+            vec!["alternate-model".into()],
+        );
+        registry.register("global", global.clone(), vec!["global-model".into()]);
+        let observer = Arc::new(RecordingCallObserver::default());
+        let mut request = ChatRequest::new("primary-model").with_execution(
+            LlmExecutionAttribution::new(
+                "task-request-options",
+                "run-request-options",
+                "conversation",
+            ),
+            observer.clone(),
+        );
+        request.fallback_models = Some(vec!["alternate-model".into()]);
+        let events: Vec<_> = registry
+            .chat_stream(request, CancellationToken::new())
+            .unwrap()
+            .collect()
+            .await;
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, ProviderEvent::TextDelta { text } if text == "done"))
+        );
+        assert!(global.seen_models.lock().unwrap().is_empty());
+        assert_eq!(*alternate.seen_models.lock().unwrap(), ["alternate-model"]);
+        {
+            let calls = observer.started.lock().unwrap();
+            assert_eq!(calls.len(), 2);
+            assert_eq!(calls[0].model, "primary-model");
+            assert_eq!(calls[1].model, "alternate-model");
+            let finishes = observer.finished.lock().unwrap();
+            assert_eq!(finishes.len(), 2);
+            assert_eq!(finishes[0].status, LlmCallStatus::Failed);
+            assert_eq!(finishes[1].status, LlmCallStatus::Completed);
+        }
+        let mut disabled = ChatRequest::new("primary-model");
+        disabled.fallback_models = Some(vec![]);
+        let events: Vec<_> = registry
+            .chat_stream(disabled, CancellationToken::new())
+            .unwrap()
+            .collect()
+            .await;
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, ProviderEvent::Error { .. }))
+        );
+        assert!(global.seen_models.lock().unwrap().is_empty());
+        drain(&registry, "primary-model").await.unwrap();
+        assert_eq!(*global.seen_models.lock().unwrap(), ["global-model"]);
+    }
+
+    #[test]
+    fn explicit_request_overrides_are_rejected_before_any_physical_call() {
+        let provider = Arc::new(ScriptedProvider::new("primary", vec![]));
+        let mut registry = ProviderRegistry::new();
+        registry.register("primary", provider.clone(), vec!["deepseek-flash".into()]);
+        let mut request = ChatRequest::new("deepseek-flash");
+        request.fallback_models = Some(vec!["typo-not-registered".into()]);
+        assert!(
+            registry
+                .chat_stream(request, CancellationToken::new())
+                .is_err()
+        );
+        let mut request =
+            ChatRequest::new("deepseek-flash").with_thinking(crate::ThinkingMode::Enabled);
+        request.reasoning_effort = Some(crate::ReasoningEffort::Medium);
+        assert!(
+            registry
+                .chat_stream(request, CancellationToken::new())
+                .is_err()
+        );
+        assert!(provider.seen_models.lock().unwrap().is_empty());
+    }
+    #[tokio::test]
+    async fn capacity_cooldown_skips_only_actual_model_and_shares_auxiliary_state() {
+        let provider = Arc::new(SequencedProvider::new(
+            "shared",
+            vec![
+                vec![error_event(529)],
+                text_then_finish("alternate succeeds"),
+            ],
+        ));
+        let other = Arc::new(ScriptedProvider::new(
+            "other",
+            text_then_finish("other succeeds"),
+        ));
+        let mut registry = ProviderRegistry::new()
+            .with_fallback_chain(vec!["model-b".into()])
+            .with_retry_policy(RetryPolicy::none());
+        registry.register(
+            "shared",
+            provider.clone(),
+            vec!["model-a".into(), "model-b".into()],
+        );
+        registry.register("other", other.clone(), vec!["model-c".into()]);
+        // Pinning auxiliary work shares provider+model overload facts without
+        // sharing the main request's global fallback chain.
+        let auxiliary = registry.isolated_provider("shared", "model-a").unwrap();
+        drain(&auxiliary, "model-a").await.unwrap();
+        drain(&registry, "model-a").await.unwrap();
+        assert_eq!(
+            *provider.seen_models.lock().unwrap(),
+            ["model-a", "model-b"]
+        );
+        assert_eq!(registry.breaker_state("shared"), Some(BreakerState::Closed));
+        assert_eq!(
+            registry.breaker("shared").unwrap().consecutive_failures(),
+            0
+        );
+        let mut request = ChatRequest::new("model-c");
+        request.fallback_models = Some(vec![]);
+        let _: Vec<_> = registry
+            .chat_stream(request, CancellationToken::new())
+            .unwrap()
+            .collect()
+            .await;
+        assert_eq!(*other.seen_models.lock().unwrap(), ["model-c"]);
+        // One explicit target still permits a bounded foreground probe, rather
+        // than silently enabling another model or inventing a cooldown error.
+        let mut request = ChatRequest::new("model-a");
+        request.fallback_models = Some(vec![]);
+        let _: Vec<_> = registry
+            .chat_stream(request, CancellationToken::new())
+            .unwrap()
+            .collect()
+            .await;
+        assert_eq!(
+            provider.seen_models.lock().unwrap().last().unwrap(),
+            "model-a"
+        );
+        assert!(
+            registry.providers["shared"]
+                .model_cooldowns
+                .available("model-a")
         );
     }
 }

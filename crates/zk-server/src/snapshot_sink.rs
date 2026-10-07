@@ -32,12 +32,13 @@ impl SnapshotSink for DbSnapshotSink {
     ) -> futures::future::BoxFuture<'_, Result<(), String>> {
         Box::pin(async move {
             self.db
-                .insert_file_snapshot(
+                .insert_file_snapshot_with_bytes(
                     &request.session_id,
                     request.message_id.as_deref(),
                     &request.file_path,
                     &request.content,
                     &request.operation,
+                    request.original_bytes.as_deref(),
                 )
                 .await
                 .map(|_id| ())
@@ -64,6 +65,7 @@ mod tests {
             message_id: Some("toolu_1".to_owned()),
             file_path: "/tmp/zk-sink/a.txt".to_owned(),
             content: "before".to_owned(),
+            original_bytes: None,
             operation: "write".to_owned(),
         })
         .await
@@ -88,6 +90,7 @@ mod tests {
                 message_id: None,
                 file_path: "/tmp/x.txt".to_owned(),
                 content: "before".to_owned(),
+                original_bytes: None,
                 operation: "write".to_owned(),
             })
             .await

@@ -191,8 +191,24 @@ fn message_view(message: &MessageRecord) -> Value {
 }
 
 fn structured_summary(result: Option<&str>) -> Value {
+    let result = result.map(str::trim).map(|text| {
+        for marker in [
+            "[skeleton]",
+            "[final]",
+            "[content compressed by system]",
+            "[content truncated by system]",
+        ] {
+            if text
+                .get(..marker.len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(marker))
+            {
+                return text[marker.len()..].trim();
+            }
+        }
+        text
+    });
     json!({
-        "conclusion": result.filter(|text| !text.trim().is_empty()),
+        "conclusion": result.filter(|text| !text.is_empty()),
         "completed": [],
         "issues": [],
         "nextSteps": [],
@@ -298,15 +314,27 @@ fn verification_view(
     };
     let verifying_evidence = evidence
         .iter()
-        .filter(|bundle| bundle.origin.can_verify())
+        .filter(|bundle| {
+            bundle.origin.can_verify()
+                && bundle.kind == "journey"
+                && bundle.items.iter().any(|item| {
+                    item.meta.as_ref().is_some_and(|meta| {
+                        meta.get("ok").is_some_and(Value::is_boolean)
+                            || meta
+                                .get("action")
+                                .and_then(Value::as_str)
+                                .is_some_and(|action| !action.trim().is_empty())
+                    })
+                })
+        })
         .collect::<Vec<_>>();
-    let runtime_status = if verifying_evidence.is_empty() {
-        "NOT_VERIFIED"
-    } else if verifying_evidence
+    let runtime_status = if evidence
         .iter()
-        .any(|bundle| bundle.verdict == "failed")
+        .any(|bundle| bundle.origin.can_verify() && bundle.verdict == "failed")
     {
         "FAILED"
+    } else if verifying_evidence.is_empty() {
+        "NOT_VERIFIED"
     } else if verifying_evidence
         .iter()
         .any(|bundle| bundle.verdict == "stale")
@@ -322,7 +350,7 @@ fn verification_view(
     };
     let technical = vec![
         json!({"id":"technical-manifest-integrity","type":"technical","text":"交付文件与Manifest一致","status":manifest_status,"detail":"只统计当前 Root Run 子树的 Manifest","evidenceBundleId":null}),
-        json!({"id":"technical-runtime-verification","type":"technical","text":"页面或程序完成运行时检查","status":runtime_status,"detail":"仅使用明确绑定到当前 Run 树的证据","evidenceBundleId":null}),
+        json!({"id":"technical-runtime-verification","type":"technical","text":"页面或程序完成运行时检查","status":runtime_status,"detail":if verifying_evidence.is_empty() {"没有可判定的 Journey 步骤，不能据此判为通过"} else {"仅证明所列步骤在该次执行的结果，不代表全部业务要求通过"},"evidenceBundleId":null}),
         json!({"id":"technical-no-failure-evidence","type":"technical","text":"本轮交付没有明确失败结论","status":if root.is_terminal() && root.status != "completed" {"FAILED"} else if root.is_terminal() {"PASSED"} else {"NOT_VERIFIED"},"detail":root.error_summary,"evidenceBundleId":null}),
     ];
     let statuses = business

@@ -210,3 +210,65 @@ async fn missing_and_cyclic_parent_chains_fail_closed() {
         missing.message
     );
 }
+
+#[tokio::test]
+async fn managed_worktree_binding_narrows_only_its_exact_child_run() {
+    let h = Harness::new();
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .current_dir(&h.workspace)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.name", "Test"]);
+    git(&["config", "user.email", "test@example.invalid"]);
+    git(&["commit", "--allow-empty", "-qm", "base"]);
+    let tree = std::env::temp_dir().join(format!("zk-subject-worktree-{}", uuid::Uuid::new_v4()));
+    git(&["worktree", "add", "-b", "isolated", tree.to_str().unwrap()]);
+    let tree = tree.canonicalize().unwrap();
+    let root = h.workspace.canonicalize().unwrap();
+    insert_session(&h, "s-root-wt").await;
+    insert_run(&h, "r-root-wt", "s-root-wt", None).await;
+    insert_run(&h, "r-child-wt", "s-child-wt", Some("r-root-wt")).await;
+    insert_run(&h, "r-other-wt", "s-other-wt", Some("r-root-wt")).await;
+    let record=serde_json::json!({"owner_run":"r-child-wt","worker_active":true,"phase":"executing","root":root,"path":tree,"cwd":tree,"parent_cwd":root}).to_string();
+    let path = tree.to_string_lossy().into_owned();
+    h.db.with_writer(move |conn| {
+        conn.execute(
+            "INSERT INTO managed_worktrees(path,record_json) VALUES(?1,?2)",
+            (path, record),
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let resolver = AuthorizationSubjectResolver::new(h.db.clone());
+    let parent = resolver.resolve(Some("r-root-wt")).await.unwrap();
+    let child = resolver.resolve(Some("r-child-wt")).await.unwrap();
+    let other = resolver.resolve(Some("r-other-wt")).await.unwrap();
+    assert_eq!(parent.authorization_root, root);
+    assert_eq!(other.authorization_root, root);
+    assert_eq!(child.authorization_root, tree);
+    assert_eq!(child.workspace_key, parent.workspace_key);
+    assert_eq!(child.root_run_id, parent.root_run_id);
+    h.db.with_writer(|conn| {
+        conn.execute(
+            "UPDATE managed_worktrees SET record_json=json_set(record_json,'$.parent_cwd','/tmp')",
+            [],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    assert!(
+        resolver.resolve(Some("r-child-wt")).await.is_err(),
+        "Cached root may not authorize a changed binding"
+    );
+}

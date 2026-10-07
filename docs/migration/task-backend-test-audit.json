@@ -1,0 +1,720 @@
+{
+  "sourceRange": "3e536438..053adf90",
+  "targetBaseline": "08cbdc45",
+  "scope": "Task/Agent lifecycle, boundary, streaming completion and websocket recovery source test net diffs",
+  "method": "Read all changed source assertions; compare native production behavior and exact regression names. Java fixtures are never counted executed. User-approved schema/topology choices and unexecuted permutations remain explicit.",
+  "paths": {
+    "backend/src/test/java/com/aicodeassistant/engine/TaskBoundaryEmissionTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/engine/TaskBoundaryEmissionTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "13d14f5e50e3c048bd12b3141f7e24e212e0ffdbc892b6a7f412c659ba11a312",
+      "sourceAssertions": [
+        "Successful TodoWrite boundaries persist before push, keep same ID, survive offline push; persistence failure stops push/state.",
+        "Invalid/error/repeated payload produces no boundary; turn_index counts instructional users, excludes steering/tool-result-only."
+      ],
+      "nativeImplementation": [
+        "crates/zk-db/src/task_boundary.rs",
+        "crates/zk-db/src/runtime_ledger.rs",
+        "crates/zk-engine/src/engine.rs"
+      ],
+      "actualNativeAssertions": [
+        "first_in_progress_is_durable_ordered_and_once_per_run",
+        "boundary_turn_index_counts_only_source_session_instructions"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Added missing source-session turn_index; new regression awaits root unified gates. Native SQL tool-result+boundary transaction is stronger than Java listener ordering. No separate failing-WebSocket fault injection executed."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "pending_root_unified_gates"
+    },
+    "backend/src/test/java/com/aicodeassistant/engine/TaskBoundaryTrackerTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/engine/TaskBoundaryTrackerTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "6c1e71b04c408ef646323dfba9a7881298f88e3b996b3572d7cc580792217f1e",
+      "sourceAssertions": [
+        "Only first IN_PROGRESS transition per task per Run emits; ordered seq, old in-progress rows/retransitions ignored.",
+        "New tasks emit; malformed/nonarray/missing-id or status rows safely ignored."
+      ],
+      "nativeImplementation": [
+        "crates/zk-db/src/task_boundary.rs",
+        "crates/zk-db/src/runtime_ledger.rs"
+      ],
+      "actualNativeAssertions": [
+        "first_in_progress_is_durable_ordered_and_once_per_run"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Persisted per-Run boundary metadata replaces Java in-memory tracker and survives replay. Code paths for malformed arrays/read-only failed results inspected; not every Java invalid JSON fixture has an independent native test."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "no_new_execution_claim"
+    },
+    "backend/src/test/java/com/aicodeassistant/run/RunRecoveryProjectionServiceTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/run/RunRecoveryProjectionServiceTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "e0d9a0230201c91d0360e46731a7264b8a15e27fb3b50c2cc0311fb0b166bcae",
+      "sourceAssertions": [
+        "Recovery retains settled top-level tool identity and tool-result preview/error/execution/duration/truncation facts, distinct from active tool rows."
+      ],
+      "nativeImplementation": [
+        "crates/zk-db/src/runtime_ledger.rs",
+        "crates/zk-db/src/session.rs",
+        "crates/zk-db/src/convert.rs",
+        "crates/zk-server/src/ws/restore.rs",
+        "frontend/src/api/dispatch.ts"
+      ],
+      "actualNativeAssertions": [
+        "bind_restores_then_push_delivers_flat_envelope",
+        "critical_pends_then_replays_in_order_after_reconnect"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Native committed tool-result messages are transactionally persisted and included directly in restore; active invocations are separate. Legacy event schema1/2 import is excluded; V4 ownership/high-water/replay retained. Exact Java duration1500 synthetic event reconstruction is not claimed executed."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "no_new_execution_claim"
+    },
+    "backend/src/test/java/com/aicodeassistant/tool/TaskDetachedExecutionTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/tool/TaskDetachedExecutionTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "227bcce729029b5b0bec792eccc2d7e64a86e880c444ee4411b2fc34ad7c5414",
+      "sourceAssertions": [
+        "Cancellation retains worker/process ownership until real exit, isolates siblings/parent; late registration cannot escape cleanup.",
+        "Normal success waits for live resources without cancelling; inspection failure retains owner, pre-cancel/missing-owner reject before effects."
+      ],
+      "nativeImplementation": [
+        "crates/zk-tools/src/executor.rs",
+        "crates/zk-tools/src/process.rs",
+        "crates/zk-engine/src/execution_resources.rs",
+        "crates/zk-engine/src/task/runtime.rs"
+      ],
+      "actualNativeAssertions": [
+        "cancellation_waits_for_cooperative_cleanup_before_cancelled_result",
+        "detached_task_survives_parent_cancel_without_releasing_its_budget_early",
+        "detached_task_has_independent_owned_stop",
+        "shutdown_timeout_never_claims_stuck_future_cleanup_is_confirmed"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Native attached/detached lifecycle is explicit in durable Task/Run; unknown cleanup is needsAttention with retained reaper, not Java RUNNING forever. Exact scripted currentTermination throws/late-register mocks not individually ported. Final runtime gates belong to root."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "no_new_execution_claim"
+    },
+    "backend/src/test/java/com/aicodeassistant/tool/task/TaskLifecycleTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/tool/task/TaskLifecycleTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "683a4ac18a55dae2418a24d22b5c51383c0686f560711f908e883cec7702fdb6",
+      "sourceAssertions": [
+        "Actual shell/agent output and failure/cancellation/timeout classification survive; never turn partial/failure/missing result into completed.",
+        "Ownership gates get/list/update/stop; status mutation fails before output; advisory output bounded and terminal edits cannot rewrite execution outcome.",
+        "Cancellation reason first accepted wins, capacity held through actual cleanup; duplicate ID/rejection/pending cancellation cannot leak/launch work.",
+        "Five Java task aliases, case-sensitive types and locale-independent status validation; source ten-slot limit and file-task output are implementation choices."
+      ],
+      "nativeImplementation": [
+        "crates/zk-tools/src/task_tools.rs",
+        "crates/zk-engine/src/task/runtime.rs",
+        "crates/zk-db/src/task_runtime.rs",
+        "crates/zk-db/src/task_display.rs",
+        "crates/zk-server/src/engine_bridge.rs"
+      ],
+      "actualNativeAssertions": [
+        "display_output_is_owned_and_mutable_after_terminal_without_rewriting_results",
+        "display_output_bound_preserves_utf16_limit_and_scalar_boundaries",
+        "ownership_and_output_wait_validation_fail_closed",
+        "idempotency_key_reuse_with_different_request_fails_closed",
+        "concurrent_idempotent_submissions_install_exactly_one_driver",
+        "root_admission_never_executes_more_than_four_children",
+        "shell_nonzero_and_permission_denial_cannot_report_success",
+        "hard_deadline_includes_time_waiting_for_an_execution_slot",
+        "parent_tool_cancellation_is_not_misreported_as_user_cancelled"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "User decision confirmed by root: retain V4 agent/shell and native Workflow/Cron/Swarm; do not restore local_workflow/monitor_mcp/dream aliases. Native four-agent per-root budgeted queue retained rather than source ten-slot global policy. TaskOutput remains cursor read; approved TaskUpdate.output projection provides advisory writes and preserves immutable terminalResult/error. Child may write only its own display text, never source isError/status. Native terminalization clears temporary display even if result text empty; source nullable-final fallback is not imported. Java executor/scheduler rejection/null wrappers have no direct Rust equivalent; native shutdown/transaction/crash-replay tests cover actual topology, not literal Java mocks."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "no_new_execution_claim"
+    },
+    "backend/src/test/java/com/aicodeassistant/tool/task/TaskToolGoldenTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/tool/task/TaskToolGoldenTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "51ec9d90546041a9a94ef2463056be8c4a3a285d47a3724f54ceed79da643bd0",
+      "sourceAssertions": [
+        "Explicit supported type schema, unsupported values reject before work, submit acknowledges durable identity before execution, status field read-only.",
+        "Stop wording only cancellation requested; truncation uses character-limit notice; temporary test coordinators close."
+      ],
+      "nativeImplementation": [
+        "contracts/task-runtime-v4.json",
+        "crates/zk-tools/src/task_tools.rs",
+        "crates/zk-engine/src/task/runtime.rs",
+        "crates/zk-server/src/engine_bridge.rs"
+      ],
+      "actualNativeAssertions": [
+        "submit_is_durable_before_executor_and_result_is_waitable",
+        "v4_tools_reject_legacy_wait_and_stop_arguments",
+        "display_output_bound_preserves_utf16_limit_and_scalar_boundaries"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "V4 explicit taskType/UUID/output cursor/cancel receipt schema deliberately retained. Source omitted/null agent default and legacy aliases not restored per user. Source mocked dispatch matrix is not represented as executed; actual native agent/shell/runtime tests cited."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "no_new_execution_claim"
+    },
+    "backend/src/test/java/com/aicodeassistant/tool/agent/SubAgentTaskLifecycleTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/tool/agent/SubAgentTaskLifecycleTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "378cee651101c90126165c87d800d6d0634e2a2136c24fe2bd3336ff00706dcf",
+      "sourceAssertions": [
+        "Actual child worker/run/foreground process/resource leases and cancellation cleanup gate slot/session closure; missing startup/cancel-before-register/timeout never fake success.",
+        "Cancellation scope only owned child, identities cannot be reused or replacement authority cancelled; normal completion leaves detached services alive.",
+        "Source executeTaskSync rejects worktree/team/plan modes before launch."
+      ],
+      "nativeImplementation": [
+        "crates/zk-engine/src/agent/executor.rs",
+        "crates/zk-engine/src/task/runtime.rs",
+        "crates/zk-engine/src/execution_resources.rs",
+        "crates/zk-tools/src/process.rs",
+        "crates/zk-server/src/engine_bridge.rs"
+      ],
+      "actualNativeAssertions": [
+        "precreated_execution_uses_durable_identity_path",
+        "caller_cancellation_reaches_the_child_engine_factory",
+        "stable_child_runtime_failures_keep_agent_result_classification_and_code",
+        "background_child_observes_parent_terminal_state_after_tool_future_returns",
+        "parent_tool_cancellation_is_not_misreported_as_user_cancelled",
+        "unified_shutdown_drains_leaf_owner_before_reconciliation"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Native DB-generated child identity, explicit attached/detached lifecycle, resource leases, owner/reaper and immutable terminal result replace Java caches/WorkLease mocks. Native valuable Agent worktree and supported team functionality retained; do not import source Task-only mode restrictions into the entire Agent tool. Precise Java lease/service-failure permutation matrix was read, not claimed literally executed."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "no_new_execution_claim"
+    },
+    "backend/src/test/java/com/aicodeassistant/tool/agent/BackgroundAgentCompletionTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/tool/agent/BackgroundAgentCompletionTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "ff4bb7e1ebf2868b24018cd102f2957cdacf06c823801114118d7b42ce3cafc3",
+      "sourceAssertions": [
+        "Default background waiting enabled, completed-before-wait collected and Run-scoped; timeout never claims child stopped.",
+        "Terminal errors/status survive late completion; cancellation wakes wait; registration precedes worker; undelivered output retained while parent active."
+      ],
+      "nativeImplementation": [
+        "crates/zk-engine/src/task/runtime.rs",
+        "crates/zk-db/src/task_runtime.rs",
+        "crates/zk-server/src/engine_bridge.rs"
+      ],
+      "actualNativeAssertions": [
+        "submit_is_durable_before_executor_and_result_is_waitable",
+        "four_waited_and_four_background_children_remain_queryable_and_terminal",
+        "child_output_unblocks_before_parent_tool_result_then_resolver_ingests_in_order",
+        "background_child_observes_parent_terminal_state_after_tool_future_returns"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Durable SQLite result/chunk storage replaces temporary output files and hourly eviction; no premature artifact deletion. Agent wait and dependency resolver are native production paths, not gated by Java BACKGROUND_AGENT_WAIT property. Source forced time-travel cleanup fixture is not relevant to SQLite retention and not claimed executed."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "no_new_execution_claim"
+    },
+    "backend/src/test/java/com/aicodeassistant/tool/StreamingToolExecutorCancellationTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/tool/StreamingToolExecutorCancellationTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "bd1918f4e37bca87f5f74be73ef7079c18c990d6c029f49aaae459329f450aff",
+      "sourceAssertions": [
+        "Snapshot includes already-completed results behind pending earlier tool without consuming or reordering final yield."
+      ],
+      "nativeImplementation": [
+        "crates/zk-engine/src/engine.rs",
+        "crates/zk-db/src/runtime_ledger.rs"
+      ],
+      "actualNativeAssertions": [],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Native select_all consumes tool events in arrival order and durably commits each result immediately, then constructs model messages in declared tool-call order. No Java ordered-yield queue exists; result map and durable committed messages survive recovery. Source exact two-item queue fixture not executed as a standalone native regression; code inspection only."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "no_new_execution_claim"
+    },
+    "backend/src/test/java/com/aicodeassistant/tool/StreamingToolExecutorErrorTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/tool/StreamingToolExecutorErrorTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "42756cc0ba517496587aff35c67984bf29d3b8b4efab7f796fb42df12ce10b7b",
+      "sourceAssertions": [
+        "Exceptions/fatal worker exits yield exactly one unknown-effect non-retryable failure, release execution slot/lease, preserve healthy queued work/order.",
+        "Metrics failure cannot replace successful result or leak owner."
+      ],
+      "nativeImplementation": [
+        "crates/zk-tools/src/executor.rs",
+        "crates/zk-engine/src/engine.rs"
+      ],
+      "actualNativeAssertions": [
+        "panicking_tool_generates_one_unknown_failure_and_releases_leaf_slot",
+        "panic_keeps_nested_cleanup_owned_until_it_really_exits"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Audit found per-call panic silently closed channel and engine called it user interruption. New per-call catch includes Tool::execute construction and polling, sends one TOOL_EXECUTION_TERMINATED_WITHOUT_RESULT with UNKNOWN/NEVER, cancels only this child token, leaves nested cleanup owned. Two focused regressions added, await root unified execution. No JVM LinkageError or Micrometer exists; outer Rust supervisor remains last-resort log/owner cleanup."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "pending_root_unified_gates"
+    },
+    "backend/src/test/java/com/aicodeassistant/websocket/WebSocketStompIntegrationTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/websocket/WebSocketStompIntegrationTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "abbb99e31d13fcf44904c559df153916ebcebcfecbf85c45ef3820dfcad57a03",
+      "sourceAssertions": [
+        "Permission selection forwards requestId and invalid mode does not mutate.",
+        "Edit-diff structuredResult crosses the UI boundary while private metadata does not; constructor changes have no behavioral assertions."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/ws/inbound.rs",
+        "crates/zk-engine/src/engine.rs",
+        "crates/zk-db/src/convert.rs",
+        "frontend/src/api/dispatch.ts"
+      ],
+      "actualNativeAssertions": [
+        "critical_pends_then_replays_in_order_after_reconnect"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Native V4 websocket replaces STOMP by explicit user constraint; source external-resource OSS variant excluded. Code inspection confirms requestId and structuredResult whitelist; no STOMP Java tests executed."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "no_new_execution_claim"
+    },
+    "backend/src/test/java/com/aicodeassistant/authorization/TaskRunAuthorizationCancellationTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/authorization/TaskRunAuthorizationCancellationTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "d7f2e355e0f22342d5750444f07ee5bfd067439b2e839c8e9941f683de978dd0",
+      "sourceAssertions": [
+        "Pending child cancellation cancels only its permission, late approval cannot launch it; sibling still can approve and run.",
+        "Cancellation after manual/AUTO_APPROVE authorization is rejected in final transaction before tool_started.",
+        "Completed parent does not close live child admission; another pending interaction does not block already authorized parallel tool."
+      ],
+      "nativeImplementation": [
+        "crates/zk-authz/src/service.rs",
+        "crates/zk-authz/src/gateway.rs",
+        "crates/zk-server/src/interaction/service.rs",
+        "crates/zk-server/src/run_termination.rs",
+        "crates/zk-engine/src/task/runtime.rs"
+      ],
+      "actualNativeAssertions": [
+        "cancelled_run_cannot_admit_a_previously_authorized_tool",
+        "parent_tool_cancellation_is_not_misreported_as_user_cancelled"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Native final writer check admits only actor Run running/waitingInteraction/waitingDependencies, independently of completed parent. Late approval checks durable Run before grant. Exact delivered/undelivered two-child manual approval matrix not newly run; existing CAS/Authz/runtime assertions are separately executed by root gates."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "no_new_execution_claim"
+    },
+    "backend/src/test/java/com/aicodeassistant/authorization/TaskShellExecutionIntegrationTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/authorization/TaskShellExecutionIntegrationTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "5a75b0a9194c28ea91a980422c733e948c0cb52de657902194eba360c34e89c3",
+      "sourceAssertions": [
+        "Durable shell child approval cancellation does not affect parent/sibling and late allow never launches stopped child.",
+        "Child inherits effective parent shell cwd, survives parent completion with actual process/resources retained; natural exit stores real output and releases ownership.",
+        "Failed cancellation does not close worker/session/slot until actual cleanup, no false termination confirmation."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/engine_bridge.rs",
+        "crates/zk-engine/src/engine.rs",
+        "crates/zk-engine/src/task/runtime.rs",
+        "crates/zk-tools/src/bash/shell_state.rs",
+        "crates/zk-tools/src/process.rs"
+      ],
+      "actualNativeAssertions": [
+        "shell_task_executes_once_and_commits_result_and_cleanup",
+        "shell_nonzero_and_permission_denial_cannot_report_success",
+        "detached_task_survives_parent_cancel_without_releasing_its_budget_early",
+        "cancellation_waits_for_cooperative_cleanup_before_cancelled_result"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Actual source diff audit found submit_shell inherited initial invocation cwd instead of parent effective ShellState cwd; root/runtime notified for canonical scoped adaptation. Not claimed complete until fixed/tested. Native Task/Run scoped ownership and cleanup reapers replace Java session caches/leases; exact source live PID outlives-parent fixture has not been independently replayed in this audit."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "no_new_execution_claim"
+    },
+    "backend/src/test/java/com/aicodeassistant/controller/RunControllerSerializationTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/controller/RunControllerSerializationTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "afcf74d1ce88b2ffa38d608358b42d60b8de07130b29ab19311944fb07f35954",
+      "sourceAssertions": [
+        "HTTP JSON exposes partial usage, total tokens, MAX_TURNS and artifact-only verification scope."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/api/run.rs",
+        "crates/zk-db/src/run.rs",
+        "contracts/task-runtime-v4.json",
+        "frontend/src/components/workbench/TaskOverviewCard.tsx"
+      ],
+      "actualNativeAssertions": [
+        "result_exit_reason_uses_only_the_public_lower_camel_contract"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Native V4 wire has physical input/output/cache/cost + usageComplete and lowerCamel exitReason. Main-Run UI reads selected rootRun physical usage. Native artifact API owns artifact integrity and never promotes it to task/business verification; no Java usageStatus compatibility alias introduced. The exact Java HTTP fixture was not rerun."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "no_new_execution_claim"
+    },
+    "backend/src/test/java/com/aicodeassistant/coordinator/CoordinatorPromptBuilderTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/coordinator/CoordinatorPromptBuilderTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "2e48471a3bdf53da287ef9ddd3f2486ccd77256cec044818bb7aef444ce0fda9",
+      "sourceAssertions": [
+        "Partial timeout continuation is bounded, reduced to remaining scope, not a fresh full retry; preserve incomplete status and evidence quality.",
+        "Actual role/tool catalog/permissions determine capability; valid schema-built examples; background does not guarantee delivery or prove workers stopped; avoid overlapping writers and preserve user edits.",
+        "Compressed markers and task-notification body are reference data, not instructions; null/empty/truncated/error output must remain truthful."
+      ],
+      "nativeImplementation": [
+        "crates/zk-engine/src/coordinator/prompt.rs",
+        "crates/zk-engine/src/engine.rs",
+        "crates/zk-engine/src/task/runtime.rs",
+        "crates/zk-db/src/task_runtime.rs"
+      ],
+      "actualNativeAssertions": [
+        "enabled_agent_gets_v4_coordinator_contract_once",
+        "synthesis_preserves_evidence_limits_instead_of_promoting_unverified_claims",
+        "absent_agent_produces_root_only_instruction_without_call_examples",
+        "examples_are_hidden_when_the_corresponding_tool_is_unavailable",
+        "structured_examples_match_authoritative_v4_tool_schemas"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Native attached barrier/exactly-once receipts and waitMode supersede Java run_in_background hints. Native working SendMessage/TaskStop are deliberately retained despite upstream removing promises for its incomplete tools. Real role/tool capabilities remain post-authorization; native readOnly default/worktree ownership and budgeted one reduced continuation match intent. Exact Java prose assertions are not ported."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "no_new_execution_claim"
+    },
+    "backend/src/test/java/com/aicodeassistant/coordinator/CoordinatorServiceTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/coordinator/CoordinatorServiceTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "0e94a6514fd28150c32bdff0417958c1570135310bbcad2322061ded5510d70b",
+      "sourceAssertions": [
+        "Environment prompt is only a partial tool reference; actual worker role/tool definitions/permissions prevail."
+      ],
+      "nativeImplementation": [
+        "crates/zk-engine/src/coordinator/prompt.rs",
+        "crates/zk-engine/src/coordinator/service.rs",
+        "crates/zk-engine/src/engine.rs"
+      ],
+      "actualNativeAssertions": [
+        "examples_are_hidden_when_the_corresponding_tool_is_unavailable",
+        "absent_agent_produces_root_only_instruction_without_call_examples"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Native coordinator prompt is generated per request from effective catalog, not source static partial environment reference. Preserved Workflow/Cron/Swarm configuration stays under existing native readiness gates; no false promise of universal Read/Bash. Source exact reference sorting fixture not relevant to the native BTreeSet."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "no_new_execution_claim"
+    },
+    "backend/src/test/java/com/aicodeassistant/coordinator/SwarmWorkerRunnerModelTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/coordinator/SwarmWorkerRunnerModelTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "a89adbff11b6db3de3946f7c22d9e5bd2358499582ff77255c713c1e61d13162",
+      "sourceAssertions": [
+        "Explicit worker model wins; absent override inherits nonblank parent; missing parent rejects before engine/tools/provider.",
+        "Cancelling waiter does not release session activity gate until worker has actually exited."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/api/swarm.rs",
+        "crates/zk-engine/src/task/runtime.rs",
+        "crates/zk-engine/src/coordinator/service.rs"
+      ],
+      "actualNativeAssertions": [
+        "two_read_only_workers_dispatch_through_shared_runtime_and_persist_tasks",
+        "configured_swarm_with_assembled_agent_runtime_still_fails_closed",
+        "detached_task_survives_parent_cancel_without_releasing_its_budget_early"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Native dispatch validates actual owning parent Run before requests, passes explicit task model or persisted run.model to durable child. Existing Swarm release readiness gate remains fail-closed and is not silently enabled by migration. These are actual native assertions, not a claim of executing source wait-thread/model mock permutations."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "no_new_execution_claim"
+    },
+    "backend/src/test/java/com/aicodeassistant/coordinator/TaskNotificationFormatterTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/coordinator/TaskNotificationFormatterTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "db6b7081448ba5de1e0141cf5a202c1f26a5138b3911bb6fd1e2c3528d0595cb",
+      "sourceAssertions": [
+        "Escape agent/status attributes and body, preserve null-versus-empty summary meaning, bound preview; omit fabricated zero-token/tool counts."
+      ],
+      "nativeImplementation": [
+        "crates/zk-db/src/task_runtime.rs",
+        "crates/zk-engine/src/task/runtime.rs",
+        "crates/zk-engine/src/coordinator/prompt.rs"
+      ],
+      "actualNativeAssertions": [
+        "child_receipt_escapes_display_markup_without_changing_result_bytes",
+        "result_blob_paging_receipt_and_inbox_form_a_durable_closed_loop",
+        "safe_boundary_orders_tool_result_before_child_result_message"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Audit found native receipt summary was directly interpolated. Fixed both receipt paths through one XML escaping renderer. Production DB regression checks a single envelope, escaped Chinese/closing tags/quotes/ampersand, unchanged original bytes and idempotent replay; awaits unified gates. Native versioned full result/paging replaces Java 200-character notification summary; no unknown metrics are synthesized."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "pending_root_unified_gates"
+    },
+    "backend/src/test/java/com/aicodeassistant/run/RunControlServiceUsageSnapshotTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/run/RunControlServiceUsageSnapshotTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "bc147c08a5a5e51e2de71a0437081d523d2eb3e918ef5b4148b7e672f3cccc6d",
+      "sourceAssertions": [
+        "Monotonic snapshot sequence rejects stale/conflicting updates, equal updates are idempotent; unknown Run is never inserted.",
+        "Late usage cannot change terminal status/reason/timestamps or duplicate lifecycle events; usage snapshot failure must not block termination."
+      ],
+      "nativeImplementation": [
+        "crates/zk-db/src/runtime_ledger.rs",
+        "crates/zk-db/src/task_runtime.rs",
+        "crates/zk-engine/src/llm_ledger.rs"
+      ],
+      "actualNativeAssertions": [
+        "tool_resource_and_llm_ledgers_are_owned_and_terminal_once",
+        "terminal_usage_fallback_projects_run_and_session_exactly_once",
+        "physical_llm_ledger_wins_over_terminal_usage_fallback",
+        "missing_usage_keeps_reservation_charged_and_marks_root_incomplete"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Native physical call IDs and writer CAS replace source best-effort aggregate sequence snapshots. finish_llm_call updates only usage fields, never Run status/reason/finished_at/terminal_at; unknown calls NotFound and duplicate settlement InvalidTransition. Native billing must not silently discard failed settlement; retained owners/needsAttention replace source supplemental snapshot loss. Exact source BUSY-time-budget fixture is not a Rust guarantee."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "no_new_execution_claim"
+    },
+    "backend/src/test/java/com/aicodeassistant/run/RunEnvelopeRepositoryTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/run/RunEnvelopeRepositoryTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "948a2bb4f1c9d50d8c6d2cb5317801423fea3706f43b945f99f1b03ae34f3ba9",
+      "sourceAssertions": [
+        "Unknown/NULL usage and exit enums never become success; source accepts mixed-case historical rows and reads new usage-status column."
+      ],
+      "nativeImplementation": [
+        "crates/zk-db/src/run.rs",
+        "crates/zk-db/src/task_runtime.rs",
+        "crates/zk-db/migrations/V2__init_session_message.sql",
+        "contracts/task-runtime-v4.json"
+      ],
+      "actualNativeAssertions": [
+        "result_exit_reason_uses_only_the_public_lower_camel_contract",
+        "missing_usage_keeps_reservation_charged_and_marks_root_incomplete"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "User excluded historical database import. Native fresh schema CHECK constraints and strict V4 parsing replace Java legacy uppercase/mixedcase tolerance; usageComplete false preserves unknown billing. No unknown-to-success fallback introduced. Java unknown-row mutations are not executed."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "no_new_execution_claim"
+    },
+    "backend/src/test/java/com/aicodeassistant/run/RunEnvelopeVerificationScopeTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/run/RunEnvelopeVerificationScopeTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "8ea45a00498394a35319b50f34e63c3383b893fdedf4b36bc2e77fc325f1f7b1",
+      "sourceAssertions": [
+        "Artifact-manifest verification scope must be explicit and not imply business acceptance; unknown/NULL scope remains unknown."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/api/artifact.rs",
+        "crates/zk-db/src/run.rs",
+        "contracts/task-runtime-v4.json",
+        "frontend/src/components/workbench/AgentRunTree.tsx"
+      ],
+      "actualNativeAssertions": [],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Native artifact manifest APIs scope verification to entries and retain Task/Run NotRequested; root owns added artifact API assertions. No source generic verificationScope alias is needed in V4; target independent verificationStatus is retained. Unknown history import excluded. No independent execution claim for the source constructor fixture."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "no_new_execution_claim"
+    },
+    "backend/src/test/java/com/aicodeassistant/run/RunExecutionRegistryTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/run/RunExecutionRegistryTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "3b1c78d68fe66bd8b81e0329727a1131066026927b84f44812bf61beeeba16e2",
+      "sourceAssertions": [
+        "Cancellation closes new-execution gate before callbacks complete; sibling remains available; finished/aborted/released ownership cannot launch more work.",
+        "Steering invalid metadata does not consume request identity; valid metadata is immutable snapshot, duplicate request ID safe."
+      ],
+      "nativeImplementation": [
+        "crates/zk-authz/src/service.rs",
+        "crates/zk-engine/src/execution_resources.rs",
+        "crates/zk-engine/src/engine.rs",
+        "crates/zk-db/src/message.rs"
+      ],
+      "actualNativeAssertions": [
+        "cancelled_run_cannot_admit_a_previously_authorized_tool",
+        "real_process_is_owned_and_released_in_the_runtime_database",
+        "repeated_message_identity_rejects_changed_payload_or_session_atomically"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Native cancellation state is checked at final writer admission and physical resource registration; child cancellation leaves siblings independent. Steering queue lock plus persisted UUID/payload equality replaces in-memory registry. serde_json owned clones prevent later mutation; JSON cannot represent null keys, and null values are valid inert metadata in native API rather than Java Map.copyOf failures. No new exact steering JSON-null fixture executed."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "no_new_execution_claim"
+    },
+    "backend/src/test/java/com/aicodeassistant/run/RunTerminationCoordinatorTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/run/RunTerminationCoordinatorTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "bce2da8003dda091aaaffb6f5f7e89540b25d5de0ebb80fcbd120001606a857a",
+      "sourceAssertions": [
+        "After cancellation query actual remaining physical ownership; never fabricate zero remaining resources.",
+        "If cancellation database write fails, still cancel registered local workers and propagate original write error without inventing terminal state."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/run_termination.rs",
+        "crates/zk-engine/src/task/runtime.rs",
+        "crates/zk-engine/src/execution_resources.rs"
+      ],
+      "actualNativeAssertions": [
+        "cancellation_waits_for_cooperative_cleanup_before_cancelled_result",
+        "shutdown_timeout_never_claims_stuck_future_cleanup_is_confirmed"
+      ],
+      "disposition": "pending_user_decision",
+      "verificationNotes": [
+        "Native cleanup owner/reaper reports unconfirmed until actual exit. Current persist-first cancellation stops on DB error; parent explicitly raised source immediate-local-stop behavior for user decision and left native unchanged pending answer. This source assertion is not marked migrated."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "no_new_execution_claim"
+    },
+    "backend/src/test/java/com/aicodeassistant/tool/interaction/InteractionToolGoldenTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/tool/interaction/InteractionToolGoldenTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "a4a3b922713770d8c607ae7d4c08f9c947cf9a1c558c060d537672d17ac9b582",
+      "sourceAssertions": [
+        "Validate entire batch before first interaction: 1-4 questions and 2-4 options, invalid later question produces no partial request.",
+        "Corrected request in same session preserves ordered multiSelect answers and complete options; omitted/false multiSelect stays single.",
+        "Todo merge retains every missing-ID entry."
+      ],
+      "nativeImplementation": [
+        "crates/zk-tools/src/ask_user_question.rs",
+        "crates/zk-tools/src/todo_write.rs",
+        "crates/zk-server/src/interaction/elicitation.rs"
+      ],
+      "actualNativeAssertions": [
+        "collects_answers_keyed_by_question_position",
+        "rejects_out_of_range_question_and_option_counts",
+        "question_delivery_failures_remain_distinct_from_user_answer_expiry",
+        "status_aliases_and_anonymous_merge_are_lossless"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Native validation collects whole questions before ask; durable request carries multi_select with ordered JSON answers. Source validation failure code is in native content; native generic tool ledger records actual failure without claiming an incompatible Java failure-object schema. Code-inspected corrected-same-session and later-invalid-question permutations; not all individually executed. New durable expiry regression awaits root gates."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "pending_root_unified_gates"
+    },
+    "backend/src/test/java/com/aicodeassistant/tool/interaction/TodoWritePipelineTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/tool/interaction/TodoWritePipelineTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "49e4feb9abb8f7a6a2d5dc1a2e9a3f07d61fbdedb545adbb5a0631e329052d57",
+      "sourceAssertions": [
+        "Canonical statuses and case-insensitive completed aliases reach runtime normalization; unknown states reject atomically without mirror/update.",
+        "All-completed clears; three completions nudge verification; optional missing/null status remains untouched.",
+        "Merge updates by ID and retains all missing/blank IDs in stable order."
+      ],
+      "nativeImplementation": [
+        "crates/zk-tools/src/todo_write.rs",
+        "crates/zk-tools/src/executor.rs",
+        "crates/zk-db/src/task_boundary.rs"
+      ],
+      "actualNativeAssertions": [
+        "status_aliases_and_anonymous_merge_are_lossless",
+        "clears_the_list_when_every_item_is_settled",
+        "nudges_verification_after_three_completions_without_a_verify_task",
+        "merge_mode_overwrites_by_id_and_keeps_original_order"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Native execution does not run enum JSON-schema rejection before tool call; normalize_todos validates/clones entire batch before store/mirror. Existing tests check normalization and execution separately, not source mocked authorization-gateway pipeline. Native mirror and durable successful boundary retained; no Java STOMP dead update imported."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "no_new_execution_claim"
+    }
+  }
+}

@@ -8,6 +8,8 @@
 import React, { useState, useMemo, useCallback } from 'react';
 import { RefreshCw, Filter, ArrowDownUp, X, ChevronDown } from 'lucide-react';
 import { useMessageStore } from '@/store/messageStore';
+import { useSessionStore } from '@/store/sessionStore';
+import { useSequenceViewStore } from '@/store/sequenceViewStore';
 import {
     extractToolCalls,
     buildSequenceDiagram,
@@ -35,18 +37,19 @@ const ToolFilterDropdown: React.FC<{
     const clearAll = useCallback(() => onChange([]), [onChange]);
 
     return (
-        <div className="relative">
+        <div className="relative min-w-[200px]" onKeyDown={event => { if (event.key === 'Escape') setOpen(false); }}>
             <button
                 onClick={() => setOpen(o => !o)}
-                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs
-                    border border-[var(--border)] bg-[var(--bg-primary)]
-                    hover:bg-[var(--bg-hover)] text-[var(--text-secondary)]
+                aria-expanded={open}
+                className="panel-control relative z-20 w-full flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-[13px]
+                    border border-[var(--v2-border-hairline)] bg-[var(--v2-bg-surface)]
+                    hover:bg-[var(--v2-bg-hover)] text-[var(--v2-text-2)]
                     transition-colors"
             >
-                <Filter size={13} />
+                <Filter size={18} />
                 <span>过滤工具</span>
                 {selected.length > 0 && (
-                    <span className="px-1.5 py-0.5 rounded-full bg-blue-500/20 text-blue-500 text-[10px] font-medium">
+                    <span className="px-1.5 py-0.5 rounded-full bg-accent2-soft text-accent2-ink text-[13px] font-medium">
                         {selected.length}
                     </span>
                 )}
@@ -56,15 +59,15 @@ const ToolFilterDropdown: React.FC<{
             {open && (
                 <>
                     <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
-                    <div className="absolute top-full left-0 mt-1 z-20 min-w-[200px] max-h-[240px] overflow-y-auto
-                        rounded-lg border border-[var(--border)] bg-[var(--bg-primary)] shadow-lg">
+                    <div className="absolute top-full left-0 mt-1 z-20 w-[200px] max-h-[240px] overflow-y-auto
+                        rounded-[14px] border border-[var(--v2-border-hairline)] bg-[var(--v2-bg-surface)] shadow-e3">
                         {/* Header */}
-                        <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--border)]">
-                            <span className="text-xs text-[var(--text-muted)]">选择工具类型</span>
+                        <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--v2-border-hairline)]">
+                            <span className="text-[13px] text-[var(--v2-text-2)]">选择工具类型</span>
                             {selected.length > 0 && (
                                 <button
                                     onClick={clearAll}
-                                    className="text-[10px] text-blue-500 hover:underline"
+                                    className="panel-control text-[13px] text-accent2-ink hover:underline"
                                 >
                                     清除全部
                                 </button>
@@ -74,20 +77,20 @@ const ToolFilterDropdown: React.FC<{
                         {toolNames.map(name => (
                             <label
                                 key={name}
-                                className="flex items-center gap-2 px-3 py-1.5 hover:bg-[var(--bg-hover)]
-                                    cursor-pointer text-xs text-[var(--text-primary)]"
+                                className="flex items-center gap-2 px-3 py-1.5 hover:bg-[var(--v2-bg-hover)]
+                                    max-md:min-h-11 break-all cursor-pointer text-[13px] text-[var(--v2-text-1)]"
                             >
                                 <input
                                     type="checkbox"
                                     checked={selected.includes(name)}
                                     onChange={() => toggle(name)}
-                                    className="rounded border-gray-400 text-blue-500 focus:ring-blue-500"
+                                    className="rounded-sm border-border-hairline text-accent2-ink focus:ring-accent2"
                                 />
                                 {name}
                             </label>
                         ))}
                         {toolNames.length === 0 && (
-                            <div className="px-3 py-2 text-xs text-[var(--text-muted)]">
+                            <div className="px-3 py-2 text-[13px] text-[var(--v2-text-2)]">
                                 无可用工具
                             </div>
                         )}
@@ -104,31 +107,32 @@ const ToolCallDetail: React.FC<{
     onClose: () => void;
 }> = ({ record, onClose }) => {
     return (
-        <div className="border-t border-[var(--border)] bg-[var(--bg-primary)]">
-            <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--border)]">
-                <span className="text-xs font-medium text-[var(--text-primary)]">
+        <div className="border-t border-[var(--v2-border-hairline)] bg-[var(--v2-bg-surface)]">
+            <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--v2-border-hairline)]">
+                <span className="text-[13px] font-medium text-[var(--v2-text-1)]">
                     {record.toolName} 详情
                 </span>
                 <button
+                    aria-label="关闭调用详情"
                     onClick={onClose}
-                    className="p-1 rounded hover:bg-[var(--bg-hover)] text-[var(--text-muted)]"
+                    className="panel-control p-1 rounded-sm hover:bg-[var(--v2-bg-hover)] text-[var(--v2-text-2)]"
                 >
-                    <X size={14} />
+                    <X size={18} />
                 </button>
             </div>
             <div className="p-3 space-y-2 max-h-[200px] overflow-y-auto">
                 <div>
-                    <span className="text-[10px] uppercase tracking-wider text-[var(--text-muted)]">Input</span>
-                    <pre className="mt-1 p-2 rounded bg-[var(--bg-secondary)] text-xs text-[var(--text-secondary)] overflow-x-auto whitespace-pre-wrap font-mono">
+                    <span className="text-[13px] uppercase tracking-wider text-[var(--v2-text-2)]">输入参数</span>
+                    <pre className="mt-1 p-2 rounded-sm bg-[var(--v2-bg-sunken)] panel-code text-[var(--v2-text-2)] overflow-x-auto whitespace-pre-wrap break-words font-mono">
                         {JSON.stringify(record.input, null, 2)}
                     </pre>
                 </div>
                 {record.result !== undefined && (
                     <div>
-                        <span className="text-[10px] uppercase tracking-wider text-[var(--text-muted)]">
-                            Result {record.isError && <span className="text-red-400">(Error)</span>}
+                        <span className="text-[13px] uppercase tracking-wider text-[var(--v2-text-2)]">
+                            执行结果 {record.isError && <span className="text-err">（失败）</span>}
                         </span>
-                        <pre className="mt-1 p-2 rounded bg-[var(--bg-secondary)] text-xs text-[var(--text-secondary)] overflow-x-auto whitespace-pre-wrap font-mono max-h-[120px]">
+                        <pre className="mt-1 p-2 rounded-sm bg-[var(--v2-bg-sunken)] panel-code text-[var(--v2-text-2)] overflow-x-auto whitespace-pre-wrap break-words font-mono max-h-[120px]">
                             {record.result}
                         </pre>
                     </div>
@@ -140,9 +144,15 @@ const ToolCallDetail: React.FC<{
 
 /** API 序列图面板 */
 export const APISequenceDiagram: React.FC = () => {
+    const sessionId = useSessionStore(state => state.sessionId);
+    return <SessionSequenceDiagram key={sessionId ?? 'no-session'} sessionId={sessionId} />;
+};
+
+const SessionSequenceDiagram = ({ sessionId }: { sessionId: string | null }) => {
     const messages = useMessageStore(s => s.messages);
-    const [selectedTools, setSelectedTools] = useState<string[]>([]);
-    const [selectedRecord, setSelectedRecord] = useState<ToolCallRecord | null>(null);
+    const view = useSequenceViewStore();
+    const selectedTools = useMemo(() => view.sessionId === sessionId ? view.tools : [], [view.sessionId, sessionId, view.tools]);
+    const setSelectedTools = view.setTools;
     const [refreshKey, setRefreshKey] = useState(0);
 
     // 提取工具调用记录
@@ -151,6 +161,10 @@ export const APISequenceDiagram: React.FC = () => {
         // eslint-disable-next-line react-hooks/exhaustive-deps
         [messages, refreshKey]
     );
+
+    const selectedRecord = view.sessionId === sessionId
+        ? toolCalls.find(record => record.toolUseId === view.selectedId) ?? null : null;
+    const note = view.sessionId === sessionId ? view.note : null;
 
     // 可用工具名列表
     const toolNames = useMemo(() => getUniqueToolNames(toolCalls), [toolCalls]);
@@ -168,16 +182,17 @@ export const APISequenceDiagram: React.FC = () => {
     }, []);
 
     const handleSelectRecord = useCallback((record: ToolCallRecord) => {
-        setSelectedRecord(prev => prev?.toolUseId === record.toolUseId ? null : record);
+        useSequenceViewStore.getState().selectRecord(record.toolUseId);
     }, []);
 
     // 空状态
     if (toolCalls.length === 0) {
         return (
             <div className="flex flex-col items-center justify-center py-12 px-4 text-center">
-                <ArrowDownUp className="w-10 h-10 text-[var(--text-muted)] mb-3 opacity-40" />
-                <p className="text-sm text-[var(--text-muted)]">当前会话暂无工具调用</p>
-                <p className="text-xs text-[var(--text-muted)] mt-1 opacity-60">
+                {note && <p role="status" className="mb-2 text-sm text-t2">{note}</p>}
+                <ArrowDownUp className="w-10 h-10 text-[var(--v2-text-2)] mb-3 opacity-40" />
+                <p className="text-sm text-[var(--v2-text-2)]">当前会话暂无工具调用</p>
+                <p className="text-[13px] text-[var(--v2-text-2)] mt-1">
                     发送消息后，工具调用序列图将在此显示
                 </p>
             </div>
@@ -185,9 +200,9 @@ export const APISequenceDiagram: React.FC = () => {
     }
 
     return (
-        <div className="flex flex-col h-full">
+        <div className="flex flex-col h-full min-w-0">
             {/* 工具栏 */}
-            <div className="flex items-center gap-2 px-3 py-2 border-b border-[var(--border)] shrink-0">
+            <div className="flex flex-wrap items-center gap-2 px-3 py-2 border-b border-[var(--v2-border-hairline)] shrink-0">
                 <ToolFilterDropdown
                     toolNames={toolNames}
                     selected={selectedTools}
@@ -195,31 +210,32 @@ export const APISequenceDiagram: React.FC = () => {
                 />
                 <button
                     onClick={handleRefresh}
-                    className="p-1.5 rounded-md border border-[var(--border)]
-                        hover:bg-[var(--bg-hover)] text-[var(--text-secondary)] transition-colors"
+                    className="panel-control p-1.5 rounded-md border border-[var(--v2-border-hairline)]
+                        hover:bg-[var(--v2-bg-hover)] text-[var(--v2-text-2)] transition-colors"
                     title="刷新"
                 >
-                    <RefreshCw size={13} />
+                    <RefreshCw size={18} />
                 </button>
-                <span className="ml-auto text-[10px] text-[var(--text-muted)]">
+                <span className="ml-auto text-[13px] text-[var(--v2-text-2)]">
                     {toolCalls.length} 次调用
                 </span>
             </div>
 
+            {note && <p role="status" className="px-3 py-2 text-sm text-t2">{note}</p>}
             {/* 序列图 */}
-            <div className="flex-1 overflow-y-auto p-3">
+            <div className="flex-1 min-h-0 min-w-0 overflow-auto p-3">
                 {diagramCode ? (
                     <MermaidBlock code={diagramCode} />
                 ) : (
-                    <div className="flex items-center justify-center py-8 text-sm text-[var(--text-muted)]">
+                    <div className="flex items-center justify-center py-8 text-sm text-[var(--v2-text-2)]">
                         过滤后无匹配的工具调用
                     </div>
                 )}
             </div>
 
             {/* 调用记录列表（可点击查看详情） */}
-            <div className="border-t border-[var(--border)] max-h-[180px] overflow-y-auto shrink-0">
-                <div className="px-3 py-1.5 text-[10px] uppercase tracking-wider text-[var(--text-muted)] border-b border-[var(--border)] bg-[var(--bg-secondary)]">
+            <div className="border-t border-[var(--v2-border-hairline)] max-h-[180px] overflow-y-auto shrink-0">
+                <div className="px-3 py-1.5 text-[13px] uppercase tracking-wider text-[var(--v2-text-2)] border-b border-[var(--v2-border-hairline)] bg-[var(--v2-bg-sunken)]">
                     调用记录
                 </div>
                 {toolCalls
@@ -228,13 +244,14 @@ export const APISequenceDiagram: React.FC = () => {
                         <button
                             key={tc.toolUseId}
                             onClick={() => handleSelectRecord(tc)}
-                            className={`w-full flex items-center gap-2 px-3 py-1.5 text-left text-xs
-                                hover:bg-[var(--bg-hover)] transition-colors border-b border-[var(--border)]/50
-                                ${selectedRecord?.toolUseId === tc.toolUseId ? 'bg-blue-500/5' : ''}`}
+                            className={`panel-control w-full flex items-center gap-2 px-3 py-1.5 text-left text-[13px]
+                                hover:bg-[var(--v2-bg-hover)] transition-colors border-b border-[var(--v2-border-hairline)]/50
+                                ${selectedRecord?.toolUseId === tc.toolUseId ? 'bg-accent2-soft' : ''}`}
                         >
-                            <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${tc.isError ? 'bg-red-400' : 'bg-green-400'}`} />
-                            <span className="font-medium text-[var(--text-primary)] truncate">{tc.toolName}</span>
-                            <span className="text-[var(--text-muted)] truncate flex-1">
+                            <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${tc.result === undefined ? 'bg-t3' : tc.isError ? 'bg-err' : 'bg-ok'}`} />
+                            <span className="font-medium text-[var(--v2-text-1)] truncate">{tc.toolName}</span>
+                            {tc.result === undefined && <span className="text-t3">结果待确认</span>}
+                            <span className="text-[var(--v2-text-2)] truncate flex-1">
                                 {Object.keys(tc.input).slice(0, 2).join(', ')}
                             </span>
                         </button>
@@ -245,7 +262,7 @@ export const APISequenceDiagram: React.FC = () => {
             {selectedRecord && (
                 <ToolCallDetail
                     record={selectedRecord}
-                    onClose={() => setSelectedRecord(null)}
+                    onClose={() => useSequenceViewStore.getState().selectRecord(null)}
                 />
             )}
         </div>

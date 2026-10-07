@@ -111,16 +111,16 @@ fn append_v4_event(
         "entityId": run_id,
         "data": payload,
     });
+    let envelope = crate::content::store_diagnostic(
+        connection,
+        &crate::content::run_session(connection, run_id)?,
+        Some(&envelope.to_string()),
+    )?
+    .expect("present lifecycle diagnostic");
     connection.execute(
         "INSERT INTO run_event_log(run_id,seq,event_type,event_data,ts)
          VALUES(?1,?2,?3,?4,?5)",
-        params![
-            run_id,
-            sequence,
-            event_type,
-            envelope.to_string(),
-            timestamp_ms
-        ],
+        params![run_id, sequence, event_type, envelope, timestamp_ms],
     )?;
     Ok(())
 }
@@ -146,6 +146,11 @@ impl Db {
             let now = format_rfc3339_micros(timestamp_ms);
             let mut report = RuntimeShutdownIntentReport::default();
             for run in runs {
+                let reason = crate::content::store_diagnostic(
+                    &tx,
+                    &crate::content::run_session(&tx, &run.run_id)?,
+                    Some(RESTART_REASON),
+                )?;
                 let task_updated = tx.execute(
                     "UPDATE tasks
                      SET status='cancelling',reason=?1,cleanup_status='pending',
@@ -153,7 +158,7 @@ impl Db {
                      WHERE id=?3 AND current_run_id=?4
                        AND status IN ('queued','running','waitingDependencies',
                                       'waitingInteraction','cancelling')",
-                    params![RESTART_REASON, now, run.task_id, run.run_id],
+                    params![reason, now, run.task_id, run.run_id],
                 )?;
                 if task_updated != 1 {
                     return Err(DbError::Invalid(
@@ -407,6 +412,7 @@ impl Db {
 
             for run in runs {
                 let cleanup_status = run_cleanup_status(&tx, &run.run_id)?;
+                let reason=crate::content::store_diagnostic(&tx,&crate::content::run_session(&tx,&run.run_id)?,Some(RESTART_REASON))?;
                 let run_updated = tx.execute(
                     &format!(
                         "UPDATE run_envelopes
@@ -416,7 +422,7 @@ impl Db {
                              cleanup_status=?3,updated_at=?1,version=version+1
                          WHERE id=?4 AND status IN ({ACTIVE_RUN_STATUSES})"
                     ),
-                    params![now, RESTART_REASON, cleanup_status, run.run_id],
+                    params![now, reason, cleanup_status, run.run_id],
                 )?;
                 if run_updated != 1 {
                     return Err(DbError::Invalid(
@@ -430,7 +436,7 @@ impl Db {
                      WHERE id=?4 AND current_run_id=?5
                        AND status IN ('queued','running','waitingDependencies',
                                       'waitingInteraction','cancelling')",
-                    params![RESTART_REASON, cleanup_status, now, run.task_id, run.run_id],
+                    params![reason, cleanup_status, now, run.task_id, run.run_id],
                 )?;
                 if task_updated != 1 {
                     return Err(DbError::Invalid(
@@ -467,6 +473,12 @@ impl Db {
                 report.runs_interrupted += 1;
                 report.tasks_needing_attention += 1;
                 report.outbox_events += 1;
+            }
+
+            let closed_inboxes = tx.prepare("SELECT DISTINCT i.target_run_id FROM task_inbox_messages i JOIN run_envelopes r ON r.id=i.target_run_id WHERE i.status IN ('queued','delivered') AND r.status IN ('completed','failed','cancelled','interrupted')")?
+                .query_map([],|row|row.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?;
+            for run_id in closed_inboxes {
+                crate::task_inbox_consumer::reject_pending_for_run(&tx,&run_id)?;
             }
 
             tx.commit()?;
@@ -656,6 +668,7 @@ mod tests {
             .append_attributed_message(
                 &child.transcript_session_id,
                 NewMessage {
+                    meta: None,
                     role: MessageRole::Assistant,
                     content: vec![StoredBlock::Text {
                         text: "durable partial evidence".to_owned(),

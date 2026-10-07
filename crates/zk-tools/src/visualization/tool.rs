@@ -24,6 +24,18 @@ use crate::input::{failure, optional_str, required_str};
 use crate::tool::{Tool, ToolContext, ToolOutput};
 
 /// 允许的渲染载体白名单（对照旧 `ALLOWED_VIEW_TYPES`：不在表内即拒绝）。
+/// Source-compatible analytical view names. These describe presentation, not proof of analysis.
+pub const ALLOWED_VIEW_TYPES: [&str; 7] = [
+    "git-timeline",
+    "schema-viewer",
+    "change-impact-graph",
+    "code-path-tracer",
+    "code-complexity-treemap",
+    "api-sequence-diagram",
+    "mermaid",
+];
+
+/// Existing source-bearing diagram carriers retained for argument compatibility.
 pub const ALLOWED_DIAGRAM_TYPES: [&str; 3] = ["mermaid", "plantuml", "d3_json"];
 
 /// 图表源码字节上限——超限拒绝（旧无此闸门；本移植追加，避免把整个文件
@@ -46,8 +58,10 @@ impl Tool for VisualizationTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
-            "required": ["diagram_type", "content"],
+            "anyOf": [{"required": ["diagram_type", "content"]}, {"required": ["viewType", "props"]}],
             "properties": {
+                "viewType": {"type":"string", "enum":ALLOWED_VIEW_TYPES},
+                "props": {"type":"object", "description":"View properties; intentOnly=true is an unexecuted suggestion, never analysis evidence."},
                 "diagram_type": {
                     "type": "string",
                     "enum": ALLOWED_DIAGRAM_TYPES,
@@ -62,6 +76,14 @@ impl Tool for VisualizationTool {
         })
     }
 
+    fn produces_visualizations(&self) -> bool {
+        true
+    }
+
+    fn child_access(&self) -> crate::ChildToolAccess {
+        crate::ChildToolAccess::ReadOnly
+    }
+
     fn is_read_only(&self, _input: &Value) -> bool {
         true
     }
@@ -72,6 +94,9 @@ impl Tool for VisualizationTool {
 }
 
 fn run(input: &Value) -> ToolOutput {
+    if input.get("viewType").is_some() {
+        return run_view(input);
+    }
     let diagram_type = match required_str(input, "diagram_type") {
         Ok(value) => value,
         Err(rejection) => return rejection,
@@ -133,6 +158,41 @@ fn run(input: &Value) -> ToolOutput {
                     "renderHint": payload.render_hint,
                 }
             }
+        })),
+    }
+}
+
+fn run_view(input: &Value) -> ToolOutput {
+    let Some(view_type) = input["viewType"]
+        .as_str()
+        .filter(|value| ALLOWED_VIEW_TYPES.contains(value))
+    else {
+        return failure("VISUALIZATION_TYPE_UNSUPPORTED", "Unsupported viewType");
+    };
+    let Some(props) = input.get("props").filter(|value| value.is_object()) else {
+        return failure("VISUALIZATION_PROPS_INVALID", "props must be an object");
+    };
+    if props.to_string().len() > MAX_DIAGRAM_BYTES {
+        return failure(
+            "VISUALIZATION_CONTENT_TOO_LARGE",
+            "props exceed the visualization limit",
+        );
+    }
+    let text = if props["intentOnly"] == true {
+        format!(
+            "Visualization suggestion: {view_type}. Analysis has not been executed; this suggestion does not grant authorization or constitute evidence."
+        )
+    } else {
+        format!(
+            "Visualization presentation: {view_type}. The payload does not independently verify its underlying data."
+        )
+    };
+    ToolOutput {
+        content: text,
+        is_error: false,
+        metadata: Some(json!({
+            "visualization": {"type":"visualization", "uuid":uuid::Uuid::new_v4().to_string(), "ts":chrono::Utc::now().timestamp_millis(), "viewType":view_type,"props":props},
+            "structuredResult":{"schema":"visualization", "viewType":view_type,"props":props}
         })),
     }
 }

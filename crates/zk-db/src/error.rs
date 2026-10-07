@@ -10,6 +10,12 @@
 ///   （`SessionController.listSessions` 捕获后仅 log.warn），见 `cursor.rs`。
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {
+    /// Optimistic concurrency conflict; no mutation was committed.
+    #[error("concurrent modification: {0}")]
+    Conflict(String),
+    /// Invalid caller input, safe to present as a validation error.
+    #[error("invalid input: {0}")]
+    Validation(String),
     /// rusqlite 底层错误（含约束冲突、IO 故障等）。
     #[error("sqlite failure: {0}")]
     Sqlite(#[from] rusqlite::Error),
@@ -41,6 +47,26 @@ pub enum DbError {
     /// `PROJECT_PATH_DUPLICATE`，对齐旧 `DuplicateKeyException` 捕获语义）。
     #[error("workspace root already bound to a project: {0}")]
     WorkspaceRootTaken(String),
+}
+
+impl DbError {
+    /// Stable log category. Display strings may contain SQL values, paths or bodies.
+    #[must_use]
+    pub const fn diagnostic_code(&self) -> &'static str {
+        match self {
+            Self::Conflict(_) => "DB_CONFLICT",
+            Self::Validation(_) => "DB_VALIDATION",
+            Self::Sqlite(_) => "DB_SQLITE_FAILED",
+            Self::Migration(_) => "DB_MIGRATION_FAILED",
+            Self::Join(_) => "DB_JOIN_FAILED",
+            Self::Json(_) => "DB_JSON_FAILED",
+            Self::Io(_) => "DB_IO_FAILED",
+            Self::IncompatibleSchema(_) => "DB_SCHEMA_INCOMPATIBLE",
+            Self::SessionNotFound(_) => "DB_SESSION_NOT_FOUND",
+            Self::Invalid(_) => "DB_INVALID_STATE",
+            Self::WorkspaceRootTaken(_) => "DB_WORKSPACE_ROOT_TAKEN",
+        }
+    }
 }
 
 /// 将 rusqlite 外键违例归一为 [`DbError::SessionNotFound`]。

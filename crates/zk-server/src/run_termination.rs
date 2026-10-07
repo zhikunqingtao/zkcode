@@ -33,29 +33,15 @@
 //! 「端口未接线」的中间状态（对比 [`crate::authz::WsInteractionPublisher`] 的
 //! `OnceLock` + `bind` 方案：那里的 publisher 可以独立于服务先建）。
 //!
-//! # 偏离留痕
-//!
-//! - **R-04**（承接 [`zk_db::run`]）：旧源 L48-67 在两步之间关闭准入并停子系统
-//!   （`executions.beginTermination` / `abortRun` / `tools.cancelRunDetailed` /
-//!   `processes.cancelRunDetailed` / `awaitQuiescence(2s)`），未静默则把终态原因
-//!   改判为 `TOOL_TERMINATION_UNCONFIRMED` / `PROCESS_TERMINATION_UNCONFIRMED`。
-//!   `RunExecutionRegistry` / `ManagedProcessRunner` 的静默确认属 **M-RUN
-//!   里程碑**，本模块取旧源「已静默」路径（`quiescent && allTerminated`），
-//!   终止实际由引擎侧三层取消令牌树驱动。DEFERRED。
-//! - **R-06**：旧源 `recordSummary` 经 `BestEffortObservabilityRecorder.record`
-//!   写 `run_termination_summary`。该记录器（`observability/BestEffortObservabilityRecorder.java`）
-//!   写的是独立的 `observability-events` **日志文件**、不入 `run_event_log`，且
-//!   `@Autowired(required = false)`（缺省即整段跳过）。zkcode 尚未移植可观测
-//!   记录器（**M-OBS**），此处不代偿——若改写 `run_event_log` 反而会多出旧源
-//!   不产生的行。DEFERRED。
-//! - **R-07**：旧 `Result(transition, processes, terminationConfirmed)` 的后两个
-//!   字段来自 R-04 未移植的子系统摘要，故本模块只返回
-//!   [`TransitionResult`]。旧源两个发布点都忽略返回值（`@EventListener` 无返回
-//!   通道），语义无损。
+//! Storage failure does not prevent a scoped local stop. `TaskRuntime` retains
+//! the Run safety fence and cancellation reconciliation owner; this adapter
+//! independently retries interaction cleanup. Neither path reports durable
+//! cancellation or confirmed physical cleanup merely because a token was sent.
 
+use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, Mutex, Weak};
 
 use zk_authz::model::{AuthzError, AuthzResult};
 use zk_db::Db;
@@ -136,6 +122,7 @@ pub struct RunTerminationCoordinator {
     ///
     /// [`Weak`] 而非 [`Arc`]：协调器由服务持有，反向持强引用即成环泄漏。
     interactions: Weak<DurableInteractionService>,
+    cleanup_retries: Arc<Mutex<HashSet<String>>>,
 }
 
 impl std::fmt::Debug for RunTerminationCoordinator {
@@ -154,6 +141,7 @@ impl RunTerminationCoordinator {
         Self {
             task_runtime,
             interactions,
+            cleanup_retries: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -173,7 +161,7 @@ impl RunTerminationCoordinator {
     /// 统一取消分两个持久化阶段：
     ///
     /// 1. [`TaskRuntime::cancel_run_with_cause`] 原子将 Task 和当前 Run 置为
-    ///    `cancelling/pending`，传播 attached 取消，然后才触发已注册的执行 token。
+    ///    本地准入屏障并传播 attached 取消；写库失败也停止本地执行，保留对账责任。
     /// 2. [`DurableInteractionService::complete_runtime_cancellation`] 校验上述状态后，
     ///    终结全部待决交互并归还配额。
     ///
@@ -189,27 +177,29 @@ impl RunTerminationCoordinator {
         exit_reason: &str,
         detail: Option<&str>,
     ) -> AuthzResult<TransitionResult> {
-        let Some(interactions) = self.interactions.upgrade() else {
-            // Normally unreachable because the composition root owns both
-            // sides. During shutdown a cloned coordinator can outlive the
-            // interaction service, so this must fail closed: returning success
-            // would let the caller signal an execution token without completing
-            // the unified cancellation workflow.
-            tracing::error!(
-                run_id,
-                exit_reason,
-                "run cancellation runtime is no longer available"
-            );
-            return Err(AuthzError::new(
-                "CANCELLATION_RUNTIME_UNAVAILABLE",
-                "interaction cancellation service is no longer available",
-            ));
-        };
-        let cancellation = self
+        let cancellation = match self
             .task_runtime
             .cancel_run_with_cause(run_id, exit_reason, detail.unwrap_or(exit_reason))
             .await
-            .map_err(|error| AuthzError::new(error.code, error.message))?;
+        {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                if error.retryable {
+                    self.retry_interaction_cleanup(
+                        run_id,
+                        exit_reason,
+                        detail.unwrap_or(exit_reason),
+                    );
+                }
+                return Err(AuthzError::new(error.code, error.message));
+            }
+        };
+        let Some(interactions) = self.interactions.upgrade() else {
+            return Err(AuthzError::new(
+                "CANCELLATION_RUNTIME_UNAVAILABLE",
+                "Local stop requested; interaction cancellation service is unavailable",
+            ));
+        };
         let transition = if cancellation.cancel_requested {
             TransitionResult::Applied
         } else if cancellation.task.status.is_terminal() {
@@ -217,9 +207,16 @@ impl RunTerminationCoordinator {
         } else {
             TransitionResult::InvalidTransition
         };
-        let interaction_cleanup = interactions
+        let interaction_cleanup = match interactions
             .complete_runtime_cancellation(run_id, detail.unwrap_or(exit_reason))
-            .await?;
+            .await
+        {
+            Ok(cleanup) => cleanup,
+            Err(error) => {
+                self.retry_interaction_cleanup(run_id, exit_reason, detail.unwrap_or(exit_reason));
+                return Err(error);
+            }
+        };
         if matches!(
             interaction_cleanup.run_transition,
             TransitionResult::NotFound | TransitionResult::InvalidTransition
@@ -242,6 +239,67 @@ impl RunTerminationCoordinator {
             "run cancellation requested"
         );
         Ok(transition)
+    }
+    /// Keep one process-owned interaction reconciler per Run, including callers
+    /// which lost their transport response after the local stop was requested.
+    fn retry_interaction_cleanup(&self, run_id: &str, exit_reason: &str, detail: &str) {
+        if !self
+            .cleanup_retries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(run_id.to_owned())
+        {
+            return;
+        }
+        let run_id = run_id.to_owned();
+        let exit_reason = exit_reason.to_owned();
+        let detail = detail.to_owned();
+        let runtime = Arc::clone(&self.task_runtime);
+        let service = self.interactions.clone();
+        let retries = Arc::clone(&self.cleanup_retries);
+        tokio::spawn(async move {
+            let mut attempts = 0_u32;
+            loop {
+                let Some(interactions) = service.upgrade() else {
+                    break;
+                };
+                match runtime
+                    .cancel_run_with_cause(&run_id, &exit_reason, &detail)
+                    .await
+                {
+                    Ok(_) => {
+                        if let Ok(cleanup) = interactions
+                            .complete_runtime_cancellation(&run_id, &detail)
+                            .await
+                            && !matches!(
+                                cleanup.run_transition,
+                                TransitionResult::NotFound | TransitionResult::InvalidTransition
+                            )
+                        {
+                            break;
+                        }
+                    }
+                    Err(error) if !error.retryable => break,
+                    Err(_) => {}
+                }
+                if attempts == 0 || attempts.is_power_of_two() {
+                    tracing::warn!(
+                        run_id,
+                        attempts,
+                        "cancelled Run interaction cleanup is awaiting storage reconciliation"
+                    );
+                }
+                attempts = attempts.saturating_add(1);
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    50_u64.saturating_mul(u64::from(attempts)).min(5_000),
+                ))
+                .await;
+            }
+            retries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&run_id);
+        });
     }
 }
 
@@ -278,9 +336,7 @@ impl RunTerminationRequest for RunTerminationCoordinator {
                 tracing::error!(
                     run_id,
                     exit_reason,
-                    detail,
                     code = %error.code,
-                    %error,
                     "run termination request failed"
                 );
             }

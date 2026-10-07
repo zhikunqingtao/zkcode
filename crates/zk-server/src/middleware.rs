@@ -228,6 +228,23 @@ pub(crate) async fn mcp_mutation_guard(
     request: Request,
     next: Next,
 ) -> Response {
+    if request.headers().contains_key("x-mcp-context-token") {
+        let path = request.uri().path();
+        let parts = path
+            .strip_prefix("/api/mcp/contexts/")
+            .map(|tail| tail.split('/').collect::<Vec<_>>());
+        let own_context = parts.as_ref().is_some_and(|parts| {
+            matches!(
+                (request.method(), parts.as_slice()),
+                (&Method::DELETE, [_run])
+                    | (&Method::GET, [_run, "capabilities"])
+                    | (&Method::POST, [_run, "capabilities", "requests"])
+            )
+        });
+        if path != "/mcp" && !own_context {
+            return ApiError::access_denied().into_response();
+        }
+    }
     if !is_mcp_protected_request(request.method(), request.uri().path()) {
         return next.run(request).await;
     }
@@ -307,7 +324,12 @@ pub(crate) async fn mcp_mutation_guard(
 
 fn is_mcp_protected_request(method: &Method, path: &str) -> bool {
     (path == "/ws" && *method == Method::GET)
+        || (*method == Method::POST && (path == "/api/query" || path.starts_with("/api/query/")))
         || (path == "/api/llm-keys" && *method == Method::PUT)
+        || (*method == Method::DELETE
+            && path.starts_with("/api/sessions/")
+            && path.ends_with("/repl-service"))
+        || is_interaction_decision(method, path)
         || is_speech_mutation(method, path)
         || path == "/mcp"
         || is_network_backed_mcp_get(method, path)
@@ -316,6 +338,16 @@ fn is_mcp_protected_request(method: &Method, path: &str) -> bool {
                 || method == Method::PUT
                 || method == Method::PATCH
                 || method == Method::DELETE))
+}
+
+fn is_interaction_decision(method: &Method, path: &str) -> bool {
+    (*method == Method::POST
+        && path.starts_with("/api/interactions/")
+        && path.ends_with("/decisions"))
+        || (*method == Method::PUT
+            && path.starts_with("/api/sessions/")
+            && path.contains("/activities/")
+            && path.ends_with("/decision"))
 }
 
 fn is_speech_mutation(method: &Method, path: &str) -> bool {
@@ -331,13 +363,25 @@ fn is_network_backed_mcp_get(method: &Method, path: &str) -> bool {
 }
 
 fn mcp_route_requires_json(method: &Method, path: &str) -> bool {
-    (path == "/api/llm-keys" && *method == Method::PUT)
+    is_interaction_decision(method, path)
+        || (*method == Method::POST
+            && path.starts_with("/api/mcp/contexts/")
+            && path.ends_with("/capabilities/requests"))
+        || (path == "/api/llm-keys" && *method == Method::PUT)
+        || (*method == Method::POST
+            && matches!(
+                path,
+                "/api/query" | "/api/query/stream" | "/api/query/conversation"
+            ))
         || (path == "/api/tts/synthesize" && *method == Method::POST)
         || path == "/mcp"
         || (*method == Method::POST
             && matches!(
                 path,
-                "/api/mcp/servers" | "/api/mcp/prompts/execute" | "/api/mcp/capabilities"
+                "/api/mcp/servers"
+                    | "/api/mcp/prompts/execute"
+                    | "/api/mcp/capabilities"
+                    | "/api/mcp/contexts"
             ))
         || (*method == Method::PUT && path.starts_with("/api/mcp/capabilities/"))
         || (*method == Method::POST

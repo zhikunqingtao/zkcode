@@ -36,6 +36,7 @@ use tower_http::services::ServeDir;
 
 use crate::api::activity;
 use crate::api::admin;
+use crate::api::analysis_openapi;
 use crate::api::artifact;
 use crate::api::attachment;
 use crate::api::browser_replay;
@@ -90,6 +91,7 @@ pub(crate) const BASE_CORS_ORIGINS: [&str; 6] = [
 #[allow(clippy::too_many_lines)] // 路由表：逐条 .route() 装配，拆分反而割裂契约全貌
 pub fn build_router(state: AppState) -> Router {
     Router::new()
+        .merge(crate::api::git_read::router())
         // Reverse MCP JSON-RPC endpoint. It shares access_guard, ToolRegistry and Admission.
         .route(
             "/mcp",
@@ -103,6 +105,15 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/sessions/{id}",
             get(session::get_session_detail).delete(session::delete_session),
+        )
+        .route(
+            "/api/sessions/{id}/execution-preferences",
+            get(crate::api::execution_preferences::get)
+                .patch(crate::api::execution_preferences::patch),
+        )
+        .route(
+            "/api/sessions/{id}/tool-presentations",
+            get(session::tool_presentations),
         )
         .route("/api/sessions/{id}/resume", post(session::resume_session))
         .route("/api/sessions/{id}/compact", post(session::compact_session))
@@ -134,6 +145,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/query", post(query::sync_query))
         .route("/api/query/stream", post(query::stream_query))
         .route("/api/query/conversation", post(query::conversation_query))
+        .route("/api/query/{requestId}/cancel", post(query::cancel_query))
+        .route(
+            "/api/query/{requestId}/stream",
+            get(query::resume_query_stream),
+        )
         .route("/metrics", get(system::prometheus_metrics))
         // ── 模型/配置域（S7b）──
         .route("/api/models", get(models::list_models))
@@ -184,6 +200,37 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/permissions/grants/{grantId}", delete(grant::revoke))
         // ── 技能域（3B.7，旧 SkillController 2 端点）──
         .route("/api/skills", get(skill::list_skills))
+        .route(
+            "/api/sessions/merge",
+            post(crate::api::session_merge::create),
+        )
+        .route(
+            "/api/session-merges/active",
+            get(crate::api::session_merge::active),
+        )
+        .route(
+            "/api/session-merges/{id}",
+            get(crate::api::session_merge::get),
+        )
+        .route(
+            "/api/session-merges/{id}/resume",
+            post(crate::api::session_merge::resume),
+        )
+        .route(
+            "/api/session-merges/{id}/cancel",
+            post(crate::api::session_merge::cancel),
+        )
+        .route(
+            "/api/session-merges/{id}/assets/{reference}",
+            get(crate::api::handoff_asset::download),
+        )
+        .route("/api/skills/manage", get(skill::manage_skills))
+        .route("/api/skills/manage/{name}", get(skill::manage_skill))
+        .route("/api/skills/detail/{name}", get(skill::get_skill))
+        .route(
+            "/api/skills/manage/{name}/toggle",
+            axum::routing::patch(skill::toggle_skill),
+        )
         .route("/api/skills/{name}", get(skill::get_skill))
         // ── 工具域（Batch 1 Step 1-5，旧 ToolController 3 端点）──
         .route("/api/tools", get(tool::list_tools))
@@ -264,8 +311,16 @@ pub fn build_router(state: AppState) -> Router {
             get(history::list_snapshots),
         )
         .route(
+            "/api/sessions/{id}/hooks",
+            get(crate::api::hook_config::get).put(crate::api::hook_config::put),
+        )
+        .route(
             "/api/sessions/{id}/history/rewind",
             post(history::rewind_to_snapshot),
+        )
+        .route(
+            "/api/sessions/{id}/history/rewind/preview",
+            post(history::preview_rewind),
         )
         .route(
             "/api/sessions/{id}/history/diff",
@@ -281,6 +336,18 @@ pub fn build_router(state: AppState) -> Router {
                 .post(memory::create_memory),
         )
         .route("/api/memory/all", get(memory::get_all_memories))
+        .route(
+            "/api/memory/document",
+            get(memory::get_document).put(memory::save_document),
+        )
+        .route(
+            "/api/memory/document/entries",
+            axum::routing::put(memory::save_document_entries),
+        )
+        .route(
+            "/api/sessions/{id}/activities/{activityId}/decision",
+            axum::routing::put(activity::update_decision),
+        )
         .route("/api/memory/{memoryId}", delete(memory::delete_memory))
         // ── 远程控制域（Batch 2b Step 2b-6，旧 RemoteControlController 2 端点）──
         .route("/api/remote/status", get(remote::status))
@@ -304,6 +371,42 @@ pub fn build_router(state: AppState) -> Router {
             post(code_analysis::analyze_endpoints),
         )
         .route("/api/code-path/trace", post(code_analysis::trace_path))
+        .route(
+            "/api/code-quality/complexity",
+            post(crate::api::code_complexity::complexity),
+        )
+        .route(
+            "/api/code-analysis/cancel",
+            post(code_analysis::cancel_analysis),
+        )
+        .route(
+            "/api/analysis/openapi/merged",
+            get(analysis_openapi::merged),
+        )
+        .route(
+            "/api/analysis/openapi/backend",
+            get(analysis_openapi::backend),
+        )
+        .route("/api/analysis/openapi/java", get(analysis_openapi::backend))
+        .route(
+            "/api/analysis/openapi/python",
+            get(analysis_openapi::python),
+        )
+        // Exact adapters prevent the general Python proxy from bypassing workspace authorization.
+        .route(
+            "/api/analysis/generate-diagram",
+            post(code_analysis::python_diagram),
+        )
+        .route(
+            "/api/analysis/api-endpoints",
+            post(code_analysis::python_endpoints),
+        )
+        .route("/api/analysis/code-path", post(code_analysis::python_trace))
+        .route(
+            "/api/analysis/change-impact",
+            post(code_analysis::change_impact),
+        )
+        .route("/api/analysis/cancel", post(code_analysis::cancel_analysis))
         .route("/api/admin/login", post(admin::login))
         .route("/api/admin/status", get(admin::status))
         .route("/api/admin/logout", post(admin::logout))
@@ -315,6 +418,38 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/dialogs/plugin-permission/{requestId}/decision",
             post(dialog::resolve_plugin_permission),
+        )
+        .route(
+            "/api/sessions/{id}/repl-service",
+            get(crate::api::repl::status).delete(crate::api::repl::stop),
+        )
+        .route("/api/mcp/services", get(mcp::list_services))
+        .route("/api/mcp/contexts", post(crate::api::mcp_context::create))
+        .route(
+            "/api/mcp/contexts/{runId}",
+            delete(crate::api::mcp_context::close),
+        )
+        .route(
+            "/api/mcp/contexts/{runId}/capabilities",
+            get(crate::api::mcp_context::get_capabilities),
+        )
+        .route(
+            "/api/mcp/contexts/{runId}/capabilities/requests",
+            post(crate::api::mcp_context::request_capabilities),
+        )
+        .route("/api/mcp/services/{name}", patch(mcp::toggle_service))
+        .route(
+            "/api/mcp/services/{name}/toggle",
+            patch(mcp::toggle_service_compat),
+        )
+        .route("/api/mcp/services/{name}/oauth", get(mcp::oauth_status))
+        .route(
+            "/api/mcp/services/{name}/oauth/authorize",
+            post(mcp::oauth_authorize),
+        )
+        .route(
+            "/api/mcp/services/{name}/oauth/logout",
+            post(mcp::oauth_logout),
         )
         // ── MCP 服务器域（Batch 4B Step 9，旧 McpController 10 端点）──
         .route(
@@ -373,6 +508,7 @@ pub fn build_router(state: AppState) -> Router {
             get(swarm::get_swarm).delete(swarm::destroy_swarm),
         )
         .route("/api/swarm/{swarmId}/dispatch", post(swarm::dispatch_swarm))
+        .route("/api/swarm/{swarmId}/broadcast", post(swarm::broadcast))
         .route("/api/swarm/{swarmId}/abort", post(swarm::abort_swarm))
         .route("/api/swarm/{swarmId}/shutdown", post(swarm::shutdown_swarm))
         .route(

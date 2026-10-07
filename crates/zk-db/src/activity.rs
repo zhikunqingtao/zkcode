@@ -46,10 +46,28 @@ fn value_ref_to_json(value: ValueRef<'_>) -> Option<Value> {
 }
 
 /// 行 → JSON 对象（键 = `snake_case` 列名，null 列剥离）。
-fn row_to_json_object(row: &Row<'_>, columns: &[String]) -> rusqlite::Result<Value> {
+fn row_to_json_object(
+    conn: &rusqlite::Connection,
+    session: &str,
+    row: &Row<'_>,
+    columns: &[String],
+) -> rusqlite::Result<Value> {
     let mut object = Map::with_capacity(columns.len());
     for (index, name) in columns.iter().enumerate() {
         if let Some(json) = value_ref_to_json(row.get_ref(index)?) {
+            let json = if matches!(
+                name.as_str(),
+                "summary" | "tool_result_json" | "changed_files_json" | "insight_json"
+            ) {
+                match json {
+                    Value::String(text) => {
+                        Value::String(crate::content::load_row_text(conn, session, text)?)
+                    }
+                    other => other,
+                }
+            } else {
+                json
+            };
             object.insert(name.clone(), json);
         }
     }
@@ -74,7 +92,7 @@ pub(crate) fn load_activities_by_session_paged_in_snapshot(
     let columns: Vec<String> = stmt.column_names().into_iter().map(str::to_owned).collect();
     let rows = stmt
         .query_map(params![session_id, limit, offset], |row| {
-            row_to_json_object(row, &columns)
+            row_to_json_object(conn, session_id, row, &columns)
         })?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)

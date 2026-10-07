@@ -55,6 +55,7 @@ pub struct ToolCallRecord {
 pub struct ToolCallTracker {
     history: Vec<ToolCallRecord>,
     consecutive_errors: u32,
+    recovery_hint_issued: bool,
 }
 
 impl ToolCallTracker {
@@ -99,9 +100,26 @@ impl ToolCallTracker {
         });
         if success || !recovery_relevant {
             self.consecutive_errors = 0;
+            self.recovery_hint_issued = false;
         } else {
             self.consecutive_errors += 1;
         }
+    }
+
+    /// Issue at most one hint per uninterrupted failure streak, preserving the
+    /// error counter used by the fixed Rust termination gate.
+    pub fn take_recovery_hint(&mut self) -> bool {
+        if self.consecutive_errors >= 3 && !self.recovery_hint_issued {
+            self.recovery_hint_issued = true;
+            true
+        } else {
+            false
+        }
+    }
+    /// Whether this streak has already received its recovery hint.
+    #[must_use]
+    pub fn recovery_hint_issued(&self) -> bool {
+        self.recovery_hint_issued
     }
 
     /// 获取连续错误计数（对齐旧 `getConsecutiveErrors`）。
@@ -179,6 +197,7 @@ impl ToolCallTracker {
     pub fn reset(&mut self) {
         self.history.clear();
         self.consecutive_errors = 0;
+        self.recovery_hint_issued = false;
     }
 }
 
@@ -269,5 +288,23 @@ mod tests {
         tracker.reset();
         assert_eq!(tracker.total_records(), 0);
         assert_eq!(tracker.consecutive_errors(), 0);
+    }
+    #[test]
+    fn recovery_hint_once_per_failure_streak_preserves_counts() {
+        let mut tracker = ToolCallTracker::new();
+        for _ in 0..3 {
+            tracker.record("Bash", false, Some("failed".into()));
+        }
+        assert!(tracker.take_recovery_hint());
+        assert!(!tracker.take_recovery_hint());
+        tracker.record("Bash", false, Some("again".into()));
+        assert!(!tracker.take_recovery_hint());
+        assert_eq!(tracker.consecutive_errors(), 4);
+        tracker.record("Read", true, None);
+        for _ in 0..3 {
+            tracker.record("Bash", false, Some("failed".into()));
+        }
+        assert!(tracker.take_recovery_hint());
+        assert_eq!(tracker.consecutive_errors(), 3);
     }
 }

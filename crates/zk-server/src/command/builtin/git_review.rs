@@ -1,21 +1,5 @@
-//! `/git-review`——AI 代码审查当前变更（Batch 8A）。
-//!
-//! 语义来源（旧仓库只读）：`GitReviewCommand.java`（68L）+ 其共用守卫
-//! `GitCommandGuard.java`（32L）+ `GitService.execGit`（`execGitPublic` 的实现：
-//! 5s 超时 / 非零退出码回 null / 输出 trim）。
-//!
-//! 用法：`/git-review` — 取工作区与暂存区全量差异，渲染审查提示词注入对话。
-//!
-//! # 有意差异
-//!
-//! - 命令名取 `git-review`（旧 `getName()` 为 `review`），旧名注册为别名——
-//!   `/review` 这类裸动词在补全列表里语义含糊，`git-` 前缀让 `/git-review` /
-//!   `/git-commit` / `/diff` 三个 Git 命令成组可见；两个名字经
-//!   [`CommandRegistry`](crate::command::CommandRegistry) 都能解析，行为同一。
-//! - 旧 `GitService` 经 `ProcessBuilder` 同步执行 Git；此处走
-//!   `tokio::process::Command`（与既有 [`super::diff`] 一致）。
-//! - 截断按 `char` 计数（旧 `String.substring` 按 UTF-16 码元），中文差异下
-//!   本端截得略长，但不会把多字节字符切半。
+//! Explicitly scoped, read-only Git review prompts and shared Git execution.
+//! Unknown Git outcomes stay errors; untracked material is never assumed reviewed.
 
 use std::path::Path;
 use std::time::Duration;
@@ -54,7 +38,7 @@ impl Command for GitReviewCommand {
 
     fn execute<'a>(
         &'a self,
-        _args: &'a str,
+        args: &'a str,
         ctx: &'a CommandContext,
     ) -> BoxFuture<'a, CommandResult> {
         Box::pin(async move {
@@ -64,33 +48,52 @@ impl Command for GitReviewCommand {
             }
             let work_dir = ctx.working_dir.as_str();
 
-            // 旧 L39-41：工作区差异 + 暂存区差异拼接（null → 空串）。
-            let diff = run_git(work_dir, &["diff"]).await.unwrap_or_default();
-            let staged = run_git(work_dir, &["diff", "--cached"])
-                .await
-                .unwrap_or_default();
-            let full_diff = format!("{diff}\n{staged}");
-
-            // 旧 L43-45：拼接串恒含换行，故 `isBlank()` 即两侧皆空。
-            if full_diff.trim().is_empty() {
-                return CommandResult::text("没有待审查的变更");
+            if !args.trim().is_empty() {
+                return CommandResult::text(format!(
+                    "请按以下用户要求进行代码审查，只审查、不修改文件。\n\
+                     以用户指定的比较对象、文件范围和排除项为准。\n\
+                     只有未指定比较对象时，才默认审查范围内的当前本地变更：已暂存、未暂存及未跟踪文件；明确排除的部分不纳入。\n\
+                     先确定范围，再通过现有工具读取必要内容，不预取排除文件的正文。\n\
+                     无法读取指定比较对象时说明原因，不自行换成其他比较对象。\n\
+                     工具失败或材料不完整时说明未覆盖部分，不能声称全部审完。\n\n本次用户要求：\n{args}"
+                ));
             }
-
-            // 旧 L47-60 的提示词逐字（Java 文本块的公共缩进已由编译器剥除）。
+            let diff = run_git(work_dir, &["diff"]).await;
+            let staged = run_git(work_dir, &["diff", "--cached"]).await;
+            let (Some(diff), Some(staged)) = (diff, staged) else {
+                return CommandResult::error(
+                    "读取未暂存或已暂存差异失败，本次尚未完成审查，请检查仓库后重试。",
+                );
+            };
+            let diff_chars = diff.chars().count().min(
+                MAX_REVIEW_DIFF_LENGTH - staged.chars().count().min(MAX_REVIEW_DIFF_LENGTH / 2),
+            );
+            let staged_chars = staged
+                .chars()
+                .count()
+                .min(MAX_REVIEW_DIFF_LENGTH - diff_chars);
+            let section = |label, text: &str, limit| {
+                if text.trim().is_empty() {
+                    format!("{label}差异预览：\n该部分未见差异")
+                } else {
+                    format!("{label}差异预览：\n```diff\n{}\n```", truncate(text, limit))
+                }
+            };
             CommandResult::text(format!(
                 "请对以下代码变更进行审查，从以下维度评估:\n\
+                 以下只是已跟踪文件的未暂存/已暂存差异预览，未跟踪文件尚未核验。\n\
+                 先核对文件范围；使用 git status --short 与 git ls-files --others --exclude-standard 等现有工具检查未跟踪文件，再按必要性读取正文。不要自动上传全部未跟踪文件。\n\
+                 预览标记“已截断”时，按文件继续读取必要 diff；未暂存与已暂存版本分别判断，同一文件存在两种版本时，不把工作区文件内容当作暂存区内容。\n\
+                 只审查、不修改；范围外资料、读取失败和未完成部分必须明确说明。\n\
+                 仅在相关集合均检查后才能说“没有待审查的变更”或“全部审完”。\n\
                  1. 🐛 Bug 风险：空指针、资源泄漏、逻辑错误\n\
                  2. 🔒 安全漏洞：注入、越权、敏感数据暴露\n\
                  3. ⚡ 性能问题：N+1 查询、内存分配、死循环\n\
                  4. 📐 代码规范：命名、结构、重复代码、单一职责\n\
-                 5. 🧪 测试覆盖建议：缺失的边界场景、回归测试\n\
-                 \n\
-                 对每个发现给出严重级别（高/中/低）和具体修复建议。\n\
-                 \n\
-                 ```diff\n\
-                 {diff}\n\
-                 ```\n",
-                diff = truncate(&full_diff, MAX_REVIEW_DIFF_LENGTH)
+                 5. 🧪 测试覆盖建议：缺失的边界场景、回归测试\n\n\
+                 对每个发现给出严重级别（高/中/低）和具体修复建议。\n\n{}\n\n{}\n",
+                section("未暂存", &diff, diff_chars),
+                section("已暂存", &staged, staged_chars)
             ))
         })
     }
@@ -136,29 +139,57 @@ fn same_real_path(left: &str, right: &str) -> bool {
     }
 }
 
-/// 执行一条 Git 命令（旧 `GitService.execGit`）。
-///
-/// 返回 `None` = 进程起不来 / 5s 超时 / 非零退出码（旧实现三种情形均回
-/// null）；`Some(output)` 为 trim 后的输出。旧 `redirectErrorStream(true)` 把
-/// stderr 并入 stdout，此处在成功分支同样拼接两股（非零退出已回 `None`，故
-/// 实际只影响带告警的成功输出）。
-pub(super) async fn run_git(working_dir: &str, args: &[&str]) -> Option<String> {
-    let output = tokio::time::timeout(
-        GIT_TIMEOUT,
-        tokio::process::Command::new("git")
-            .args(args)
-            .current_dir(working_dir)
-            .output(),
-    )
-    .await
-    .ok()?
-    .ok()?;
-    if !output.status.success() {
+/// Read stdout without merging diagnostic stderr or removing filename whitespace.
+/// Nonzero exit, invalid UTF-8, launch failure and timeout all fail closed.
+pub(super) async fn run_git_raw(working_dir: &str, args: &[&str]) -> Option<String> {
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let _cancel_on_drop = cancel.clone().drop_guard();
+    let (progress, _receiver) = tokio::sync::mpsc::channel(1);
+    // Slash commands have no model Run: do not invent task/tool attribution.
+    // The retained Git anchor still supervises the owned hook group to quiescence.
+    let context = zk_tools::ToolContext::with_bounded_progress(cancel, progress)
+        .with_working_dir(working_dir);
+    // Human diffs and explicit commit reports (including hook output) may exceed
+    // the machine-record budget. Path/raw protocols retain the smaller bound.
+    let human_diff = args.first() == Some(&"diff")
+        && !args.iter().any(|arg| {
+            matches!(
+                *arg,
+                "-z" | "--name-only" | "--name-status" | "--numstat" | "--raw"
+            )
+        });
+    let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
+    let output = if human_diff || args.first().is_some_and(|arg| arg == "commit") {
+        zk_tools::process::run_git_human_program(
+            &args,
+            Path::new(working_dir),
+            GIT_TIMEOUT,
+            &context,
+        )
+        .await
+        .ok()?
+    } else {
+        zk_tools::process::run_git_program(&args, Path::new(working_dir), GIT_TIMEOUT, &context)
+            .await
+            .ok()?
+    };
+    if output.exit_code != 0
+        || !output.termination_confirmed
+        || output.timed_out
+        || output.cancelled
+        || output.truncated
+        || output.stdout.contains('\u{fffd}')
+    {
         return None;
     }
-    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-    text.push_str(&String::from_utf8_lossy(&output.stderr));
-    Some(text.trim().to_owned())
+    Some(output.stdout)
+}
+
+/// Human-readable successful stdout; never use this for NUL path protocols.
+pub(super) async fn run_git(working_dir: &str, args: &[&str]) -> Option<String> {
+    run_git_raw(working_dir, args)
+        .await
+        .map(|text| text.trim().to_owned())
 }
 
 /// 旧各命令私有的 `truncate(text, maxLen)`（超长追加 `\n...(已截断)`）。
@@ -244,10 +275,11 @@ mod tests {
         let canonical = std::fs::canonicalize(&dir).expect("canonical temp dir");
         let work_dir = canonical.to_str().expect("utf-8 path").to_owned();
 
-        assert_eq!(
-            run(&work_dir).await,
-            CommandResult::text("没有待审查的变更")
-        );
+        let CommandResult::Text(prompt) = run(&work_dir).await else {
+            panic!("review prompt");
+        };
+        assert!(prompt.contains("未跟踪文件尚未核验"));
+        assert!(prompt.contains("该部分未见差异"));
 
         std::fs::write(dir.join("a.txt"), "hello\n").expect("seed file");
         let _ = std::process::Command::new("git")

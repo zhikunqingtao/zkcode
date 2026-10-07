@@ -331,6 +331,8 @@ dev_build_backend() {
 }
 
 dev_sync_all() {
+    dev_sync_documents
+    dev_sync_lsp
     DEV_PLAN_FRONTEND=verify-or-sync
     DEV_PLAN_PYTHON=verify-or-sync
     DEV_PLAN_BROWSER=verify-or-sync

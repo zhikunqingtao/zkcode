@@ -38,8 +38,31 @@ use crate::execution_resources::ExecutionSupervisor;
 use crate::sink::MessageSink;
 use crate::{NoopObservabilityRecorder, ObservabilityEvent, ObservabilityRecorder};
 
+#[path = "cancellation.rs"]
+mod cancellation;
+
+#[path = "external_root.rs"]
+mod external_root;
+pub use external_root::ExternalRootSubmission;
+#[path = "terminal_hooks.rs"]
+mod terminal_hooks;
+#[path = "terminal_observer.rs"]
+mod terminal_observer;
+pub use terminal_observer::RunTerminalObserver;
+#[path = "cleanup.rs"]
+mod cleanup;
+
 /// Maximum number of executing task futures in the process. Queued tasks hold no permit.
 pub const GLOBAL_AGENT_LIMIT: usize = 8;
+/// Idle local connections have independent bounded capacity and cannot starve Agent tasks.
+const LOCAL_SERVICE_LIMIT: usize = 16;
+#[derive(Clone, Copy)]
+enum ExecutionClass {
+    Task,
+    McpService,
+    ReplService,
+}
+
 /// Maximum number of executing direct children owned by one root task.
 pub const ROOT_AGENT_LIMIT: usize = 4;
 /// Default child deadline after the unified runtime release gate. Callers may
@@ -259,9 +282,11 @@ pub struct TaskRuntimeShutdownPhase {
 }
 
 struct ActiveExecution {
+    task: RuntimeTaskRecord,
     run_id: String,
     cancel: CancellationToken,
     driver: Mutex<Option<JoinHandle<()>>>,
+    hook_notifications: Arc<tokio::sync::Mutex<bool>>,
 }
 
 #[cfg(test)]
@@ -310,7 +335,7 @@ impl Drop for TaskExecutionLease {
             .get(&self.task_id)
             .is_some_and(|active| active.run_id == self.run_id);
         if matches_attempt {
-            inner.active.remove(&self.task_id);
+            cancellation::release_active(&inner, &self.task_id);
         }
     }
 }
@@ -328,7 +353,12 @@ struct TaskRuntimeInner {
     db: zk_db::Db,
     sink: Arc<dyn MessageSink>,
     observability: Arc<dyn ObservabilityRecorder>,
+    hooks: std::sync::OnceLock<Arc<crate::hook::HookService>>,
+    hook_supervisor: std::sync::OnceLock<ExecutionSupervisor>,
+    terminal_observer: std::sync::OnceLock<Arc<dyn RunTerminalObserver>>,
     active: DashMap<String, Arc<ActiveExecution>>,
+    /// Local safety fences never replace durable lifecycle facts.
+    cancellation_fences: DashMap<String, Arc<cancellation::CancellationFence>>,
     /// Reapers retain ownership after a result explicitly records unconfirmed cleanup.
     cleanup_reapers: DashMap<String, JoinHandle<()>>,
     /// One durable-result resolver per child result version. A marker is inserted before
@@ -338,6 +368,8 @@ struct TaskRuntimeInner {
     parent_resolvers: DashMap<String, ()>,
     result_notify: DashMap<String, Arc<Notify>>,
     global_slots: Arc<Semaphore>,
+    mcp_service_slots: Arc<Semaphore>,
+    repl_service_slots: Arc<Semaphore>,
     root_slots: DashMap<String, Arc<Semaphore>>,
     /// Gated Swarm worker IDs map to durable `TaskRuntime` identities. This is
     /// process-local scheduling state only; Task/Run/Result rows remain authoritative.
@@ -369,11 +401,17 @@ impl TaskRuntime {
                 db,
                 sink,
                 observability: Arc::new(NoopObservabilityRecorder),
+                hooks: std::sync::OnceLock::new(),
+                hook_supervisor: std::sync::OnceLock::new(),
+                terminal_observer: std::sync::OnceLock::new(),
                 active: DashMap::new(),
+                cancellation_fences: DashMap::new(),
                 cleanup_reapers: DashMap::new(),
                 parent_resolvers: DashMap::new(),
                 result_notify: DashMap::new(),
                 global_slots: Arc::new(Semaphore::new(GLOBAL_AGENT_LIMIT)),
+                mcp_service_slots: Arc::new(Semaphore::new(LOCAL_SERVICE_LIMIT)),
+                repl_service_slots: Arc::new(Semaphore::new(LOCAL_SERVICE_LIMIT)),
                 root_slots: DashMap::new(),
                 external_tasks: DashMap::new(),
                 accepting_execution: AtomicBool::new(true),
@@ -395,6 +433,33 @@ impl TaskRuntime {
             .expect("observability must be configured before sharing TaskRuntime")
             .observability = recorder;
         self
+    }
+
+    /// Configure the shared external event hooks once before accepting work.
+    /// Reconfiguration cannot silently replace a running Task's notification service.
+    pub fn configure_hooks(&self, hooks: Arc<crate::hook::HookService>) -> bool {
+        self.inner.hooks.set(hooks).is_ok()
+    }
+
+    /// Share the host's existing supervisor for parent-owned completion notifications.
+    #[must_use]
+    pub fn configure_hook_supervisor(&self, supervisor: &ExecutionSupervisor) -> bool {
+        self.inner.hook_supervisor.set(supervisor.clone()).is_ok()
+    }
+
+    /// Close child notification admission before the owning Run drains its Hooks.
+    /// A callback already entering its child commit holds this same gate until it
+    /// queues the parent's supervised notification or releases a failed commit.
+    pub async fn seal_run_hook_notifications(&self, run_id: &str) {
+        let active = self
+            .inner
+            .active
+            .iter()
+            .find(|entry| entry.run_id == run_id)
+            .map(|entry| entry.value().clone());
+        if let Some(active) = active {
+            *active.hook_notifications.lock().await = false;
+        }
     }
 
     #[must_use]
@@ -533,6 +598,36 @@ impl TaskRuntime {
         Ok(task)
     }
 
+    /// Update only the caller's current child task display text. The complete
+    /// Run/session/task binding is checked again inside the write transaction.
+    pub async fn update_own_display_output(
+        &self,
+        caller_session: &str,
+        caller_run: &str,
+        requested_task: Option<&str>,
+        output: &str,
+    ) -> Result<RuntimeTaskRecord, TaskRuntimeError> {
+        self.inner
+            .db
+            .update_own_task_display(
+                caller_session,
+                caller_run,
+                requested_task,
+                bound_display_output(output),
+            )
+            .await
+            .map_err(|error| match error {
+                zk_db::DbError::Validation(code) if code == "TASK_SELF_OUTPUT_ACCESS_DENIED" => {
+                    TaskRuntimeError::new(
+                        code,
+                        "child display output can only update its own current task",
+                        false,
+                    )
+                }
+                other => TaskRuntimeError::storage(other),
+            })
+    }
+
     /// Update advisory fields only. Lifecycle and terminal state remain runtime-owned.
     pub async fn update_advisory(
         &self,
@@ -541,6 +636,7 @@ impl TaskRuntime {
         description: Option<&str>,
         plan: Option<&str>,
         reported_progress: Option<f64>,
+        display_output: Option<&str>,
     ) -> Result<RuntimeTaskRecord, TaskRuntimeError> {
         if description.is_some_and(|value| value.trim().is_empty()) {
             return Err(TaskRuntimeError::new(
@@ -567,7 +663,11 @@ impl TaskRuntime {
                 )
             })?;
         }
-        if description.is_none() && plan.is_none() && reported_progress.is_none() {
+        if description.is_none()
+            && plan.is_none()
+            && reported_progress.is_none()
+            && display_output.is_none()
+        {
             return self
                 .get_owned(root_session_id, task_id)
                 .await?
@@ -580,6 +680,7 @@ impl TaskRuntime {
                 });
         }
 
+        let display_output = display_output.map(bound_display_output);
         let description = description.map(str::to_owned);
         let plan = plan.map(str::to_owned);
         for _ in 0..6 {
@@ -597,6 +698,7 @@ impl TaskRuntime {
             let session_owned = root_session_id.to_owned();
             let description_owned = description.clone();
             let plan_owned = plan.clone();
+            let output_owned = display_output.clone();
             let expected_version = task.version;
             let changed = self
                 .inner
@@ -608,16 +710,30 @@ impl TaskRuntime {
                             description=COALESCE(?1,description),
                             plan_json=COALESCE(?2,plan_json),
                             reported_progress=COALESCE(?3,reported_progress),
+                            display_output=COALESCE(?8,display_output),
                             updated_at=?4,version=version+1
                          WHERE id=?5 AND session_id=?6 AND version=?7",
                         (
-                            description_owned,
-                            plan_owned,
+                            zk_db::content::store_optional(
+                                connection,
+                                &session_owned,
+                                description_owned.as_deref(),
+                            )?,
+                            zk_db::content::store_optional(
+                                connection,
+                                &session_owned,
+                                plan_owned.as_deref(),
+                            )?,
                             reported_progress,
                             now,
                             task_id_owned,
-                            session_owned,
+                            &session_owned,
                             expected_version,
+                            zk_db::content::store_optional(
+                                connection,
+                                &session_owned,
+                                output_owned.as_deref(),
+                            )?,
                         ),
                     )?;
                     Ok(count == 1)
@@ -656,6 +772,13 @@ impl TaskRuntime {
     {
         let _intake = self.execution_intake().await?;
         validate_submission(&request)?;
+        if self
+            .inner
+            .cancellation_fences
+            .contains_key(&request.parent_run_id)
+        {
+            return Err(cancellation::admission_closed());
+        }
         let execution_config_json = durable_submission_config(&request)?;
         let task_id = Uuid::new_v4().to_string();
         let run_id = Uuid::new_v4().to_string();
@@ -736,9 +859,11 @@ impl TaskRuntime {
 
         let cancel = CancellationToken::new();
         let active = Arc::new(ActiveExecution {
+            task: durable.task.clone(),
             run_id: durable.run_id.clone(),
             cancel: cancel.clone(),
             driver: Mutex::new(None),
+            hook_notifications: Arc::new(tokio::sync::Mutex::new(true)),
         });
         match self.inner.active.entry(durable.task.id.clone()) {
             dashmap::mapref::entry::Entry::Occupied(entry) => {
@@ -789,6 +914,7 @@ impl TaskRuntime {
                 root_session_id,
                 task_timeout,
                 cancel,
+                ExecutionClass::Task,
                 build,
             )
             .await;
@@ -864,9 +990,11 @@ impl TaskRuntime {
 
         let cancel = CancellationToken::new();
         let active = Arc::new(ActiveExecution {
+            task: task.clone(),
             run_id: run_id.clone(),
             cancel: cancel.clone(),
             driver: Mutex::new(None),
+            hook_notifications: Arc::new(tokio::sync::Mutex::new(true)),
         });
         match self.inner.active.entry(task.id.clone()) {
             dashmap::mapref::entry::Entry::Occupied(_) => return Ok(false),
@@ -896,6 +1024,7 @@ impl TaskRuntime {
                 root_session_id,
                 task_timeout,
                 cancel,
+                ExecutionClass::Task,
                 build,
             )
             .await;
@@ -970,9 +1099,11 @@ impl TaskRuntime {
 
         let cancel = CancellationToken::new();
         let active = Arc::new(ActiveExecution {
+            task: task.clone(),
             run_id: run_id.clone(),
             cancel: cancel.clone(),
             driver: Mutex::new(None),
+            hook_notifications: Arc::new(tokio::sync::Mutex::new(true)),
         });
         match self.inner.active.entry(task.id.clone()) {
             dashmap::mapref::entry::Entry::Occupied(_) => return Ok(false),
@@ -1002,6 +1133,7 @@ impl TaskRuntime {
                 root_session_id,
                 task_timeout,
                 cancel,
+                ExecutionClass::Task,
                 build,
             )
             .await;
@@ -1104,9 +1236,11 @@ impl TaskRuntime {
         }
 
         let active = Arc::new(ActiveExecution {
+            task: task.clone(),
             run_id: run_id.to_owned(),
             cancel: cancel.clone(),
             driver: Mutex::new(None),
+            hook_notifications: Arc::new(tokio::sync::Mutex::new(true)),
         });
         match self.inner.active.entry(task_id.to_owned()) {
             dashmap::mapref::entry::Entry::Occupied(_) => {
@@ -1120,6 +1254,8 @@ impl TaskRuntime {
                 entry.insert(active);
             }
         }
+
+        cancellation::inherit_and_signal(&self.inner, &task);
 
         // Construct the lease before the post-registration read. Any storage
         // or identity failure below must drop it and remove the accelerator
@@ -1152,38 +1288,42 @@ impl TaskRuntime {
         exit_reason: &str,
         reason: &str,
     ) -> Result<CancelReceipt, TaskRuntimeError> {
-        let run = self
+        let local = self
             .inner
-            .db
-            .find_run_by_id(run_id)
-            .await
-            .map_err(TaskRuntimeError::storage)?
-            .ok_or_else(|| TaskRuntimeError::new("TASK_RUN_NOT_FOUND", "Run not found", false))?;
-        if run.task_id.is_empty() {
-            return Err(TaskRuntimeError::new(
-                "TASK_RUN_UNOWNED",
-                "Run is not owned by a durable Task",
-                false,
-            ));
-        }
-        let task = self
-            .inner
-            .db
-            .find_runtime_task_by_id(&run.task_id)
-            .await
-            .map_err(TaskRuntimeError::storage)?
-            .ok_or_else(|| {
-                TaskRuntimeError::new("TASK_NOT_FOUND", "Run's durable Task does not exist", false)
-            })?;
-        if task.current_run_id.as_deref() != Some(run_id) {
-            return Err(TaskRuntimeError::new(
-                "TASK_RUN_STALE",
-                "Run is not the Task's current attempt",
-                false,
-            ));
-        }
-        self.cancel_owned_with_cause(&task.session_id, &task.id, exit_reason, reason, true)
-            .await
+            .active
+            .iter()
+            .find(|active| active.run_id == run_id)
+            .map(|active| active.task.clone());
+        let task = if let Some(task) = local {
+            task
+        } else {
+            let run = self
+                .inner
+                .db
+                .find_run_by_id(run_id)
+                .await
+                .map_err(TaskRuntimeError::storage)?
+                .ok_or_else(|| {
+                    TaskRuntimeError::new("TASK_RUN_NOT_FOUND", "Run not found", false)
+                })?;
+            self.inner
+                .db
+                .find_runtime_task_by_id(&run.task_id)
+                .await
+                .map_err(TaskRuntimeError::storage)?
+                .ok_or_else(|| {
+                    TaskRuntimeError::new("TASK_NOT_FOUND", "Run has no durable Task", false)
+                })?
+        };
+        self.cancel_scoped(
+            &task.session_id,
+            &task.id,
+            exit_reason,
+            reason,
+            true,
+            Some(run_id),
+        )
+        .await
     }
 
     /// Request cancellation and propagate the token. The driver, not this method, owns
@@ -1218,7 +1358,7 @@ impl TaskRuntime {
             task_id,
             zk_db::run::EXIT_PARENT_CANCELLED,
             reason,
-            false,
+            true,
         )
         .await
     }
@@ -1231,110 +1371,15 @@ impl TaskRuntime {
         reason: &str,
         cascade_root: bool,
     ) -> Result<CancelReceipt, TaskRuntimeError> {
-        let mut requested = false;
-        let task = loop {
-            let Some(task) = self.get_owned(root_session_id, task_id).await? else {
-                return Err(TaskRuntimeError::new(
-                    "TASK_NOT_FOUND",
-                    "task does not exist in the current root session",
-                    false,
-                ));
-            };
-            if task.status.is_terminal()
-                || matches!(
-                    task.status,
-                    DurableTaskStatus::Cancelling | DurableTaskStatus::NeedsAttention
-                )
-            {
-                break task;
-            }
-            if persist_cancelling(&self.inner, &task, exit_reason, reason).await? {
-                requested = true;
-                let updated = self
-                    .get_owned(root_session_id, task_id)
-                    .await?
-                    .ok_or_else(|| {
-                        TaskRuntimeError::new(
-                            "TASK_NOT_FOUND",
-                            "task disappeared immediately after cancellation CAS",
-                            false,
-                        )
-                    })?;
-                break updated;
-            }
-        };
-
-        // Attached parent cancellation cascades to every non-terminal descendant.
-        if cascade_root && task.parent_task_id.is_none() {
-            let descendants = self.list_owned(root_session_id, None).await?;
-            let mut first_error = None;
-            for child in descendants
-                .into_iter()
-                .filter(|candidate| candidate.root_task_id == task.id && candidate.id != task.id)
-            {
-                if let Err(error) = self
-                    .request_child_cancel(&child, "parent Task was cancelled")
-                    .await
-                {
-                    tracing::error!(
-                        task_id,
-                        child_task_id = %child.id,
-                        code = %error.code,
-                        message = %error.message,
-                        "attached child cancellation did not become durable"
-                    );
-                    first_error.get_or_insert(error);
-                }
-            }
-            if let Some(error) = first_error {
-                // Root execution remains owned and unsignalled. A retry can
-                // finish the cascade; child drivers also observe the durable
-                // parent state and retain their own cleanup responsibility.
-                return Err(error);
-            }
-        }
-
-        // `needsAttention` is a quarantine state paired with an interrupted Run,
-        // not a durable cancellation boundary. A stale in-memory registration
-        // must not be signalled unless persistence proves cancelling (or the
-        // logical Task is already terminal).
-        if (task.status == DurableTaskStatus::Cancelling || task.status.is_terminal())
-            && let Some(active) = self.inner.active.get(task_id)
-        {
-            active.cancel.cancel();
-        }
-
-        let current = self
-            .get_owned(root_session_id, task_id)
-            .await?
-            .ok_or_else(|| TaskRuntimeError::new("TASK_NOT_FOUND", "task disappeared", false))?;
-        Ok(CancelReceipt {
-            cancel_requested: requested,
-            task: current,
-        })
-    }
-
-    async fn request_child_cancel(
-        &self,
-        child: &RuntimeTaskRecord,
-        reason: &str,
-    ) -> Result<(), TaskRuntimeError> {
-        if child.status == DurableTaskStatus::NeedsAttention {
-            return Ok(());
-        }
-        if !child.status.is_terminal() && child.status != DurableTaskStatus::Cancelling {
-            request_cancelling(
-                &self.inner,
-                &child.id,
-                zk_db::run::EXIT_PARENT_CANCELLED,
-                reason,
-            )
-            .await?;
-        }
-        if let Some(active) = self.inner.active.get(&child.id) {
-            active.cancel.cancel();
-        }
-        Ok(())
+        self.cancel_scoped(
+            root_session_id,
+            task_id,
+            exit_reason,
+            reason,
+            cascade_root,
+            None,
+        )
+        .await
     }
 
     /// Read an immutable result page, optionally waiting up to 30 seconds.
@@ -2087,10 +2132,10 @@ fn validate_submission(request: &ChildTaskSubmission) -> Result<(), TaskRuntimeE
             false,
         ));
     }
-    if request.task_type != "agent" {
+    if !matches!(request.task_type.as_str(), "agent" | "shell") {
         return Err(TaskRuntimeError::new(
             "UNSUPPORTED_CAPABILITY",
-            "v1 TaskRuntime supports only agent tasks; Swarm workers are adapters over Agent",
+            "TaskRuntime supports agent and shell tasks",
             false,
         ));
     }
@@ -2127,6 +2172,21 @@ fn durable_submission_config(request: &ChildTaskSubmission) -> Result<String, Ta
             false,
         ));
     };
+    let lifecycle = config
+        .get("lifecycle")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("attached");
+    if config
+        .get("lifecycle")
+        .is_some_and(|value| !value.is_string())
+        || !matches!(lifecycle, "attached" | "detached")
+    {
+        return Err(TaskRuntimeError::new(
+            "TASK_LIFECYCLE_INVALID",
+            "lifecycle must be attached or detached",
+            false,
+        ));
+    }
     let timeout_ms = u64::try_from(request.timeout.as_millis()).map_err(|_| {
         TaskRuntimeError::new(
             "TASK_TIMEOUT_INVALID",
@@ -2172,7 +2232,11 @@ async fn wait_for_parent_stop(db: zk_db::Db, parent_task_id: Option<String>) {
             // A deleted parent cannot continue to own an attached execution.
             Ok(None) => return,
             Err(error) => {
-                error!(parent_task_id, %error, "retrying attached parent state observation");
+                error!(
+                    parent_task_id,
+                    error_type = std::any::type_name_of_val(&error),
+                    "retrying attached parent state observation"
+                );
             }
         }
         sleep(Duration::from_millis(25)).await;
@@ -2187,11 +2251,13 @@ async fn drive_task<F, Fut>(
     root_session_id: String,
     task_timeout: Duration,
     cancel: CancellationToken,
+    execution_class: ExecutionClass,
     build: F,
 ) where
     F: FnOnce(TaskExecutionContext) -> Fut + Send + 'static,
     Fut: Future<Output = TaskExecutionResult> + Send + 'static,
 {
+    cancellation::inherit_and_signal(&inner, &created_task);
     let task_id = created_task.id.clone();
     let root_id = created_task.root_task_id.clone();
     let root_slots = inner
@@ -2202,10 +2268,21 @@ async fn drive_task<F, Fut>(
     // One absolute deadline covers durable queue wait and execution. A queued task
     // cannot gain a fresh timeout window merely because capacity was unavailable.
     let deadline = Instant::now() + task_timeout;
-    let parent_stopped =
-        wait_for_parent_stop(inner.db.clone(), created_task.parent_task_id.clone());
+    let parent_stopped = wait_for_parent_stop(
+        inner.db.clone(),
+        if created_task.lifecycle_policy == "attached" {
+            created_task.parent_task_id.clone()
+        } else {
+            None
+        },
+    );
     tokio::pin!(parent_stopped);
 
+    let execution_slots = match execution_class {
+        ExecutionClass::Task => &inner.global_slots,
+        ExecutionClass::McpService => &inner.mcp_service_slots,
+        ExecutionClass::ReplService => &inner.repl_service_slots,
+    };
     let permits = tokio::select! {
         biased;
         () = sleep_until(deadline) => (None, true, false),
@@ -2213,7 +2290,7 @@ async fn drive_task<F, Fut>(
         () = cancel.cancelled() => (None, false, false),
         acquired = async {
             let root = root_slots.acquire_owned().await.ok()?;
-            let global = Arc::clone(&inner.global_slots).acquire_owned().await.ok()?;
+            let global = Arc::clone(execution_slots).acquire_owned().await.ok()?;
             Some((root, global))
         } => (acquired, false, false),
     };
@@ -2224,7 +2301,7 @@ async fn drive_task<F, Fut>(
             // active durable Run before signalling this token. Keep the Run
             // non-terminal for the shutdown reconciler instead of manufacturing
             // a user-cancelled result.
-            inner.active.remove(&task_id);
+            cancellation::release_active(&inner, &task_id);
             return;
         }
         let outcome = if parent_stopped_before_claim {
@@ -2248,7 +2325,12 @@ async fn drive_task<F, Fut>(
             .await;
             TaskExecutionResult::Failed {
                 message: "task deadline expired before execution claim".to_owned(),
-                code: "SUBAGENT_DEADLINE_EXCEEDED".to_owned(),
+                code: if created_task.parent_task_id.is_none() {
+                    "TIMEOUT"
+                } else {
+                    "SUBAGENT_DEADLINE_EXCEEDED"
+                }
+                .to_owned(),
             }
         } else {
             TaskExecutionResult::Cancelled {
@@ -2264,14 +2346,14 @@ async fn drive_task<F, Fut>(
             CleanupStatus::NotRequired,
         )
         .await;
-        inner.active.remove(&task_id);
+        cancellation::release_active(&inner, &task_id);
         return;
     };
 
-    let claimed = claim_task(&inner, &task_id).await;
+    let claimed = !cancel.is_cancelled() && claim_task(&inner, &task_id).await;
     if !claimed {
         if !inner.accepting_execution.load(Ordering::Acquire) {
-            inner.active.remove(&task_id);
+            cancellation::release_active(&inner, &task_id);
             return;
         }
         let outcome = TaskExecutionResult::Cancelled {
@@ -2286,10 +2368,26 @@ async fn drive_task<F, Fut>(
             CleanupStatus::NotRequired,
         )
         .await;
-        inner.active.remove(&task_id);
+        cancellation::release_active(&inner, &task_id);
         return;
     }
 
+    cancellation::inherit_and_signal(&inner, &created_task);
+    if cancel.is_cancelled() {
+        reap_outcome_until_durable(
+            &inner,
+            &task_id,
+            &run_id,
+            &root_session_id,
+            TaskExecutionResult::Cancelled {
+                message: "cancelled before executor admission".into(),
+            },
+            CleanupStatus::NotRequired,
+        )
+        .await;
+        cancellation::release_active(&inner, &task_id);
+        return;
+    }
     let context = TaskExecutionContext {
         task_id: task_id.clone(),
         run_id: run_id.clone(),
@@ -2306,53 +2404,21 @@ async fn drive_task<F, Fut>(
     let terminal = tokio::select! {
         biased;
         () = sleep_until(deadline) => {
-            let boundary = request_cancelling_before_signal(
-                &inner,
-                &task_id,
-                zk_db::run::EXIT_TIMEOUT,
-                "task execution deadline expired",
-                &mut execution,
-            )
-            .await;
-            match boundary {
-                CancellationBoundary::Persisted => {
-                    cancel.cancel();
-                    await_cleanup_or_reap(
-                        Arc::clone(&inner), &task_id, execution,
-                        TaskExecutionResult::Failed {
-                            message: format!("task timed out after {} seconds", task_timeout.as_secs()),
-                            code: "TIMEOUT".to_owned(),
-                        },
-                    ).await
-                }
-                CancellationBoundary::ExecutionFinished(outcome) => {
-                    Some((outcome, CleanupStatus::Confirmed))
-                }
-            }
+            request_cancelling_before_signal(&inner, &task_id, zk_db::run::EXIT_TIMEOUT,
+                "task execution deadline expired").await;
+            cancel.cancel();
+            await_cleanup_or_reap(Arc::clone(&inner), &task_id, execution,
+                TaskExecutionResult::Failed {
+                    message: format!("task timed out after {} seconds", task_timeout.as_secs()),
+                    code: "TIMEOUT".to_owned(),
+                }).await
         }
         () = &mut parent_stopped => {
-            let boundary = request_cancelling_before_signal(
-                &inner,
-                &task_id,
-                zk_db::run::EXIT_PARENT_CANCELLED,
-                "attached parent stopped during child execution",
-                &mut execution,
-            )
-            .await;
-            match boundary {
-                CancellationBoundary::Persisted => {
-                    cancel.cancel();
-                    await_cleanup_or_reap(
-                        Arc::clone(&inner), &task_id, execution,
-                        TaskExecutionResult::Cancelled {
-                            message: "attached parent stopped during child execution".to_owned(),
-                        },
-                    ).await
-                }
-                CancellationBoundary::ExecutionFinished(outcome) => {
-                    Some((outcome, CleanupStatus::Confirmed))
-                }
-            }
+            request_cancelling_before_signal(&inner, &task_id, zk_db::run::EXIT_PARENT_CANCELLED,
+                "attached parent stopped during child execution").await;
+            cancel.cancel();
+            await_cleanup_or_reap(Arc::clone(&inner), &task_id, execution,
+                TaskExecutionResult::Cancelled { message: "attached parent stopped during child execution".to_owned() }).await
         }
         () = cancel.cancelled() => {
             let requested_outcome = if inner.db.find_run_by_id(&run_id).await.ok().flatten()
@@ -2386,7 +2452,7 @@ async fn drive_task<F, Fut>(
         )
         .await;
     }
-    inner.active.remove(&task_id);
+    cancellation::release_active(&inner, &task_id);
 }
 
 async fn claim_task(inner: &TaskRuntimeInner, task_id: &str) -> bool {
@@ -2396,6 +2462,30 @@ async fn claim_task(inner: &TaskRuntimeInner, task_id: &str) -> bool {
         };
         if task.status == DurableTaskStatus::Cancelling || task.status.is_terminal() {
             return false;
+        }
+        if task
+            .current_run_id
+            .as_deref()
+            .is_some_and(|run| inner.cancellation_fences.contains_key(run))
+        {
+            return false;
+        }
+        if task.lifecycle_policy == "attached"
+            && let Some(parent_id) = &task.parent_task_id
+        {
+            match inner.db.find_runtime_task_by_id(parent_id).await {
+                Ok(Some(parent))
+                    if !parent.status.is_terminal()
+                        && !matches!(
+                            parent.status,
+                            DurableTaskStatus::Cancelling | DurableTaskStatus::NeedsAttention
+                        )
+                        && !parent
+                            .current_run_id
+                            .as_deref()
+                            .is_some_and(|run| inner.cancellation_fences.contains_key(run)) => {}
+                _ => return false,
+            }
         }
         if task.status == DurableTaskStatus::Running {
             return true;
@@ -2453,7 +2543,12 @@ async fn claim_task(inner: &TaskRuntimeInner, task_id: &str) -> bool {
             }
             Ok(false) => {}
             Err(error) => {
-                error!(task_id, run_id, %error, "failed to atomically claim task/run");
+                error!(
+                    task_id,
+                    run_id,
+                    error_type = std::any::type_name_of_val(&error),
+                    "failed to atomically claim task/run"
+                );
                 return false;
             }
         }
@@ -2601,7 +2696,7 @@ async fn request_cancelling_until_durable(
                         task_id,
                         exit_reason,
                         code = error.code,
-                        message = %error.message,
+                        error_type = std::any::type_name_of_val(&error),
                         failure_count,
                         "retaining TaskRuntime owner until cancellation intent is durable"
                     );
@@ -2613,51 +2708,15 @@ async fn request_cancelling_until_durable(
     }
 }
 
-enum CancellationBoundary {
-    Persisted,
-    ExecutionFinished(TaskExecutionResult),
-}
-
-/// Persist a timeout/parent-stop transition before signalling its execution token.
-///
-/// A transient storage failure cannot make the driver drop its `JoinHandle`: the
-/// driver retries while also observing natural executor completion. Whichever
-/// boundary becomes durable/observable first wins the race.
+/// Stop owned execution immediately, retaining a reconciliation owner if storage
+/// cannot record the cancellation intent yet. Cleanup proceeds independently.
 async fn request_cancelling_before_signal(
-    inner: &TaskRuntimeInner,
+    inner: &Arc<TaskRuntimeInner>,
     task_id: &str,
     exit_reason: &str,
     detail: &str,
-    execution: &mut JoinHandle<TaskExecutionResult>,
-) -> CancellationBoundary {
-    let mut failure_count = 0_u32;
-    loop {
-        match request_cancelling(inner, task_id, exit_reason, detail).await {
-            Ok(()) => return CancellationBoundary::Persisted,
-            Err(error) => {
-                if failure_count == 0 || failure_count.is_power_of_two() {
-                    tracing::error!(
-                        task_id,
-                        exit_reason,
-                        code = error.code,
-                        message = %error.message,
-                        failure_count,
-                        "cancellation persistence failed; execution ownership retained"
-                    );
-                }
-                failure_count = failure_count.saturating_add(1);
-                let delay = sleep(terminal_commit_retry_delay(failure_count));
-                tokio::pin!(delay);
-                tokio::select! {
-                    biased;
-                    joined = &mut *execution => {
-                        return CancellationBoundary::ExecutionFinished(map_join(joined));
-                    }
-                    () = &mut delay => {}
-                }
-            }
-        }
-    }
+) {
+    cancellation::stop_active(inner, task_id, exit_reason, detail).await;
 }
 
 async fn await_cleanup_or_reap(
@@ -2720,6 +2779,21 @@ async fn recover_timeout_result(
         _ => String::new(),
     };
     if let Ok(Some(task)) = inner.db.find_runtime_task_by_id(task_id).await
+        && task.parent_task_id.is_none()
+    {
+        return if content.trim().is_empty() {
+            TaskExecutionResult::Failed {
+                message: "Task execution deadline expired".into(),
+                code: "TIMEOUT".into(),
+            }
+        } else {
+            TaskExecutionResult::Partial {
+                content,
+                code: "TIMEOUT".into(),
+            }
+        };
+    }
+    if let Ok(Some(task)) = inner.db.find_runtime_task_by_id(task_id).await
         && let Some(run_id) = task.current_run_id
     {
         if content.trim().is_empty()
@@ -2773,7 +2847,13 @@ async fn recover_timeout_result(
     }
 }
 
-fn timeout_checkpoint_text(messages: &serde_json::Value) -> String {
+fn timeout_checkpoint_text(checkpoint: &serde_json::Value) -> String {
+    let messages = if checkpoint["kind"] == "contextCheckpoint" && checkpoint["schemaVersion"] == 1
+    {
+        &checkpoint["messages"]
+    } else {
+        checkpoint
+    };
     messages
         .as_array()
         .into_iter()
@@ -2939,6 +3019,13 @@ async fn commit_outcome(
         }
     }
 
+    if let Err(error) = cancellation::reconcile(inner, task_id, run_id).await {
+        return TerminalCommitResult::Retryable(TerminalCommitFailure {
+            stage: "reconcile_local_cancellation",
+            detail: error.to_string(),
+        });
+    }
+
     let task = match inner.db.find_runtime_task_by_id(task_id).await {
         Ok(Some(task)) => task,
         Ok(None) => {
@@ -2965,12 +3052,31 @@ async fn commit_outcome(
         });
     }
 
+    // The executor may finish at the same instant as the cancellation select.
+    // The durable cause, not whichever future was polled first, determines a timeout.
+    let normalized_outcome = if matches!(
+        outcome,
+        TaskExecutionResult::Cancelled { .. } | TaskExecutionResult::Complete(_)
+    ) {
+        match inner.db.find_run_by_id(run_id).await {
+            Ok(Some(run))
+                if run.requested_exit_reason.as_deref() == Some(zk_db::run::EXIT_TIMEOUT) =>
+            {
+                recover_timeout_result(inner, task_id, outcome.clone()).await
+            }
+            Ok(_) => outcome.clone(),
+            Err(error) => return db_failure("read_terminal_cancellation_cause", &error),
+        }
+    } else {
+        outcome.clone()
+    };
+
     let ledger_cleanup = match inner.db.run_cleanup_status(run_id).await {
         Ok(status) => status,
         Err(error) => return db_failure("read_cleanup_ledger", &error),
     };
     let cleanup_status = effective_cleanup_status(requested_cleanup, ledger_cleanup);
-    let effective_outcome = match (outcome.clone(), cleanup_status) {
+    let effective_outcome = match (normalized_outcome, cleanup_status) {
         (TaskExecutionResult::Cancelled { message }, CleanupStatus::Unconfirmed) => {
             TaskExecutionResult::Partial {
                 content: message,
@@ -3228,7 +3334,7 @@ fn log_terminal_commit_retry(
             task_id,
             run_id,
             stage = failure.stage,
-            detail = %failure.detail,
+            failure_code = "TASK_TERMINAL_PERSISTENCE_FAILED",
             failure_count,
             "retaining TaskRuntime owner while terminal persistence is retried"
         );
@@ -3352,6 +3458,7 @@ async fn reap_outcome_until_durable(
                     return DurableTerminalization::NeedsAttention;
                 }
                 NeedsAttentionCommitResult::AlreadyDurable => {
+                    terminal_observer::observe(inner, run_id).await;
                     notify_terminal_state(inner, task_id);
                     return DurableTerminalization::ResultAlreadyDurable;
                 }
@@ -3361,6 +3468,7 @@ async fn reap_outcome_until_durable(
                 }
             }
         } else {
+            let notification = terminal_hooks::prepare(inner, task_id).await;
             match commit_outcome(inner, task_id, run_id, &outcome, cleanup_status).await {
                 TerminalCommitResult::Committed {
                     task,
@@ -3368,6 +3476,8 @@ async fn reap_outcome_until_durable(
                     content,
                     cleanup_status,
                 } => {
+                    terminal_hooks::publish(notification, &task, &content).await;
+                    terminal_observer::observe(inner, run_id).await;
                     publish_committed_outcome(
                         inner,
                         root_session_id,
@@ -3382,6 +3492,7 @@ async fn reap_outcome_until_durable(
                     return DurableTerminalization::ResultCommitted;
                 }
                 TerminalCommitResult::AlreadyDurable => {
+                    terminal_observer::observe(inner, run_id).await;
                     notify_terminal_state(inner, task_id);
                     return DurableTerminalization::ResultAlreadyDurable;
                 }
@@ -3397,7 +3508,7 @@ async fn reap_outcome_until_durable(
                         task_id,
                         run_id,
                         stage = failure.stage,
-                        detail = %failure.detail,
+                        failure_code = "TASK_TERMINAL_PERSISTENCE_FAILED",
                         "terminal result cannot be committed; persisting needsAttention"
                     );
                     permanent_failure = Some(failure);
@@ -3416,7 +3527,7 @@ fn schedule_parent_resolution(
     result_version: i64,
     content: &str,
 ) {
-    if child.parent_task_id.is_none() {
+    if child.parent_task_id.is_none() || child.lifecycle_policy != "attached" {
         return;
     }
     let resolver_key = format!("{}:{result_version}", child.id);
@@ -3462,12 +3573,12 @@ async fn resolve_parent(
             }
             Ok(None) => {}
             Err(zk_db::DbError::Invalid(error)) => {
-                error!(task_id = %child.id, parent_task_id = parent_id, %error, "child result cannot be ingested");
+                error!(task_id = %child.id, parent_task_id = parent_id, error_type = std::any::type_name_of_val(&error), "child result cannot be ingested");
                 return;
             }
             Err(error) => {
                 if retry == 0 || retry.is_power_of_two() {
-                    error!(task_id = %child.id, parent_task_id = parent_id, %error, "retrying child result ingestion");
+                    error!(task_id = %child.id, parent_task_id = parent_id, error_type = std::any::type_name_of_val(&error), "retrying child result ingestion");
                 }
             }
         }
@@ -3484,7 +3595,7 @@ async fn resolve_parent(
             Ok(Some(_) | None) => return,
             Err(error) => {
                 if retry == 0 || retry.is_power_of_two() {
-                    error!(task_id = %child.id, parent_task_id = parent_id, %error, "retrying parent state lookup");
+                    error!(task_id = %child.id, parent_task_id = parent_id, error_type = std::any::type_name_of_val(&error), "retrying parent state lookup");
                 }
             }
         }
@@ -3537,6 +3648,22 @@ impl Drop for TaskRuntimeInner {
     }
 }
 
+// Match the source's 1048576 UTF-16 character bound without splitting a scalar.
+fn bound_display_output(text: &str) -> String {
+    const LIMIT: usize = 1024 * 1024;
+    let mut count = 0;
+    for (offset, ch) in text.char_indices() {
+        count += ch.len_utf16();
+        if count > LIMIT {
+            return format!(
+                "{}\n[Output truncated at 1048576 character limit]",
+                &text[..offset]
+            );
+        }
+    }
+    text.to_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -3553,6 +3680,164 @@ mod tests {
     struct NoopSink;
 
     #[test]
+    fn display_output_bound_preserves_utf16_limit_and_scalar_boundaries() {
+        let text = format!("{}😀tail", "a".repeat(1024 * 1024 - 1));
+        let bounded = bound_display_output(&text);
+        assert!(bounded.starts_with(&"a".repeat(1024 * 1024 - 1)));
+        assert!(!bounded.contains('😀'));
+        assert!(bounded.ends_with("[Output truncated at 1048576 character limit]"));
+        assert_eq!(bound_display_output(""), "");
+        assert_eq!(bound_display_output("中文😀"), "中文😀");
+    }
+
+    #[tokio::test]
+    async fn display_output_is_owned_and_mutable_after_terminal_without_rewriting_results() {
+        let (runtime, session, root, root_run) = fixture().await;
+        let release = Arc::new(Notify::new());
+        let child_release = Arc::clone(&release);
+        let receipt = runtime
+            .submit_child(
+                submission(&session, &root, &root_run),
+                move |_| async move {
+                    child_release.notified().await;
+                    TaskExecutionResult::Failed {
+                        message: "immutable execution failure".into(),
+                        code: "FIXTURE_FAILURE".into(),
+                    }
+                },
+            )
+            .await
+            .unwrap();
+        let own = runtime
+            .update_own_display_output(
+                &receipt.transcript_session_id,
+                &receipt.run_id,
+                None,
+                "own progress",
+            )
+            .await
+            .unwrap();
+        assert_eq!(own.id, receipt.task.id);
+        assert_eq!(own.display_output.as_deref(), Some("own progress"));
+        for (caller_session, caller_run, target) in [
+            (
+                receipt.transcript_session_id.as_str(),
+                receipt.run_id.as_str(),
+                Some(root.id.as_str()),
+            ),
+            ("foreign-session", receipt.run_id.as_str(), None),
+            (session.as_str(), root_run.as_str(), Some(root.id.as_str())),
+        ] {
+            let denied = runtime
+                .update_own_display_output(caller_session, caller_run, target, "forged")
+                .await
+                .unwrap_err();
+            assert_eq!(denied.code, "TASK_SELF_OUTPUT_ACCESS_DENIED");
+        }
+        let task = runtime
+            .update_advisory(
+                &session,
+                &receipt.task.id,
+                None,
+                None,
+                None,
+                Some("progress note"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(task.display_output.as_deref(), Some("progress note"));
+        let denied = runtime
+            .update_advisory(
+                "foreign-session",
+                &receipt.task.id,
+                None,
+                None,
+                None,
+                Some("forged"),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(denied.code, "TASK_ACCESS_DENIED");
+        release.notify_one();
+        let query = || TaskOutputRequest {
+            root_session_id: session.clone(),
+            task_id: receipt.task.id.clone(),
+            wait_ms: 5000,
+            result_version: None,
+            cursor: 0,
+            max_bytes: 4096,
+        };
+        let terminal = runtime.read_output(query()).await.unwrap();
+        assert_eq!(terminal.task.status, DbTaskStatus::Failed);
+        assert!(
+            terminal.task.display_output.is_none(),
+            "execution replaces temporary progress display"
+        );
+        let original = terminal.result.unwrap();
+        let updated = runtime
+            .update_advisory(
+                &session,
+                &receipt.task.id,
+                None,
+                None,
+                None,
+                Some("post-execution display only"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            updated.display_output.as_deref(),
+            Some("post-execution display only")
+        );
+        assert_eq!(updated.status, terminal.task.status);
+        assert_eq!(updated.reason, terminal.task.reason);
+        assert_eq!(updated.terminal_at, terminal.task.terminal_at);
+        assert_eq!(
+            updated.budget_consumed_tokens,
+            terminal.task.budget_consumed_tokens
+        );
+        assert_eq!(
+            updated.budget_consumed_cost_nanos_usd,
+            terminal.task.budget_consumed_cost_nanos_usd
+        );
+        assert_eq!(updated.usage_complete, terminal.task.usage_complete);
+        let reread = runtime.read_output(query()).await.unwrap().result.unwrap();
+        assert_eq!(reread.content, "immutable execution failure");
+        assert_eq!(reread.result.content_sha256, original.result.content_sha256);
+        assert_eq!(reread.result.result_version, original.result.result_version);
+        assert_eq!(reread.result.error_code.as_deref(), Some("FIXTURE_FAILURE"));
+        let cleared = runtime
+            .update_advisory(&session, &receipt.task.id, None, None, None, Some(""))
+            .await
+            .unwrap();
+        assert_eq!(cleared.display_output.as_deref(), Some(""));
+        assert_eq!(cleared.status, DbTaskStatus::Failed);
+        let stale_task = receipt.task.id.clone();
+        runtime
+            .inner
+            .db
+            .with_writer(move |conn| {
+                conn.execute(
+                    "UPDATE tasks SET current_run_id=NULL WHERE id=?1",
+                    [&stale_task],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let stale = runtime
+            .update_own_display_output(
+                &receipt.transcript_session_id,
+                &receipt.run_id,
+                None,
+                "stale report",
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(stale.code, "TASK_SELF_OUTPUT_ACCESS_DENIED");
+    }
+
+    #[test]
     fn timeout_recovery_uses_last_assistant_text_only() {
         let messages = serde_json::json!([
             {"role":"assistant","content":[{"type":"text","text":"source-backed finding"}]},
@@ -3560,6 +3845,18 @@ mod tests {
             {"role":"assistant","content":[{"type":"thinking","thinking":"private reasoning"}]}
         ]);
         assert_eq!(timeout_checkpoint_text(&messages), "source-backed finding");
+        let envelope = serde_json::json!({
+            "schemaVersion": 1, "kind": "contextCheckpoint", "terminalReason": "cancelled",
+            "messages": [
+                {"role":"user","content":"original request"},
+                {"role":"assistant","content":"recoverable streamed partial","thinking":"private"}
+            ]
+        });
+        assert_eq!(
+            timeout_checkpoint_text(&envelope),
+            "recoverable streamed partial"
+        );
+        assert!(timeout_checkpoint_text(&serde_json::json!({"schemaVersion":2,"kind":"contextCheckpoint","messages":messages})).is_empty());
         assert!(timeout_checkpoint_text(&serde_json::json!([])).is_empty());
     }
 
@@ -3913,6 +4210,7 @@ mod tests {
             .append_message(
                 &session,
                 NewMessage {
+                    meta: None,
                     role: MessageRole::Assistant,
                     content: vec![StoredBlock::ToolUse {
                         id: "tool-1".to_owned(),
@@ -4003,6 +4301,7 @@ mod tests {
             .append_message(
                 &session,
                 NewMessage {
+                    meta: None,
                     role: MessageRole::User,
                     content: vec![StoredBlock::ToolResult {
                         tool_use_id: "tool-1".to_owned(),
@@ -4554,7 +4853,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn needs_attention_never_signals_a_stale_execution_token() {
+    async fn explicit_stop_signals_quarantined_owner_without_manufacturing_result() {
         let (runtime, session, root, root_run_id) = fixture().await;
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = tokio::sync::oneshot::channel();
@@ -4609,8 +4908,8 @@ mod tests {
         assert_eq!(stop.task.status, DbTaskStatus::NeedsAttention);
         sleep(Duration::from_millis(25)).await;
         assert!(
-            !token_observed.load(Ordering::SeqCst),
-            "needsAttention is not a durable cancellation boundary"
+            token_observed.load(Ordering::SeqCst),
+            "explicit local stop must reach even a quarantined execution owner"
         );
 
         let _ = release_tx.send(());
@@ -4621,7 +4920,7 @@ mod tests {
         })
         .await
         .expect("execution owner released");
-        assert!(!token_observed.load(Ordering::SeqCst));
+        assert!(token_observed.load(Ordering::SeqCst));
         assert!(
             runtime
                 .db()
@@ -4634,7 +4933,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deadline_retries_persistence_before_signalling_execution() {
+    async fn deadline_stops_locally_and_reconciles_intent_before_terminal_result() {
         let (runtime, session, root, root_run_id) = fixture().await;
         runtime
             .inner
@@ -4678,11 +4977,19 @@ mod tests {
             .await
             .expect("deadline result");
         let (task_at_signal, run_at_signal) = observed_rx.await.expect("token observation");
-        assert_eq!(task_at_signal.status, DbTaskStatus::Cancelling);
-        assert_eq!(task_at_signal.cleanup_status, CleanupStatus::Pending);
-        assert_eq!(run_at_signal.status, "cancelling");
+        assert!(!task_at_signal.status.is_terminal());
+        assert!(matches!(
+            run_at_signal.status.as_str(),
+            "running" | "cancelling"
+        ));
+        let terminal_run = runtime
+            .db()
+            .find_run_by_id(&receipt.run_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(
-            run_at_signal.requested_exit_reason.as_deref(),
+            terminal_run.requested_exit_reason.as_deref(),
             Some(zk_db::run::EXIT_TIMEOUT)
         );
         assert!(
@@ -4698,6 +5005,138 @@ mod tests {
             output.result.expect("timeout result").result.status,
             ResultStatus::Error
         );
+    }
+
+    #[tokio::test]
+    async fn failed_cancellation_write_stops_owned_subtree_and_fences_new_work() {
+        let (runtime, session, root, root_run) = fixture().await;
+        let root_token = CancellationToken::new();
+        let _lease = runtime
+            .attach_existing_execution(&session, &root.id, &root_run, root_token.clone())
+            .await
+            .unwrap();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (stopped_tx, stopped_rx) = tokio::sync::oneshot::channel();
+        let child = runtime
+            .submit_child(
+                submission(&session, &root, &root_run),
+                move |context| async move {
+                    let _ = started_tx.send(());
+                    context.cancel.cancelled().await;
+                    let _ = stopped_tx.send(());
+                    TaskExecutionResult::Cancelled {
+                        message: "physical execution stopped".into(),
+                    }
+                },
+            )
+            .await
+            .unwrap();
+        started_rx.await.unwrap();
+        let mut detached_request = submission(&session, &root, &root_run);
+        detached_request.creator_tool_use_id = "detached-other".into();
+        detached_request.execution_config_json =
+            serde_json::json!({"lifecycle":"detached"}).to_string();
+        let (detached_tx, detached_rx) = tokio::sync::oneshot::channel();
+        let detached = runtime
+            .submit_child(detached_request, move |context| async move {
+                let _ = detached_tx.send(context.cancel.clone());
+                context.cancel.cancelled().await;
+                TaskExecutionResult::Cancelled {
+                    message: "detached explicitly stopped".into(),
+                }
+            })
+            .await
+            .unwrap();
+        let detached_token = detached_rx.await.unwrap();
+        let denied = runtime
+            .cancel_owned("unrelated-session", &root.id, "unauthorized")
+            .await
+            .unwrap_err();
+        assert_eq!(denied.code, "TASK_ACCESS_DENIED");
+        assert!(!root_token.is_cancelled());
+        runtime
+            .inner
+            .cancellation_persist_failpoint
+            .remaining_failures
+            .store(1_000, Ordering::SeqCst);
+        let error = runtime
+            .cancel_owned(&session, &root.id, "explicit stop during outage")
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "TASK_CANCELLATION_PERSISTENCE_PENDING");
+        assert!(root_token.is_cancelled());
+        tokio::time::timeout(Duration::from_secs(1), stopped_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            !detached_token.is_cancelled(),
+            "detached execution is outside this cancellation subtree"
+        );
+        assert!(
+            runtime
+                .db()
+                .read_task_result(&child.task.id, None, 0, 1024)
+                .await
+                .unwrap()
+                .is_none(),
+            "a locally stopped execution must not fabricate a durable terminal result"
+        );
+        let mut rejected = submission(&session, &root, &root_run);
+        rejected.creator_tool_use_id = "after-stop".into();
+        let rejected = runtime
+            .submit_child(rejected, |_| async { panic!("fenced work cannot execute") })
+            .await
+            .unwrap_err();
+        assert_eq!(rejected.code, "TASK_CANCELLATION_PENDING");
+        runtime
+            .inner
+            .cancellation_persist_failpoint
+            .remaining_failures
+            .store(0, Ordering::SeqCst);
+        runtime
+            .reconcile_local_cancellation(&root.id, &root_run)
+            .await
+            .unwrap();
+        let output = runtime
+            .read_output(TaskOutputRequest {
+                root_session_id: session.clone(),
+                task_id: child.task.id,
+                wait_ms: 5_000,
+                result_version: None,
+                cursor: 0,
+                max_bytes: 1024,
+            })
+            .await
+            .unwrap();
+        assert_eq!(output.task.status, DbTaskStatus::Cancelled);
+        let run = runtime
+            .db()
+            .find_run_by_id(&child.run_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            run.exit_reason.as_deref(),
+            Some(zk_db::run::EXIT_PARENT_CANCELLED)
+        );
+        assert!(!detached_token.is_cancelled());
+        runtime
+            .cancel_owned(&session, &detached.task.id, "detached cleanup")
+            .await
+            .unwrap();
+        let detached_output = runtime
+            .read_output(TaskOutputRequest {
+                root_session_id: session,
+                task_id: detached.task.id,
+                wait_ms: 5_000,
+                result_version: None,
+                cursor: 0,
+                max_bytes: 1024,
+            })
+            .await
+            .unwrap();
+        assert_eq!(detached_output.task.status, DbTaskStatus::Cancelled);
     }
 
     #[tokio::test]
@@ -4870,13 +5309,11 @@ mod tests {
             .expect("child terminal result");
         assert_eq!(output.task.status, DbTaskStatus::Cancelled);
         let (task_at_signal, run_at_signal) = observed_rx.await.expect("token observation");
-        assert_eq!(task_at_signal.status, DbTaskStatus::Cancelling);
-        assert_eq!(task_at_signal.cleanup_status, CleanupStatus::Pending);
-        assert_eq!(run_at_signal.status, "cancelling");
-        assert_eq!(
-            run_at_signal.requested_exit_reason.as_deref(),
-            Some(zk_db::run::EXIT_PARENT_CANCELLED)
-        );
+        assert!(!task_at_signal.status.is_terminal());
+        assert!(matches!(
+            run_at_signal.status.as_str(),
+            "running" | "cancelling"
+        ));
         assert!(
             runtime
                 .inner
@@ -4894,6 +5331,127 @@ mod tests {
         assert_eq!(
             run.exit_reason.as_deref(),
             Some(zk_db::run::EXIT_PARENT_CANCELLED)
+        );
+    }
+
+    #[tokio::test]
+    async fn saturated_local_services_never_take_agent_slots_and_queued_cancel_never_starts() {
+        let (runtime, session, root, root_run) = fixture().await;
+        let (started, mut observed) = tokio::sync::mpsc::unbounded_channel();
+        let mut services = Vec::new();
+        for repl in [false, true] {
+            for index in 0..=LOCAL_SERVICE_LIMIT {
+                // Fill each class before creating its queued overflow. Spawn order
+                // alone is not a FIFO proof across scheduler workers.
+                if index == LOCAL_SERVICE_LIMIT {
+                    tokio::time::timeout(Duration::from_secs(5), async {
+                        for _ in 0..LOCAL_SERVICE_LIMIT {
+                            let (observed_class, observed_index) = observed.recv().await.unwrap();
+                            assert_eq!(observed_class, repl);
+                            assert!(observed_index < LOCAL_SERVICE_LIMIT);
+                        }
+                    })
+                    .await
+                    .expect("service class reaches its bounded capacity");
+                }
+                let service_session = runtime
+                    .db()
+                    .create_session("fixture", "/tmp")
+                    .await
+                    .unwrap()
+                    .id;
+                let request = ExternalRootSubmission {
+                    session_id: service_session.clone(),
+                    startup_epoch: 1,
+                    timeout: Duration::from_secs(30),
+                    budget: TaskBudgetLimits {
+                        token_limit: Some(1),
+                        cost_limit_nanos_usd: Some(1),
+                        deadline_at_ms: None,
+                    },
+                };
+                let sent = started.clone();
+                let build = move |context: TaskExecutionContext| async move {
+                    sent.send((repl, index)).unwrap();
+                    context.cancel.cancelled().await;
+                    TaskExecutionResult::Cancelled {
+                        message: "service closed".into(),
+                    }
+                };
+                let receipt = if repl {
+                    runtime.submit_repl_service(request, build).await.unwrap()
+                } else {
+                    runtime.submit_external_root(request, build).await.unwrap()
+                };
+                services.push((service_session, receipt));
+            }
+        }
+        assert_eq!(
+            runtime.inner.global_slots.available_permits(),
+            GLOBAL_AGENT_LIMIT
+        );
+        let child = runtime
+            .submit_child(submission(&session, &root, &root_run), |_| async {
+                TaskExecutionResult::complete("ordinary worker finished")
+            })
+            .await
+            .unwrap();
+        let result = runtime
+            .read_output(TaskOutputRequest {
+                root_session_id: session,
+                task_id: child.task.id,
+                wait_ms: 5000,
+                result_version: None,
+                cursor: 0,
+                max_bytes: 4096,
+            })
+            .await
+            .unwrap();
+        assert_eq!(result.result.unwrap().content, "ordinary worker finished");
+        // Cancel both queued seventeenth services while every permit is still held.
+        for index in [LOCAL_SERVICE_LIMIT, 2 * LOCAL_SERVICE_LIMIT + 1] {
+            let (owner, receipt) = &services[index];
+            runtime
+                .cancel_owned(owner, &receipt.task.id, "queued service cancelled")
+                .await
+                .unwrap();
+            let result = runtime
+                .read_output(TaskOutputRequest {
+                    root_session_id: owner.clone(),
+                    task_id: receipt.task.id.clone(),
+                    wait_ms: 5000,
+                    result_version: None,
+                    cursor: 0,
+                    max_bytes: 4096,
+                })
+                .await
+                .unwrap();
+            assert_eq!(result.task.status, DbTaskStatus::Cancelled);
+        }
+        assert!(observed.try_recv().is_err());
+        for (owner, receipt) in &services {
+            runtime
+                .cancel_owned(owner, &receipt.task.id, "close fixture")
+                .await
+                .unwrap();
+        }
+        for (owner, receipt) in &services {
+            let result = runtime
+                .read_output(TaskOutputRequest {
+                    root_session_id: owner.clone(),
+                    task_id: receipt.task.id.clone(),
+                    wait_ms: 5000,
+                    result_version: None,
+                    cursor: 0,
+                    max_bytes: 4096,
+                })
+                .await
+                .unwrap();
+            assert!(result.task.status.is_terminal());
+        }
+        assert!(
+            observed.try_recv().is_err(),
+            "cancelled queued service must never execute later"
         );
     }
 
@@ -5473,6 +6031,282 @@ mod tests {
                 .await
                 .expect("result lookup")
                 .is_none()
+        );
+    }
+    #[tokio::test]
+    async fn detached_task_survives_parent_cancel_without_releasing_its_budget_early() {
+        let (runtime, session, root, root_run_id) = fixture().await;
+        let mut request = submission(&session, &root, &root_run_id);
+        request.execution_config_json =
+            serde_json::json!({"isolation":"readOnly","lifecycle":"detached"}).to_string();
+        let release = Arc::new(Notify::new());
+        let release_child = release.clone();
+        let child = runtime
+            .submit_child(request, move |context| async move {
+                release_child.notified().await;
+                assert!(!context.cancel.is_cancelled());
+                TaskExecutionResult::complete("detached complete")
+            })
+            .await
+            .unwrap();
+        assert_eq!(child.task.lifecycle_policy, "detached");
+        assert_eq!(
+            runtime
+                .get_owned(&session, &root.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            DbTaskStatus::Running
+        );
+        assert!(
+            !runtime
+                .cancel_attached_from_parent(&session, &child.task.id, "parent tool dropped")
+                .await
+                .unwrap()
+                .cancel_requested
+        );
+        runtime
+            .cancel_owned(&session, &root.id, "root cancelled")
+            .await
+            .unwrap();
+        let budget = runtime
+            .db()
+            .read_task_budget(&child.task.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            budget.reservation.unwrap().status,
+            zk_db::BudgetReservationStatus::Active
+        );
+        release.notify_one();
+        let output = runtime
+            .read_output(TaskOutputRequest {
+                root_session_id: session.clone(),
+                task_id: child.task.id.clone(),
+                wait_ms: 5000,
+                result_version: None,
+                cursor: 0,
+                max_bytes: 1024,
+            })
+            .await
+            .unwrap();
+        assert_eq!(output.task.status, DbTaskStatus::Succeeded);
+        assert_eq!(output.result.unwrap().content, "detached complete");
+        assert_eq!(
+            runtime
+                .db()
+                .read_task_budget(&child.task.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .reservation
+                .unwrap()
+                .status,
+            zk_db::BudgetReservationStatus::Settled
+        );
+    }
+
+    #[tokio::test]
+    async fn detached_task_has_independent_owned_stop() {
+        let (runtime, session, root, root_run_id) = fixture().await;
+        let mut request = submission(&session, &root, &root_run_id);
+        request.execution_config_json =
+            serde_json::json!({"isolation":"readOnly","lifecycle":"detached"}).to_string();
+        let child = runtime
+            .submit_child(request, |context| async move {
+                context.cancel.cancelled().await;
+                TaskExecutionResult::Cancelled {
+                    message: "cleaned".into(),
+                }
+            })
+            .await
+            .unwrap();
+        assert!(
+            runtime
+                .cancel_owned("different-session", &child.task.id, "stop")
+                .await
+                .is_err()
+        );
+        runtime
+            .cancel_owned(&session, &child.task.id, "explicit stop")
+            .await
+            .unwrap();
+        let output = runtime
+            .read_output(TaskOutputRequest {
+                root_session_id: session.clone(),
+                task_id: child.task.id,
+                wait_ms: 5000,
+                result_version: None,
+                cursor: 0,
+                max_bytes: 1024,
+            })
+            .await
+            .unwrap();
+        assert_eq!(output.task.status, DbTaskStatus::Cancelled);
+        assert_eq!(
+            runtime
+                .get_owned(&session, &root.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            DbTaskStatus::Running
+        );
+    }
+
+    struct ShellNoLlm;
+    impl zk_llm::ChatProvider for ShellNoLlm {
+        fn provider_name(&self) -> &'static str {
+            "shell-no-llm"
+        }
+        fn chat_stream(
+            &self,
+            _request: zk_llm::ChatRequest,
+            _cancel: CancellationToken,
+        ) -> Result<futures::stream::BoxStream<'static, zk_llm::ProviderEvent>, zk_llm::ProviderError>
+        {
+            panic!("shell tasks must not make an LLM request")
+        }
+    }
+    struct ShellDeny;
+    impl crate::ToolAdmission for ShellDeny {
+        fn admit<'a>(
+            &'a self,
+            _request: crate::AdmissionRequest<'a>,
+        ) -> BoxFuture<'a, crate::Admission> {
+            Box::pin(async {
+                crate::Admission::Denied {
+                    code: "SHELL_TEST_DENIED".into(),
+                    message: "policy denied".into(),
+                }
+            })
+        }
+    }
+    async fn shell_fixture(command: &str, deny: bool) -> (TaskRuntime, TaskOutputResponse, String) {
+        let (runtime, session, root, root_run_id) = fixture().await;
+        let mut request = submission(&session, &root, &root_run_id);
+        request.task_type = "shell".into();
+        request.prompt = command.into();
+        request.working_dir = std::env::temp_dir().to_string_lossy().into_owned();
+        let mut tools = zk_tools::ToolRegistry::new();
+        tools.register(Arc::new(zk_tools::BashTool));
+        let admission: Arc<dyn crate::ToolAdmission> = if deny {
+            Arc::new(ShellDeny)
+        } else {
+            crate::admission::allow_all()
+        };
+        let engine = Arc::new(
+            crate::Engine::with_admission(
+                runtime.db().clone(),
+                Arc::new(ShellNoLlm),
+                Arc::new(NoopSink),
+                Arc::new(tools),
+                admission,
+            )
+            .with_task_runtime(Arc::new(runtime.clone())),
+        );
+        let command = command.to_owned();
+        let cwd = request.working_dir.clone();
+        let child = runtime
+            .submit_child(request, move |execution| async move {
+                engine.run_shell_task(execution, command, cwd).await
+            })
+            .await
+            .unwrap();
+        let output = runtime
+            .read_output(TaskOutputRequest {
+                root_session_id: session,
+                task_id: child.task.id,
+                wait_ms: 5000,
+                result_version: None,
+                cursor: 0,
+                max_bytes: 4096,
+            })
+            .await
+            .unwrap();
+        (runtime, output, child.run_id)
+    }
+    #[tokio::test]
+    async fn shell_task_executes_once_and_commits_result_and_cleanup() {
+        let (runtime, output, run_id) = shell_fixture("printf shell-ok", false).await;
+        assert_eq!(output.task.task_type, "shell");
+        assert_eq!(
+            output.task.status,
+            DbTaskStatus::Succeeded,
+            "{:?}",
+            output.task
+        );
+        assert!(output.result.unwrap().content.contains("shell-ok"));
+        let counts=runtime.db().with_conn_blocking(move|conn|Ok(conn.query_row("SELECT count(*),sum(status='succeeded'),sum(cleanup_status='confirmed') FROM tool_invocations WHERE run_id=?1",[run_id],|row|Ok((row.get::<_,i64>(0)?,row.get::<_,i64>(1)?,row.get::<_,i64>(2)?)))?)).unwrap();
+        assert_eq!(counts.0, 1);
+        assert_eq!(counts.1, 1);
+    }
+    #[tokio::test]
+    async fn shell_nonzero_and_permission_denial_cannot_report_success() {
+        let (_, failed, _) = shell_fixture("printf partial-output; exit 7", false).await;
+        assert_eq!(failed.task.status, DbTaskStatus::Failed);
+        assert!(failed.result.unwrap().content.contains("partial-output"));
+        let (_, denied, _) = shell_fixture("printf must-not-run", true).await;
+        assert_eq!(denied.task.status, DbTaskStatus::Failed);
+        assert!(denied.result.unwrap().content.contains("SHELL_TEST_DENIED"));
+    }
+    #[tokio::test]
+    async fn detached_shutdown_preserves_restart_reason_and_holds_unresolved_reservation_without_fake_result()
+     {
+        let (runtime, session, root, parent_run) = fixture().await;
+        let mut request = submission(&session, &root, &parent_run);
+        request.execution_config_json =
+            serde_json::json!({"isolation":"readOnly","lifecycle":"detached"}).to_string();
+        let entered = Arc::new(Notify::new());
+        let child_entered = entered.clone();
+        let child = runtime
+            .submit_child(request, move |context| async move {
+                child_entered.notify_one();
+                context.cancel.cancelled().await;
+                TaskExecutionResult::Cancelled {
+                    message: "restart cleanup".into(),
+                }
+            })
+            .await
+            .unwrap();
+        entered.notified().await;
+        let report = runtime.shutdown(Duration::from_secs(2)).await.unwrap();
+        assert!(report.drained);
+        let run = runtime
+            .db()
+            .find_run_by_id(&child.run_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.status, "interrupted");
+        assert_eq!(run.exit_reason.as_deref(), Some("serviceRestart"));
+        assert!(
+            runtime
+                .db()
+                .read_task_result(&child.task.id, None, 0, 1024)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let task = runtime
+            .get_owned(&session, &child.task.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(task.status, DbTaskStatus::NeedsAttention);
+        let budget = runtime
+            .db()
+            .read_task_budget(&child.task.id)
+            .await
+            .unwrap()
+            .unwrap();
+        // NeedsAttention deliberately retains the reservation until recovery resolves
+        // unknown accounting; restart may not silently refund or recreate a budget.
+        assert_eq!(
+            budget.reservation.unwrap().status,
+            zk_db::BudgetReservationStatus::Active
         );
     }
 }

@@ -26,11 +26,11 @@ function getRuleIcon(ruleId: AnomalyEvent['ruleId']): string {
 function getSeverityColor(severity: AnomalyEvent['severity']): string {
     switch (severity) {
         case 'critical':
-            return 'text-red-600 dark:text-red-400';
+            return 'text-err';
         case 'error':
-            return 'text-yellow-600 dark:text-yellow-400';
+            return 'text-warn';
         default:
-            return 'text-gray-600 dark:text-gray-400';
+            return 'text-t2';
     }
 }
 
@@ -38,11 +38,11 @@ function getSeverityColor(severity: AnomalyEvent['severity']): string {
 function getSeverityBg(severity: AnomalyEvent['severity']): string {
     switch (severity) {
         case 'critical':
-            return 'bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-800';
+            return 'bg-errsoft border-err';
         case 'error':
-            return 'bg-yellow-50 dark:bg-yellow-900/20 border-yellow-200 dark:border-yellow-800';
+            return 'bg-warnsoft border-warn';
         default:
-            return 'bg-gray-50 dark:bg-gray-800 border-gray-200 dark:border-gray-700';
+            return 'bg-surface2 border-border-hairline';
     }
 }
 
@@ -79,11 +79,11 @@ export const AnomalyAlertPanel: React.FC = () => {
         <div className="p-6">
             {/* Header with count badge */}
             <div className="flex items-center gap-2 mb-4">
-                <h2 className="text-lg font-bold text-gray-900 dark:text-gray-100">
+                <h2 className="text-t1 text-xl font-semibold">
                     Anomaly Alerts
                 </h2>
                 {activeAnomalies.length > 0 && (
-                    <span className="inline-flex items-center justify-center px-2 py-0.5 text-xs font-bold rounded-full bg-red-500 text-white">
+                    <span className="inline-flex items-center justify-center px-2 py-0.5 text-[13px] font-bold rounded-full bg-err text-white dark:text-app2">
                         {activeAnomalies.length}
                     </span>
                 )}
@@ -91,17 +91,17 @@ export const AnomalyAlertPanel: React.FC = () => {
 
             {/* Empty state */}
             {activeAnomalies.length === 0 ? (
-                <div className="flex flex-col items-center justify-center py-12 text-gray-400 dark:text-gray-500">
+                <div className="flex flex-col items-center justify-center py-12 text-t2">
                     <span className="text-4xl mb-3">✅</span>
                     <p className="text-sm font-medium">运行正常</p>
-                    <p className="text-xs mt-1">No anomalies detected</p>
+                    <p className="text-[13px] mt-1">No anomalies detected</p>
                 </div>
             ) : (
                 <div className="space-y-3">
                     {activeAnomalies.map((anomaly) => (
                         <div
                             key={anomaly.id}
-                            className={`rounded-lg border p-4 ${getSeverityBg(anomaly.severity)}`}
+                            className={`rounded-[10px] border p-4 ${getSeverityBg(anomaly.severity)}`}
                         >
                             {/* Top row: icon + worker name + severity */}
                             <div className="flex items-center gap-2 mb-2">
@@ -109,17 +109,17 @@ export const AnomalyAlertPanel: React.FC = () => {
                                 <span className={`font-semibold text-sm ${getSeverityColor(anomaly.severity)}`}>
                                     {anomaly.workerName}
                                 </span>
-                                <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${
+                                <span className={`text-[13px] px-1.5 py-0.5 rounded-sm font-medium ${
                                     anomaly.severity === 'critical'
-                                        ? 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300'
-                                        : 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/40 dark:text-yellow-300'
+                                        ? 'bg-errsoft text-err dark:text-err'
+                                        : 'bg-warnsoft text-warn dark:text-warn'
                                 }`}>
                                     {anomaly.severity.toUpperCase()}
                                 </span>
                             </div>
 
                             {/* Message */}
-                            <p className="text-sm text-gray-700 dark:text-gray-300 mb-3">
+                            <p className="text-sm text-t1 mb-3">
                                 {anomaly.message}
                             </p>
 
@@ -128,13 +128,13 @@ export const AnomalyAlertPanel: React.FC = () => {
                                 <button
                                     onClick={() => handleAbort(anomaly)}
                                     disabled={abortingIds.has(anomaly.id)}
-                                    className="px-3 py-1.5 text-xs font-medium rounded-md bg-red-600 text-white hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                                    className="panel-control px-3 py-1.5 text-[13px] font-medium rounded-md bg-errstrong text-white hover:bg-errstrong disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                                 >
                                     {abortingIds.has(anomaly.id) ? '中止中...' : '中止 Worker'}
                                 </button>
                                 <button
                                     onClick={() => handleDismiss(anomaly.id)}
-                                    className="px-3 py-1.5 text-xs font-medium rounded-md bg-gray-200 text-gray-700 hover:bg-gray-300 dark:bg-gray-700 dark:text-gray-300 dark:hover:bg-gray-600 transition-colors"
+                                    className="panel-control px-3 py-1.5 text-[13px] font-medium rounded-md bg-sunken2 text-t1 hover:bg-sunken2 dark:text-t2 transition-colors"
                                 >
                                     忽略
                                 </button>

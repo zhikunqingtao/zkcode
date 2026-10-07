@@ -66,7 +66,7 @@ async fn drive(provider: &dyn ChatProvider, model: &str) -> Tally {
                     }
                     ProviderEvent::ThinkingDelta { .. } => tally.thinking_deltas += 1,
                     ProviderEvent::ToolUseStart { .. } => tally.tool_starts += 1,
-                    ProviderEvent::ToolInputDelta { .. } | ProviderEvent::UsageUpdate { .. } => {}
+                    ProviderEvent::ResponseState { .. } | ProviderEvent::ToolInputDelta { .. } | ProviderEvent::UsageUpdate { .. } => {}
                     ProviderEvent::Finish { finish_reason, .. } => {
                         tally.finish = Some(finish_reason.as_str().to_owned());
                     }

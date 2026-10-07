@@ -96,6 +96,11 @@ impl ReplManager {
 
         if let Some(existing) = self.sessions.get(session_id) {
             if existing.is_alive() {
+                if existing.language() != language {
+                    return Err(ReplError::Spawn(
+                        "REPL_LANGUAGE_MISMATCH: use a distinct sessionId for each language".into(),
+                    ));
+                }
                 existing.update_last_active();
                 return Ok(Arc::clone(existing.value()));
             }

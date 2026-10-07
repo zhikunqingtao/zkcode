@@ -12,7 +12,9 @@
   - CodePath   用 graph.successors()（正向：API 入口调用了谁）
 """
 
+import hashlib
 import logging
+import threading
 import re
 import time
 from collections import deque
@@ -166,7 +168,28 @@ _tracer_graph_cache: Dict[str, object] = {
     "key": None,
     "timestamp": 0.0,
 }
-_TRACER_CACHE_TTL = 300  # 5 minutes
+_TRACER_CACHE_TTL = 300  # Cache expiry is additional to the content fingerprint.
+_tracer_cache_lock = threading.Lock()
+
+
+def _graph_fingerprint(root: str, languages: Optional[List[str]], skip_tests: bool = True) -> tuple:
+    selected = tuple(sorted(set(languages or ["python", "java", "typescript"])))
+    extensions = {"python": {".py"}, "java": {".java"}, "typescript": {".ts", ".tsx"}}
+    accepted = set().union(*(extensions.get(language, set()) for language in selected))
+    directory = Path(root).resolve(strict=True)
+    digest = hashlib.sha256()
+    for path in sorted(CallGraphBuilder()._iter_files(directory, accepted, skip_tests)):
+        resolved = path.resolve(strict=True)
+        if not resolved.is_relative_to(directory):
+            continue
+        digest.update(str(path.relative_to(directory)).encode("utf-8"))
+        digest.update(b"\0")
+        with path.open("rb") as source:
+            while chunk := source.read(65536):
+                digest.update(chunk)
+        digest.update(b"\0")
+    return str(directory), selected, digest.hexdigest()
+
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -223,16 +246,17 @@ class CodePathTracer:
             line_range = attrs.get("line_range", [0, 0])
             line_number = line_range[0] if isinstance(line_range, (list, tuple)) and line_range else 0
 
-            endpoints.append(APIEndpointInfo(
-                http_method=http_method,
-                path=path,
-                handler_function=name,
-                handler_class=class_name,
-                file_path=attrs.get("file_path", ""),
-                line_number=line_number,
-                language=lang,
-                parameters=parameters,
-            ))
+            for route in attrs.get("routes") or [{"http_method": http_method, "path": path}]:
+                endpoints.append(APIEndpointInfo(
+                    http_method=route["http_method"],
+                    path=route["path"],
+                    handler_function=name,
+                    handler_class=class_name,
+                    file_path=attrs.get("file_path", ""),
+                    line_number=line_number,
+                    language=lang,
+                    parameters=parameters,
+                ))
 
         # 按 path 排序以保证输出稳定性
         endpoints.sort(key=lambda e: (e.path, e.http_method))
@@ -296,25 +320,23 @@ class CodePathTracer:
         """构建调用图（带缓存）"""
         global _tracer_graph_cache
 
-        now = time.time()
-        cache_key = self._project_root
-
-        if (
-            _tracer_graph_cache["key"] == cache_key
-            and _tracer_graph_cache["graph"] is not None
-            and (now - _tracer_graph_cache["timestamp"]) < _TRACER_CACHE_TTL
-        ):
-            self._graph = _tracer_graph_cache["graph"]  # type: ignore[assignment]
-            return
-
-        logger.info("Building call graph for CodePathTracer: %s", self._project_root)
+        now = time.monotonic()
+        cache_key = _graph_fingerprint(self._project_root, languages)
+        with _tracer_cache_lock:
+            if (
+                _tracer_graph_cache["key"] == cache_key
+                and _tracer_graph_cache["graph"] is not None
+                and now - _tracer_graph_cache["timestamp"] < _TRACER_CACHE_TTL
+            ):
+                self._graph = _tracer_graph_cache["graph"]
+                return
         self._graph = self._builder.build(
             self._project_root, languages=languages, skip_tests=True
         )
-
-        _tracer_graph_cache["graph"] = self._graph
-        _tracer_graph_cache["key"] = cache_key
-        _tracer_graph_cache["timestamp"] = now
+        if _graph_fingerprint(self._project_root, languages) != cache_key:
+            raise RuntimeError("Project changed during static analysis; retry")
+        with _tracer_cache_lock:
+            _tracer_graph_cache.update(graph=self._graph, key=cache_key, timestamp=now)
 
         logger.info(
             "Call graph built: %d nodes, %d edges",

@@ -1,0 +1,348 @@
+{
+  "sourceRange": "3e536438..053adf90",
+  "targetBaseline": "08cbdc45",
+  "capabilities": [
+    {
+      "id": "diff-scope",
+      "capability": "/diff只接收空/unstaged/staged/--staged；仓库根授权校验；读取失败不等于无差异；stat和正文分别截断",
+      "sourceCommit": "053adf90",
+      "sourcePath": "backend/src/main/java/com/aicodeassistant/command/impl/DiffCommand.java",
+      "implementation": [
+        "crates/zk-server/src/command/builtin/diff.rs"
+      ],
+      "status": "implemented_named_native_regressions_passed",
+      "verification": {
+        "status": "passed_named_native_regressions",
+        "tests": [
+          "command::builtin::git_regressions::diff_arguments_are_exact_and_read_failures_cannot_report_no_changes",
+          "command::builtin::git_regressions::complete_multi_megabyte_unstaged_and_staged_diffs_reach_the_preview"
+        ],
+        "evidenceRef": "#currentExecutionEvidence/nativeWorkspace",
+        "clippyEvidenceRef": "#currentExecutionEvidence/strictClippy",
+        "limits": "Only listed native assertions are evidenced. Source Java/remote API execution is not implied. Formal dev lifecycle passed independently; release browser E2E covers only its four explicit cases. Product matrix records additional component/native coverage and remaining limits."
+      },
+      "previousValidation": {
+        "status": "implemented",
+        "verification": {
+          "command": "ZK_RUN_GIT_TESTS=true cargo test -p zk-server command::builtin::git --lib --locked",
+          "result": "19 passed; actual isolated temporary Git repositories, no user checkout operations",
+          "test": "diff_arguments_are_exact_and_read_failures_cannot_report_no_changes",
+          "log": "/tmp/zk-git-command-tests3.txt"
+        }
+      }
+    },
+    {
+      "id": "commit-index",
+      "capability": "/commit仅预览/提交已暂存文件；NUL完整文件列表不裁剪文件名空白、不混入stderr；未暂存不自动git add",
+      "sourceCommit": "053adf90",
+      "sourcePath": "backend/src/main/java/com/aicodeassistant/command/impl/GitCommitCommand.java",
+      "implementation": [
+        "crates/zk-server/src/command/builtin/git_commit.rs"
+      ],
+      "status": "implemented_named_native_regressions_passed",
+      "verification": {
+        "status": "passed_named_native_regressions",
+        "tests": [
+          "command::builtin::git_regressions::commit_preview_contains_only_complete_staged_paths_and_preserves_message_arguments",
+          "command::builtin::git_commit::tests::staged_names_preserve_whitespace_and_reject_incomplete_protocol"
+        ],
+        "evidenceRef": "#currentExecutionEvidence/nativeWorkspace",
+        "clippyEvidenceRef": "#currentExecutionEvidence/strictClippy",
+        "limits": "Only listed native assertions are evidenced. Source Java/remote API execution is not implied. Formal dev lifecycle passed independently; release browser E2E covers only its four explicit cases. Product matrix records additional component/native coverage and remaining limits."
+      },
+      "previousValidation": {
+        "status": "implemented",
+        "verification": {
+          "command": "ZK_RUN_GIT_TESTS=true cargo test -p zk-server command::builtin::git --lib --locked",
+          "result": "19 passed; actual isolated temporary Git repositories, no user checkout operations",
+          "test": "commit_preview_contains_only_complete_staged_paths_and_preserves_message_arguments; staged_names_preserve_whitespace_and_reject_incomplete_protocol",
+          "log": "/tmp/zk-git-command-tests3.txt"
+        }
+      }
+    },
+    {
+      "id": "commit-merge",
+      "capability": "空树的pending merge允许提交；通过git --git-path兼容linked worktree .git文件",
+      "sourceCommit": "053adf90",
+      "sourcePath": "backend/src/main/java/com/aicodeassistant/command/impl/GitCommitCommand.java",
+      "implementation": [
+        "crates/zk-server/src/command/builtin/git_commit.rs"
+      ],
+      "status": "implemented_named_native_regressions_passed",
+      "verification": {
+        "status": "passed_named_native_regressions",
+        "tests": [
+          "command::builtin::git_regressions::commit_does_not_attempt_unstaged_changes_but_accepts_empty_tree_linked_worktree_merge"
+        ],
+        "evidenceRef": "#currentExecutionEvidence/nativeWorkspace",
+        "clippyEvidenceRef": "#currentExecutionEvidence/strictClippy",
+        "limits": "Only listed native assertions are evidenced. Source Java/remote API execution is not implied. Formal dev lifecycle passed independently; release browser E2E covers only its four explicit cases. Product matrix records additional component/native coverage and remaining limits."
+      },
+      "previousValidation": {
+        "status": "implemented",
+        "verification": {
+          "command": "ZK_RUN_GIT_TESTS=true cargo test -p zk-server command::builtin::git --lib --locked",
+          "result": "19 passed; actual isolated temporary Git repositories, no user checkout operations",
+          "test": "commit_does_not_attempt_unstaged_changes_but_accepts_empty_tree_linked_worktree_merge",
+          "log": "/tmp/zk-git-command-tests3.txt"
+        }
+      }
+    },
+    {
+      "id": "commit-unknown",
+      "capability": "消息独立argv保留引号/换行；失败/超时/不完整输出为UNKNOWN先核对log/status，无自动重试",
+      "sourceCommit": "053adf90",
+      "sourcePath": "backend/src/main/java/com/aicodeassistant/command/impl/GitCommitCommand.java",
+      "implementation": [
+        "crates/zk-server/src/command/builtin/git_commit.rs"
+      ],
+      "status": "implemented_named_native_regressions_passed",
+      "verification": {
+        "status": "passed_named_native_regressions",
+        "tests": [
+          "command::builtin::git_regressions::rejected_commit_reports_uncertainty_and_does_not_retry_a_hook",
+          "command::builtin::git_regressions::completed_commit_with_a_late_hook_is_uncertain_until_the_hook_really_finishes",
+          "command::builtin::git_regressions::explicit_commit_with_multi_megabyte_hook_output_succeeds_exactly_once"
+        ],
+        "evidenceRef": "#currentExecutionEvidence/nativeWorkspace",
+        "clippyEvidenceRef": "#currentExecutionEvidence/strictClippy",
+        "limits": "Only listed native assertions are evidenced. Source Java/remote API execution is not implied. Formal dev lifecycle passed independently; release browser E2E covers only its four explicit cases. Product matrix records additional component/native coverage and remaining limits."
+      },
+      "previousValidation": {
+        "status": "implemented",
+        "verification": {
+          "command": "ZK_RUN_GIT_TESTS=true cargo test -p zk-server command::builtin::git --lib --locked",
+          "result": "19 passed; actual isolated temporary Git repositories, no user checkout operations",
+          "test": "rejected_commit_reports_uncertainty_and_does_not_retry_a_hook; completed_commit_with_a_late_hook_is_uncertain_until_the_hook_really_finishes",
+          "log": "/tmp/zk-git-command-tests3.txt"
+        }
+      }
+    },
+    {
+      "id": "review-scope",
+      "capability": "显式用户审查比较对象/范围/排除原样保留，不预读diff；默认双预览共享预算且提醒未跟踪、截断和未覆盖",
+      "sourceCommit": "053adf90",
+      "sourcePath": "backend/src/main/java/com/aicodeassistant/command/impl/GitReviewCommand.java",
+      "implementation": [
+        "crates/zk-server/src/command/builtin/git_review.rs"
+      ],
+      "status": "implemented_named_native_regressions_passed",
+      "verification": {
+        "status": "passed_named_native_regressions",
+        "tests": [
+          "command::builtin::git_regressions::explicit_review_scope_never_prefetches_excluded_diff_and_default_discloses_coverage"
+        ],
+        "evidenceRef": "#currentExecutionEvidence/nativeWorkspace",
+        "clippyEvidenceRef": "#currentExecutionEvidence/strictClippy",
+        "limits": "Only listed native assertions are evidenced. Source Java/remote API execution is not implied. Formal dev lifecycle passed independently; release browser E2E covers only its four explicit cases. Product matrix records additional component/native coverage and remaining limits."
+      },
+      "previousValidation": {
+        "status": "implemented",
+        "verification": {
+          "command": "ZK_RUN_GIT_TESTS=true cargo test -p zk-server command::builtin::git --lib --locked",
+          "result": "19 passed; actual isolated temporary Git repositories, no user checkout operations",
+          "test": "explicit_review_scope_never_prefetches_excluded_diff_and_default_discloses_coverage",
+          "log": "/tmp/zk-git-command-tests3.txt"
+        }
+      }
+    },
+    {
+      "id": "git-process",
+      "capability": "人类可读diff与显式commit报告（含Hook输出）在16 MiB内完整捕获、机器格式与其他命令保留1 MiB上限；5秒截止/并发管道读取，借用Rust retained Git anchor监督；已结束Git的晚hook不被错误终止，仍活动返回UNKNOWN",
+      "sourceCommit": "053adf90",
+      "sourcePath": "backend/src/main/java/com/aicodeassistant/service/GitService.java",
+      "implementation": [
+        "crates/zk-server/src/command/builtin/git_review.rs",
+        "crates/zk-tools/src/git_process.rs"
+      ],
+      "status": "implemented_named_native_regressions_passed",
+      "verification": {
+        "status": "passed_named_native_regressions",
+        "tests": [
+          "command::builtin::git_regressions::complete_multi_megabyte_unstaged_and_staged_diffs_reach_the_preview",
+          "command::builtin::git_regressions::raw_git_preserves_whitespace_crlf_nul_and_unicode_without_merging_stderr",
+          "command::builtin::git_regressions::explicit_commit_with_multi_megabyte_hook_output_succeeds_exactly_once",
+          "process::tests::process_and_git_start_gates_prevent_side_effects_during_binding_failure_or_cancel",
+          "process::git_process::tests::invalid_utf8_git_output_is_never_authoritative_complete_output",
+          "process::git_process::tests::late_natural_hook_reports_uncertain_but_survives_cancellation"
+        ],
+        "evidenceRef": "#currentExecutionEvidence/nativeWorkspace",
+        "clippyEvidenceRef": "#currentExecutionEvidence/strictClippy",
+        "limits": "Only listed native assertions are evidenced. Source Java/remote API execution is not implied. Formal dev lifecycle passed independently; release browser E2E covers only its four explicit cases. Product matrix records additional component/native coverage and remaining limits."
+      },
+      "additionalRegressions": {
+        "status": "passed_in_complete_workspace",
+        "tests": [
+          "complete_multi_megabyte_unstaged_and_staged_diffs_reach_the_preview",
+          "raw_git_preserves_whitespace_crlf_nul_and_unicode_without_merging_stderr",
+          "explicit_commit_with_multi_megabyte_hook_output_succeeds_exactly_once"
+        ],
+        "note": "All three named regressions passed in resume7, including large hook stderr after its capture budget was corrected. Human diff/commit stdout and stderr each remain hard-bounded at 16 MiB; other protocols remain 1 MiB.",
+        "evidenceRef": "#currentExecutionEvidence/nativeWorkspace"
+      },
+      "previousValidation": {
+        "status": "implemented",
+        "verification": {
+          "command": "ZK_RUN_GIT_TESTS=true cargo test -p zk-server command::builtin::git --lib --locked",
+          "result": "19 passed; actual isolated temporary Git repositories, no user checkout operations",
+          "test": "completed_commit_with_a_late_hook_is_uncertain_until_the_hook_really_finishes",
+          "log": "/tmp/zk-git-command-tests3.txt"
+        }
+      }
+    }
+  ],
+  "notes": [
+    "Existing git-commit/git-review aliases retained. Git changes require explicit command and message; no auto add, push or PR.",
+    "Local slash commands do not create model Task/Run identities; shared Git supervisor retains process-local ownership until hooks are actually quiescent."
+  ],
+  "currentExecutionEvidence": {
+    "nativeWorkspace": {
+      "command": "ZK_RUN_GIT_TESTS=true CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --workspace --all-features --locked --no-fail-fast",
+      "status": "passed",
+      "result": "106 harness summaries; 2852 passed, 0 failed, 8 ignored. Ignored cases are not verified.",
+      "evidence": {
+        "path": "/tmp/zk-workspace-tests-resume7.txt",
+        "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7"
+      }
+    },
+    "strictClippy": {
+      "command": "CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo clippy --workspace --all-features --all-targets --locked -- -D warnings",
+      "status": "passed",
+      "evidence": {
+        "path": "/tmp/zk-workspace-clippy-resume10.txt",
+        "sha256": "d2c539975b17f1983e2c2f9465869204726adf8cf656244c3e35b4ca27489d0c"
+      }
+    },
+    "machineContracts": {
+      "command": "./scripts/parity/check-contracts.sh",
+      "status": "passed",
+      "evidence": {
+        "path": "/tmp/zk-release-contracts-resume7.log",
+        "sha256": "dd7dca9f28ae775b866302044d05a2c4700f78b16d8efd9ce8ec2ee7f9173de5"
+      },
+      "downstreamKinds": 60,
+      "databaseTables": 56,
+      "defaultTools": 34,
+      "compiledToolSchemaSha256": "315d341299f27dbe83a7e2ce808b994b72b9a701914e955920ddbf0abfd36e35"
+    },
+    "frontendUnit": {
+      "command": "cd frontend && npm test -- --run --reporter=verbose",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "135 files;1190 passed;16 unchanged baseline skips not counted as verified;141.86s",
+      "evidence": {
+        "path": "/tmp/zk-frontend-product-final-tests.txt",
+        "sha256": "2cfd332e58298aa51e36b6ad5b5d6504a7c68d970c88857208a579ab8e1ec819"
+      }
+    },
+    "latestBackendE2E": {
+      "command": "cd frontend && ZK_E2E_SERVER_BINARY=/Users/guoqingtao/Desktop/dev/code/zkcode/target/release/zk-server npm run test:e2e:production",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "4 passed in19.3s; actual release Rust binary, installed Chrome, fresh isolated SQLite and scripted local provider.",
+      "evidence": {
+        "path": "/tmp/zk-frontend-production-release-final.txt",
+        "sha256": "f72567c6cabc2dedae57f04c3b1d8ab2d96c76921a5dc49f15f8b4f880ed0e17"
+      },
+      "binaryEvidence": {
+        "path": "/Users/guoqingtao/Desktop/dev/code/zkcode/target/release/zk-server",
+        "sha256": "5c7985aba8e25b2356f343c401f21b72b191f3a6c99ef7b8e3a23198a8817491",
+        "version": "zk-server 0.1.0 (git 08cbdc45e12cc28f3f13aaafbd0b056b980dfb1a, built 1791332366, schema 2, ws 4)",
+        "sha256Before": "5c7985aba8e25b2356f343c401f21b72b191f3a6c99ef7b8e3a23198a8817491",
+        "sha256After": "5c7985aba8e25b2356f343c401f21b72b191f3a6c99ef7b8e3a23198a8817491"
+      },
+      "binaryHashBeforeEqualsAfter": true,
+      "cases": [
+        "real backend: upgraded diagram and math renderers display the assistant response",
+        "real backend: browser chat is durable before message_complete",
+        "real backend: settings, Skill management, and revisioned memory use native contracts",
+        "real backend: merge UI produces a charged, durable handoff and inherits primary permission"
+      ],
+      "limits": "These four browser cases do not cover every product scenario, external provider availability, source browser references, or source Java tests. Flat intermediate assistant-segment behavior has focused native-wire unit coverage; the plain chat E2E covers final completion and task boundary.",
+      "binaryIdentityRecord": {
+        "path": "/tmp/zk-frontend-release-binary-evidence.json",
+        "sha256": "51cda4f879900e2ea6f8890c72847f87eb7d576392ef7091158d47f15bd19e2c"
+      }
+    },
+    "previousDebugBackendE2E": {
+      "command": "cd frontend && ZK_E2E_SERVER_BINARY=/Users/guoqingtao/Desktop/dev/code/zkcode/target/debug/zk-server npm run test:e2e:production",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "4 passed in 21.3s using installed Chrome, fresh isolated SQLite, actual latest Rust server and scripted local provider.",
+      "evidence": {
+        "path": "/tmp/zk-frontend-production-latest.txt",
+        "sha256": "f83589d871f65cfa5e20186ca70ee81d14ff5d2f63b1edcf1b8a2e7f248aa4f5"
+      },
+      "binaryEvidence": {
+        "path": "/Users/guoqingtao/Desktop/dev/code/zkcode/target/debug/zk-server",
+        "sha256": "de3da835bd01a7a7fe3ecd6c6261af12d9b99a7690d0d47cd431332ecdd3c6d6",
+        "identityScope": "Historical executable used for /tmp/zk-frontend-production-latest.txt, recorded before/after execution; this path was rebuilt later. Never infer historical identity from the current file."
+      },
+      "binaryHashBeforeEqualsAfter": true,
+      "cases": [
+        "real backend: upgraded diagram and math renderers display the assistant response",
+        "real backend: browser chat is durable before message_complete",
+        "real backend: settings, Skill management, and revisioned memory use native contracts",
+        "real backend: merge UI produces a charged, durable handoff and inherits primary permission"
+      ],
+      "limits": "These four browser cases do not cover every product scenario, external provider availability, source browser references, or source Java tests. Flat intermediate assistant-segment behavior has focused native-wire unit coverage; the plain chat E2E covers final completion and task boundary.",
+      "identityCorrection": "Corrected documentation writer that accidentally hashed the later rebuilt debug path rather than the executable identity recorded during the run."
+    },
+    "formalDevLifecycle": {
+      "status": "passed",
+      "sync": {
+        "status": "passed",
+        "result": "exit0; supported local environment synced and debug binary built",
+        "evidence": {
+          "path": "/tmp/zk-dev-sync-online-latest.log",
+          "sha256": "55c5e8b42f9d845c601d6d3cf32545b23cd474cd007262256ab2fc1cba0d0948"
+        },
+        "command": "./dev sync --build"
+      },
+      "doctor": {
+        "status": "passed",
+        "result": "ok=true; every reported check is true",
+        "evidence": {
+          "path": "/tmp/zk-doctor-deep-final.json",
+          "sha256": "19b4b8cb97c26935d64ef0ceacebc8e00d77925a92a5b139f4ca0ed231dafa5a"
+        },
+        "command": "./dev doctor --deep --json"
+      }
+    },
+    "defaultWorkspace": {
+      "status": "passed",
+      "result": "106 harnesses;2852 passed,0 failed,8 ignored; ZK_RUN_GIT_TESTS=true",
+      "evidence": {
+        "path": "/tmp/zk-workspace-tests-default-final.txt",
+        "sha256": "c0c9fb73f284c8b10c830886ec5e4f416d92dad7a5ba20f1f0a704ed0752a567"
+      }
+    },
+    "engineNoDefaultFeatures": {
+      "status": "passed",
+      "result": "616 passed; optional image thumbnail feature disabled",
+      "evidence": {
+        "path": "/tmp/zk-engine-no-default-final.txt",
+        "sha256": "bdd59d268e7d6123198fa92c90b7df41a76811fc3b7e103c0aabf2ac9fb39eae"
+      }
+    },
+    "nativeJourney": {
+      "status": "passed",
+      "result": "1 passed; real Rust→UDS→Python→Chromium and HTTP managed previews/evidence/resource cleanup",
+      "evidence": {
+        "path": "/tmp/zk-verify-journey-native-final.txt",
+        "sha256": "d7a59ab06950e8b15d1b1dcb4b350f5f845c1f515dc651f2a1d573c0f55b1d07"
+      }
+    },
+    "previousFrontendUnit": {
+      "command": "cd frontend && npm run test:run",
+      "status": "passed",
+      "result": "135 files; 1185 passed, 16 skipped. Skips are not verified.",
+      "evidence": {
+        "path": "/tmp/zk-frontend-native-segment-full.txt",
+        "sha256": "72c0e93f5abb385473d216d15cc43b1e56f27eeefc0ca36138139f502bd1ae89"
+      }
+    }
+  },
+  "currentExecutionScope": "Named native assertions passed in the complete workspace run and strict Clippy passed. Formal dev sync/build and deep doctor passed. Release-binary browser E2E passed only its four explicit cases. Product acceptance is itemized in product-acceptance-matrix.json. Source Java permutations, paid remote services and the remaining baseline skipped frontend assertions are not claimed passed. Previous validation remains historical.",
+  "productAcceptanceMatrix": "docs/migration/product-acceptance-matrix.json"
+}

@@ -1,5 +1,6 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { useBridgeStore } from '@/store/bridgeStore';
 import { SettingsPanel } from '@/components/dialog/SettingsPanel';
 import { useNotificationStore } from '@/store/notificationStore';
 import { usePermissionStore } from '@/store/permissionStore';
@@ -9,7 +10,7 @@ import { useConfigStore } from '@/store/configStore';
 
 const { binding, sendSetModel, sendSetPermissionMode } = vi.hoisted(() => ({
     binding: { bound: true },
-    sendSetModel: vi.fn(),
+    sendSetModel: vi.fn(() => true),
     sendSetPermissionMode: vi.fn(() => true),
 }));
 
@@ -18,10 +19,13 @@ const saveConfig = vi.fn(async () => {});
 
 vi.mock('@/api/dispatch', () => ({
     isSessionBound: () => binding.bound,
+    isSessionBindingReady: () => binding.bound,
+    subscribeSessionBinding: () => () => {},
 }));
 
 vi.mock('@/api/stompClient', () => ({
     sendSetModel,
+    isWsConnected: () => true,
     sendSetPermissionMode,
 }));
 
@@ -32,6 +36,7 @@ describe('SettingsPanel permission modes', () => {
         sendSetPermissionMode.mockClear();
         sendSetPermissionMode.mockReturnValue(true);
         binding.bound = true;
+        useBridgeStore.setState({ bridgeStatus: 'connected' });
         useConfigStore.setState({
             defaultModel: 'current-model',
             saveConfig,
@@ -49,7 +54,7 @@ describe('SettingsPanel permission modes', () => {
             loading: false,
             error: null,
         });
-        usePermissionStore.setState({ permissionMode: 'default', pendingPermissions: [] });
+        usePermissionStore.setState({ permissionMode: 'default', pendingPermissions: [], pendingModeChange: null, modeChangeMessage: null });
         useNotificationStore.getState().clearAll();
     });
 
@@ -90,7 +95,7 @@ describe('SettingsPanel permission modes', () => {
         expect(screen.getByText('完全访问权限')).toBeInTheDocument();
     });
 
-    it('applies an advertised model to the current and future sessions', () => {
+    it('keeps current-session selection separate from the new-session default', () => {
         useModelStore.setState({
             models: [
                 {
@@ -111,7 +116,7 @@ describe('SettingsPanel permission modes', () => {
 
         render(<SettingsPanel onClose={vi.fn()} />);
 
-        const modelOption = screen.getByRole('option', { name: 'New Provider Model' });
+        const modelOption = screen.getAllByRole('option', { name: 'New Provider Model' })[0];
         expect(modelOption).toBeInTheDocument();
         const modelSelect = modelOption.closest('select');
         expect(modelSelect).not.toBeNull();
@@ -119,6 +124,8 @@ describe('SettingsPanel permission modes', () => {
             .toEqual(['current-model', 'new-model']);
         if (modelSelect) fireEvent.change(modelSelect, { target: { value: 'new-model' } });
         expect(useSessionStore.getState().model).toBe('new-model');
+        expect(saveConfig).not.toHaveBeenCalled();
+        fireEvent.change(screen.getByLabelText('新会话默认模型'), { target: { value: 'new-model' } });
         expect(saveConfig).toHaveBeenCalledWith({ defaultModel: 'new-model' });
         expect(sendSetModel).toHaveBeenCalledWith('new-model');
     });
@@ -128,7 +135,7 @@ describe('SettingsPanel permission modes', () => {
 
         fireEvent.click(screen.getByText('完全访问权限'));
 
-        expect(sendSetPermissionMode).toHaveBeenCalledWith('AUTO_APPROVE');
+        expect(sendSetPermissionMode).toHaveBeenCalledWith('AUTO_APPROVE', expect.any(String));
         expect(usePermissionStore.getState().permissionMode).toBe('default');
     });
 

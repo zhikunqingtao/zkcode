@@ -80,7 +80,12 @@ impl NotebookEditTool {
             return false;
         };
         if content.len() > MAX_SNAPSHOT_BYTES {
-            tracing::warn!(path = %path.display(), bytes = content.len(), "snapshot skipped: too large");
+            tracing::warn!(
+                tool = "NotebookEdit",
+                code = "HISTORY_SNAPSHOT_TOO_LARGE",
+                bytes = content.len(),
+                "snapshot skipped"
+            );
             return false;
         }
         let request = SnapshotRequest {
@@ -88,14 +93,18 @@ impl NotebookEditTool {
             message_id: ctx.tool_use_id().map(str::to_owned),
             file_path: path.to_string_lossy().into_owned(),
             content: content.to_owned(),
+            original_bytes: None,
             operation: "notebook_edit".to_owned(),
         };
-        match sink.capture(request).await {
-            Ok(()) => true,
-            Err(error) => {
-                tracing::warn!(path = %path.display(), %error, "snapshot persist failed");
-                false
-            }
+        if sink.capture(request).await.is_ok() {
+            true
+        } else {
+            tracing::warn!(
+                tool = "NotebookEdit",
+                code = "HISTORY_SNAPSHOT_PERSIST_FAILED",
+                "snapshot persist failed"
+            );
+            false
         }
     }
 }
@@ -319,7 +328,11 @@ impl NotebookEditTool {
         )
         .await;
         if artifact.is_none() {
-            tracing::error!(path = %path.display(), "applied NotebookEdit could not produce an artifact receipt");
+            tracing::error!(
+                tool = "NotebookEdit",
+                code = "FILE_ARTIFACT_RECEIPT_UNAVAILABLE",
+                "applied file operation could not produce an artifact receipt"
+            );
         }
         file_state::global().mark_modified(session, &display);
 

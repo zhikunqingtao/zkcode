@@ -47,30 +47,12 @@ pub(crate) async fn create_session(
     State(state): State<AppState>,
     body: Bytes,
 ) -> Result<(StatusCode, Json<CreateSessionResponse>), ApiError> {
-    let request = if body.is_empty() {
-        None
-    } else {
-        Some(
-            serde_json::from_slice::<CreateSessionRequest>(&body)
-                .map_err(|_| ApiError::invalid_request_body())?,
-        )
-    };
-    if let Some(req) = &request {
-        let rejected = req
-            .working_directory
-            .as_deref()
-            .is_some_and(|value| !value.trim().is_empty());
-        if rejected {
-            return Err(ApiError::validation_with_code(
-                "SESSION_WORKING_DIRECTORY_UNSUPPORTED",
-                "Use projectId instead of workingDirectory",
-            ));
-        }
-    }
-    let model = resolve_model(
+    let request = parse_create_session_request(&body)?;
+    let model = resolve_new_session_model(
         &state,
         request.as_ref().and_then(|req| req.model.as_deref()),
-    )?;
+    )
+    .await?;
     // 新建会话默认授予完全访问权限（免首轮逐次工具确认）；请求显式携带
     // permissionMode 时以请求为准，非法值按 query 端同规则 400。
     let permission_mode = request
@@ -119,14 +101,19 @@ pub(crate) async fn create_session(
             |path| path.to_string_lossy().into_owned(),
         )
     };
-    let summary = state.db.create_session(&model, &working_dir).await?;
-    // 登记到 PermissionModeRegistry——缺了这步 `get_mode` 会回退 DEFAULT，
-    // WS 绑定后的 session_restored 便把 DEFAULT 当作生效模式回传前端。
-    state
-        .authz
-        .modes
-        .set_mode(&summary.id, permission_mode)
-        .await;
+    let summary = state
+        .db
+        .create_session_with_permission(
+            &uuid::Uuid::new_v4().to_string(),
+            &model,
+            &working_dir,
+            Some(permission_mode.as_str()),
+        )
+        .await?;
+    // Permission was stored with creation. Persistent sessions must read that
+    // authoritative value; only genuinely ephemeral verifier sessions use overrides.
+    // SessionStart runs at the first durable conversation Root, where cancellation,
+    // the total deadline and physical resource ownership exist (also for WS users).
     Ok((
         StatusCode::CREATED,
         Json(CreateSessionResponse {
@@ -138,6 +125,43 @@ pub(crate) async fn create_session(
             permission_mode: permission_mode.as_str().to_owned(),
         }),
     ))
+}
+
+fn parse_create_session_request(body: &[u8]) -> Result<Option<CreateSessionRequest>, ApiError> {
+    let request = if body.is_empty() {
+        None
+    } else {
+        Some(
+            serde_json::from_slice::<CreateSessionRequest>(body)
+                .map_err(|_| ApiError::invalid_request_body())?,
+        )
+    };
+    if let Some(req) = &request {
+        let rejected = req
+            .working_directory
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty());
+        if rejected {
+            return Err(ApiError::validation_with_code(
+                "SESSION_WORKING_DIRECTORY_UNSUPPORTED",
+                "Use projectId instead of workingDirectory",
+            ));
+        }
+    }
+    Ok(request)
+}
+
+/// Saved defaults affect only new sessions; selecting a current-session model never writes them.
+pub(super) async fn resolve_new_session_model(
+    state: &AppState,
+    requested: Option<&str>,
+) -> Result<String, ApiError> {
+    match requested.map(str::trim).filter(|value| !value.is_empty()) {
+        None | Some("premium" | "default" | "inherit") => {
+            Ok(super::config::load_user_config(state).await?.default_model)
+        }
+        explicit => resolve_model(state, explicit),
+    }
 }
 
 pub(super) fn resolve_model(state: &AppState, requested: Option<&str>) -> Result<String, ApiError> {
@@ -222,7 +246,14 @@ pub(crate) async fn list_sessions(
     )?;
     let page = state
         .db
-        .list_sessions(query.get("cursor").map(String::as_str), limit)
+        .search_sessions(
+            query.get("cursor").map(String::as_str),
+            limit,
+            query
+                .get("q")
+                .or_else(|| query.get("query"))
+                .map_or("", String::as_str),
+        )
         .await?;
     Ok(Json(page))
 }
@@ -258,7 +289,8 @@ pub(crate) async fn delete_session(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
 ) -> Result<Json<DeleteSessionResponse>, ApiError> {
-    let _existed = state.db.delete_session(&session_id).await?;
+    super::session_hooks::execute(state, session_id, super::session_hooks::Operation::Delete)
+        .await?;
     Ok(Json(DeleteSessionResponse { success: true }))
 }
 
@@ -278,6 +310,7 @@ pub(crate) async fn resume_session(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
 ) -> Result<Json<ResumeSessionResponse>, ApiError> {
+    require_durable_conversation(&state, &session_id).await?;
     let detail = load_session(&state, &session_id).await?;
     Ok(Json(ResumeSessionResponse {
         session_id: detail.session_id.clone(),
@@ -301,22 +334,12 @@ pub(crate) async fn compact_session(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
 ) -> Result<Json<CompactResponse>, ApiError> {
-    let detail = load_session(&state, &session_id).await?;
-    let outcome = mapping::compact_deterministic(&detail.messages);
-    if let Some(summary) = &outcome.summary {
-        let updated = state
-            .db
-            .update_session_summary(&detail.session_id, summary)
-            .await?;
-        if !updated {
-            tracing::warn!(session_id = %detail.session_id, "compact summary target session vanished");
-        }
+    match super::session_hooks::execute(state, session_id, super::session_hooks::Operation::Compact)
+        .await?
+    {
+        super::session_hooks::Response::Compacted(result) => Ok(Json(result)),
+        super::session_hooks::Response::Deleted => Err(ApiError::internal()),
     }
-    Ok(Json(CompactResponse {
-        success: true,
-        tokens_before: outcome.tokens_before,
-        tokens_after: outcome.tokens_after,
-    }))
 }
 
 /// `POST /api/sessions/{id}/export`——JSON（独立序列化语义）或 markdown。
@@ -338,6 +361,7 @@ pub(crate) async fn export_session(
     Path(session_id): Path<String>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Result<Response, ApiError> {
+    require_durable_conversation(&state, &session_id).await?;
     let detail = load_session(&state, &session_id).await?;
     let format = query
         .get("format")
@@ -415,16 +439,64 @@ pub(crate) async fn list_session_messages(
     }))
 }
 
+/// Enforce retention before decoding content, including after its RAM lease ends.
+/// Live detail/messages reads remain legal while an ephemeral scope is active.
+async fn require_durable_conversation(state: &AppState, session_id: &str) -> Result<(), ApiError> {
+    if state.db.session_retention(session_id).await? == zk_db::content::ContentRetention::Ephemeral
+    {
+        return Err(ApiError::validation_with_code(
+            "EPHEMERAL_OPERATION_UNSUPPORTED",
+            "Temporary conversations cannot be exported or resumed",
+        ));
+    }
+    Ok(())
+}
+
 /// 详情加载 + 404 映射（detail / resume / compact / export 共用）。
 async fn load_session(
     state: &AppState,
     session_id: &str,
 ) -> Result<zk_db::model::SessionDetail, ApiError> {
+    if state.db.is_merge_billing_session(session_id).await? {
+        return Err(ApiError::session_not_found(session_id));
+    }
     state
         .db
         .get_session(session_id)
         .await?
         .ok_or_else(|| ApiError::session_not_found(session_id))
+}
+
+/// UI projections are scoped separately from the canonical conversation body.
+#[utoipa::path(
+    get, path = "/api/sessions/{id}/tool-presentations", tag = "sessions",
+    params(("id" = String, Path), ("X-Session-Id" = String, Header), ("after" = Option<i64>, Query)),
+    responses((status = 200, description = "Scoped presentation page"), (status = 400, description = "Invalid cursor"), (status = 404, description = "Session not accessible"))
+)]
+pub(crate) async fn tool_presentations(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    headers: axum::http::HeaderMap,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, ApiError> {
+    let asserted = crate::session_access::require_session_header(&headers)?;
+    if !crate::session_access::can_access_session(&state, &session_id, &asserted).await? {
+        return Err(ApiError::session_not_found(&session_id));
+    }
+    let after = query
+        .get("after")
+        .map_or(Ok(0), |value| value.parse::<i64>())
+        .map_err(|_| ApiError::validation("Invalid presentation cursor"))?;
+    if after < 0 {
+        return Err(ApiError::validation("Invalid presentation cursor"));
+    }
+    let records = state.db.hook_presentations(&session_id, after, 200).await?;
+    let next = (records.len() == 200)
+        .then(|| records.last().map(|record| record.sequence))
+        .flatten();
+    Ok(Json(
+        serde_json::json!({"presentations":records,"nextCursor":next}),
+    ))
 }
 
 /// limit 解析：缺省/空白取默认；非法或 0 → 400 `INVALID_REQUEST`。

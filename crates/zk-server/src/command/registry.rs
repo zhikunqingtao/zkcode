@@ -149,6 +149,7 @@ impl CommandRegistry {
             .by_name
             .get(&lower)
             .or_else(|| index.by_alias.get(&lower))
+            .filter(|command| command.is_available())
             .map(Arc::clone)
     }
 
@@ -177,7 +178,9 @@ impl CommandRegistry {
         let mut candidates: Vec<(usize, String)> = self
             .read()
             .by_name
-            .keys()
+            .iter()
+            .filter(|(_, command)| command.is_available())
+            .map(|(name, _)| name)
             .filter(|name| {
                 levenshtein_distance(&lower, name) <= 3
                     || name.contains(&lower)
@@ -206,7 +209,7 @@ impl CommandRegistry {
         self.read()
             .by_name
             .values()
-            .filter(|command| !command.is_hidden())
+            .filter(|command| command.is_available() && !command.is_hidden())
             .map(Arc::clone)
             .collect()
     }
@@ -217,7 +220,7 @@ impl CommandRegistry {
         self.read()
             .by_name
             .values()
-            .filter(|command| command.command_type() == command_type)
+            .filter(|command| command.is_available() && command.command_type() == command_type)
             .map(Arc::clone)
             .collect()
     }

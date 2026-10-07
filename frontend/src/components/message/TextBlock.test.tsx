@@ -4,6 +4,14 @@ import { useSessionStore } from '@/store/sessionStore';
 import TextBlock from './TextBlock';
 
 describe('TextBlock markdown images', () => {
+    it('renders completed and pending GFM task items with accessible status markers', () => {
+        render(<TextBlock text={'- [x] verified\n- [ ] pending'} />);
+        expect(screen.getByLabelText('已完成')).toBeInTheDocument();
+        expect(screen.getByLabelText('未完成')).toBeInTheDocument();
+        expect(screen.getByText('verified')).toBeVisible();
+        expect(screen.getByText('pending')).toBeVisible();
+    });
+
     const fetchMock = vi.fn();
     const createObjectUrl = vi.fn();
     const revokeObjectUrl = vi.fn();

@@ -1,0 +1,2131 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-07T12:57:06.935686+00:00",
+  "sourceTarget": "053adf9071dc1996aa1ebfa30c0a23d587ffad5c",
+  "rustBaseline": "08cbdc45e12cc28f3f13aaafbd0b056b980dfb1a",
+  "overallStatus": "passed_with_explicit_limits",
+  "scope": "F1–F5 repairs and real SQLite summary-ledger acceptance on the existing migration. Local required gates completed; optional paid-provider execution excluded. Same main branch, no DB rebuild, no commit/push/PR.",
+  "gates": [
+    {
+      "id": "machine-contracts",
+      "status": "passed",
+      "result": "Current corrected-source command exited 0; detailed counts are recorded separately.",
+      "priorAttempts": [
+        {
+          "status": "passed",
+          "command": "./scripts/parity/check-contracts.sh",
+          "evidence": {
+            "path": "/tmp/zk-alignment-contracts-final.txt",
+            "sha256": "dd7dca9f28ae775b866302044d05a2c4700f78b16d8efd9ce8ec2ee7f9173de5"
+          },
+          "result": "V4/REST/WS/schema and public credential fixture check passed before new complexity/Git endpoints; requires final rerun."
+        },
+        {
+          "status": "passed",
+          "result": "Frozen-tree V4/REST/WS/schema and public credential fixture checks passed, including the final complexity/Git endpoints.",
+          "exitCode": 0,
+          "command": "./scripts/parity/check-contracts.sh",
+          "evidence": {
+            "path": "/tmp/zk-alignment-contracts-final3.txt",
+            "sha256": "dd7dca9f28ae775b866302044d05a2c4700f78b16d8efd9ce8ec2ee7f9173de5"
+          }
+        },
+        {
+          "status": "passed",
+          "result": "Corrected-source V4/REST/WS/schema and public credential fixture checks passed.",
+          "exitCode": 0,
+          "command": "./scripts/parity/check-contracts.sh",
+          "evidence": {
+            "path": "/tmp/zk-alignment-thinking-contracts-final.txt",
+            "sha256": "dd7dca9f28ae775b866302044d05a2c4700f78b16d8efd9ce8ec2ee7f9173de5"
+          }
+        }
+      ],
+      "command": "./scripts/parity/check-contracts.sh",
+      "requiredForCurrentScope": true,
+      "exitCode": 0,
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-contracts-frozen-final.txt",
+        "sha256": "dd7dca9f28ae775b866302044d05a2c4700f78b16d8efd9ce8ec2ee7f9173de5"
+      },
+      "cwd": "/Users/guoqingtao/Desktop/dev/code/zkcode",
+      "startedAt": "2026-10-07T12:45:31.872229+00:00",
+      "finishedAt": "2026-10-07T12:45:35.376818+00:00",
+      "durationSeconds": 3.504
+    },
+    {
+      "id": "python-full",
+      "status": "passed",
+      "cwd": "python-service",
+      "result": "342 passed, 0 failed; 9 dependency/deprecation warnings; parent-process coverage 75.85%. Real spawn regression does not count child coverage in the parent. Source remains byte-identical to this full-suite manifest.",
+      "priorAttempts": [
+        {
+          "status": "passed",
+          "command": ".venv/bin/python -m pytest --cov=src --cov-fail-under=70",
+          "cwd": "python-service",
+          "evidence": {
+            "path": "/tmp/zk-python-alignment-full.txt",
+            "sha256": "36ccd201925bd3fe3c5584115ecd94c9f6f229cb142b09b53f3c6acf02fb427e"
+          },
+          "result": "332 passed, 9 warnings in 43.05s; coverage 75.79%."
+        },
+        {
+          "status": "passed",
+          "cwd": "python-service",
+          "result": "335 passed, 9 dependency/deprecation warnings; coverage 75.83%, above the 70% floor.",
+          "exitCode": 0,
+          "command": ".venv/bin/python -m pytest --cov=src --cov-fail-under=70",
+          "evidence": {
+            "path": "/tmp/zk-python-alignment-final-coverage.txt",
+            "sha256": "c36a07d7903e2ce700bbca684922e0081e01e62d1493faeb860e13be9ffc00ca"
+          }
+        }
+      ],
+      "command": ".venv/bin/python -m pytest --cov=src --cov-fail-under=70",
+      "requiredForCurrentScope": true,
+      "exitCode": 0,
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-f4-coverage-matrix-full.txt",
+        "sha256": "9a7263244d58ebde523550b4a2684a3d200adae32c87dda1c7ce0e1284ad08a3"
+      },
+      "additionalEvidence": [
+        {
+          "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-f4-coverage-matrix-evidence.json",
+          "sha256": "5e7a30cf971864553994e8ab3dd6600b3e6a0daaf2c7a6a8919ef72ed14d5484"
+        },
+        {
+          "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-scoped-source-match.json",
+          "sha256": "c91f41f22605ecb412d4f81409c8bd48b3ab4de193129f7b121712068f511372"
+        }
+      ]
+    },
+    {
+      "id": "dev-bootstrap-tests",
+      "status": "passed",
+      "command": "python-service/.venv/bin/python -m unittest discover -s scripts/dev/tests -v",
+      "result": "87 passed using the configured Python 3.11.",
+      "priorAttempts": [
+        {
+          "status": "failed",
+          "command": "python3 -m unittest discover -s scripts/dev/tests -v",
+          "result": "Shell python3 resolved to unsupported Xcode Python 3.9; 4 import/runtime errors. Re-ran with configured 3.11 without changing assertions.",
+          "evidence": {
+            "path": "/tmp/zk-dev-alignment-tests.txt",
+            "sha256": "87460669cb7082954f70fe858ad81dcb961353a18ff6d84aa8beac824639e604"
+          }
+        },
+        {
+          "status": "passed",
+          "command": "python-service/.venv/bin/python -m unittest discover -s scripts/dev/tests -v",
+          "evidence": {
+            "path": "/tmp/zk-dev-alignment-tests-py311.txt",
+            "sha256": "591db59e93062fe659482562388ee236b0add36b81b3454973c89017a115775b"
+          },
+          "result": "87 passed with supported Python 3.11 in 17.773s."
+        }
+      ],
+      "requiredForCurrentScope": true,
+      "exitCode": 0,
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-bootstrap-final.txt",
+        "sha256": "1f364f09c3a1ca52f9f9a8ce02390d63ca528a1e2931e171cce0f1b5e92114de"
+      }
+    },
+    {
+      "id": "cargo-fmt",
+      "status": "passed",
+      "result": "Current source format check passed.",
+      "priorAttempts": [
+        {
+          "status": "passed",
+          "result": "Format check passed at the earlier freeze; later test/entry edits require final check.",
+          "evidence": {
+            "path": "/tmp/zk-alignment-fmt-final.txt",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          }
+        },
+        {
+          "status": "passed",
+          "result": "Final frozen-source format check passed.",
+          "exitCode": 0,
+          "command": "cargo fmt --all -- --check",
+          "evidence": {
+            "path": "/tmp/zk-alignment-fmt-final.txt",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "sourceSnapshotNote": "Passed before correcting DeepSeek explicit thinking=disabled handling. Retained as historical source/artifact evidence, not final validation of the correction."
+        },
+        {
+          "status": "passed",
+          "result": "Thinking-control correction frozen-source format check passed.",
+          "command": "cargo fmt --all -- --check",
+          "exitCode": 0,
+          "evidence": {
+            "path": "/tmp/zk-alignment-thinking-fmt.txt",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          }
+        },
+        {
+          "status": "passed",
+          "result": "Final corrected-source format check passed.",
+          "command": "cargo fmt --all -- --check",
+          "exitCode": 0,
+          "evidence": {
+            "path": "/tmp/zk-alignment-thinking-fmt-final.txt",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          }
+        }
+      ],
+      "command": "cargo fmt --all -- --check",
+      "requiredForCurrentScope": true,
+      "cwd": "/Users/guoqingtao/Desktop/dev/code/zkcode",
+      "startedAt": "2026-10-07T12:33:47.321508+00:00",
+      "finishedAt": "2026-10-07T12:33:49.686415+00:00",
+      "durationSeconds": 2.365,
+      "exitCode": 0,
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-fmt-final5.txt",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "id": "cargo-clippy-all",
+      "status": "passed",
+      "result": "Strict workspace/all-targets/all-features Clippy passed with -D warnings.",
+      "priorAttempts": [
+        {
+          "status": "passed",
+          "result": "Strict workspace/all-targets/all-features -D warnings passed after Hook admission and REPL typed port fixes, 37.50s.",
+          "command": "CARGO_INCREMENTAL=0 cargo clippy --workspace --all-targets --all-features --keep-going --locked --offline -- -D warnings",
+          "evidence": {
+            "path": "/tmp/zk-alignment-clippy-final.txt",
+            "sha256": "52736bd0b5c510f9f733e3dba74734160257eb6c53b992c0c5774311006fa8da"
+          }
+        },
+        {
+          "status": "passed",
+          "result": "Final frozen-source strict workspace/all-targets/all-features -D warnings passed in 21.39s.",
+          "exitCode": 0,
+          "command": "CARGO_INCREMENTAL=0 cargo clippy --workspace --all-targets --all-features --keep-going --locked --offline -- -D warnings",
+          "evidence": {
+            "path": "/tmp/zk-alignment-clippy-final4.txt",
+            "sha256": "8c78a6cb8c4dad5a388de0bee810a2412abcabeb71b94ca219807c182ab3cd49"
+          },
+          "sourceSnapshotNote": "Passed before correcting DeepSeek explicit thinking=disabled handling. Retained as historical source/artifact evidence, not final validation of the correction."
+        },
+        {
+          "status": "passed",
+          "result": "Thinking-control correction strict workspace/all-targets/all-features -D warnings passed in 26.15s.",
+          "command": "CARGO_INCREMENTAL=0 cargo clippy --workspace --all-targets --all-features --keep-going --locked --offline -- -D warnings",
+          "exitCode": 0,
+          "evidence": {
+            "path": "/tmp/zk-alignment-thinking-clippy.txt",
+            "sha256": "effb85bad3d4dcc35efd92ceeef9d2006adfd2c84fd61535daea1061bdcb4160"
+          }
+        },
+        {
+          "status": "passed",
+          "result": "Final corrected-source strict workspace/all-targets/all-features -D warnings passed in 1.93s.",
+          "command": "CARGO_INCREMENTAL=0 cargo clippy --workspace --all-targets --all-features --keep-going --locked --offline -- -D warnings",
+          "exitCode": 0,
+          "evidence": {
+            "path": "/tmp/zk-alignment-thinking-clippy-final.txt",
+            "sha256": "2792530b7b1a1f84d2b6c263c980b0e8fc7240d1dbd0a8703b65e893b1cabd78"
+          }
+        },
+        {
+          "id": "cargo-clippy-all",
+          "command": "CARGO_INCREMENTAL=0 cargo clippy --workspace --all-targets --all-features --keep-going --locked --offline -- -D warnings",
+          "cwd": "/Users/guoqingtao/Desktop/dev/code/zkcode",
+          "startedAt": "2026-10-07T12:00:38.519854+00:00",
+          "finishedAt": "2026-10-07T12:01:00.939851+00:00",
+          "durationSeconds": 22.42,
+          "exitCode": 101,
+          "evidence": {
+            "path": "/tmp/zk-fix-clippy-final.txt",
+            "sha256": "9052c42a645d4b02ac5f6b47312de4eb96eba32adb20621627df95fe54b75af7"
+          },
+          "status": "failed"
+        },
+        {
+          "id": "cargo-clippy-all",
+          "command": "CARGO_INCREMENTAL=0 cargo clippy --workspace --all-targets --all-features --keep-going --locked --offline -- -D warnings",
+          "cwd": "/Users/guoqingtao/Desktop/dev/code/zkcode",
+          "startedAt": "2026-10-07T12:02:24.060052+00:00",
+          "finishedAt": "2026-10-07T12:02:40.769802+00:00",
+          "durationSeconds": 16.71,
+          "exitCode": 101,
+          "evidence": {
+            "path": "/tmp/zk-fix-clippy-final2.txt",
+            "sha256": "f1c60526e48143851fb4a4baf1455deef5d9f80feea0b98a32f7d1041ffe4b3b"
+          },
+          "status": "failed"
+        }
+      ],
+      "command": "CARGO_INCREMENTAL=0 cargo clippy --workspace --all-targets --all-features --keep-going --locked --offline -- -D warnings",
+      "requiredForCurrentScope": true,
+      "cwd": "/Users/guoqingtao/Desktop/dev/code/zkcode",
+      "startedAt": "2026-10-07T12:34:01.290826+00:00",
+      "finishedAt": "2026-10-07T12:34:30.127836+00:00",
+      "durationSeconds": 28.837,
+      "exitCode": 0,
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-clippy-final5.txt",
+        "sha256": "25b8cd15649a08c033c58b5656072abee8dde67d6afd3f470f6794b2f9aa8f06"
+      }
+    },
+    {
+      "id": "cargo-workspace-tests",
+      "status": "passed",
+      "result": "148 independent harnesses: 3199 passed, 0 failed, 9 ignored. The raw log includes one nested tools test reexecution, excluded from the total.",
+      "priorAttempts": [
+        {
+          "status": "failed",
+          "evidence": {
+            "path": "/tmp/zk-alignment-workspace-tests-first.txt",
+            "sha256": "c2fa640ada392ef0e994af50dba2f767ea3c227707e85f95f47488e0c0ad6704"
+          },
+          "result": "14 target failures. Includes production unknown-usage gate, durable timeout classification and REPL executor architecture problems, plus outdated/invalid fixtures. Follow-up fixes retain or strengthen assertions."
+        },
+        {
+          "status": "failed",
+          "evidence": {
+            "path": "/tmp/zk-alignment-workspace-tests-second.txt",
+            "sha256": "5ecaca36733dda8609d0116f0eb26fec997d46f4c395a40681fa4e7bef1ec9c3"
+          },
+          "result": "Second attempt: 6 target failures. Four MCP capability cases completed; fifth was stopped while waiting for a missing real local permission decision in its fixture. Remaining failures: Hook cancel fixture never applied, tracing capture concurrency, guarded Bash fixture, true partial checkpoint-envelope recovery defect, Query fixture expecting interactive WS delivery without a WS client. Assertions preserved; latest fixes require rerun."
+        },
+        {
+          "status": "passed",
+          "result": "Final frozen-source run exited 0: 145 independent harnesses, 3138 passed, 0 failed, 9 ignored. Raw log has 146 result lines / 3139 passed because one native process test reexecutes itself; that nested result is included in its outer 394-test tools harness and is not counted twice. Four native ignored cases were explicitly passed separately; five remote paid-credential test cases remain unrun.",
+          "exitCode": 0,
+          "command": "CARGO_INCREMENTAL=0 ZK_RUN_GIT_TESTS=true cargo test --workspace --locked --offline --no-fail-fast",
+          "counts": {
+            "harnesses": 145,
+            "passed": 3138,
+            "failed": 0,
+            "ignored": 9,
+            "rawResultLines": 146,
+            "rawPassedSum": 3139,
+            "excludedNestedReexecutionPassed": 1
+          },
+          "ignoredDisposition": {
+            "separatelyPassed": [
+              "native-keychain: 1",
+              "native-lsp: 1 covering five languages",
+              "native-browser: 2"
+            ],
+            "notRun": [
+              "dashscope_live",
+              "dashscope_token_plan_live",
+              "deepseek_live",
+              "moonshot_kimi_live",
+              "mcp_search::tests::dashscope_web_search_live"
+            ]
+          },
+          "evidence": {
+            "path": "/tmp/zk-alignment-workspace-tests-final.txt",
+            "sha256": "d7e0c4cc106318b9d13f2b82b5730d6211d3bc4d052372327130028c96c8dc98"
+          },
+          "sourceSnapshotNote": "Passed before correcting DeepSeek explicit thinking=disabled handling. Retained as historical source/artifact evidence, not final validation of the correction."
+        },
+        {
+          "status": "failed",
+          "result": "First thinking-correction workspace attempt has 2 real wire fixture failures (7 of 9 wire cases passed). Unknown/old model identifiers correctly use conservative context 8192; fixture output default 8192 left zero input budget. Only the two fixtures now set max_tokens=512; production guard/pricing/capabilities unchanged. Entire attempt is failed, regardless of remaining passing harnesses.",
+          "exitCode": 101,
+          "evidence": {
+            "path": "/tmp/zk-alignment-thinking-workspace.txt",
+            "sha256": "292f1ff1cb35a3d1f791075d9bba836a901f7452d82bce3e69b004c535a469ae"
+          }
+        },
+        {
+          "status": "passed",
+          "result": "Final thinking-corrected frozen source: 145 independent harnesses, 3143 passed, 0 failed, 9 ignored. Raw log contains 146 result lines / 3144 passed because one native process test reexecutes itself; excluded from independent totals. Four native ignored cases were passed separately; five historical paid-credential test cases remain unrun.",
+          "command": "CARGO_INCREMENTAL=0 ZK_RUN_GIT_TESTS=true cargo test --workspace --locked --offline --no-fail-fast",
+          "ignoredDisposition": {
+            "separatelyPassed": [
+              "native-keychain: 1",
+              "native-lsp: 1 covering five languages",
+              "native-browser: 2"
+            ],
+            "notRun": [
+              "dashscope_live",
+              "dashscope_token_plan_live",
+              "deepseek_live",
+              "moonshot_kimi_live",
+              "mcp_search::tests::dashscope_web_search_live"
+            ]
+          },
+          "exitCode": 0,
+          "evidence": {
+            "path": "/tmp/zk-alignment-thinking-workspace-final.txt",
+            "sha256": "e65109d7113495aded4bfe36014dfc575a2717160d8c99776a6a792d7deed7eb"
+          },
+          "counts": {
+            "harnesses": 145,
+            "passed": 3143,
+            "failed": 0,
+            "ignored": 9,
+            "rawResultLines": 146,
+            "rawPassedSum": 3144,
+            "excludedNestedReexecutionPassed": 1
+          }
+        },
+        {
+          "id": "cargo-workspace-tests",
+          "command": "CARGO_INCREMENTAL=0 ZK_RUN_GIT_TESTS=true cargo test --workspace --locked --offline --no-fail-fast",
+          "cwd": "/Users/guoqingtao/Desktop/dev/code/zkcode",
+          "startedAt": "2026-10-07T12:03:14.715249+00:00",
+          "finishedAt": "2026-10-07T12:18:39.809683+00:00",
+          "durationSeconds": 925.089,
+          "exitCode": 101,
+          "evidence": {
+            "path": "/tmp/zk-fix-workspace-final.txt",
+            "sha256": "82585a0d565faec44b4dd3bab99b48b48ab64b0432dbbcd0d06821ed399d8935"
+          },
+          "status": "failed"
+        },
+        {
+          "id": "cargo-workspace-tests",
+          "command": "CARGO_INCREMENTAL=0 ZK_RUN_GIT_TESTS=true cargo test --workspace --locked --offline --no-fail-fast",
+          "cwd": "/Users/guoqingtao/Desktop/dev/code/zkcode",
+          "startedAt": "2026-10-07T12:24:57.791362+00:00",
+          "finishedAt": "2026-10-07T12:28:51.006524+00:00",
+          "durationSeconds": 233.214,
+          "exitCode": 101,
+          "evidence": {
+            "path": "/tmp/zk-fix-workspace-final2.txt",
+            "sha256": "bc11bcefbc44bbe5c4e953b9b52188a130cf95cb905297ed053ef551afc14e2e"
+          },
+          "status": "failed"
+        }
+      ],
+      "command": "CARGO_INCREMENTAL=0 ZK_RUN_GIT_TESTS=true cargo test --workspace --locked --offline --no-fail-fast",
+      "ignoredDisposition": {
+        "separatelyPassed": [
+          "native-keychain: 1",
+          "native-lsp: 1 covering five languages",
+          "native-browser: 2"
+        ],
+        "notRun": [
+          "dashscope_live",
+          "dashscope_token_plan_live",
+          "deepseek_live",
+          "moonshot_kimi_live",
+          "mcp_search::tests::dashscope_web_search_live"
+        ]
+      },
+      "requiredForCurrentScope": true,
+      "cwd": "/Users/guoqingtao/Desktop/dev/code/zkcode",
+      "startedAt": "2026-10-07T12:35:39.530995+00:00",
+      "finishedAt": "2026-10-07T12:44:37.726344+00:00",
+      "durationSeconds": 538.193,
+      "exitCode": 0,
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-workspace-final3.txt",
+        "sha256": "0c877b00b272dc26ea78b6fe1b98981392ba29ea0eac27ef23c407a04a3755f7"
+      },
+      "counts": {
+        "harnesses": 148,
+        "passed": 3199,
+        "failed": 0,
+        "ignored": 9,
+        "rawResultLines": 149,
+        "rawPassed": 3200
+      },
+      "additionalEvidence": [
+        {
+          "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-workspace-final-counts.json",
+          "sha256": "a6fe5e39cf1830216caf174a1eafe5afb4d6214414ccceda446c64b06a6d1ffe"
+        }
+      ]
+    },
+    {
+      "id": "cargo-engine-no-default",
+      "status": "passed",
+      "result": "16 harnesses: 716 passed, 0 failed, 0 ignored.",
+      "command": "CARGO_INCREMENTAL=0 ZK_RUN_GIT_TESTS=true cargo test -p zk-engine --no-default-features --locked --offline --no-fail-fast",
+      "priorAttempts": [
+        {
+          "status": "passed",
+          "result": "16 harnesses;696 passed,zero failed/ignored including actual typed-checkpoint partial recovery, parent Hook fencing and isolated privacy log capture.",
+          "command": "CARGO_INCREMENTAL=0 ZK_RUN_GIT_TESTS=true cargo test -p zk-engine --no-default-features --locked --offline --no-fail-fast",
+          "evidence": {
+            "path": "/tmp/zk-alignment-engine-no-default-current.txt",
+            "sha256": "1be8ba3d7ec3ecf5bacf0af21c92166cb7e86a6eb7d212e4178c77f70908831f"
+          },
+          "sourceSnapshotNote": "Passed before correcting DeepSeek explicit thinking=disabled handling. Retained as historical source/artifact evidence, not final validation of the correction."
+        },
+        {
+          "status": "passed",
+          "result": "Thinking-corrected source, optional image-budget feature disabled: 16 harnesses, 696 passed, 0 failed, 0 ignored.",
+          "command": "CARGO_INCREMENTAL=0 ZK_RUN_GIT_TESTS=true cargo test -p zk-engine --no-default-features --locked --offline --no-fail-fast",
+          "exitCode": 0,
+          "evidence": {
+            "path": "/tmp/zk-alignment-thinking-engine-no-default.txt",
+            "sha256": "f845d33b649b9dee312887244c22db0efba8a0b6f6c5b68a334ba1b83f3039d4"
+          },
+          "counts": {
+            "harnesses": 16,
+            "passed": 696,
+            "failed": 0,
+            "ignored": 0
+          }
+        }
+      ],
+      "requiredForCurrentScope": true,
+      "cwd": "/Users/guoqingtao/Desktop/dev/code/zkcode",
+      "startedAt": "2026-10-07T12:44:54.335885+00:00",
+      "finishedAt": "2026-10-07T12:46:24.095695+00:00",
+      "durationSeconds": 89.759,
+      "exitCode": 0,
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-engine-no-default-final.txt",
+        "sha256": "e592041288eed0f1041331c51a6e25885a4cf618c88f06fafc80921a3fb84c4f"
+      },
+      "counts": {
+        "harnesses": 16,
+        "passed": 716,
+        "failed": 0,
+        "ignored": 0
+      }
+    },
+    {
+      "id": "cargo-release-build",
+      "status": "passed",
+      "result": "Frozen-source workspace release build passed; this exact artifact was used for both real browser E2E suites.",
+      "command": "CARGO_INCREMENTAL=0 cargo build --workspace --release --locked --offline",
+      "priorAttempts": [
+        {
+          "status": "passed",
+          "result": "Frozen-source workspace release build passed in 6m41s. Artifact reports zk-server 0.1.0, git 08cbdc45, schema 2, WS 4.",
+          "exitCode": 0,
+          "command": "CARGO_INCREMENTAL=0 cargo build --workspace --release --locked --offline",
+          "evidence": {
+            "path": "/tmp/zk-alignment-release-build-final.txt",
+            "sha256": "5bf454a0d6859880887b33afddcb95e2bd4e15462e7ce06d14d321e5e27bbd4d"
+          },
+          "artifact": {
+            "path": "/Users/guoqingtao/Desktop/dev/code/zkcode/target/release/zk-server",
+            "sha256": "822adfed182e047c0cc31ac4b9e1c41a14d474f19d249f331f27aa83a92a6315",
+            "version": "0.1.0",
+            "git": "08cbdc45",
+            "schemaVersion": 2,
+            "wsVersion": 4,
+            "availability": "historical_path_replaced",
+            "availabilityNote": "Expected historical SHA is preserved. This path now contains different bytes and is not available as verification of that historical attempt; current acceptance uses separately archived evidence."
+          },
+          "sourceSnapshotNote": "Passed before correcting DeepSeek explicit thinking=disabled handling. Retained as historical source/artifact evidence, not final validation of the correction."
+        },
+        {
+          "status": "passed",
+          "result": "Thinking-corrected frozen-source release build passed in 5m56s. Artifact reports zk-server 0.1.0, git 08cbdc45, schema 2, WS 4.",
+          "command": "CARGO_INCREMENTAL=0 cargo build --workspace --release --locked --offline",
+          "exitCode": 0,
+          "evidence": {
+            "path": "/tmp/zk-alignment-thinking-release-final.txt",
+            "sha256": "e911e2b37d8acfa4a76ac6c0dac331c87e115e533ba88d05d0941a48950dd697"
+          },
+          "artifact": {
+            "path": "/Users/guoqingtao/Desktop/dev/code/zkcode/target/release/zk-server",
+            "sha256": "cca0d0a64e2ab3bad9bf95fdc22fcb02f278d89c8b9e78286d4c0960a89e3251",
+            "version": "0.1.0",
+            "git": "08cbdc45",
+            "schemaVersion": 2,
+            "wsVersion": 4,
+            "availability": "historical_path_replaced",
+            "availabilityNote": "Expected historical SHA is preserved. This path now contains different bytes and is not available as verification of that historical attempt; current acceptance uses separately archived evidence."
+          }
+        }
+      ],
+      "artifact": {
+        "path": "/Users/guoqingtao/Desktop/dev/code/zkcode/target/release/zk-server",
+        "bytes": 37773888,
+        "sha256": "3ff461b276879e19fb9898b639af54c9cd979f2db5ce64cd3741d073e4bf476e",
+        "version": "zk-server 0.1.0 (git 08cbdc45e12cc28f3f13aaafbd0b056b980dfb1a, built 1791332366, schema 2, ws 4)"
+      },
+      "requiredForCurrentScope": true,
+      "cwd": "/Users/guoqingtao/Desktop/dev/code/zkcode",
+      "startedAt": "2026-10-07T12:48:15.417694+00:00",
+      "finishedAt": "2026-10-07T12:53:36.101154+00:00",
+      "durationSeconds": 320.682,
+      "exitCode": 0,
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-release-build-final.txt",
+        "sha256": "2f866d59d69c79324f133d183006754a365f2a57cabaac5a528cd145066d30b9"
+      }
+    },
+    {
+      "id": "compiled-tool-golden",
+      "status": "passed",
+      "result": "Passed within the final frozen-source workspace run; these are subsets, not additional tests to add to the 3199 total.",
+      "selectedTests": [
+        "base_tool_schema_sha256_is_stable"
+      ],
+      "priorAttempts": [
+        {
+          "status": "passed",
+          "result": "Compiled base tool schema golden assertion passed in the final workspace run; expected SHA-256 9cf070a498aea955528188ea7b15fa1fd77a706ca30cb975b3d5d316c770a95c.",
+          "exitCode": 0,
+          "selectedTests": [
+            "zk_server::engine_bridge::tests::base_tool_schema_sha256_is_stable"
+          ],
+          "evidence": {
+            "path": "/tmp/zk-alignment-workspace-tests-final.txt",
+            "sha256": "d7e0c4cc106318b9d13f2b82b5730d6211d3bc4d052372327130028c96c8dc98"
+          }
+        }
+      ],
+      "requiredForCurrentScope": true,
+      "exitCode": 0,
+      "command": "CARGO_INCREMENTAL=0 ZK_RUN_GIT_TESTS=true cargo test --workspace --locked --offline --no-fail-fast",
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-workspace-final3.txt",
+        "sha256": "0c877b00b272dc26ea78b6fe1b98981392ba29ea0eac27ef23c407a04a3755f7"
+      }
+    },
+    {
+      "id": "frontend-final-lint",
+      "status": "passed",
+      "result": "Lint passed with zero warnings.",
+      "cwd": "frontend",
+      "priorAttempts": [
+        {
+          "status": "passed",
+          "result": "Passed with zero warnings on final browser replay/DAG production tree; added Coordinator tests separately linted.",
+          "command": "npm run lint",
+          "cwd": "frontend",
+          "evidence": {
+            "path": "/tmp/zk-browser-dag-lint.txt",
+            "sha256": "2c0e646c20e8af9892a4f4b8e822f617828f16c93327420881ad2995ddf9d1fc"
+          },
+          "additionalEvidence": [
+            {
+              "path": "/tmp/zk-coordinator-final-lint.txt",
+              "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            }
+          ]
+        },
+        {
+          "status": "passed",
+          "result": "Frozen frontend tree passed ESLint with zero warnings.",
+          "cwd": "frontend",
+          "exitCode": 0,
+          "command": "npm run lint",
+          "evidence": {
+            "path": "/tmp/zk-frontend-alignment-frozen-lint.txt",
+            "sha256": "b60802a2486a38abed82876ac6a1e311e4fc7c1c79b586671b867ae4dab4a448"
+          }
+        }
+      ],
+      "command": "npm run lint",
+      "requiredForCurrentScope": true,
+      "exitCode": 0,
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-f3-conflict-frontend-final-lint.txt",
+        "sha256": "b60802a2486a38abed82876ac6a1e311e4fc7c1c79b586671b867ae4dab4a448"
+      },
+      "additionalEvidence": [
+        {
+          "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-f3-conflict-final-evidence.json",
+          "sha256": "6bda4af57edecb0de49658bbe9a63b073842a9e941e120475968600460d137ec"
+        },
+        {
+          "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-scoped-source-match.json",
+          "sha256": "c91f41f22605ecb412d4f81409c8bd48b3ab4de193129f7b121712068f511372"
+        }
+      ]
+    },
+    {
+      "id": "frontend-final-tests",
+      "status": "passed",
+      "result": "157 files, 1321 passed, 0 failed, 0 skipped.",
+      "cwd": "frontend",
+      "priorAttempts": [
+        {
+          "status": "in_progress",
+          "result": "Full run on pre-final complexity/Git/visualization tree:155 files,1282 passed,zero skipped in237.02s. New UI entry changes afterward require applicable reruns.",
+          "command": "npm run test:run",
+          "cwd": "frontend",
+          "evidence": {
+            "path": "/tmp/zk-frontend-final-no-placeholders-tests.txt",
+            "sha256": "a43d89b7e39326f0e1b537dc10488ae211084befa9daaabc8fcac72680d2f88b"
+          },
+          "additionalEvidence": [
+            {
+              "path": "/tmp/zk-coordinator-final-tests.txt",
+              "sha256": "dedcd04c7e7c6c1570bd2f658ee503f144fd1d388e545620ad43849ca5f5cccf"
+            }
+          ]
+        },
+        {
+          "status": "passed",
+          "result": "Frozen frontend tree: 156 files, 1295 passed, 0 skipped in 241.48s. Before/after source identity matches across 502 files.",
+          "cwd": "frontend",
+          "exitCode": 0,
+          "command": "npm run test:run",
+          "counts": {
+            "files": 156,
+            "passed": 1295,
+            "skipped": 0
+          },
+          "additionalEvidence": [
+            {
+              "path": "/tmp/zk-frontend-alignment-frozen-evidence.json",
+              "sha256": "0ec29fad52d64fb46c351611915cd78215129496305c968a0a84d0fc65e04015"
+            }
+          ],
+          "sourceSha256": "a3bb63bff6ef933a0648f2bc2299abe34aecaf18d42a63b8e66be55f94cea71c",
+          "evidence": {
+            "path": "/tmp/zk-frontend-alignment-frozen-unit.txt",
+            "sha256": "6a9465fb91646482334658d565bb6e43781a22aa7dd2700a8a012f3e91681f83"
+          }
+        }
+      ],
+      "command": "npm run test:run",
+      "requiredForCurrentScope": true,
+      "exitCode": 0,
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-f3-conflict-frontend-final-tests.txt",
+        "sha256": "0cae5dad0f88d9b37f8c64ca5da0ba4408d303794ce5a759f1541cfce93dc3f8"
+      },
+      "additionalEvidence": [
+        {
+          "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-f3-conflict-final-evidence.json",
+          "sha256": "6bda4af57edecb0de49658bbe9a63b073842a9e941e120475968600460d137ec"
+        },
+        {
+          "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-scoped-source-match.json",
+          "sha256": "c91f41f22605ecb412d4f81409c8bd48b3ab4de193129f7b121712068f511372"
+        }
+      ]
+    },
+    {
+      "id": "frontend-final-build",
+      "status": "passed",
+      "result": "Type checking and production build passed; existing large-chunk advisory retained.",
+      "cwd": "frontend",
+      "priorAttempts": [
+        {
+          "status": "passed",
+          "result": "TypeScript and Vite passed in 21.89s on final browser replay/DAG production tree; existing large-chunk advisory remains.",
+          "command": "npm run build",
+          "cwd": "frontend",
+          "evidence": {
+            "path": "/tmp/zk-browser-replay-final-build.txt",
+            "sha256": "97702289b9048df7b45d2a21cbfde9e5168352725d8183ee90f6540ab4ef1116"
+          }
+        },
+        {
+          "status": "passed",
+          "result": "Frozen frontend TypeScript/Vite build passed in 13.34s; existing large-chunk advisory remains.",
+          "cwd": "frontend",
+          "exitCode": 0,
+          "command": "npm run build",
+          "evidence": {
+            "path": "/tmp/zk-frontend-alignment-frozen-build.txt",
+            "sha256": "e9f23082510ab2f44fbf79672b75ba3bcfd998156bada6648dd6f59e2033f937"
+          }
+        }
+      ],
+      "command": "npm run build",
+      "requiredForCurrentScope": true,
+      "exitCode": 0,
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-f3-conflict-frontend-final-build.txt",
+        "sha256": "0bddb2a2e62965518f5b79c22085240866cdd8d6caf62a3406e56efe675a1f5a"
+      },
+      "additionalEvidence": [
+        {
+          "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-f3-conflict-final-evidence.json",
+          "sha256": "6bda4af57edecb0de49658bbe9a63b073842a9e941e120475968600460d137ec"
+        },
+        {
+          "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-scoped-source-match.json",
+          "sha256": "c91f41f22605ecb412d4f81409c8bd48b3ab4de193129f7b121712068f511372"
+        }
+      ]
+    },
+    {
+      "id": "frontend-real-rust-e2e",
+      "status": "passed",
+      "result": "9 passed: 6 product and 3 analysis/Git browser tests against this exact release binary, isolated SQLite, local model fixture and actual Python UDS.",
+      "priorAttempts": [
+        {
+          "status": "failed",
+          "exitCode": 1,
+          "result": "First final-release production E2E: 5 passed, 1 failed. Fixture requested low reasoning from Qwen, which correctly does not support that capability; preserving unsupported-model validation while adapting the positive fixture. No overall E2E pass claimed.",
+          "evidence": {
+            "path": "/tmp/zk-alignment-release-production-e2e.txt",
+            "sha256": "a9332765b6f3d81abf170f2346a1cefc5fff7121a838a14d8125b8b4de020e01"
+          },
+          "artifactSha256": "822adfed182e047c0cc31ac4b9e1c41a14d474f19d249f331f27aa83a92a6315"
+        },
+        {
+          "status": "passed",
+          "result": "Final frozen-release artifact: production E2E 6 passed in 24.8s and analysis E2E 3 passed in 58.0s, both exit 0. Actual Chrome, isolated SQLite and scripted loopback provider; analysis traverses Rust and Python. Binary before/after SHA is unchanged. Three fixture-only changes retained negative Qwen reasoning-capability validation and strengthened positive DeepSeek wire assertions; production source stayed frozen. No paid provider request is claimed by these E2E tests.",
+          "additionalEvidence": [
+            {
+              "path": "/tmp/zk-alignment-release-analysis-e2e.txt",
+              "sha256": "470364627f8867e43dbbd0fa59b74217c10928963ea86d26ce275e68e6fe65af"
+            },
+            {
+              "path": "/tmp/zk-final-browser-binary-evidence.json",
+              "sha256": "656242641f317f53380cf59f5120786b761a515e4ebdbff2608eb1d63f2e6b7a"
+            },
+            {
+              "path": "/tmp/zk-production-fixture-final-lint-applied.txt",
+              "sha256": "5587c8f555658fb2f13496e8deb55b352750690766b156728fd5c5cba93002e3",
+              "result": "Changed E2E fixture lint with applied ESLint configuration: exit 0, zero warnings."
+            }
+          ],
+          "artifactSha256": "822adfed182e047c0cc31ac4b9e1c41a14d474f19d249f331f27aa83a92a6315",
+          "exitCode": 0,
+          "evidence": {
+            "path": "/tmp/zk-alignment-release-production-e2e-final.txt",
+            "sha256": "ce95505eec2f4b4dc8ba5918e93a016b03b73cd7ca3e70afdb93fc2c1ad150ba"
+          },
+          "counts": {
+            "productionPassed": 6,
+            "analysisPassed": 3,
+            "failed": 0
+          },
+          "sourceSnapshotNote": "Passed before correcting DeepSeek explicit thinking=disabled handling. Retained as historical source/artifact evidence, not final validation of the correction."
+        },
+        {
+          "status": "passed",
+          "result": "Thinking-corrected release: production E2E 6 passed in 29.1s and analysis E2E 3 passed in 30.6s, both exit 0. Actual Chrome, isolated SQLite and scripted loopback provider; analysis traverses Rust/Python/native Git. Binary before/after SHA unchanged. No fixture or production changes during this run; this is not paid-provider validation.",
+          "exitCode": 0,
+          "evidence": {
+            "path": "/tmp/zk-post-adapter-production-e2e.txt",
+            "sha256": "cfbe74f16458554432cc4b94cd39d982c7a8ff41883c79b6733baa8920fdad7f"
+          },
+          "additionalEvidence": [
+            {
+              "path": "/tmp/zk-post-adapter-analysis-e2e.txt",
+              "sha256": "b52821d6e8d9eecbe3336bf29100912a0e8af0cfb43a4ac9a1dbe45eccd7728e"
+            },
+            {
+              "path": "/tmp/zk-post-adapter-browser-binary-evidence.json",
+              "sha256": "41581313da138da5828a8e96c5dd56bb3b274a6e9ba79bc0ad99f57941eb88e6"
+            }
+          ],
+          "artifactSha256": "cca0d0a64e2ab3bad9bf95fdc22fcb02f278d89c8b9e78286d4c0960a89e3251",
+          "counts": {
+            "productionPassed": 6,
+            "analysisPassed": 3,
+            "failed": 0
+          }
+        }
+      ],
+      "requiredForCurrentScope": true,
+      "exitCode": 0,
+      "command": "ZK_E2E_SERVER_BINARY=<recorded release> npm run test:e2e:production; npm run test:e2e:analysis",
+      "additionalEvidence": [
+        {
+          "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-e2e-artifact-evidence.json",
+          "sha256": "ef006cba496fff22d97900eec28653eb88b134eb639541993c706c1a1ec93d6c"
+        },
+        {
+          "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-e2e-analysis-final.txt",
+          "sha256": "5534864b27be493736a40ae2eb0099832852d3078aa8cb34ea82a48f3ad427a9"
+        }
+      ],
+      "artifact": {
+        "path": "/Users/guoqingtao/Desktop/dev/code/zkcode/target/release/zk-server",
+        "bytes": 37773888,
+        "sha256": "3ff461b276879e19fb9898b639af54c9cd979f2db5ce64cd3741d073e4bf476e",
+        "version": "zk-server 0.1.0 (git 08cbdc45e12cc28f3f13aaafbd0b056b980dfb1a, built 1791332366, schema 2, ws 4)"
+      },
+      "executions": [
+        {
+          "id": "frontend-real-rust-e2e-production",
+          "command": "npm run test:e2e:production",
+          "cwd": "/Users/guoqingtao/Desktop/dev/code/zkcode/frontend",
+          "startedAt": "2026-10-07T12:54:08.201241+00:00",
+          "finishedAt": "2026-10-07T12:54:34.946491+00:00",
+          "durationSeconds": 26.744,
+          "exitCode": 0,
+          "environmentPolicy": "Explicit PATH/HOME/TMPDIR/locale/user/shell allowlist; fixed isolated test port bases and exact release path. No inherited provider credentials.",
+          "artifactBeforeSha256": "3ff461b276879e19fb9898b639af54c9cd979f2db5ce64cd3741d073e4bf476e",
+          "artifactAfterSha256": "3ff461b276879e19fb9898b639af54c9cd979f2db5ce64cd3741d073e4bf476e",
+          "evidence": {
+            "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-e2e-production-final.txt",
+            "sha256": "5e1354c771f07d962c7cc5e8a9631960a746879a6b2585d0affe7d8e553bacf7"
+          }
+        },
+        {
+          "id": "frontend-real-rust-e2e-analysis",
+          "command": "npm run test:e2e:analysis",
+          "cwd": "/Users/guoqingtao/Desktop/dev/code/zkcode/frontend",
+          "startedAt": "2026-10-07T12:54:34.948150+00:00",
+          "finishedAt": "2026-10-07T12:54:55.923851+00:00",
+          "durationSeconds": 20.976,
+          "exitCode": 0,
+          "environmentPolicy": "Explicit PATH/HOME/TMPDIR/locale/user/shell allowlist; fixed isolated test port bases and exact release path. No inherited provider credentials.",
+          "artifactBeforeSha256": "3ff461b276879e19fb9898b639af54c9cd979f2db5ce64cd3741d073e4bf476e",
+          "artifactAfterSha256": "3ff461b276879e19fb9898b639af54c9cd979f2db5ce64cd3741d073e4bf476e",
+          "evidence": {
+            "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-e2e-analysis-final.txt",
+            "sha256": "5534864b27be493736a40ae2eb0099832852d3078aa8cb34ea82a48f3ad427a9"
+          }
+        }
+      ],
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-e2e-production-final.txt",
+        "sha256": "5e1354c771f07d962c7cc5e8a9631960a746879a6b2585d0affe7d8e553bacf7"
+      }
+    },
+    {
+      "id": "theme-browser-regression",
+      "status": "passed",
+      "result": "20 theme scenarios / 12728 assertions and 42 Jelly scenarios passed in actual Chrome 154.0.8037.98. These isolated visual tests make no business requests.",
+      "priorAttempts": [
+        {
+          "status": "passed",
+          "result": "20 theme scenarios / 12728 assertions passed; Jelly 42 scenarios also exited successfully. Chrome 154.0.8037.98; both browser identity and explicit harness shutdown verified.",
+          "evidence": {
+            "path": "/tmp/zk-alignment-final-theme2.txt",
+            "sha256": "f087a3dcd17f3642e89790806966eb39ee052868ada0af15c0a365d21b9ac9b6"
+          },
+          "additionalEvidence": [
+            {
+              "path": "/tmp/zk-alignment-final-jelly3.txt",
+              "sha256": "0f3f5e13033729148a98c05e331562f7811337abdc593f9d59c43e47caf43ca2"
+            }
+          ]
+        },
+        {
+          "status": "passed",
+          "result": "Frozen dist: 20 theme scenarios / 12728 assertions and 42 Jelly scenarios passed with Chrome 154.0.8037.98; no business API requests. Browser shutdown and source freeze were verified.",
+          "exitCode": 0,
+          "additionalEvidence": [
+            {
+              "path": "/tmp/zk-frontend-alignment-frozen-jelly.txt",
+              "sha256": "0f3f5e13033729148a98c05e331562f7811337abdc593f9d59c43e47caf43ca2"
+            },
+            {
+              "path": "/tmp/zk-frontend-alignment-frozen-evidence.json",
+              "sha256": "0ec29fad52d64fb46c351611915cd78215129496305c968a0a84d0fc65e04015"
+            }
+          ],
+          "evidence": {
+            "path": "/tmp/zk-frontend-alignment-frozen-theme.txt",
+            "sha256": "f087a3dcd17f3642e89790806966eb39ee052868ada0af15c0a365d21b9ac9b6"
+          }
+        }
+      ],
+      "requiredForCurrentScope": true,
+      "exitCode": 0,
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-theme-final.txt",
+        "sha256": "f087a3dcd17f3642e89790806966eb39ee052868ada0af15c0a365d21b9ac9b6"
+      },
+      "additionalEvidence": [
+        {
+          "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-jelly-final.txt",
+          "sha256": "0f3f5e13033729148a98c05e331562f7811337abdc593f9d59c43e47caf43ca2"
+        }
+      ]
+    },
+    {
+      "id": "npm-audit",
+      "status": "passed",
+      "result": "No vulnerabilities reported.",
+      "command": "./scripts/parity/npm-audit.sh",
+      "priorAttempts": [
+        {
+          "status": "passed",
+          "result": "Official registry audit: 0 vulnerabilities.",
+          "command": "./scripts/parity/npm-audit.sh",
+          "evidence": {
+            "path": "/tmp/zk-npm-alignment-audit.txt",
+            "sha256": "6d8c5c8f3d7684adb070417bd608d01ae90aa3dc26a65af03ffda4955f38d9a3"
+          }
+        }
+      ],
+      "requiredForCurrentScope": true,
+      "exitCode": 0,
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-npm-audit-final.txt",
+        "sha256": "6d8c5c8f3d7684adb070417bd608d01ae90aa3dc26a65af03ffda4955f38d9a3"
+      }
+    },
+    {
+      "id": "cargo-deny",
+      "status": "passed",
+      "result": "Dependency advisories, licenses, bans and sources checks passed.",
+      "priorAttempts": [
+        {
+          "status": "failed",
+          "result": "First attempt: advisories/bans/sources passed, missing explicit MIT-0 allowance for borrow-or-share 0.2.4 (JSON Schema transitive dependency). Packaged license checked against SPDX; allowlist updated, rerun pending.",
+          "evidence": {
+            "path": "/tmp/zk-alignment-cargo-deny.txt",
+            "sha256": "1fcfabe6fee1344b8cb12b611c8c1a4ec194d983e22e437b17e0eaa5eba67dd6"
+          }
+        },
+        {
+          "status": "passed",
+          "result": "advisories, bans, licenses and sources passed. MIT-0 packaged license verified and explicitly allowed; duplicate transitive versions remain warnings under existing policy.",
+          "evidence": {
+            "path": "/tmp/zk-alignment-cargo-deny-final.txt",
+            "sha256": "065e43f402ae34ce8cd56214071005290ea89c6810f4e3f4c7d8117a1a408bc9"
+          },
+          "command": "CARGO_INCREMENTAL=0 cargo deny check"
+        }
+      ],
+      "command": "CARGO_INCREMENTAL=0 cargo deny check",
+      "requiredForCurrentScope": true,
+      "cwd": "/Users/guoqingtao/Desktop/dev/code/zkcode",
+      "startedAt": "2026-10-07T11:54:16.640818+00:00",
+      "finishedAt": "2026-10-07T11:54:19.222797+00:00",
+      "durationSeconds": 2.581,
+      "exitCode": 0,
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-cargo-deny-final.txt",
+        "sha256": "065e43f402ae34ce8cd56214071005290ea89c6810f4e3f4c7d8117a1a408bc9"
+      }
+    },
+    {
+      "id": "secret-scan",
+      "status": "passed",
+      "result": "Release source secret scan passed.",
+      "command": "./scripts/parity/scan-release-secrets.sh",
+      "priorAttempts": [
+        {
+          "status": "passed",
+          "result": "22.47 MB scanned, no leaks; final scan needed after remaining source changes.",
+          "command": "./scripts/parity/scan-release-secrets.sh",
+          "evidence": {
+            "path": "/tmp/zk-alignment-secret-scan-final.txt",
+            "sha256": "b08d13bbaf84444db1bfaa4377ad0c66473d313620bd8b966f7ff005d6685d15"
+          }
+        },
+        {
+          "status": "passed",
+          "result": "Final frozen-source scan: 22.58 MB, no credential leaks; exited 0 in 4.31s.",
+          "command": "./scripts/parity/scan-release-secrets.sh",
+          "exitCode": 0,
+          "evidence": {
+            "path": "/tmp/zk-alignment-secret-scan-final2.txt",
+            "sha256": "07c23eda2915d77b3235ebd6816069eada921c5ac866178d9a3d5d730e547e9f"
+          },
+          "sourceSnapshotNote": "Passed before correcting DeepSeek explicit thinking=disabled handling. Retained as historical source/artifact evidence, not final validation of the correction."
+        },
+        {
+          "status": "passed",
+          "result": "Final thinking-corrected source scan: 22.64 MB in 3.12s, no credential leaks; exit 0.",
+          "command": "./scripts/parity/scan-release-secrets.sh",
+          "exitCode": 0,
+          "evidence": {
+            "path": "/tmp/zk-alignment-thinking-secrets-final.txt",
+            "sha256": "cbe2f75868e7dc34082fdfce392aecd31a73cd8536e4095ffc3956f2dd0e329e"
+          }
+        }
+      ],
+      "requiredForCurrentScope": true,
+      "cwd": "/Users/guoqingtao/Desktop/dev/code/zkcode",
+      "startedAt": "2026-10-07T12:45:31.872286+00:00",
+      "finishedAt": "2026-10-07T12:45:38.035096+00:00",
+      "durationSeconds": 6.162,
+      "exitCode": 0,
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-secret-scan-frozen-final.txt",
+        "sha256": "a72679f52ced05fca15d65c5d8eedb476a5bce94db13a3b1269022d928809249"
+      }
+    },
+    {
+      "id": "install-doctor",
+      "status": "passed",
+      "result": "Official offline Rust component repair, official release build repair and deep doctor passed. Full dev sync was not invoked, to avoid its potential recovery/restart of the user services.",
+      "command": "CARGO_NET_OFFLINE=true ./dev repair rust; CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true ./dev repair build; ./dev doctor --deep --json",
+      "priorAttempts": [
+        {
+          "status": "in_progress",
+          "result": "Actual private LSP, document tools, OCR/CJK, headless browser, runtime locks passed; Rust source fingerprint stale during active edits. Rebuild through dev and re-run after final source freeze.",
+          "command": "./dev doctor --deep --json",
+          "evidence": {
+            "path": "/tmp/zk-alignment-doctor-final.json",
+            "sha256": "37fbedeec369a39957bab471b7b79ecbf06125e1b6dc933200f851ffd19e46ab",
+            "availability": "historical_path_replaced",
+            "availabilityNote": "Expected historical SHA is preserved. This path now contains different bytes and is not available as verification of that historical attempt; current acceptance uses separately archived evidence."
+          }
+        },
+        {
+          "status": "passed",
+          "result": "Official synchronization and deep doctor exited 0: 37 checks, all ok=true, deep=true. Locked npm ci reported 582 packages / zero vulnerabilities; Python/browser were unchanged; source-matched debug build completed in 53.36s.",
+          "command": "./dev sync --build && ./dev doctor --deep --json",
+          "evidence": {
+            "path": "/tmp/zk-alignment-doctor-final.json",
+            "sha256": "053663b0e57926d1cb40cbdf89d7fb3d84acce6c0eb5f5320457ad55b4123a90"
+          },
+          "exitCode": 0,
+          "additionalEvidence": [
+            {
+              "path": "/tmp/zk-alignment-dev-sync-final.txt",
+              "sha256": "0c97a6c9597749104cdad29ff98bbf2ecb5ce6e6a1be54196475e909950361e5"
+            }
+          ],
+          "sourceSnapshotNote": "Passed before correcting DeepSeek explicit thinking=disabled handling. Retained as historical source/artifact evidence, not final validation of the correction."
+        },
+        {
+          "status": "passed",
+          "result": "Thinking-corrected source official dev synchronization/build and deep doctor exited 0. Debug artifact rebuilt in 1m11s; all 37 checks ok=true, deep=true, overall ok=true.",
+          "command": "./dev sync --build && ./dev doctor --deep --json",
+          "exitCode": 0,
+          "evidence": {
+            "path": "/tmp/zk-alignment-thinking-doctor-final.json",
+            "sha256": "053663b0e57926d1cb40cbdf89d7fb3d84acce6c0eb5f5320457ad55b4123a90"
+          },
+          "additionalEvidence": [
+            {
+              "path": "/tmp/zk-alignment-thinking-dev-sync-final.txt",
+              "sha256": "8c5ad06e1fd828d1f8c09b68d6e2b5a57f4b9658a217169769569c5648ea3455"
+            }
+          ]
+        }
+      ],
+      "requiredForCurrentScope": true,
+      "cwd": "/Users/guoqingtao/Desktop/dev/code/zkcode",
+      "startedAt": "2026-10-07T12:55:11.487238+00:00",
+      "finishedAt": "2026-10-07T12:55:47.624833+00:00",
+      "durationSeconds": 36.137,
+      "exitCode": 0,
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-doctor-final.txt",
+        "sha256": "0af8b8048b5ac8bcd5147cad06bb5cc01fa28632fcfef6c8727e20776417f1d5"
+      },
+      "additionalEvidence": [
+        {
+          "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-repair-rust-final.txt",
+          "sha256": "0c9bcb18ce2b22686b6048fd24658c26b90429cacc036505c9e225b61bdb19f0"
+        },
+        {
+          "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-repair-build-final.txt",
+          "sha256": "74d0464ffcf201607bb1429d50e8a3b250c01d74c9317c57a2117c1bd4a45bf9"
+        }
+      ],
+      "doctorSummary": {
+        "checks": 40,
+        "passed": 40,
+        "failed": 0
+      }
+    },
+    {
+      "id": "python-dependency-check",
+      "status": "passed",
+      "result": "No broken requirements found.",
+      "command": "python-service/.venv/bin/python -m pip check",
+      "priorAttempts": [
+        {
+          "status": "passed",
+          "result": "No broken requirements found.",
+          "command": "python-service/.venv/bin/python -m pip check",
+          "evidence": {
+            "path": "/tmp/zk-python-alignment-deps.txt",
+            "sha256": "9261363b733079a641c2e4cc9bc46ffa1d8336945a87f807b6cf68847dbc9b09"
+          }
+        }
+      ],
+      "requiredForCurrentScope": true,
+      "exitCode": 0,
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-pip-check-final.txt",
+        "sha256": "9261363b733079a641c2e4cc9bc46ffa1d8336945a87f807b6cf68847dbc9b09"
+      }
+    },
+    {
+      "id": "native-lsp",
+      "status": "passed",
+      "result": "One native test passed, starting all five private language servers and exercising semantic requests.",
+      "priorAttempts": [
+        {
+          "status": "passed",
+          "result": "Five real private language servers semantic requests and owned cleanup passed in20.13s; toolchain identities printed.",
+          "evidence": {
+            "path": "/tmp/zk-alignment-lsp-native-current.txt",
+            "sha256": "d7b7600d16807989d7d9c8aec6bd6581b9ee97aae7718737d5d600f9057558b6"
+          }
+        }
+      ],
+      "requiredForCurrentScope": true,
+      "command": "CARGO_INCREMENTAL=0 cargo test -p zk-tools --test lsp_native --locked --offline -- --ignored --nocapture",
+      "cwd": "/Users/guoqingtao/Desktop/dev/code/zkcode",
+      "startedAt": "2026-10-07T12:46:41.487961+00:00",
+      "finishedAt": "2026-10-07T12:47:12.036368+00:00",
+      "durationSeconds": 30.548,
+      "exitCode": 0,
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-lsp-final.txt",
+        "sha256": "428642803089ce27acd69b950701835d9742ad881b7dd34bb396c8eb117d3f2f"
+      }
+    },
+    {
+      "id": "native-office",
+      "status": "passed",
+      "result": "41 actual native Office/PDF/media/OCR/browser tests passed; actual LibreOfficeDev 26.8 alpha used.",
+      "command": "./dev test office",
+      "identity": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-independent-gates-evidence.json",
+        "sha256": "9374d0cfb47720a755056315e62b0a0aba24d19b5c2615d768a0c55b5ba55eac"
+      },
+      "priorAttempts": [
+        {
+          "status": "passed",
+          "result": "41 native tests passed; exact installed LibreOfficeDev alpha, PDF/media/OCR/CJK/browser identity recorded (no stable LibreOffice claim).",
+          "command": "./dev test office",
+          "evidence": {
+            "path": "/tmp/zk-office-alignment-final.txt",
+            "sha256": "47fccceab6923f728bddb5bede4869b4a8f585b8f21b3fc5dc65cb4b82166d40"
+          },
+          "identity": {
+            "path": "/var/folders/g_/cgkxr_w91xg7tx8n84hjt9zm0000gn/T/zkcode-office-zs0ua3iq/run-identity.json",
+            "sha256": "416fc21714516deb2f33920bc897545e92d071d908384cc242e019c82e1ff62d"
+          }
+        }
+      ],
+      "requiredForCurrentScope": true,
+      "exitCode": 0,
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-office-final.txt",
+        "sha256": "3aa3256c3d7d8558aec9c7c09809800500b9efbaeb6f8b865c35858ee92ec313"
+      }
+    },
+    {
+      "id": "native-browser",
+      "status": "passed",
+      "result": "Two native browser/HTTP journey tests passed, including temporary execution evidence and cleanup.",
+      "priorAttempts": [
+        {
+          "status": "passed",
+          "result": "Native ordinary/temporary Journey+WebBrowser 2 passed including real repeated JavaScript, RAM screenshot, wrong-Run rejection and actual owned cleanup; parent remains active.",
+          "evidence": {
+            "path": "/tmp/zk-mcp-candidates-repl-browser-final.txt",
+            "sha256": "78ee644c40b94580e2f8d7fffa1103f716670cce035343e627999a45b7654228"
+          }
+        },
+        {
+          "status": "passed",
+          "result": "Explicit native run: ordinary and temporary Journey/WebBrowser 2 passed in 4.93s, including real repeated JavaScript, RAM screenshot, wrong-Run rejection and owned cleanup. Parent remains active.",
+          "exitCode": 0,
+          "command": "CARGO_INCREMENTAL=0 cargo test -p zk-server --test verify_journey_native --locked --offline -- --ignored --nocapture",
+          "evidence": {
+            "path": "/tmp/zk-alignment-browser-native-current.txt",
+            "sha256": "bd2d163c0cb4f44225a557d89034b189149bb9382a349c945bc36b6484cce97a"
+          }
+        }
+      ],
+      "command": "CARGO_INCREMENTAL=0 cargo test -p zk-server --test verify_journey_native --locked --offline -- --ignored --nocapture",
+      "requiredForCurrentScope": true,
+      "cwd": "/Users/guoqingtao/Desktop/dev/code/zkcode",
+      "startedAt": "2026-10-07T12:47:12.101782+00:00",
+      "finishedAt": "2026-10-07T12:48:10.450046+00:00",
+      "durationSeconds": 58.348,
+      "exitCode": 0,
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-browser-final.txt",
+        "sha256": "c636dda7acf0baeffc9cb66f4555f7ebb86325eb8efc90662a8795be22013d42"
+      }
+    },
+    {
+      "id": "query-cli-privacy",
+      "status": "passed",
+      "result": "Passed within the final frozen-source workspace run; these are subsets, not additional tests to add to the 3199 total.",
+      "priorAttempts": [
+        {
+          "status": "passed",
+          "result": "Latest Query SSE11, production runtime9, Bash cwd1 and MCP external5 all passed. Query negative confirms durable permission waiting creates no REPL task/process; ordinary two-Query42→43, deletion/merge gate and stop also passed. Full workspace still required.",
+          "evidence": {
+            "path": "/tmp/zk-alignment-server-focused-current2.txt",
+            "sha256": "1d10085fd7b5ae9c97fff981720cd23dfa516f7d4f4a1573031ccc38aa114136"
+          }
+        },
+        {
+          "status": "passed",
+          "result": "Final workspace: Query SSE 11, production runtime 9, Bash cwd 1 and Query MCP scope 1 passed. Actual DEFAULT waiting creates no REPL task/process; two Query turns preserve 42→43 and enforce deletion/merge/stop ownership.",
+          "exitCode": 0,
+          "selectedTests": [
+            "query_stream: 11",
+            "production_runtime_roundtrip: 9",
+            "bash_cwd_binding: 1",
+            "query_mcp_scope: 1"
+          ],
+          "evidence": {
+            "path": "/tmp/zk-alignment-workspace-tests-final.txt",
+            "sha256": "d7e0c4cc106318b9d13f2b82b5730d6211d3bc4d052372327130028c96c8dc98"
+          }
+        }
+      ],
+      "selectedTests": [
+        "query_stream: 14",
+        "production_runtime_roundtrip: 9",
+        "bash_cwd_binding: 1",
+        "query_mcp_scope: 1"
+      ],
+      "requiredForCurrentScope": true,
+      "exitCode": 0,
+      "command": "CARGO_INCREMENTAL=0 ZK_RUN_GIT_TESTS=true cargo test --workspace --locked --offline --no-fail-fast",
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-workspace-final3.txt",
+        "sha256": "0c877b00b272dc26ea78b6fe1b98981392ba29ea0eac27ef23c407a04a3755f7"
+      }
+    },
+    {
+      "id": "mcp-external-capability",
+      "status": "passed",
+      "result": "Passed within the final frozen-source workspace run; these are subsets, not additional tests to add to the 3199 total.",
+      "priorAttempts": [
+        {
+          "status": "passed",
+          "result": "All5 actual capability tests passed, including sensitive Hook configuration Write through real local dispatch/ACK/decision, PRE command/network ceiling and immutable POST effects.",
+          "evidence": {
+            "path": "/tmp/zk-alignment-server-focused-current2.txt",
+            "sha256": "1d10085fd7b5ae9c97fff981720cd23dfa516f7d4f4a1573031ccc38aa114136"
+          }
+        },
+        {
+          "status": "passed",
+          "result": "Final workspace: external capabilities 5, context 2, STDIO 2, reverse MCP 3, MCP service REST 19 and WS 6 passed. Includes real local dispatch/ACK permission for sensitive Hook configuration Write, command/network ceiling and immutable POST facts.",
+          "exitCode": 0,
+          "selectedTests": [
+            "mcp_external_capabilities: 5",
+            "mcp_context: 2",
+            "mcp_stdio: 2",
+            "mcp_reverse: 3",
+            "mcp_api: 19",
+            "mcp_ws: 6"
+          ],
+          "evidence": {
+            "path": "/tmp/zk-alignment-workspace-tests-final.txt",
+            "sha256": "d7e0c4cc106318b9d13f2b82b5730d6211d3bc4d052372327130028c96c8dc98"
+          }
+        }
+      ],
+      "selectedTests": [
+        "mcp_external_capabilities: 5",
+        "mcp_context: 2",
+        "mcp_stdio: 2",
+        "mcp_reverse: 3",
+        "mcp_api: 19",
+        "mcp_ws: 6"
+      ],
+      "requiredForCurrentScope": true,
+      "exitCode": 0,
+      "command": "CARGO_INCREMENTAL=0 ZK_RUN_GIT_TESTS=true cargo test --workspace --locked --offline --no-fail-fast",
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-workspace-final3.txt",
+        "sha256": "0c877b00b272dc26ea78b6fe1b98981392ba29ea0eac27ef23c407a04a3755f7"
+      }
+    },
+    {
+      "id": "team-native",
+      "status": "passed",
+      "result": "Passed within the final frozen-source workspace run; these are subsets, not additional tests to add to the 3199 total.",
+      "selectedTests": [
+        "team_runtime::tests::"
+      ],
+      "priorAttempts": [
+        {
+          "status": "passed",
+          "result": "All eight real team runtime tests passed: durable serial child engines, broadcast once, saved policy, stop/queued-work cancellation, parent finalization waiting, parent tool ceiling, write gate rejection and managed Worktree delivery without implicit commit.",
+          "exitCode": 0,
+          "selectedTests": [
+            "zk_server::team_runtime::tests: 8"
+          ],
+          "evidence": {
+            "path": "/tmp/zk-alignment-workspace-tests-final.txt",
+            "sha256": "d7e0c4cc106318b9d13f2b82b5730d6211d3bc4d052372327130028c96c8dc98"
+          }
+        }
+      ],
+      "requiredForCurrentScope": true,
+      "exitCode": 0,
+      "command": "CARGO_INCREMENTAL=0 ZK_RUN_GIT_TESTS=true cargo test --workspace --locked --offline --no-fail-fast",
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-workspace-final3.txt",
+        "sha256": "0c877b00b272dc26ea78b6fe1b98981392ba29ea0eac27ef23c407a04a3755f7"
+      }
+    },
+    {
+      "id": "repl-service",
+      "status": "passed",
+      "result": "Passed within the final frozen-source workspace run; these are subsets, not additional tests to add to the 3199 total.",
+      "priorAttempts": [
+        {
+          "status": "passed",
+          "result": "Three real interpreter tests, two service cleanup/retry tests, and actual two Query 42→43/stop/deletion/merge gating passed; combined final gate still required.",
+          "evidence": {
+            "path": "/tmp/zk-repl-service-final.txt",
+            "sha256": "c0cae12e02aaddcb14cd9b0dc3eaab70be937ef8d8d968d0982d5074e97e22a0"
+          },
+          "additionalEvidence": [
+            {
+              "path": "/tmp/zk-repl-scope-final.txt",
+              "sha256": "bb17804c8de6b99cd5367a908fb4688c49fba24a671d56289529f9f225dee52b"
+            },
+            {
+              "path": "/tmp/zk-server-alignment-combined3.txt",
+              "sha256": "7e6cf035e2b1e24e3efb650152473b6a4a50aeea6152974a5fe4b71ec6e811e3"
+            }
+          ]
+        },
+        {
+          "status": "passed",
+          "result": "Final workspace: real Python/Node/Ruby scope 3, persistent service ownership/cleanup retry 2, service REST 1, plus real two-Query 42→43 and DEFAULT denial cases passed. Ordinary state survives root completion; stop participates in delete/merge gating.",
+          "exitCode": 0,
+          "selectedTests": [
+            "repl_scope: 3",
+            "zk_server::repl_service::tests: 2",
+            "repl_service_api: 1",
+            "query_stream::ordinary_query_repl_state_survives_root_completion_and_blocks_delete_merge_until_stopped",
+            "query_stream::default_permission_repl_waits_for_approval_and_cancel_never_starts_service"
+          ],
+          "evidence": {
+            "path": "/tmp/zk-alignment-workspace-tests-final.txt",
+            "sha256": "d7e0c4cc106318b9d13f2b82b5730d6211d3bc4d052372327130028c96c8dc98"
+          }
+        }
+      ],
+      "selectedTests": [
+        "repl_scope: 3",
+        "repl_service::tests::",
+        "repl_service_api: 1",
+        "ordinary_query_repl_state_survives_root_completion_and_blocks_delete_merge_until_stopped",
+        "default_permission_repl_waits_for_approval_and_cancel_never_starts_service"
+      ],
+      "requiredForCurrentScope": true,
+      "exitCode": 0,
+      "command": "CARGO_INCREMENTAL=0 ZK_RUN_GIT_TESTS=true cargo test --workspace --locked --offline --no-fail-fast",
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-workspace-final3.txt",
+        "sha256": "0c877b00b272dc26ea78b6fe1b98981392ba29ea0eac27ef23c407a04a3755f7"
+      }
+    },
+    {
+      "id": "artifact-terminal",
+      "status": "passed",
+      "result": "Passed within the final frozen-source workspace run; these are subsets, not additional tests to add to the 3199 total.",
+      "priorAttempts": [
+        {
+          "status": "passed",
+          "result": "Native server terminal observer 1 passed; artifact REST 3 passed. DB terminal/CAS/reopen/cleanup gating 4 passed in sqlite-all-targets. Later source changes require applicable rerun.",
+          "evidence": {
+            "path": "/tmp/zk-server-alignment-combined3.txt",
+            "sha256": "7e6cf035e2b1e24e3efb650152473b6a4a50aeea6152974a5fe4b71ec6e811e3"
+          }
+        },
+        {
+          "status": "passed",
+          "result": "Final workspace: terminal observer 1, artifact REST 3 and DB terminal/CAS/reopen/cleanup gating 4 passed. Integrity projection does not execute artifacts or repeat external effects.",
+          "exitCode": 0,
+          "selectedTests": [
+            "artifact_terminal: 1",
+            "artifact_api: 3",
+            "zk_db::artifact_terminal::tests: 4"
+          ],
+          "evidence": {
+            "path": "/tmp/zk-alignment-workspace-tests-final.txt",
+            "sha256": "d7e0c4cc106318b9d13f2b82b5730d6211d3bc4d052372327130028c96c8dc98"
+          }
+        }
+      ],
+      "selectedTests": [
+        "artifact_terminal: 1",
+        "artifact_api: 3",
+        "artifact_terminal::tests::"
+      ],
+      "requiredForCurrentScope": true,
+      "exitCode": 0,
+      "command": "CARGO_INCREMENTAL=0 ZK_RUN_GIT_TESTS=true cargo test --workspace --locked --offline --no-fail-fast",
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-workspace-final3.txt",
+        "sha256": "0c877b00b272dc26ea78b6fe1b98981392ba29ea0eac27ef23c407a04a3755f7"
+      }
+    },
+    {
+      "id": "change-impact-native",
+      "status": "passed",
+      "result": "Passed in the real React/Rust/Python/native Git analysis E2E; change-impact output remains analysis, not proof of passing tests.",
+      "priorAttempts": [
+        {
+          "status": "passed",
+          "result": "Actual React → Rust → Python UDS browser E2E 2 passed; server binary before/after SHA256 a11f71dbd3efbc5a601e3386fd4275b2c7d7877b187c09b77ad32005862fddc0. Code analysis API 4 passed separately. Advisory graph is not test verification.",
+          "evidence": {
+            "path": "/tmp/zk-analysis-browser-final3.txt",
+            "sha256": "01dcb8933c472e220876029101847a8918417f33d6cec38ec31d46a5c8f0585b"
+          }
+        },
+        {
+          "status": "passed",
+          "result": "Final-release analysis E2E: 3 passed in 58.0s, actual React → Rust → Python UDS including change-impact advisory, complexity and Git workspace flow. Backend binary identity unchanged. Graphs are advisory, not verification evidence; final workspace code_analysis_api 5 also passed.",
+          "evidence": {
+            "path": "/tmp/zk-alignment-release-analysis-e2e.txt",
+            "sha256": "470364627f8867e43dbbd0fa59b74217c10928963ea86d26ce275e68e6fe65af"
+          },
+          "exitCode": 0,
+          "additionalEvidence": [
+            {
+              "path": "/tmp/zk-final-browser-binary-evidence.json",
+              "sha256": "656242641f317f53380cf59f5120786b761a515e4ebdbff2608eb1d63f2e6b7a"
+            }
+          ],
+          "artifactSha256": "822adfed182e047c0cc31ac4b9e1c41a14d474f19d249f331f27aa83a92a6315",
+          "sourceSnapshotNote": "Passed before correcting DeepSeek explicit thinking=disabled handling. Retained as historical source/artifact evidence, not final validation of the correction."
+        },
+        {
+          "status": "passed",
+          "result": "Thinking-corrected release analysis E2E 3 passed in 30.6s via actual React → Rust → Python UDS and native Git; before/after binary SHA unchanged. Graphs remain advisory, not verification evidence.",
+          "exitCode": 0,
+          "evidence": {
+            "path": "/tmp/zk-post-adapter-analysis-e2e.txt",
+            "sha256": "b52821d6e8d9eecbe3336bf29100912a0e8af0cfb43a4ac9a1dbe45eccd7728e"
+          },
+          "additionalEvidence": [
+            {
+              "path": "/tmp/zk-post-adapter-browser-binary-evidence.json",
+              "sha256": "41581313da138da5828a8e96c5dd56bb3b274a6e9ba79bc0ad99f57941eb88e6"
+            }
+          ],
+          "artifactSha256": "cca0d0a64e2ab3bad9bf95fdc22fcb02f278d89c8b9e78286d4c0960a89e3251"
+        }
+      ],
+      "requiredForCurrentScope": true,
+      "exitCode": 0,
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-e2e-analysis-final.txt",
+        "sha256": "5534864b27be493736a40ae2eb0099832852d3078aa8cb34ea82a48f3ad427a9"
+      }
+    },
+    {
+      "id": "tools-lib",
+      "status": "passed",
+      "result": "Passed within the final frozen-source workspace run; these are subsets, not additional tests to add to the 3199 total.",
+      "priorAttempts": [
+        {
+          "status": "passed",
+          "command": "CARGO_INCREMENTAL=0 ZK_RUN_GIT_TESTS=true cargo test -p zk-tools --lib --offline",
+          "result": "394 passed, 0 failed in 31.09s, including native Git and REPL. Initial native Git fixture exposed TAB path delimiter handling, repaired without weakening assertions.",
+          "evidence": {
+            "path": "/tmp/zk-tools-alignment-all-lib.txt",
+            "sha256": "d03462b5b7244dcf52adb313064b075c83414454e49c044e5bf9bed1df0c61c9"
+          }
+        },
+        {
+          "status": "passed",
+          "result": "Final workspace tools lib: 394 passed, 0 failed in 31.18s, including actual native Git, REPL and process supervision. Nested one-test process reexecution is not an additional independent test.",
+          "exitCode": 0,
+          "selectedTests": [
+            "zk_tools lib: 394"
+          ],
+          "evidence": {
+            "path": "/tmp/zk-alignment-workspace-tests-final.txt",
+            "sha256": "d7e0c4cc106318b9d13f2b82b5730d6211d3bc4d052372327130028c96c8dc98"
+          }
+        }
+      ],
+      "selectedTests": [
+        "zk_tools lib: 394"
+      ],
+      "requiredForCurrentScope": true,
+      "exitCode": 0,
+      "command": "CARGO_INCREMENTAL=0 ZK_RUN_GIT_TESTS=true cargo test --workspace --locked --offline --no-fail-fast",
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-workspace-final3.txt",
+        "sha256": "0c877b00b272dc26ea78b6fe1b98981392ba29ea0eac27ef23c407a04a3755f7"
+      }
+    },
+    {
+      "id": "sqlite-all-targets",
+      "status": "passed",
+      "result": "Passed within the final frozen-source workspace run; these are subsets, not additional tests to add to the 3199 total.",
+      "priorAttempts": [
+        {
+          "status": "failed",
+          "reason": "Two older immutable evidence fixtures lacked a real owner Session; fixtures corrected, production owner validation preserved.",
+          "evidence": {
+            "path": "/tmp/zk-db-alignment-full.txt",
+            "sha256": "e59f17186bc07ec0af90ff607fe404f695073b4cac1e641c9df30ef78aa6d6f7"
+          }
+        },
+        {
+          "status": "failed",
+          "reason": "Fresh -1 replay cursor was falsely expired; corrected to require an actual retention marker. External operation temporary service fixture was invalid; long-lived temporary MCP still rejected.",
+          "evidence": {
+            "path": "/tmp/zk-db-alignment-all-targets.txt",
+            "sha256": "673552a00114e32240f43a11dba71103dd1da7378c0c4d0548980b6946c40158"
+          }
+        },
+        {
+          "status": "failed",
+          "reason": "Compile failed: new crate documentation placed after items; moved to file head.",
+          "evidence": {
+            "path": "/tmp/zk-db-alignment-all-targets2.txt",
+            "sha256": "fa2cdff74503e955b20e0a4c4217015a04ea76c91e8826a29da5c4782d3e9440"
+          }
+        },
+        {
+          "status": "in_progress",
+          "command": "CARGO_INCREMENTAL=0 cargo test -p zk-db --offline --no-fail-fast",
+          "result": "Latest full attempt: 223 passed, 2 failed due to purpose field contract expectations. Corrected contracts: lib 164 passed on rerun; other integration harnesses had 61 passed. Newly added tool ceiling: 4 passed separately. Final unified workspace run remains required.",
+          "evidence": {
+            "path": "/tmp/zk-db-alignment-all-targets4.txt",
+            "sha256": "ee682007b04bd07413688bec4ef9ea3647aa73735536d42b2fe00a5346224d64"
+          },
+          "additionalEvidence": [
+            {
+              "path": "/tmp/zk-db-ceiling-purpose-final.txt",
+              "sha256": "0d5037cbd7b82849c1b3f2fa3e5f2de65cd20d7d299007423d9911e38a531ad5"
+            },
+            {
+              "path": "/tmp/zk-db-tool-ceiling-final2.txt",
+              "sha256": "5efd5b6a7a20f694e868b322aac0707724ad060416aaa61a49620810291190a3"
+            }
+          ]
+        },
+        {
+          "status": "passed",
+          "result": "Final workspace DB: 23 executable harnesses, 232 passed, 0 failed/ignored (164 unit + 68 integration), plus successful empty doctest harness. Includes purpose projection, retention, immutable evidence, cleanup reconciliation and tool ceilings.",
+          "exitCode": 0,
+          "selectedTests": [
+            "zk_db lib: 164",
+            "zk_db integration harnesses: 68"
+          ],
+          "evidence": {
+            "path": "/tmp/zk-alignment-workspace-tests-final.txt",
+            "sha256": "d7e0c4cc106318b9d13f2b82b5730d6211d3bc4d052372327130028c96c8dc98"
+          }
+        }
+      ],
+      "selectedTests": [
+        "zk_db lib: 164",
+        "zk_db integration harnesses: 68"
+      ],
+      "requiredForCurrentScope": true,
+      "exitCode": 0,
+      "command": "CARGO_INCREMENTAL=0 ZK_RUN_GIT_TESTS=true cargo test --workspace --locked --offline --no-fail-fast",
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-workspace-final3.txt",
+        "sha256": "0c877b00b272dc26ea78b6fe1b98981392ba29ea0eac27ef23c407a04a3755f7"
+      }
+    },
+    {
+      "id": "mcp-library",
+      "status": "passed",
+      "result": "Passed within the final frozen-source workspace run; these are subsets, not additional tests to add to the 3199 total.",
+      "priorAttempts": [
+        {
+          "status": "passed",
+          "command": "CARGO_INCREMENTAL=0 cargo test -p zk-mcp --locked --offline --no-fail-fast",
+          "result": "210 passed; one native Keychain ignored by normal harness, executed separately below. All local OAuth/transport fixtures passed.",
+          "evidence": {
+            "path": "/tmp/zk-mcp-alignment-final-all.txt",
+            "sha256": "d7173dce5acb87141816aa54c37420d5f3c63b4709e84da388d0641fea2894c0"
+          }
+        },
+        {
+          "status": "passed",
+          "result": "Final workspace MCP lib: 210 passed; one Keychain case ignored by the normal harness and explicitly passed in native-keychain. Local OAuth and transport fixtures passed; no remote-provider interoperability claim.",
+          "exitCode": 0,
+          "selectedTests": [
+            "zk_mcp lib: 210"
+          ],
+          "evidence": {
+            "path": "/tmp/zk-alignment-workspace-tests-final.txt",
+            "sha256": "d7e0c4cc106318b9d13f2b82b5730d6211d3bc4d052372327130028c96c8dc98"
+          }
+        }
+      ],
+      "selectedTests": [
+        "zk_mcp lib: 210; native Keychain ignored here and run separately"
+      ],
+      "requiredForCurrentScope": true,
+      "exitCode": 0,
+      "command": "CARGO_INCREMENTAL=0 ZK_RUN_GIT_TESTS=true cargo test --workspace --locked --offline --no-fail-fast",
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-workspace-final3.txt",
+        "sha256": "0c877b00b272dc26ea78b6fe1b98981392ba29ea0eac27ef23c407a04a3755f7"
+      }
+    },
+    {
+      "id": "native-keychain",
+      "status": "passed",
+      "command": "CARGO_INCREMENTAL=0 cargo test -p zk-mcp --lib oauth::tests::native_keychain_round_trip --locked --offline -- --ignored --nocapture",
+      "result": "One real macOS Keychain round-trip passed.",
+      "priorAttempts": [
+        {
+          "status": "passed",
+          "command": "CARGO_INCREMENTAL=0 cargo test -p zk-mcp --lib oauth::tests::native_keychain_round_trip --locked --offline -- --ignored --nocapture",
+          "result": "One native login Keychain write/read/delete round trip passed in0.12s.",
+          "evidence": {
+            "path": "/tmp/zk-alignment-keychain-native-current.txt",
+            "sha256": "55686cad180f3cada149b816bef0937937febb75f0354bac5df055aa833d04c8"
+          }
+        }
+      ],
+      "requiredForCurrentScope": true,
+      "cwd": "/Users/guoqingtao/Desktop/dev/code/zkcode",
+      "startedAt": "2026-10-07T12:46:24.157728+00:00",
+      "finishedAt": "2026-10-07T12:46:41.419393+00:00",
+      "durationSeconds": 17.261,
+      "exitCode": 0,
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-keychain-final.txt",
+        "sha256": "4e43a0101f8fbb6e1d26f9e8079eef8cb342371e0009f3a05084e9cec00183c1"
+      }
+    },
+    {
+      "id": "hook-resource-admission",
+      "status": "passed",
+      "result": "Passed within the final frozen-source workspace run; these are subsets, not additional tests to add to the 3199 total.",
+      "priorAttempts": [
+        {
+          "status": "passed",
+          "result": "Three real DB active/cancel/bind/terminal/foreign-owner and waitingDependencies legacy cancellation checks passed. Full Engine Hook tests passed in no-default suite.",
+          "evidence": {
+            "path": "/tmp/zk-alignment-hook-db-current.txt",
+            "sha256": "fe089b01dea501fdb71a44d9378dcb368712e8775d0ca558997c800a487e7db8"
+          }
+        },
+        {
+          "status": "passed",
+          "result": "Final workspace: DB Hook owner/cancel/bind/terminal checks 3, Session Hook ownership 6, diagnostic logs 2 and real terminal Hook notifications/seal fencing passed. Final no-default Engine suite also passed.",
+          "exitCode": 0,
+          "selectedTests": [
+            "hook_resources: 3",
+            "session_hook_ownership: 6",
+            "hook_diagnostic_logs: 2",
+            "zk_engine::task::runtime::terminal_hooks::tests: 4"
+          ],
+          "evidence": {
+            "path": "/tmp/zk-alignment-workspace-tests-final.txt",
+            "sha256": "d7e0c4cc106318b9d13f2b82b5730d6211d3bc4d052372327130028c96c8dc98"
+          }
+        }
+      ],
+      "selectedTests": [
+        "hook_resources: 3",
+        "session_hook_ownership: 6",
+        "hook_diagnostic_logs: 3",
+        "hook_authorization: 4",
+        "hook_host_admission: 7",
+        "session_hook_lifecycle: 9",
+        "hook_admission_pipeline: 1",
+        "terminal_hooks::tests::"
+      ],
+      "requiredForCurrentScope": true,
+      "exitCode": 0,
+      "command": "CARGO_INCREMENTAL=0 ZK_RUN_GIT_TESTS=true cargo test --workspace --locked --offline --no-fail-fast",
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-workspace-final3.txt",
+        "sha256": "0c877b00b272dc26ea78b6fe1b98981392ba29ea0eac27ef23c407a04a3755f7"
+      }
+    },
+    {
+      "id": "git-history-api",
+      "status": "passed",
+      "result": "Passed within the final frozen-source workspace run; these are subsets, not additional tests to add to the 3199 total.",
+      "priorAttempts": [
+        {
+          "status": "passed",
+          "result": "Six actual temporary Git repository/API cases passed: fixed pagination, root commit, diff, Unicode/TAB blame, scoped authorization and exact-owner pre-cancel. Inflight cancellation added separately still pending.",
+          "evidence": {
+            "path": "/tmp/zk-alignment-git-read-api-current.txt",
+            "sha256": "d1abca7db82d54438a953e60486e8358e3816f5b20d0caa7ca7bc0481f24fe73"
+          }
+        },
+        {
+          "status": "passed",
+          "result": "Final workspace: six native Git REST cases plus server-lib in-flight cancellation and dropped-request reaping passed. Covers pagination, root commit/diff, Unicode/TAB blame and exact workspace authorization.",
+          "exitCode": 0,
+          "selectedTests": [
+            "git_read_api: 6",
+            "zk_server::api::git_read::tests::in_flight_cancellation_reaps_the_supervised_git_process",
+            "zk_server::api::git_read::tests::dropped_request_reaps_the_supervised_git_process"
+          ],
+          "evidence": {
+            "path": "/tmp/zk-alignment-workspace-tests-final.txt",
+            "sha256": "d7e0c4cc106318b9d13f2b82b5730d6211d3bc4d052372327130028c96c8dc98"
+          }
+        }
+      ],
+      "selectedTests": [
+        "git_read_api: 6",
+        "in_flight_cancellation_reaps_the_supervised_git_process",
+        "dropped_request_reaps_the_supervised_git_process"
+      ],
+      "requiredForCurrentScope": true,
+      "exitCode": 0,
+      "command": "CARGO_INCREMENTAL=0 ZK_RUN_GIT_TESTS=true cargo test --workspace --locked --offline --no-fail-fast",
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-workspace-final3.txt",
+        "sha256": "0c877b00b272dc26ea78b6fe1b98981392ba29ea0eac27ef23c407a04a3755f7"
+      }
+    },
+    {
+      "id": "git-diff-check",
+      "status": "passed",
+      "command": "git diff --check",
+      "result": "Final tracked diff whitespace check passed.",
+      "priorAttempts": [
+        {
+          "status": "passed",
+          "command": "git diff --check",
+          "result": "Frozen-source whitespace/conflict-marker diff check exited 0.",
+          "exitCode": 0,
+          "evidence": {
+            "path": "/tmp/zk-alignment-diff-check-final.txt",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "sourceSnapshotNote": "Passed before correcting DeepSeek explicit thinking=disabled handling. Retained as historical source/artifact evidence, not final validation of the correction."
+        },
+        {
+          "status": "passed",
+          "command": "git diff --check",
+          "result": "Thinking-corrected source diff check exited 0.",
+          "exitCode": 0,
+          "evidence": {
+            "path": "/tmp/zk-alignment-thinking-diff-check.txt",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          }
+        },
+        {
+          "status": "passed",
+          "command": "git diff --check",
+          "result": "Thinking-corrected source diff check exited 0.",
+          "exitCode": 0,
+          "evidence": {
+            "path": "/tmp/zk-alignment-thinking-diff-check-final.txt",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          }
+        }
+      ],
+      "requiredForCurrentScope": true,
+      "cwd": "/Users/guoqingtao/Desktop/dev/code/zkcode",
+      "startedAt": "2026-10-07T12:56:47.303055+00:00",
+      "finishedAt": "2026-10-07T12:56:47.531211+00:00",
+      "durationSeconds": 0.228,
+      "exitCode": 0,
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-diff-frozen-final.txt",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "id": "live-deepseek-release-query",
+      "status": "not_run",
+      "result": "No paid provider request in this repair scope; previous single-request evidence applies only to its historical source/artifact.",
+      "priorAttempts": [
+        {
+          "status": "failed",
+          "result": "Local readiness fixture treated text/plain health as JSON and timed out before dispatch. Exactly zero upstream attempts/forwards and zero LLM ledger calls; not a paid request. Server exited 0.",
+          "evidence": {
+            "path": "/private/var/folders/g_/cgkxr_w91xg7tx8n84hjt9zm0000gn/T/zk-deepseek-release-swkvg0vj/probe-report.json",
+            "sha256": "44dd7a4c124636c0c3f28816a248adda4f2f9e04043f3652096f04f29fb896df"
+          },
+          "additionalEvidence": [
+            {
+              "path": "/tmp/zk-deepseek-release-probe-execution.txt",
+              "sha256": "cda03beacf24c51fec389b046de9cd5971632184c02e6b2b651a10731eb93a58"
+            }
+          ],
+          "upstreamAttempts": 0,
+          "upstreamForwarded": 0,
+          "llmCalls": 0
+        },
+        {
+          "status": "failed",
+          "result": "Local authenticated Query was rejected before dispatch; this initial fixture attempt did not retain the specific HTTP status. Exactly zero upstream attempts/forwards and zero LLM ledger calls; not a paid request. Server exited 0.",
+          "evidence": {
+            "path": "/private/var/folders/g_/cgkxr_w91xg7tx8n84hjt9zm0000gn/T/zk-deepseek-release-0b7jyyaa/probe-report.json",
+            "sha256": "80eee5c752a32478f83af630130f70e517f2626e2ac3efacbecbdc2856c53801"
+          },
+          "additionalEvidence": [
+            {
+              "path": "/tmp/zk-deepseek-release-probe-execution2.txt",
+              "sha256": "4f1f776c67782af1eea2856d5c98057984317ef2bc7e56aa5bf967de9878d206"
+            }
+          ],
+          "upstreamAttempts": 0,
+          "upstreamForwarded": 0,
+          "llmCalls": 0
+        },
+        {
+          "status": "failed",
+          "result": "Safe diagnostic capture confirmed 403 MCP_REQUEST_ORIGIN_DENIED. Supplying the exact localhost Origin fixed the fixture; production access guard was preserved. Exactly zero upstream attempts/forwards and zero LLM ledger calls; not a paid request. Server exited 0.",
+          "evidence": {
+            "path": "/private/var/folders/g_/cgkxr_w91xg7tx8n84hjt9zm0000gn/T/zk-deepseek-release-8raovu88/probe-report.json",
+            "sha256": "6aa74bbf1ff8013288b913cce0c4d0ff455b3d26242dc59944ed0b5abfe9713f"
+          },
+          "additionalEvidence": [
+            {
+              "path": "/tmp/zk-deepseek-release-probe-execution3.txt",
+              "sha256": "2fd214fef51a75554d4cd43043aaaf3074a24da6b5c36a0327d17b581ec4ca09"
+            }
+          ],
+          "upstreamAttempts": 0,
+          "upstreamForwarded": 0,
+          "llmCalls": 0
+        },
+        {
+          "status": "passed",
+          "result": "One user-authorized real release Query passed against official DeepSeek TLS /v1/chat/completions using deepseek-flash: exactly 1 attempted/forwarded upstream request, HTTP 200; thinking disabled, no auxiliary/fallback/tools. Official usage 32 input / 2 output / 0 cached tokens matches completed Rust LLM call and Run ledger, cost 12000 nanos USD ($0.000012), below $0.05 ceiling. First text 404ms, terminal 562ms. Cleanup confirmed, 0 unreleased resources, process group gone, server exit 0; release binary unchanged and credential absent from probe files. Covers this exact model/interface/ledger path, not all providers, endpoints or thinking modes.",
+          "exitCode": 0,
+          "evidence": {
+            "path": "/Users/guoqingtao/Desktop/dev/code/zkcode/docs/migration/deepseek-flash-release-probe.json",
+            "sha256": "1c3140fbfed1850e604f92ed77d8e17750378907d128b4cd82861191ae653fea"
+          },
+          "additionalEvidence": [
+            {
+              "path": "/tmp/zk-deepseek-release-probe-execution4.txt",
+              "sha256": "28c23faedd57dab12913c65d66732d7656157973d6b6856ee99c575e70ab5be4"
+            },
+            {
+              "path": "/private/var/folders/g_/cgkxr_w91xg7tx8n84hjt9zm0000gn/T/zk-deepseek-release-c7naj5q2/probe-report.json",
+              "sha256": "1c3140fbfed1850e604f92ed77d8e17750378907d128b4cd82861191ae653fea"
+            }
+          ],
+          "artifactSha256": "cca0d0a64e2ab3bad9bf95fdc22fcb02f278d89c8b9e78286d4c0960a89e3251",
+          "liveRequest": {
+            "provider": "deepseek",
+            "model": "deepseek-flash",
+            "upstream": "https://api.deepseek.com/v1/chat/completions",
+            "attempts": 1,
+            "forwarded": 1,
+            "inputTokens": 32,
+            "outputTokens": 2,
+            "cacheReadTokens": 0,
+            "costNanosUsd": 12000,
+            "maxBudgetUsd": 0.05,
+            "thinking": "disabled",
+            "auxiliaryEnabled": false,
+            "fallbackChain": [],
+            "tools": []
+          }
+        }
+      ],
+      "requiredForCurrentScope": false
+    },
+    {
+      "id": "llm-thinking-override",
+      "status": "passed",
+      "result": "Passed within the final frozen-source workspace run; these are subsets, not additional tests to add to the 3199 total.",
+      "command": "CARGO_INCREMENTAL=0 ZK_RUN_GIT_TESTS=true cargo test --workspace --locked --offline --no-fail-fast",
+      "priorAttempts": [
+        {
+          "status": "passed",
+          "result": "All 9 real loopback wire cases passed in 0.03s: explicit DeepSeek disabled, summary override, Qwen/GLM, OpenRouter, direct OpenAI and strengthened Kimi/Responses behavior. Negative unsupported-model and conservative input-budget boundaries remain intact. No paid provider call is implied.",
+          "exitCode": 0,
+          "evidence": {
+            "path": "/tmp/zk-alignment-thinking-wire-final.txt",
+            "sha256": "dac7806e1c89d06792ca460904685f038197cef944811742769bd7f8b960cde8"
+          },
+          "command": "CARGO_INCREMENTAL=0 cargo test -p zk-llm --test provider_routing_wire --locked --offline"
+        }
+      ],
+      "requiredForCurrentScope": true,
+      "exitCode": 0,
+      "selectedTests": [
+        "provider_routing_wire: 9"
+      ],
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-workspace-final3.txt",
+        "sha256": "0c877b00b272dc26ea78b6fe1b98981392ba29ea0eac27ef23c407a04a3755f7"
+      }
+    },
+    {
+      "id": "source-freeze-identity",
+      "status": "passed",
+      "result": "Exact metadata and all 1387 paths matched before/after. 1384 files, 3 deleted paths; docs and ignored user secrets/data excluded. Frontend/Python earlier scoped manifests match their unchanged current source.",
+      "command": "python3 /tmp/zk-source-freeze-snapshot.py /tmp/zk-fix-source-freeze-after.json; compare all fields except timestamp",
+      "priorAttempts": [
+        {
+          "status": "passed",
+          "result": "Final snapshot equals the pre-final snapshot exactly: 1374 regular files + 3 deleted tracked paths, 0 symlinks, 21776379 content bytes, unchanged HEAD and bytewise path/content SHA-256 37ee9ab3456b0953469042a52fd1216a0929e408bbeed2331bd380cf12785f5c. docs/** excluded; no ignored user configuration/database read. Comparison includes every path/kind/size/per-file digest.",
+          "evidence": {
+            "path": "/tmp/zk-alignment-source-freeze-after.json",
+            "sha256": "aeb591b79ded9fb5d54ad7dad02c68e8ce03f73e94db2a7edfa844604fa63b41"
+          },
+          "command": "python3 /tmp/zk-source-freeze-snapshot.py /tmp/zk-alignment-source-freeze-after.json; compare exact metadata and all entries with before snapshot",
+          "exitCode": 0,
+          "additionalEvidence": [
+            {
+              "path": "/tmp/zk-alignment-source-freeze-before.json",
+              "sha256": "e242e18f796e7a69ba5475bad63c1b30a1d6a352f1fe63a3eef3668e4a5db3af"
+            }
+          ],
+          "sourceSha256": "37ee9ab3456b0953469042a52fd1216a0929e408bbeed2331bd380cf12785f5c"
+        }
+      ],
+      "requiredForCurrentScope": true,
+      "exitCode": 0,
+      "additionalEvidence": [
+        {
+          "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-source-freeze-before-final5.json",
+          "sha256": "6d986d8759631de0ccb16a7414d421359daac8ce403dfd2ce75df26ee93b37f3"
+        },
+        {
+          "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-scoped-source-match.json",
+          "sha256": "c91f41f22605ecb412d4f81409c8bd48b3ab4de193129f7b121712068f511372"
+        }
+      ],
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-source-freeze-after.json",
+        "sha256": "4e64dce19f3da55f4820ae1836408c8b2abe6d35ea45d34ca3a5c47077fe0755"
+      }
+    }
+  ],
+  "verificationLimits": [
+    "No paid provider request was executed for F1–F5. The five credential-requiring LLM/search tests remain unrun. The earlier single DeepSeek probe belongs to the historical source/artifact only.",
+    "Hook authorization covers the mode matrix and lifecycle paths at multiple layers, not the full events × modes × command/HTTP × sync/async cross-product. Request-drop uses a cancelled Router Future, not TCP disconnection. Approval does not sandbox every script dependency.",
+    "Skill WS isolation uses a RecordingEngine; source revocation is verified at shared discovery/model-call gates, not as a separate post-load WS revocation scenario.",
+    "Draft race/navigation/attachment matrices use actual React components and stores with mocked transport. Actual browser chat E2E is separate and does not cover the full draft matrix.",
+    "Complexity mutation is injected deterministically inside a real spawn child. The browser analysis fixture uses Python; JS/JSX cache matrix uses real Python workers.",
+    "Deadline order is deterministic at the internal cancellation layer. Cancellation-save failure uses a failpoint; REST timeout plus real SQLite write I/O fault plus all attached/detached combinations are not claimed as one end-to-end test.",
+    "Known-usage summary retry uses ProviderEvent fixture plus production SQLite observers. Unknown HTTP 429 uses real loopback HTTP and production adapter/observers. No remote provider compatibility or physical disk-full recovery claim.",
+    "Remote OAuth provider interoperability was not exercised; local OAuth/PKCE/refresh fixtures and native Keychain were exercised.",
+    "Temporary Java LSP is explicitly unavailable because JDT may log content. External MCP does not publish REPL/WebBrowser; ordinary Query retains them.",
+    "Native Office used installed LibreOfficeDev 26.8 alpha. Frontend production build retains the existing chunk-size advisory; Python has 9 dependency/deprecation warnings.",
+    "Existing user services were preserved. Official narrow Rust/build repair plus deep doctor ran; full dev sync and a clean-machine reinstall were not performed."
+  ],
+  "sourceSnapshot": {
+    "recordedAt": "2026-10-07T12:34:02.828443+00:00",
+    "head": "08cbdc45e12cc28f3f13aaafbd0b056b980dfb1a",
+    "algorithm": {
+      "selection": "git ls-files -co --exclude-standard -z; deduplicate; exclude docs/**; bytewise path sort",
+      "digest": "SHA-256 over each sorted raw path byte string, one NUL byte, then payload; concatenated without extra separators",
+      "payload": "Regular file: exact original bytes; symlink: link target string as filesystem bytes without following; deleted path: hex 005a4b5f44454c4554454400 (NUL ZK_DELETED NUL)",
+      "metadata": "Metadata manifest saved outside repository; no ignored user .env/database is read. Repository env configuration examples and the public bootstrap demo database are source inputs."
+    },
+    "sourceSha256": "01407de2a65016f55704b4e6e1f25ce14f58dab800b0e196ec24d99634d32a37",
+    "entryCount": 1387,
+    "fileCount": 1384,
+    "symlinkCount": 0,
+    "deletedCount": 3,
+    "totalBytes": 21982769,
+    "manifest": {
+      "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-source-freeze-before-final5.json",
+      "sha256": "6d986d8759631de0ccb16a7414d421359daac8ce403dfd2ce75df26ee93b37f3"
+    },
+    "afterManifest": {
+      "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-source-freeze-after.json",
+      "sha256": "4e64dce19f3da55f4820ae1836408c8b2abe6d35ea45d34ca3a5c47077fe0755"
+    },
+    "verificationStatus": "matched",
+    "finalComparisonAt": "2026-10-07T12:56:46.674427+00:00"
+  },
+  "previousGateSnapshot": "full-alignment-gates-before-f1-f5-20261007.json",
+  "servicePreservation": {
+    "before": {
+      "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-services-before-final.json",
+      "sha256": "e2c369d5c94bd37b0685b714bacc3695d034d766f6764b785217ea1877470d05"
+    },
+    "after": {
+      "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-services-after-final.json",
+      "sha256": "0c519e8779f44f3d1b738650d143f73278f892cf40fd24f97ac4e691801c82e3"
+    },
+    "samePids": {
+      "backend": 2579,
+      "frontend": 93669,
+      "python": 2621
+    },
+    "note": "No restart or database rebuild. The currently running backend predates the new release and must be restarted explicitly to load it."
+  },
+  "repairAcceptance": {
+    "regressionMap": "f1-f5-regression-map.md",
+    "counterexamples": {
+      "F1": [
+        {
+          "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-hook-red.txt",
+          "sha256": "46d70983ec611a341e16823bcf90f0bf8b94445ea3037b6c3d4da69465d432f7",
+          "disposition": "Expected pre-fix failure; retained as counterexample, not counted as passed"
+        },
+        {
+          "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-hook-bind-red.txt",
+          "sha256": "45b925b06983c152ab8bdf012771f036cfc98a4384c4d3b6276d2b51badcfba4",
+          "disposition": "Expected pre-fix failure; retained as counterexample, not counted as passed"
+        }
+      ],
+      "F2": [
+        {
+          "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-skill-red.txt",
+          "sha256": "c77b6bb201d1d29af37848e02cb23443ded848557cee9ea80eca93b5a0f9a0c4",
+          "disposition": "Expected pre-fix failure; retained as counterexample, not counted as passed"
+        },
+        {
+          "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-skill-structural-red.txt",
+          "sha256": "9b0ac7d2b007e02a2f6b72804bf895e18a7dd3ad96068f957646124b3c887deb",
+          "disposition": "Expected pre-fix failure; retained as counterexample, not counted as passed"
+        }
+      ],
+      "F3": [
+        {
+          "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-f3-draft-red.txt",
+          "sha256": "08f0d345a2a16e36d907376a92be99b26863ba1cea258e3d95d0657d6ac6e3eb",
+          "disposition": "Expected pre-fix failure; retained as counterexample, not counted as passed"
+        },
+        {
+          "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-f3-abandoned-bind-red-final.txt",
+          "sha256": "8426465336e07887a75b0ff530da60b2707f7c7ebccbb3a84c0d5b2819384b3d",
+          "disposition": "Expected pre-fix failure; retained as counterexample, not counted as passed"
+        },
+        {
+          "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-f3-deferred-creation-red-final.txt",
+          "sha256": "b8dcd70e0c68cc58a736e66b229d77684e1b075ba2fd06b3e03fc08d4b8f0e0e",
+          "disposition": "Expected pre-fix failure; retained as counterexample, not counted as passed"
+        },
+        {
+          "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-f3-conflict-idempotency-red.txt",
+          "sha256": "9d5c91981b236cbda25d3a3038266872d35bad7a21f8b7912c089c8bf33a6fe3",
+          "disposition": "Expected pre-fix failure; retained as counterexample, not counted as passed"
+        }
+      ],
+      "F4": [
+        {
+          "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-f4-complexity-baseline-red.txt",
+          "sha256": "885774e9ea750f9615669b5ba9405d8dcd01c40073b205c0b5422603892d5abd",
+          "disposition": "Expected pre-fix failure; retained as counterexample, not counted as passed"
+        }
+      ],
+      "F5": [
+        {
+          "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-timeout-red.txt",
+          "sha256": "fc8473e7af7a12c3d762ad93297abfda0d553c39e37b2c246d16ef4f2fc07792",
+          "disposition": "Expected pre-fix failure; retained as counterexample, not counted as passed"
+        },
+        {
+          "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-late-timeout-red.txt",
+          "sha256": "bb55ff6fb4432ae45903c56fdb9d4e1b0fc550f22276fa266ead79573810409f",
+          "disposition": "Expected pre-fix failure; retained as counterexample, not counted as passed"
+        }
+      ]
+    },
+    "ledger": {
+      "tests": 11,
+      "productionSqliteObserver": true,
+      "realHttpCases": 2,
+      "providerEventCases": 9,
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/zk-fix-ledger-wire-green1.txt",
+        "sha256": "814ad6592c645532e5f4712c20d0174786e4e3731ce46759c39290f4a3dd92c2"
+      }
+    },
+    "history": "Initial expected regression failures and two failed workspace attempts retained; only the latest corrected-source passes establish acceptance."
+  },
+  "acceptanceSummary": {
+    "requiredLocalGates": 37,
+    "passedRequiredLocalGates": 37,
+    "optionalNotRunGates": 1,
+    "decision": "Eligible for a local GitHub submission within the agreed scope and recorded limits; not a guarantee that every behavior, supplier or concurrency combination is defect-free."
+  },
+  "repairEvidenceArchive": {
+    "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/f1-f5修复验收/evidence-index.json",
+    "sha256": "04cc156e0f93ace2e9a030284d38c1d597b83b43604c59b539c6d3fca54dc63d"
+  },
+  "recordRole": "Full-suite snapshot for F1–F5 before the subsequent frontend-only simple-workbench removal",
+  "subsequentIncrementalValidation": {
+    "report": "development-workbench-only.md",
+    "gates": "development-workbench-gates.json",
+    "scope": "Frontend-only removal of simple workbench; no history migration",
+    "sourceSha256": "284039bfcafa7757d4cf94b3c8955fa27646a42c4a8d163930377301cef5527b"
+  }
+}

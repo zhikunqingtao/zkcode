@@ -71,9 +71,13 @@ impl Tool for REPLTool {
                     "type": "string",
                     "description": "Code to execute in the REPL"
                 },
-                "session_id": {
+                "sessionId": {
                     "type": "string",
                     "description": "Session ID to reuse an existing REPL session"
+                },
+                "session_id": {
+                    "type": "string",
+                    "description": "Compatibility alias for sessionId; when both are supplied they must match"
                 }
             }
         })
@@ -97,6 +101,12 @@ impl Tool for REPLTool {
 
     fn execute(&self, input: serde_json::Value, ctx: ToolContext) -> BoxFuture<'_, ToolOutput> {
         Box::pin(async move {
+            if ctx.is_ephemeral() {
+                return failure(
+                    "EPHEMERAL_REPL_SCOPE_UNAVAILABLE",
+                    "Temporary REPL execution requires a Run-owned interpreter scope; no process was started",
+                );
+            }
             let code = match required_str(&input, "code") {
                 Ok(code) => code.to_owned(),
                 Err(output) => return output,
@@ -104,34 +114,48 @@ impl Tool for REPLTool {
             let language = optional_str(&input, "language")
                 .unwrap_or(DEFAULT_LANGUAGE)
                 .to_owned();
-            // 旧入参名 `sessionId`；两种写法都收，缺省落新 UUID。
-            let session_id = optional_str(&input, "session_id")
-                .or_else(|| optional_str(&input, "sessionId"))
+            // Preserve both published parameter names without silently choosing
+            // a different persistent interpreter when their values conflict.
+            let canonical = optional_str(&input, "sessionId");
+            let alias = optional_str(&input, "session_id");
+            if canonical
+                .zip(alias)
+                .is_some_and(|(left, right)| left != right)
+            {
+                return failure(
+                    "INVALID_PARAMETER",
+                    "sessionId and session_id must match when both are supplied",
+                );
+            }
+            let session_id = canonical
+                .or(alias)
                 .map_or_else(|| uuid::Uuid::new_v4().to_string(), str::to_owned);
 
-            let session =
-                match self
-                    .manager
-                    .get_or_create(&session_id, &language, ctx.working_dir())
-                {
-                    Ok(session) => session,
-                    Err(ReplError::UnsupportedLanguage(language)) => {
-                        return failure(
-                            "REPL_OPERATION_UNSUPPORTED",
-                            format!(
-                                "Unsupported REPL language: {language}. Supported: {}",
-                                LANGUAGES.join(", ")
-                            ),
-                        );
-                    }
-                    Err(error @ ReplError::Spawn(_)) => {
-                        return failure("REPL_SESSION_ERROR", format!("REPL error: {error}"));
-                    }
-                };
+            // Public aliases retain their cross-turn lifetime, but can never name
+            // an interpreter belonging to another application Session.
+            let owned_id = persistent_session_key(ctx.session_id(), &session_id);
+            let session = match self
+                .manager
+                .get_or_create(&owned_id, &language, ctx.working_dir())
+            {
+                Ok(session) => session,
+                Err(ReplError::UnsupportedLanguage(language)) => {
+                    return failure(
+                        "REPL_OPERATION_UNSUPPORTED",
+                        format!(
+                            "Unsupported REPL language: {language}. Supported: {}",
+                            LANGUAGES.join(", ")
+                        ),
+                    );
+                }
+                Err(error @ ReplError::Spawn(_)) => {
+                    return failure("REPL_SESSION_ERROR", format!("REPL error: {error}"));
+                }
+            };
 
             if let Err(error) = session.write_stdin(&code).await {
                 // 写 stdin 失败 = 解释器已崩 → 把它踢出池，下次调用重开。
-                self.manager.destroy_session(&session_id);
+                self.manager.destroy_session(&owned_id);
                 return failure(
                     "REPL_EXECUTION_FAILED",
                     format!("REPL execution failed: {error}"),
@@ -154,6 +178,16 @@ impl Tool for REPLTool {
             output
         })
     }
+}
+
+fn persistent_session_key(session: Option<&str>, alias: &str) -> String {
+    session.map_or_else(
+        || alias.to_owned(),
+        |session| {
+            let bytes = serde_json::to_vec(&(session, alias)).expect("string tuple serializes");
+            format!("owned-{}", crate::atomic::sha256_hex(&bytes))
+        },
+    )
 }
 
 /// 元数据里回报的输出上限，供文档与测试引用。
@@ -230,7 +264,7 @@ mod tests {
         }
         let second = tool
             .execute(
-                json!({ "code": "print(zk_marker + 1)", "session_id": "state-test" }),
+                json!({ "code": "print(zk_marker + 1)", "sessionId": "state-test" }),
                 ctx(),
             )
             .await;
@@ -242,6 +276,27 @@ mod tests {
         assert_eq!(meta["language"], "python");
 
         tool.manager().destroy_all();
+    }
+
+    #[tokio::test]
+    async fn conflicting_session_aliases_do_not_create_an_interpreter() {
+        let tool = tool();
+        let output = tool
+            .execute(
+                json!({ "code": "pass", "sessionId": "one", "session_id": "two" }),
+                ctx(),
+            )
+            .await;
+        assert!(output.is_error);
+        assert!(output.content.starts_with("INVALID_PARAMETER: "));
+        assert_eq!(tool.manager().active_session_count(), 0);
+        let properties = tool.parameters();
+        assert!(properties["properties"]["sessionId"].is_object());
+        assert!(properties["properties"]["session_id"].is_object());
+        assert_eq!(
+            properties["properties"]["language"]["enum"],
+            json!(["python", "node", "ruby"])
+        );
     }
 
     /// 旧入参名 `sessionId` 仍被接受（不破旧调用点）。
@@ -256,5 +311,24 @@ mod tests {
         }
         assert_eq!(output.metadata.expect("metadata")["replSessionId"], "camel");
         tool.manager().destroy_all();
+    }
+    #[test]
+    fn persistent_aliases_are_exactly_scoped_without_losing_cross_turn_identity() {
+        assert_eq!(
+            persistent_session_key(Some("session-a"), "console"),
+            persistent_session_key(Some("session-a"), "console")
+        );
+        assert_ne!(
+            persistent_session_key(Some("session-a"), "console"),
+            persistent_session_key(Some("session-b"), "console")
+        );
+        assert_ne!(
+            persistent_session_key(Some("session-a"), "console"),
+            persistent_session_key(Some("session-a"), "console2")
+        );
+        assert_ne!(
+            persistent_session_key(Some("a:b"), "c"),
+            persistent_session_key(Some("a"), "b:c")
+        );
     }
 }

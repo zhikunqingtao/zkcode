@@ -2,16 +2,19 @@
  * EvidenceBundleView — RV-4 证据包详情展示
  *
  * 设计风格对齐 JourneyVerifyPanel：
- * - 紧凑面板：border rounded-lg p-4
+ * - 紧凑面板：border rounded-[10px] p-4
  * - 状态色：verified=green / failed=red / inconclusive=amber / running=blue
  * - 按 EvidenceItem.type 分组展示，提供 tabs 切换
  *
- * 数据来源：useEvidenceStore.currentBundle，组件挂载时按需触发 fetchBundle。
+ * 每个详情实例独立管理请求与展示状态；按 ID 复用最近一个成功加载的证据包。
  */
 
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
+import { useSessionStore } from '@/store/sessionStore';
 import { useEvidenceStore } from '@/store/evidenceStore';
 import type { EvidenceBundle, EvidenceItem } from '@/store/evidenceStore';
+
+const EvidenceSessionContext = createContext<string | null>(null);
 
 interface EvidenceBundleViewProps {
     bundleId: string;
@@ -27,41 +30,76 @@ const ITEM_TYPE_LABELS: Record<string, string> = {
     diff: 'Diffs',
 };
 
-export const EvidenceBundleView: React.FC<EvidenceBundleViewProps> = ({ bundleId }) => {
-    const currentBundle = useEvidenceStore((s) => s.currentBundle);
-    const loading = useEvidenceStore((s) => s.loading);
-    const error = useEvidenceStore((s) => s.error);
-    const fetchBundle = useEvidenceStore((s) => s.fetchBundle);
+export const EvidenceBundleView: React.FC<EvidenceBundleViewProps> = ({ bundleId }) =>
+    bundleId ? <EvidenceBundleLoader key={bundleId} bundleId={bundleId} /> : null;
+
+type EvidenceLoadState =
+    | { status: 'loading' }
+    | { status: 'success'; bundle: EvidenceBundle }
+    | { status: 'error'; message: string };
+
+const EvidenceBundleLoader: React.FC<EvidenceBundleViewProps> = ({ bundleId }) => {
+    // Freeze one cache snapshot for this mount; shared cache updates must not affect this viewer.
+    const [cachedBundle] = useState(() => {
+        const cached = useEvidenceStore.getState().currentBundle;
+        return cached?.bundleId === bundleId ? cached : null;
+    });
+    const [state, setState] = useState<EvidenceLoadState>(() => cachedBundle
+        ? { status: 'success', bundle: cachedBundle }
+        : { status: 'loading' });
 
     useEffect(() => {
-        if (!bundleId) return;
-        if (currentBundle?.bundleId !== bundleId) {
-            void fetchBundle(bundleId);
-        }
-    }, [bundleId, currentBundle?.bundleId, fetchBundle]);
+        if (cachedBundle) return;
+        const controller = new AbortController();
+        let active = true;
+        void (async () => {
+            try {
+                const response = await fetch(`/api/evidence/${encodeURIComponent(bundleId)}`, {
+                    signal: controller.signal,
+                    headers: { 'X-Session-Id': useSessionStore.getState().sessionId ?? '' },
+                });
+                if (!active) return;
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                const data: unknown = await response.json();
+                if (!active) return;
+                if (data === null || typeof data !== 'object'
+                    || !('bundleId' in data) || data.bundleId !== bundleId) {
+                    throw new Error('Evidence bundle identity mismatch');
+                }
+                setState({ status: 'success', bundle: data as EvidenceBundle });
+                useEvidenceStore.setState({ currentBundle: data as EvidenceBundle });
+            } catch (error) {
+                if (active) {
+                    setState({ status: 'error', message: error instanceof Error
+                        ? error.message : 'Failed to load evidence bundle' });
+                }
+            }
+        })();
+        return () => {
+            active = false;
+            controller.abort();
+        };
+    }, [bundleId, cachedBundle]);
 
+    const currentBundle = state.status === 'success' ? state.bundle : null;
     const grouped = useMemo(() => groupByType(currentBundle?.items ?? []), [currentBundle]);
     const groupKeys = useMemo(() => Object.keys(grouped), [grouped]);
-    const [activeTab, setActiveTab] = useState<string | null>(null);
+    const [selectedTab, setSelectedTab] = useState<string | null>(null);
+    const activeTab = selectedTab !== null && groupKeys.includes(selectedTab)
+        ? selectedTab : groupKeys[0] ?? null;
 
-    useEffect(() => {
-        if (groupKeys.length > 0 && (activeTab === null || !groupKeys.includes(activeTab))) {
-            setActiveTab(groupKeys[0]);
-        }
-    }, [groupKeys, activeTab]);
-
-    if (loading && (!currentBundle || currentBundle.bundleId !== bundleId)) {
+    if (state.status === 'loading') {
         return (
-            <div className="evidence-bundle-view border rounded-lg p-4 mt-2 text-xs text-gray-500">
+            <div className="evidence-bundle-view border rounded-[14px] p-4 mt-2 text-[13px] text-t2">
                 Loading evidence bundle…
             </div>
         );
     }
 
-    if (error && !currentBundle) {
+    if (state.status === 'error') {
         return (
-            <div className="evidence-bundle-view border rounded-lg p-4 mt-2 text-xs text-red-600 bg-red-50">
-                Failed to load evidence bundle: {error}
+            <div className="evidence-bundle-view border rounded-[14px] p-4 mt-2 text-[13px] text-err bg-errsoft">
+                Failed to load evidence bundle: {state.message}
             </div>
         );
     }
@@ -71,11 +109,11 @@ export const EvidenceBundleView: React.FC<EvidenceBundleViewProps> = ({ bundleId
     const activeItems = activeTab ? grouped[activeTab] ?? [] : [];
 
     return (
-        <div className="evidence-bundle-view border rounded-lg p-4 mt-2">
+        <div className="evidence-bundle-view border rounded-[14px] p-4 mt-2">
             <Header bundle={currentBundle} />
 
             {groupKeys.length === 0 ? (
-                <div className="mt-3 text-xs text-gray-400">No evidence items.</div>
+                <div className="mt-3 text-[13px] text-t2">No evidence items.</div>
             ) : (
                 <>
                     <div className="flex flex-wrap gap-1 mt-3 border-b pb-2">
@@ -83,16 +121,16 @@ export const EvidenceBundleView: React.FC<EvidenceBundleViewProps> = ({ bundleId
                             <button
                                 key={key}
                                 type="button"
-                                onClick={() => setActiveTab(key)}
+                                onClick={() => setSelectedTab(key)}
                                 className={
-                                    'px-2 py-0.5 text-xs rounded transition-colors ' +
+                                    'px-2 py-0.5 text-[13px] rounded-sm transition-colors ' +
                                     (activeTab === key
-                                        ? 'bg-blue-100 text-blue-700 font-medium'
-                                        : 'text-gray-500 hover:bg-gray-100')
+                                        ? 'bg-accent2-soft text-accent2-ink font-medium'
+                                        : 'text-t2 hover:bg-surface2')
                                 }
                             >
                                 {(ITEM_TYPE_LABELS[key] ?? capitalize(key))}
-                                <span className="ml-1 text-gray-400">
+                                <span className="ml-1 text-t2">
                                     ({grouped[key].length})
                                 </span>
                             </button>
@@ -100,7 +138,7 @@ export const EvidenceBundleView: React.FC<EvidenceBundleViewProps> = ({ bundleId
                     </div>
 
                     <div className="mt-3">
-                        <ItemGroupRenderer type={activeTab ?? ''} items={activeItems} />
+                        <EvidenceSessionContext.Provider value={currentBundle.sessionId}><ItemGroupRenderer type={activeTab ?? ''} items={activeItems} /></EvidenceSessionContext.Provider>
                     </div>
                 </>
             )}
@@ -111,49 +149,66 @@ export const EvidenceBundleView: React.FC<EvidenceBundleViewProps> = ({ bundleId
 // ==================== Header ====================
 
 const Header: React.FC<{ bundle: EvidenceBundle }> = ({ bundle }) => (
-    <div className="flex items-center justify-between gap-2">
-        <div className="min-w-0">
-            <div className="flex items-center gap-2">
-                <h3 className="text-sm font-medium truncate">
-                    {bundle.claim || `Evidence Bundle ${shortId(bundle.bundleId)}`}
-                </h3>
-                <span className="px-1.5 py-0.5 text-[10px] rounded bg-gray-100 text-gray-600 uppercase">
-                    {bundle.kind}
-                </span>
-                <span className="px-1.5 py-0.5 text-[10px] rounded bg-slate-100 text-slate-600">
-                    {bundle.origin === 'machine' ? 'Machine evidence' : bundle.origin === 'human' ? 'Human review' : 'Model assertion'}
-                </span>
+    <div>
+        <div className="flex items-center justify-between gap-2">
+            <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                    <span className="text-[13px] text-t2">{bundle.origin === 'machine' ? 'Machine evidence' : bundle.origin === 'human' ? 'Human review' : 'Model assertion'}</span>
+                <h3 className="truncate text-base font-semibold">
+                        {bundle.claim || `Evidence Bundle ${shortId(bundle.bundleId)}`}
+                    </h3>
+                    <span className="px-1.5 py-0.5 text-[13px] rounded-sm bg-surface2 text-t2 uppercase">
+                        {bundle.kind}
+                    </span>
+                </div>
+                <div className="text-[13px] text-t2 mt-0.5 font-mono truncate">
+                    {shortId(bundle.bundleId)} · {formatTimestamp(bundle.createdAt)}
+                </div>
             </div>
-            <div className="text-xs text-gray-400 mt-0.5 font-mono truncate">
-                {shortId(bundle.bundleId)} · {formatTimestamp(bundle.createdAt)}
-            </div>
+            <VerdictBadge verdict={bundle.verdict} />
         </div>
-        <VerdictBadge verdict={bundle.verdict} />
+        {scopeNote(bundle) && (
+            <p className="mt-2 text-[13px] text-t2">{scopeNote(bundle)}</p>
+        )}
     </div>
 );
+
+/** 有限范围口径：正向结论只限定在可识别的检查范围；未知值不崩溃、不显示 undefined。 */
+function scopeNote(bundle: EvidenceBundle): string | null {
+    const v = (bundle.verdict || '').toLowerCase();
+    if (v === 'verified' || v === 'passed') {
+        return bundle.kind === 'journey' && bundle.items?.length > 0
+            ? '范围有限：仅表示所列步骤在该次执行中通过'
+            : '该记录标记为通过；检查覆盖范围未知';
+    }
+    if (v === 'unavailable') return '该次检查未执行，不能据此判定通过';
+    if (v === 'inconclusive') return '结论不确定，不能据此判定通过';
+    if (v === 'failed') return null;
+    return '范围未知，不能据此判定通过';
+}
 
 const VerdictBadge: React.FC<{ verdict: string }> = ({ verdict }) => {
     const v = (verdict || '').toLowerCase();
     if (v === 'verified' || v === 'passed') {
-        return <span className="px-2 py-0.5 text-xs rounded bg-green-100 text-green-700">Verified</span>;
+        return <span className="px-2 py-0.5 text-[13px] rounded-sm bg-oksoft text-ok">Verified</span>;
     }
     if (v === 'failed') {
-        return <span className="px-2 py-0.5 text-xs rounded bg-red-100 text-red-700">Failed</span>;
+        return <span className="px-2 py-0.5 text-[13px] rounded-sm bg-errsoft text-err">Failed</span>;
     }
     if (v === 'inconclusive') {
-        return <span className="px-2 py-0.5 text-xs rounded bg-amber-100 text-amber-700">Inconclusive</span>;
+        return <span className="px-2 py-0.5 text-[13px] rounded-sm bg-warnsoft text-warn">Inconclusive</span>;
     }
-    if (v === 'stale') {
-        return <span className="px-2 py-0.5 text-xs rounded bg-amber-100 text-amber-700">Stale</span>;
+    if (v === 'unavailable') {
+        return <span className="px-2 py-0.5 text-[13px] rounded-sm bg-warnsoft text-warn">Unavailable</span>;
     }
-    return <span className="px-2 py-0.5 text-xs rounded bg-blue-100 text-blue-700">{verdict || 'Unknown'}</span>;
+    return <span className="px-2 py-0.5 text-[13px] rounded-sm bg-accent2-soft text-accent2-ink">Unknown</span>;
 };
 
 // ==================== Item Group Renderer ====================
 
 const ItemGroupRenderer: React.FC<{ type: string; items: EvidenceItem[] }> = ({ type, items }) => {
     if (items.length === 0) {
-        return <div className="text-xs text-gray-400">No items.</div>;
+        return <div className="text-[13px] text-t2">No items.</div>;
     }
     switch (type) {
         case 'screenshot':
@@ -177,31 +232,90 @@ const ItemGroupRenderer: React.FC<{ type: string; items: EvidenceItem[] }> = ({ 
 
 // ---- screenshot ----
 const ScreenshotGrid: React.FC<{ items: EvidenceItem[] }> = ({ items }) => (
-    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-        {items.map((item) => {
-            const src = pickImageSrc(item);
-            return (
-                <div key={item.id} className="border rounded overflow-hidden bg-gray-50">
-                    {src ? (
-                        <img
-                            src={src}
-                            alt={item.summary ?? 'screenshot'}
-                            className="w-full h-24 object-cover"
-                            loading="lazy"
-                        />
-                    ) : (
-                        <div className="w-full h-24 flex items-center justify-center text-[10px] text-gray-400">
-                            no preview
-                        </div>
-                    )}
-                    <div className="px-1.5 py-1 text-[11px] text-gray-600 truncate">
-                        {item.summary ?? shortId(item.id)}
-                    </div>
-                </div>
-            );
-        })}
+    <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+        {items.map((item) => <ScreenshotCard key={item.id} item={item} />)}
     </div>
 );
+
+const ScreenshotCard: React.FC<{ item: EvidenceItem }> = ({ item }) => {
+    const candidate = pickImageSrc(item);
+    const sessionId = useContext(EvidenceSessionContext);
+    const [authorizedSrc, setAuthorizedSrc] = useState<string | null>(null);
+    const [previewError, setPreviewError] = useState(false);
+    useEffect(() => {
+        if (!candidate?.startsWith('/api/evidence/')) return;
+        const controller = new AbortController(); let url: string | null = null; let active = true;
+        setAuthorizedSrc(null); setPreviewError(false);
+        void fetch(candidate, { signal: controller.signal, headers: { 'X-Session-Id': sessionId ?? '' } })
+            .then(async response => {
+                if (!response.ok) throw new Error('Screenshot unavailable');
+                const blob = await response.blob();
+                if (!['image/png', 'image/jpeg'].includes(blob.type)) throw new Error('Unsupported screenshot');
+                if (active) { url = URL.createObjectURL(blob); setAuthorizedSrc(url); }
+            }).catch(() => { if (active) setPreviewError(true); });
+        return () => { active = false; controller.abort(); if (url) URL.revokeObjectURL(url); };
+    }, [candidate, sessionId]);
+    const src = candidate?.startsWith('/api/evidence/') ? authorizedSrc : candidate;
+    const [failedSrc, setFailedSrc] = useState<string | null>(null);
+    const unreadable = previewError || (src !== null && src === failedSrc);
+    return (
+        <div className="border rounded-sm overflow-hidden bg-surface2">
+            {src && !unreadable ? (
+                <img
+                    src={src}
+                    alt={item.summary ?? 'screenshot'}
+                    className="w-full h-24 object-cover"
+                    loading="lazy"
+                    onError={() => setFailedSrc(src)}
+                />
+            ) : (
+                <div className="w-full min-h-24 p-2 flex items-center justify-center text-[13px] text-t2">
+                    {unreadable ? '截图不可读取：文件缺失、损坏或加载失败' : '无截图预览'}
+                </div>
+            )}
+            <div className="px-1.5 py-1 text-[13px] text-t2 break-words">
+                {item.summary ?? shortId(item.id)}
+            </div>
+            <StepEvidenceDetails item={item} missingScreenshot={!src} unreadableScreenshot={unreadable} />
+        </div>
+    );
+};
+
+/** Journey facts remain separate from the verdict, including when no image was saved. */
+const StepEvidenceDetails: React.FC<{
+    item: EvidenceItem;
+    missingScreenshot?: boolean;
+    unreadableScreenshot?: boolean;
+}> = ({ item, missingScreenshot = false, unreadableScreenshot = false }) => {
+    const meta = item.meta ?? {};
+    const method = nonEmptyString(meta.method);
+    const warning = nonEmptyString(meta.warning);
+    const isInteraction = meta.action === 'click' || meta.action === 'type';
+    const status = nonEmptyString(meta.screenshotStatus);
+    const reason = nonEmptyString(meta.screenshotReason);
+    const missing = missingScreenshot || (status !== null && status !== 'stored') || reason !== null;
+    const mime = nonEmptyString(meta.mime);
+    const bytes = typeof meta.bytes === 'number' && Number.isFinite(meta.bytes) && meta.bytes >= 0 ? meta.bytes : null;
+    const screenshotDetails = [mime, bytes !== null ? `${bytes} 字节` : null].filter(Boolean).join('，');
+    const gapLabel = status === 'invalid' ? '截图无效'
+        : status === 'limit_exceeded' ? '截图未保存（超出限额）' : '截图缺失';
+    if (!method && !warning && !isInteraction && !missing && !status) return null;
+
+    return (
+        <div className="px-2 py-1 space-y-1 text-[13px] text-t2 break-words">
+            {(method || isInteraction) && <p>{method ? `执行方式：${method}` : '执行方式未记录'}</p>}
+            {warning && <p className="text-warn">{warning}</p>}
+            {method === 'js_fallback' && (
+                <p className="text-warn">此次操作使用 JS fallback，不能单独证明原生用户交互可用。</p>
+            )}
+            {missing ? (
+                <p className="text-warn">{gapLabel}：{screenshotReasonLabel(reason)}</p>
+            ) : status === 'stored' && (
+                <p>{unreadableScreenshot ? '归档记录存在，当前无法读取' : '截图已归档'}{screenshotDetails ? `（${screenshotDetails}）` : ''}</p>
+            )}
+        </div>
+    );
+};
 
 // ---- command ----
 const CommandList: React.FC<{ items: EvidenceItem[] }> = ({ items }) => (
@@ -211,16 +325,16 @@ const CommandList: React.FC<{ items: EvidenceItem[] }> = ({ items }) => (
             const cmd = (item.meta?.command as string | undefined) ?? item.summary ?? '';
             const stdout = (item.meta?.stdout as string | undefined) ?? '';
             return (
-                <div key={item.id} className="border rounded">
-                    <div className="flex items-center justify-between px-2 py-1 bg-gray-50 border-b text-xs">
+                <div key={item.id} className="border rounded-sm">
+                    <div className="flex items-center justify-between px-2 py-1 bg-surface2 border-b text-[13px]">
                         <span className="font-mono truncate">{cmd || shortId(item.id)}</span>
                         {exitCode !== null && (
                             <span
                                 className={
-                                    'ml-2 px-1.5 py-0.5 text-[10px] rounded ' +
+                                    'ml-2 px-1.5 py-0.5 text-[13px] rounded-sm ' +
                                     (exitCode === 0
-                                        ? 'bg-green-100 text-green-700'
-                                        : 'bg-red-100 text-red-700')
+                                        ? 'bg-oksoft text-ok'
+                                        : 'bg-errsoft text-err')
                                 }
                             >
                                 exit {exitCode}
@@ -228,10 +342,11 @@ const CommandList: React.FC<{ items: EvidenceItem[] }> = ({ items }) => (
                         )}
                     </div>
                     {stdout && (
-                        <pre className="p-2 text-[11px] font-mono bg-gray-50 max-h-32 overflow-auto whitespace-pre-wrap">
+                        <pre className="p-2 text-[13px] font-mono bg-surface2 max-h-32 overflow-auto whitespace-pre-wrap">
                             {stdout}
                         </pre>
                     )}
+                    <StepEvidenceDetails item={item} />
                 </div>
             );
         })}
@@ -248,11 +363,11 @@ const ConsoleList: React.FC<{ items: EvidenceItem[] }> = ({ items }) => (
                 <div
                     key={item.id}
                     className={
-                        'flex items-start gap-2 px-2 py-1 rounded text-xs ' +
-                        (isError ? 'bg-red-50 text-red-700' : 'bg-amber-50 text-amber-700')
+                        'flex items-start gap-2 px-2 py-1 rounded-sm text-[13px] ' +
+                        (isError ? 'bg-errsoft text-err' : 'bg-warnsoft text-warn')
                     }
                 >
-                    <span className="font-mono uppercase text-[10px] shrink-0 mt-0.5">{level}</span>
+                    <span className="font-mono uppercase text-[13px] shrink-0 mt-0.5">{level}</span>
                     <span className="font-mono break-all">
                         {item.summary ?? JSON.stringify(item.meta)}
                     </span>
@@ -270,9 +385,9 @@ const TestList: React.FC<{ items: EvidenceItem[] }> = ({ items }) => (
             const ok = passed === true;
             const fail = passed === false;
             return (
-                <div key={item.id} className="flex items-center gap-2 text-xs">
+                <div key={item.id} className="flex items-center gap-2 text-[13px]">
                     <span
-                        className={ok ? 'text-green-500' : fail ? 'text-red-500' : 'text-gray-400'}
+                        className={ok ? 'text-ok' : fail ? 'text-err' : 'text-t2'}
                     >
                         {ok ? '✓' : fail ? '✗' : '·'}
                     </span>
@@ -280,7 +395,7 @@ const TestList: React.FC<{ items: EvidenceItem[] }> = ({ items }) => (
                         {item.summary ?? (item.meta?.name as string | undefined) ?? shortId(item.id)}
                     </span>
                     {typeof item.meta?.durationMs === 'number' && (
-                        <span className="text-gray-400 ml-auto">{item.meta.durationMs}ms</span>
+                        <span className="text-t2 ml-auto">{item.meta.durationMs}ms</span>
                     )}
                 </div>
             );
@@ -288,20 +403,40 @@ const TestList: React.FC<{ items: EvidenceItem[] }> = ({ items }) => (
     </div>
 );
 
+
+const EvidenceBlobDownload: React.FC<{ sha: string }> = ({ sha }) => {
+    const sessionId = useContext(EvidenceSessionContext);
+    const [busy, setBusy] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const download = async () => {
+        if (busy) return;
+        setBusy(true); setError(null);
+        try {
+            const response = await fetch(`/api/evidence/blob/${encodeURIComponent(sha)}`, { headers: { 'X-Session-Id': sessionId ?? '' } });
+            if (!response.ok) throw new Error(`下载失败（HTTP ${response.status}）`);
+            const url = URL.createObjectURL(await response.blob());
+            const link = document.createElement('a'); link.href = url; link.download = `evidence-${sha}`; link.click();
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
+        } catch (failure) { setError(failure instanceof Error ? failure.message : '下载失败'); }
+        finally { setBusy(false); }
+    };
+    return <><button disabled={busy} onClick={() => void download()} className="text-accent2-ink underline">下载证据</button>{error && <p role="alert">{error}</p>}</>;
+};
+
 // ---- video ----
 const VideoList: React.FC<{ items: EvidenceItem[] }> = ({ items }) => (
     <div className="space-y-2">
         {items.map((item) => {
             const url = (item.meta?.url as string | undefined) ?? pickBlobHref(item);
             return (
-                <div key={item.id} className="border rounded p-2 text-xs">
-                    <div className="text-gray-600 mb-1 truncate">
+                <div key={item.id} className="border rounded-sm p-2 text-[13px]">
+                    <div className="text-t2 mb-1 truncate">
                         {item.summary ?? shortId(item.id)}
                     </div>
-                    {url ? (
-                        <video controls src={url} className="w-full max-h-48 bg-black rounded" />
+                    {item.blobSha256 ? <EvidenceBlobDownload sha={item.blobSha256} /> : url ? (
+                        <video controls src={url} className="w-full max-h-48 bg-black rounded-sm" />
                     ) : (
-                        <span className="text-gray-400">no source</span>
+                        <span className="text-t2">no source</span>
                     )}
                 </div>
             );
@@ -312,9 +447,9 @@ const VideoList: React.FC<{ items: EvidenceItem[] }> = ({ items }) => (
 // ---- har ----
 const HarTable: React.FC<{ items: EvidenceItem[] }> = ({ items }) => (
     <div className="overflow-x-auto">
-        <table className="min-w-full text-xs">
+        <table className="min-w-full text-[13px]">
             <thead>
-                <tr className="text-gray-500 border-b">
+                <tr className="text-t2 border-b">
                     <th className="text-left px-2 py-1 font-medium">Method</th>
                     <th className="text-left px-2 py-1 font-medium">URL</th>
                     <th className="text-right px-2 py-1 font-medium">Status</th>
@@ -334,10 +469,10 @@ const HarTable: React.FC<{ items: EvidenceItem[] }> = ({ items }) => (
                                 className={
                                     'px-2 py-1 text-right font-mono ' +
                                     (status === undefined
-                                        ? 'text-gray-400'
+                                        ? 'text-t2'
                                         : ok
-                                            ? 'text-green-600'
-                                            : 'text-red-600')
+                                            ? 'text-ok'
+                                            : 'text-err')
                                 }
                             >
                                 {status ?? '—'}
@@ -356,13 +491,13 @@ const DiffList: React.FC<{ items: EvidenceItem[] }> = ({ items }) => (
         {items.map((item) => {
             const patch = (item.meta?.patch as string | undefined) ?? item.summary ?? '';
             return (
-                <div key={item.id} className="border rounded">
+                <div key={item.id} className="border rounded-sm">
                     {item.meta?.path ? (
-                        <div className="px-2 py-1 bg-gray-50 border-b text-[11px] font-mono truncate">
+                        <div className="px-2 py-1 bg-surface2 border-b text-[13px] font-mono truncate">
                             {String(item.meta.path)}
                         </div>
                     ) : null}
-                    <pre className="p-2 text-[11px] font-mono bg-gray-50 max-h-48 overflow-auto whitespace-pre">
+                    <pre className="p-2 text-[13px] font-mono bg-surface2 max-h-48 overflow-auto whitespace-pre">
                         {renderDiffWithColor(patch)}
                     </pre>
                 </div>
@@ -373,10 +508,10 @@ const DiffList: React.FC<{ items: EvidenceItem[] }> = ({ items }) => (
 
 const renderDiffWithColor = (patch: string): React.ReactNode =>
     patch.split('\n').map((line, idx) => {
-        let cls = 'text-gray-700';
-        if (line.startsWith('+') && !line.startsWith('+++')) cls = 'text-green-600';
-        else if (line.startsWith('-') && !line.startsWith('---')) cls = 'text-red-600';
-        else if (line.startsWith('@@')) cls = 'text-blue-600';
+        let cls = 'text-t1';
+        if (line.startsWith('+') && !line.startsWith('+++')) cls = 'text-ok';
+        else if (line.startsWith('-') && !line.startsWith('---')) cls = 'text-err';
+        else if (line.startsWith('@@')) cls = 'text-accent2-ink';
         return (
             <span key={idx} className={cls}>
                 {line + '\n'}
@@ -388,12 +523,12 @@ const renderDiffWithColor = (patch: string): React.ReactNode =>
 const GenericList: React.FC<{ items: EvidenceItem[] }> = ({ items }) => (
     <div className="space-y-1">
         {items.map((item) => (
-            <div key={item.id} className="text-xs border rounded px-2 py-1">
-                <div className="font-mono text-gray-700 truncate">
+            <div key={item.id} className="text-[13px] border rounded-sm px-2 py-1">
+                <div className="font-mono text-t1 truncate">
                     {item.summary ?? shortId(item.id)}
                 </div>
                 {Object.keys(item.meta ?? {}).length > 0 && (
-                    <pre className="mt-1 text-[10px] text-gray-500 font-mono whitespace-pre-wrap break-all">
+                    <pre className="mt-1 text-[13px] text-t2 font-mono whitespace-pre-wrap break-all">
                         {safeJsonStringify(item.meta)}
                     </pre>
                 )}
@@ -435,6 +570,22 @@ function pickBool(v: unknown): boolean | null {
     return null;
 }
 
+function nonEmptyString(value: unknown): string | null {
+    return typeof value === 'string' && value.trim().length > 0 ? value : null;
+}
+
+function screenshotReasonLabel(reason: string | null): string {
+    switch (reason) {
+        case null:
+        case 'reason_not_recorded': return '原因未记录';
+        case 'invalid_base64': return '截图编码无效';
+        case 'single_image_limit_5_mib': return '单张截图超过 5 MiB 限额';
+        case 'journey_image_limit_20_mib': return '本次 Journey 截图归档剩余额度不足（总限额 20 MiB）';
+        case 'invalid_or_unsupported_image': return '截图无效或不是支持的 JPEG/PNG 图片';
+        default: return reason;
+    }
+}
+
 function pickImageSrc(item: EvidenceItem): string | null {
     const meta = item.meta ?? {};
     if (typeof meta.dataUrl === 'string' && meta.dataUrl.length > 0) return meta.dataUrl;
@@ -444,7 +595,7 @@ function pickImageSrc(item: EvidenceItem): string | null {
         return `data:${mime};base64,${meta.base64}`;
     }
     if (item.blobSha256) {
-        return `/api/evidence/blob/${encodeURIComponent(item.blobSha256)}`;
+        return `/api/evidence/blob/${encodeURIComponent(item.blobSha256)}?preview=true`;
     }
     return null;
 }

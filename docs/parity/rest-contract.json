@@ -1,42 +1,398 @@
 {
   "version": 1,
   "enforcedThroughWorkPackage": 11,
-  "errorEnvelopeTarget": {"code": "string", "message": "string", "requestId": "string"},
-  "defaults": {"queryPermissionMode": "DONT_ASK", "allowArbitraryWorkingDirectory": false},
+  "errorEnvelopeTarget": {
+    "code": "string",
+    "message": "string",
+    "requestId": "string"
+  },
+  "defaults": {
+    "queryPermissionMode": "DONT_ASK",
+    "allowArbitraryWorkingDirectory": false
+  },
   "requiredEndpoints": [
-    {"method": "GET", "path": "/api/commands", "workPackage": "WP-03"},
-    {"method": "GET", "path": "/api/commands/{name}", "workPackage": "WP-03"},
-    {"method": "POST", "path": "/api/runs/{runId}/cancel", "workPackage": "WP-03"},
-    {"method": "GET", "path": "/api/swarm", "workPackage": "WP-03/WP-11"},
-    {"method": "POST", "path": "/api/swarm", "workPackage": "WP-11"},
-    {"method": "GET", "path": "/api/swarm/{swarmId}", "workPackage": "WP-11"},
-    {"method": "DELETE", "path": "/api/swarm/{swarmId}", "workPackage": "WP-11"},
-    {"method": "POST", "path": "/api/swarm/{swarmId}/dispatch", "workPackage": "WP-11"},
-    {"method": "POST", "path": "/api/swarm/{swarmId}/abort", "workPackage": "WP-11"},
-    {"method": "POST", "path": "/api/swarm/{swarmId}/shutdown", "workPackage": "WP-03/WP-11"},
-    {"method": "POST", "path": "/api/swarm/{swarmId}/force-stop", "workPackage": "WP-03/WP-11"},
-    {"method": "POST", "path": "/api/swarm/{swarmId}/worker/{workerId}/abort", "workPackage": "WP-03/WP-11"},
-    {"method": "POST", "path": "/api/query", "mode": "sync", "workPackage": "WP-04"},
-    {"method": "POST", "path": "/api/query/stream", "mode": "sse", "workPackage": "WP-04"},
-    {"method": "POST", "path": "/api/query/conversation", "mode": "conversation", "workPackage": "WP-04"},
-    {"method": "GET", "path": "/api/sessions/snapshots", "workPackage": "WP-04"},
-    {"method": "POST", "path": "/api/sessions/{sessionId}/snapshot", "workPackage": "WP-04"},
-    {"method": "POST", "path": "/api/sessions/{sessionId}/snapshot/resume", "workPackage": "WP-04"},
-    {"method": "DELETE", "path": "/api/sessions/snapshots/{sessionId}", "workPackage": "WP-04"},
-    {"method": "POST", "path": "/api/evidence", "workPackage": "WP-06"},
-    {"method": "GET", "path": "/api/evidence/{bundleId}", "workPackage": "WP-06"},
-    {"method": "POST", "path": "/api/evidence/{bundleId}/verify", "workPackage": "WP-06"},
-    {"method": "GET", "path": "/api/evidence/session/{sessionId}", "workPackage": "WP-06"},
-    {"method": "GET", "path": "/api/evidence/blob/{sha256}", "workPackage": "WP-06"},
-    {"method": "POST", "path": "/api/artifacts/manifests", "workPackage": "WP-06"},
-    {"method": "POST", "path": "/api/artifacts/manifests/{manifestId}/verify", "workPackage": "WP-06"},
-    {"method": "GET", "path": "/api/runs/{runId}/manifest", "workPackage": "WP-06"},
-    {"method": "POST", "path": "/api/runs/{runId}/manifest/verify", "workPackage": "WP-06"},
-    {"method": "POST", "path": "/api/verify/run-checks", "workPackage": "WP-06"},
-    {"method": "GET", "path": "/api/workbench/{runId}", "workPackage": "WP-06"},
-    {"method": "PUT", "path": "/api/workbench/{runId}", "workPackage": "WP-06"},
-    {"method": "GET", "path": "/api/sessions/{sessionId}/workbench/current", "workPackage": "WP-06"},
-    {"method": "GET", "path": "/api/workbench/tasks", "workPackage": "WP-06"},
-    {"method": "POST", "path": "/mcp", "workPackage": "WP-10"}
+    {
+      "method": "GET",
+      "path": "/api/commands",
+      "workPackage": "WP-03"
+    },
+    {
+      "method": "GET",
+      "path": "/api/commands/{name}",
+      "workPackage": "WP-03"
+    },
+    {
+      "method": "POST",
+      "path": "/api/runs/{runId}/cancel",
+      "workPackage": "WP-03"
+    },
+    {
+      "method": "GET",
+      "path": "/api/swarm",
+      "workPackage": "WP-03/WP-11"
+    },
+    {
+      "method": "POST",
+      "path": "/api/swarm",
+      "workPackage": "WP-11"
+    },
+    {
+      "method": "GET",
+      "path": "/api/swarm/{swarmId}",
+      "workPackage": "WP-11"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/swarm/{swarmId}",
+      "workPackage": "WP-11"
+    },
+    {
+      "method": "POST",
+      "path": "/api/swarm/{swarmId}/dispatch",
+      "workPackage": "WP-11"
+    },
+    {
+      "method": "POST",
+      "path": "/api/swarm/{swarmId}/abort",
+      "workPackage": "WP-11"
+    },
+    {
+      "method": "POST",
+      "path": "/api/swarm/{swarmId}/shutdown",
+      "workPackage": "WP-03/WP-11"
+    },
+    {
+      "method": "POST",
+      "path": "/api/swarm/{swarmId}/force-stop",
+      "workPackage": "WP-03/WP-11"
+    },
+    {
+      "method": "POST",
+      "path": "/api/swarm/{swarmId}/worker/{workerId}/abort",
+      "workPackage": "WP-03/WP-11"
+    },
+    {
+      "method": "POST",
+      "path": "/api/query",
+      "mode": "sync",
+      "workPackage": "WP-04"
+    },
+    {
+      "method": "POST",
+      "path": "/api/query/stream",
+      "mode": "sse",
+      "workPackage": "WP-04"
+    },
+    {
+      "method": "POST",
+      "path": "/api/query/conversation",
+      "mode": "conversation",
+      "workPackage": "WP-04"
+    },
+    {
+      "method": "GET",
+      "path": "/api/sessions/snapshots",
+      "workPackage": "WP-04"
+    },
+    {
+      "method": "POST",
+      "path": "/api/sessions/{sessionId}/snapshot",
+      "workPackage": "WP-04"
+    },
+    {
+      "method": "POST",
+      "path": "/api/sessions/{sessionId}/snapshot/resume",
+      "workPackage": "WP-04"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/sessions/snapshots/{sessionId}",
+      "workPackage": "WP-04"
+    },
+    {
+      "method": "POST",
+      "path": "/api/evidence",
+      "workPackage": "WP-06"
+    },
+    {
+      "method": "GET",
+      "path": "/api/evidence/{bundleId}",
+      "workPackage": "WP-06"
+    },
+    {
+      "method": "POST",
+      "path": "/api/evidence/{bundleId}/verify",
+      "workPackage": "WP-06"
+    },
+    {
+      "method": "GET",
+      "path": "/api/evidence/session/{sessionId}",
+      "workPackage": "WP-06"
+    },
+    {
+      "method": "GET",
+      "path": "/api/evidence/blob/{sha256}",
+      "workPackage": "WP-06"
+    },
+    {
+      "method": "POST",
+      "path": "/api/artifacts/manifests",
+      "workPackage": "WP-06"
+    },
+    {
+      "method": "POST",
+      "path": "/api/artifacts/manifests/{manifestId}/verify",
+      "workPackage": "WP-06"
+    },
+    {
+      "method": "GET",
+      "path": "/api/runs/{runId}/manifest",
+      "workPackage": "WP-06"
+    },
+    {
+      "method": "POST",
+      "path": "/api/runs/{runId}/manifest/verify",
+      "workPackage": "WP-06"
+    },
+    {
+      "method": "POST",
+      "path": "/api/verify/run-checks",
+      "workPackage": "WP-06"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/{runId}",
+      "workPackage": "WP-06"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/workbench/{runId}",
+      "workPackage": "WP-06"
+    },
+    {
+      "method": "GET",
+      "path": "/api/sessions/{sessionId}/workbench/current",
+      "workPackage": "WP-06"
+    },
+    {
+      "method": "GET",
+      "path": "/api/workbench/tasks",
+      "workPackage": "WP-06"
+    },
+    {
+      "method": "POST",
+      "path": "/mcp",
+      "workPackage": "WP-10"
+    },
+    {
+      "method": "POST",
+      "path": "/api/sessions/merge",
+      "workPackage": "Migration-2026-10"
+    },
+    {
+      "method": "GET",
+      "path": "/api/session-merges/active",
+      "workPackage": "Migration-2026-10"
+    },
+    {
+      "method": "GET",
+      "path": "/api/session-merges/{id}",
+      "workPackage": "Migration-2026-10"
+    },
+    {
+      "method": "POST",
+      "path": "/api/session-merges/{id}/resume",
+      "workPackage": "Migration-2026-10"
+    },
+    {
+      "method": "POST",
+      "path": "/api/session-merges/{id}/cancel",
+      "workPackage": "Migration-2026-10"
+    },
+    {
+      "method": "GET",
+      "path": "/api/session-merges/{id}/assets/{reference}",
+      "workPackage": "Migration-2026-10"
+    },
+    {
+      "method": "GET",
+      "path": "/api/skills/manage",
+      "workPackage": "Migration-2026-10"
+    },
+    {
+      "method": "GET",
+      "path": "/api/skills/manage/{name}",
+      "workPackage": "Migration-2026-10"
+    },
+    {
+      "method": "GET",
+      "path": "/api/skills/detail/{name}",
+      "workPackage": "Migration-2026-10"
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/skills/manage/{name}/toggle",
+      "workPackage": "Migration-2026-10"
+    },
+    {
+      "method": "GET",
+      "path": "/api/memory/document",
+      "workPackage": "Migration-2026-10"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/memory/document",
+      "workPackage": "Migration-2026-10"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/memory/document/entries",
+      "workPackage": "Migration-2026-10"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/sessions/{id}/activities/{activityId}/decision",
+      "workPackage": "Migration-2026-10"
+    },
+    {
+      "method": "POST",
+      "path": "/api/query/{requestId}/cancel",
+      "workPackage": "full-alignment"
+    },
+    {
+      "method": "GET",
+      "path": "/api/query/{requestId}/stream",
+      "workPackage": "full-alignment"
+    },
+    {
+      "method": "GET",
+      "path": "/api/sessions/{id}/execution-preferences",
+      "workPackage": "full-alignment"
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/sessions/{id}/execution-preferences",
+      "workPackage": "full-alignment"
+    },
+    {
+      "method": "GET",
+      "path": "/api/sessions/{id}/repl-service",
+      "workPackage": "full-alignment"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/sessions/{id}/repl-service",
+      "workPackage": "full-alignment"
+    },
+    {
+      "method": "POST",
+      "path": "/api/code-diagrams/generate",
+      "workPackage": "full-alignment"
+    },
+    {
+      "method": "POST",
+      "path": "/api/code-path/endpoints",
+      "workPackage": "full-alignment"
+    },
+    {
+      "method": "POST",
+      "path": "/api/code-path/trace",
+      "workPackage": "full-alignment"
+    },
+    {
+      "method": "GET",
+      "path": "/api/analysis/openapi/merged",
+      "workPackage": "full-alignment"
+    },
+    {
+      "method": "GET",
+      "path": "/api/analysis/openapi/backend",
+      "workPackage": "full-alignment"
+    },
+    {
+      "method": "GET",
+      "path": "/api/analysis/openapi/python",
+      "workPackage": "full-alignment"
+    },
+    {
+      "method": "POST",
+      "path": "/api/analysis/change-impact",
+      "workPackage": "full-alignment"
+    },
+    {
+      "method": "POST",
+      "path": "/api/mcp/contexts",
+      "workPackage": "full-alignment"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/mcp/contexts/{runId}",
+      "workPackage": "full-alignment"
+    },
+    {
+      "method": "GET",
+      "path": "/api/mcp/contexts/{runId}/capabilities",
+      "workPackage": "full-alignment"
+    },
+    {
+      "method": "POST",
+      "path": "/api/mcp/contexts/{runId}/capabilities/requests",
+      "workPackage": "full-alignment"
+    },
+    {
+      "method": "GET",
+      "path": "/api/mcp/services/{name}/oauth",
+      "workPackage": "full-alignment"
+    },
+    {
+      "method": "POST",
+      "path": "/api/mcp/services/{name}/oauth/authorize",
+      "workPackage": "full-alignment"
+    },
+    {
+      "method": "POST",
+      "path": "/api/mcp/services/{name}/oauth/logout",
+      "workPackage": "full-alignment"
+    },
+    {
+      "method": "GET",
+      "path": "/api/sessions/{id}/hooks",
+      "workPackage": "full-alignment"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/sessions/{id}/hooks",
+      "workPackage": "full-alignment"
+    },
+    {
+      "method": "POST",
+      "path": "/api/sessions/{id}/history/rewind/preview",
+      "workPackage": "full-alignment"
+    },
+    {
+      "method": "POST",
+      "path": "/api/code-quality/complexity",
+      "workPackage": "full-alignment"
+    },
+    {
+      "method": "POST",
+      "path": "/api/git/log",
+      "workPackage": "full-alignment"
+    },
+    {
+      "method": "POST",
+      "path": "/api/git/diff",
+      "workPackage": "full-alignment"
+    },
+    {
+      "method": "POST",
+      "path": "/api/git/blame",
+      "workPackage": "full-alignment"
+    },
+    {
+      "method": "POST",
+      "path": "/api/git/cancel",
+      "workPackage": "full-alignment"
+    }
   ]
 }

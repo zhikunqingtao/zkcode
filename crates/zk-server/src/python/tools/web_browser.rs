@@ -85,7 +85,7 @@ const DESCRIPTION: &str = concat!(
     "- Use the same session_id across all actions in a test sequence\n",
     "- Use wait_for after click/navigate to ensure page loads completely\n",
     "- For AJAX pages (e.g. Baidu new search), use `no_wait_after: true` in click to avoid navigation timeout\n",
-    "- If click times out due to element visibility issues, the tool automatically retries with JS click\n",
+    "- If click times out, inspect the current page before another action; the click may already have taken effect\n",
     "- Use click with `force: true` for elements that exist in DOM but are not visible (e.g. headless mode)\n",
     "- After AJAX click, use `wait_for(wait_until: 'networkidle')` to wait for content loading\n",
     "- Take screenshots at key checkpoints for visual evidence\n",
@@ -123,7 +123,7 @@ impl WebBrowserTool {
     }
 
     /// 入参校验（旧 `validateInput`，:181-246）。
-    fn validate(input: &serde_json::Value) -> Result<&str, ToolOutput> {
+    pub(super) fn validate(input: &serde_json::Value) -> Result<&str, ToolOutput> {
         let Some(action) = opt_str(input, "action").filter(|value| ALLOWED_ACTIONS.contains(value))
         else {
             return Err(failure(
@@ -285,7 +285,7 @@ impl Tool for WebBrowserTool {
                 },
                 "force": {
                     "type": "boolean",
-                    "description": "Force click, skip visibility/actionability checks. Useful for elements that exist in DOM but are not visible in headless mode (default: false). Click auto-falls back to JS click on visibility errors."
+                    "description": "Force click, skip visibility/actionability checks. Useful for elements that exist in DOM but are not visible in headless mode (default: false). Interaction failures remain errors; no JavaScript fallback is used."
                 }
             }
         })
@@ -297,6 +297,12 @@ impl Tool for WebBrowserTool {
 
     fn execute(&self, input: serde_json::Value, ctx: ToolContext) -> BoxFuture<'_, ToolOutput> {
         Box::pin(async move {
+            if ctx.is_ephemeral() {
+                return failure(
+                    "EPHEMERAL_BROWSER_SCOPE_UNAVAILABLE",
+                    "Temporary interactive browser sessions require a Run-owned browser scope; use VerifyJourney with record=false",
+                );
+            }
             let action = match Self::validate(&input) {
                 Ok(action) => action.to_owned(),
                 Err(output) => return output,
@@ -333,7 +339,7 @@ impl Tool for WebBrowserTool {
                 );
             };
             if !envelope.success {
-                return failure(envelope.code(), envelope.message());
+                return browser_failure(&action, &envelope);
             }
             let data = envelope.data.unwrap_or(serde_json::Value::Null);
 
@@ -366,6 +372,31 @@ impl Tool for WebBrowserTool {
             ToolOutput::ok(data.to_string())
         })
     }
+}
+
+pub(super) fn browser_failure(action: &str, envelope: &PythonEnvelope) -> ToolOutput {
+    let mut output = failure(envelope.code(), envelope.message());
+    let mut metadata = json!({"retryability": "NEVER", "effectState": "UNKNOWN"});
+    if matches!(action, "click" | "type") {
+        for key in ["method", "warning"] {
+            if let Some(value) = envelope
+                .data
+                .as_ref()
+                .and_then(|data| data.get(key))
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+            {
+                let bounded: String = value.chars().take(2_048).collect();
+                output.content.push('\n');
+                output.content.push_str(key);
+                output.content.push_str(": ");
+                output.content.push_str(&bounded);
+                metadata[key] = json!(bounded);
+            }
+        }
+    }
+    output.metadata = Some(metadata);
+    output
 }
 
 /// 截图落盘（旧 :271-295 的等价实现）。
@@ -646,6 +677,23 @@ mod tests {
         assert_eq!(
             WebBrowserTool::validate(&json!({ "action": "get_cookies" })).expect("default timeout"),
             "get_cookies"
+        );
+    }
+
+    #[test]
+    fn interaction_failure_keeps_only_bounded_truthful_facts() {
+        let envelope: PythonEnvelope = serde_json::from_value(json!({"success":false,"error_code":"CLICK_FAILED","error_message":"blocked", "data":{"method":"locator.click","warning":"overlay", "screenshot_base64":"secret","arbitrary":"ignored"}})).expect("envelope");
+        let output = browser_failure("click", &envelope);
+        assert!(output.is_error);
+        assert!(output.content.contains("method: locator.click"));
+        assert!(output.content.contains("warning: overlay"));
+        let metadata = output.metadata.expect("metadata");
+        assert_eq!(metadata["retryability"], "NEVER");
+        assert!(metadata.get("screenshot_base64").is_none());
+        assert!(
+            !browser_failure("navigate", &envelope)
+                .content
+                .contains("overlay")
         );
     }
 

@@ -20,6 +20,7 @@ use zk_tools::{
 pub struct ExecutionSupervisor {
     executor: ToolExecutor,
     resource_observer: Arc<dyn ExecutionResourceObserver>,
+    hook_resource_observer: Arc<dyn ExecutionResourceObserver>,
 }
 
 impl std::fmt::Debug for ExecutionSupervisor {
@@ -36,7 +37,8 @@ impl ExecutionSupervisor {
     pub fn new(db: Db) -> Self {
         Self {
             executor: ToolExecutor::new(),
-            resource_observer: DbExecutionResourceObserver::shared(db),
+            resource_observer: DbExecutionResourceObserver::shared(db.clone()),
+            hook_resource_observer: DbExecutionResourceObserver::hook_shared(db),
         }
     }
 
@@ -108,6 +110,61 @@ impl ExecutionSupervisor {
         )
     }
 
+    /// Context for trusted internal Git operations owned directly by a durable Run.
+    pub(crate) fn process_context(
+        &self,
+        task_id: &str,
+        run_id: &str,
+        session_id: &str,
+        cwd: &std::path::Path,
+        cancel: CancellationToken,
+    ) -> zk_tools::ToolContext {
+        self.executor.process_context(
+            cancel,
+            CallEnv::new()
+                .with_session_id(session_id)
+                .with_run_id(run_id)
+                .with_working_dir(cwd.to_string_lossy().as_ref())
+                .with_execution_resources(
+                    ExecutionResourceOwner {
+                        task_id: task_id.to_owned(),
+                        run_id: run_id.to_owned(),
+                        invocation_id: String::new(),
+                    },
+                    Arc::clone(&self.resource_observer),
+                ),
+        )
+    }
+
+    /// Bind host lifecycle Hooks to an existing durable owner and the same
+    /// supervised process/HTTP resource ledger. This supplies ownership only;
+    /// the Hook admission port must still authorize every physical dispatch.
+    #[must_use]
+    pub fn hook_context(
+        &self,
+        task_id: &str,
+        run_id: &str,
+        session_id: &str,
+        cwd: &std::path::Path,
+        cancel: CancellationToken,
+    ) -> crate::hook::HookContext {
+        let hook = crate::hook::HookContext::new()
+            .with_session(session_id)
+            .with_working_dir(cwd.to_string_lossy())
+            .with_cancellation(&cancel)
+            .require_execution_owner();
+        let context = self.process_context(task_id, run_id, session_id, cwd, cancel);
+        let context = context.with_execution_resources(
+            ExecutionResourceOwner {
+                task_id: task_id.into(),
+                run_id: run_id.into(),
+                invocation_id: String::new(),
+            },
+            Arc::clone(&self.hook_resource_observer),
+        );
+        hook.with_execution(context, self.executor.clone())
+    }
+
     pub(crate) fn executor(&self) -> ToolExecutor {
         self.executor.clone()
     }
@@ -121,11 +178,22 @@ impl ExecutionSupervisor {
 #[derive(Clone)]
 pub(crate) struct DbExecutionResourceObserver {
     db: Db,
+    hook_only: bool,
 }
 
 impl DbExecutionResourceObserver {
+    /// Hook allocations and physical-start binding both require the current active Run.
+    pub(crate) fn hook_shared(db: Db) -> Arc<dyn ExecutionResourceObserver> {
+        Arc::new(Self {
+            db,
+            hook_only: true,
+        })
+    }
     pub(crate) fn shared(db: Db) -> Arc<dyn ExecutionResourceObserver> {
-        Arc::new(Self { db })
+        Arc::new(Self {
+            db,
+            hook_only: false,
+        })
     }
 }
 
@@ -136,22 +204,27 @@ impl ExecutionResourceObserver for DbExecutionResourceObserver {
         allocation: ExecutionResourceAllocation,
     ) -> BoxFuture<'static, Result<ExecutionResourceLease, String>> {
         let db = self.db.clone();
+        let hook_only = self.hook_only;
         Box::pin(async move {
             let lease = ExecutionResourceLease {
                 resource_id: allocation.resource_id.clone(),
             };
-            db.register_execution_resource(&NewExecutionResource {
+            let resource = NewExecutionResource {
                 resource_id: allocation.resource_id,
                 task_id: owner.task_id,
                 run_id: owner.run_id,
-                invocation_id: Some(owner.invocation_id),
+                invocation_id: (!owner.invocation_id.is_empty()).then_some(owner.invocation_id),
                 resource_kind: allocation.resource_kind,
                 external_id: allocation.external_id,
                 metadata_json: serde_json::to_string(&allocation.metadata)
                     .map_err(|error| format!("RESOURCE_METADATA_INVALID: {error}"))?,
-            })
-            .await
-            .map_err(|error| format!("RESOURCE_REGISTER_FAILED: {error}"))?;
+            };
+            if hook_only {
+                db.register_hook_execution_resource(&resource).await
+            } else {
+                db.register_execution_resource(&resource).await
+            }
+            .map_err(|_| "RESOURCE_REGISTER_FAILED".to_owned())?;
             Ok(lease)
         })
     }
@@ -162,14 +235,50 @@ impl ExecutionResourceObserver for DbExecutionResourceObserver {
         external_id: String,
     ) -> BoxFuture<'static, Result<(), String>> {
         let db = self.db.clone();
+        let hook_only = self.hook_only;
         Box::pin(async move {
-            match db
-                .bind_execution_resource_external(&lease.resource_id, &external_id)
-                .await
-                .map_err(|error| format!("RESOURCE_BIND_FAILED: {error}"))?
-            {
+            let bound = if hook_only {
+                db.bind_hook_execution_resource_external(&lease.resource_id, &external_id)
+                    .await
+            } else {
+                db.bind_execution_resource_external(&lease.resource_id, &external_id)
+                    .await
+            };
+            match bound.map_err(|_| "RESOURCE_BIND_FAILED".to_owned())? {
                 CasOutcome::Applied => Ok(()),
                 outcome => Err(format!("RESOURCE_BIND_{outcome:?}")),
+            }
+        })
+    }
+
+    fn reconcile_released(
+        &self,
+        owner: ExecutionResourceOwner,
+        lease: ExecutionResourceLease,
+        external_id: String,
+    ) -> BoxFuture<'static, Result<(), String>> {
+        let db = self.db.clone();
+        Box::pin(async move {
+            let proof = db
+                .execution_resource_release_proof(&lease.resource_id)
+                .await
+                .map_err(|_| "RESOURCE_RECONCILIATION_STORE_FAILED")?
+                .ok_or("RESOURCE_RECONCILIATION_IDENTITY_MISSING")?;
+            if proof.task_id != owner.task_id
+                || proof.run_id != owner.run_id
+                || proof.invocation_id.as_deref()
+                    != (!owner.invocation_id.is_empty()).then_some(owner.invocation_id.as_str())
+                || proof.external_id != external_id
+            {
+                return Err("RESOURCE_RECONCILIATION_OWNER_MISMATCH".into());
+            }
+            match db
+                .reconcile_execution_resource_release(&proof)
+                .await
+                .map_err(|_| "RESOURCE_RECONCILIATION_STORE_FAILED")?
+            {
+                CasOutcome::Applied => Ok(()),
+                _ => Err("RESOURCE_RECONCILIATION_CONFLICT".into()),
             }
         })
     }

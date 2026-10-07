@@ -30,6 +30,17 @@ pub(crate) fn decode_session_cursor(cursor: &str) -> Option<String> {
     decoded.split_once('|').map(|(_, id)| id.to_owned())
 }
 
+/// Read a stable keyset position even if its source row is changed or deleted.
+pub(crate) fn decode_session_position(cursor: &str) -> Option<(String, String)> {
+    let decoded = String::from_utf8(ENGINE.decode(cursor).ok()?).ok()?;
+    let (time, id) = decoded.split_once('|')?;
+    crate::time::parse_rfc3339_millis(time)?;
+    if id.is_empty() {
+        return None;
+    }
+    Some((time.into(), id.into()))
+}
+
 /// 编码消息列表游标：`Base64(十进制索引)`。
 pub(crate) fn encode_message_cursor(index: u64) -> String {
     ENGINE.encode(index.to_string())

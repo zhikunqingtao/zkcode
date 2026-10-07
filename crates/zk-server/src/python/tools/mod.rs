@@ -15,11 +15,14 @@
 //!    `retryability` / `effectState` 在 2.2 冻结的 [`ToolOutput`] 中无承载
 //!    位，沿用 zk-tools §4 既定约定——错误码以 `"CODE: message"` 落文本首段。
 
+mod browser_scope;
 mod code_intel;
 mod git_enhanced;
+mod journey_resources;
 mod verify_journey;
 mod web_browser;
 
+pub use browser_scope::BrowserRunScopeFactory;
 pub use code_intel::CodeIntelTool;
 pub use git_enhanced::GitEnhancedTool;
 pub use verify_journey::BrowserVerifyJourneyTool;

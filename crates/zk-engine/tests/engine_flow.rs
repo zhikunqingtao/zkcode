@@ -4,6 +4,11 @@
 //! `MockChatProvider` 手写事件流喂入，`RecordingSink` 录制下行序列；
 //! 消息 JSON 形状断言以 zk-protocol serde 输出为唯一权威。
 
+#[path = "support/hook_admission.rs"]
+mod hook_admission_fixture;
+
+use hook_admission_fixture::FixtureHookAdmission;
+
 use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -42,8 +47,24 @@ struct RecordingSink {
     pushed: Mutex<Vec<(String, ServerMessage)>>,
 }
 
+fn approved_hooks(root: &std::path::Path) -> zk_engine::hook::HookService {
+    let registry = zk_engine::hook::HookRegistry::try_load_from_dir(root).unwrap();
+    zk_engine::hook::HookService::load_from_dir(root)
+        .with_admission(Arc::new(FixtureHookAdmission::for_registry(&registry)))
+}
+
 impl MessageSink for RecordingSink {
     fn push<'a>(&'a self, session_id: &'a str, message: ServerMessage) -> BoxFuture<'a, ()> {
+        // This legacy flow fixture compares conversation events; lifecycle and
+        // intermediate-segment persistence/deduplication have dedicated checks
+        // in runtime_migration.rs.
+        if matches!(
+            message,
+            ServerMessage::TaskBoundary { .. } | ServerMessage::AssistantSegmentComplete { .. }
+        ) {
+            return Box::pin(futures::future::ready(()));
+        }
+
         self.pushed
             .lock()
             .expect("sink lock")
@@ -64,7 +85,14 @@ impl RecordingSink {
 
     fn json_at(&self, index: usize) -> serde_json::Value {
         let pushed = self.pushed.lock().expect("sink lock");
-        serde_json::to_value(&pushed[index].1).expect("serialize server message")
+        let mut value = serde_json::to_value(&pushed[index].1).expect("serialize server message");
+        if let Some(messages) = value
+            .get_mut("committedMessages")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            messages.retain(|message| message["subtype"] != "task_boundary");
+        }
+        value
     }
 
     fn session_at(&self, index: usize) -> String {
@@ -293,6 +321,9 @@ impl WebFetchPort for FixtureFetchPort {
 struct FixtureVerifyJourney;
 
 impl Tool for FixtureVerifyJourney {
+    fn produces_machine_evidence(&self) -> bool {
+        true
+    }
     fn name(&self) -> &'static str {
         "VerifyJourney"
     }
@@ -361,7 +392,25 @@ impl Tool for FixtureVerifyJourney {
 
 // Result 包装是刻意的：与 setup 的脚本槽位类型（Ok=流 / Err=建立期失败）对齐。
 #[expect(clippy::unnecessary_wraps, reason = "匹配脚本槽位 Result 形态")]
-fn events(seq: Vec<ProviderEvent>) -> Result<BoxStream<'static, ProviderEvent>, ProviderError> {
+fn events(mut seq: Vec<ProviderEvent>) -> Result<BoxStream<'static, ProviderEvent>, ProviderError> {
+    // Finish-only success fixtures need a real final response under the new
+    // completion contract. Empty-final recovery itself is tested separately.
+    if seq.len() == 1
+        && matches!(
+            seq.first(),
+            Some(ProviderEvent::Finish {
+                finish_reason: FinishReason::EndTurn,
+                ..
+            })
+        )
+    {
+        seq.insert(
+            0,
+            ProviderEvent::TextDelta {
+                text: "done".into(),
+            },
+        );
+    }
     Ok(stream::iter(seq).boxed())
 }
 
@@ -417,6 +466,336 @@ async fn run(engine: &Arc<Engine>, session_id: &str, text: &str) {
     Arc::clone(engine)
         .run_user_message(session_id.to_owned(), text.to_owned())
         .await;
+}
+
+async fn hook_fixture(
+    scripts: Vec<Result<BoxStream<'static, ProviderEvent>, ProviderError>>,
+    event: &str,
+    role: &str,
+    command: &str,
+) -> (
+    Arc<Engine>,
+    Arc<MockProvider>,
+    Arc<RecordingSink>,
+    Db,
+    String,
+    std::path::PathBuf,
+) {
+    let root = std::env::temp_dir().join(format!("zk-engine-hook-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(root.join(".zk")).unwrap();
+    std::fs::write(
+        root.join(".zk/hooks.toml"),
+        format!(
+            "[[hook]]\nname='integration'\nevent='{event}'\nrole='{role}'\ncommand={}\n",
+            serde_json::to_string(command).unwrap(),
+        ),
+    )
+    .unwrap();
+    let db = Db::open_in_memory().unwrap();
+    let session = db
+        .create_session("qwen3.8-max-0902", root.to_str().unwrap())
+        .await
+        .unwrap()
+        .id;
+    let provider = Arc::new(MockProvider::new(scripts));
+    let sink = Arc::new(RecordingSink::default());
+    let registry = registry_with_models(Arc::clone(&provider), &["qwen3.8-max-0902"]);
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(EchoTool));
+    let engine = Arc::new(
+        Engine::with_tools(db.clone(), registry, sink.clone(), Arc::new(tools))
+            .with_hooks(Arc::new(approved_hooks(&root))),
+    );
+    (engine, provider, sink, db, session, root)
+}
+
+#[tokio::test]
+async fn stop_hook_requests_one_counted_correction_and_preserves_accounting() {
+    let answer = || {
+        events(vec![
+            ProviderEvent::TextDelta {
+                text: "answer".into(),
+            },
+            ProviderEvent::Finish {
+                finish_reason: FinishReason::EndTurn,
+                usage: Some(usage(3, 2)),
+            },
+        ])
+    };
+    let (engine, provider, _, db, session, root) = hook_fixture(
+        vec![answer(), answer()],
+        "STOP",
+        "transform",
+        r#"printf '%s' '{"decision":"correct","message":"Check the result again"}'"#,
+    )
+    .await;
+    run(&engine, &session, "original user requirement").await;
+    assert_eq!(provider.request_count(), 2);
+    assert!(
+        provider
+            .request_at(1)
+            .messages
+            .iter()
+            .any(|message| message.content.contains("not authorization"))
+    );
+    let run = db
+        .find_latest_root_run_by_session(&session)
+        .await
+        .unwrap()
+        .unwrap();
+    let result = db
+        .read_task_result(&run.task_id, None, 0, 4096)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.result.status, zk_db::ResultStatus::Error);
+    assert!(
+        result
+            .result
+            .error_code
+            .as_deref()
+            .unwrap_or_default()
+            .contains("STOP_HOOK_CORRECTION_UNSATISFIED")
+    );
+    let run_id = run.id;
+    let calls: i64 = db
+        .with_conn_blocking(move |conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(*) FROM llm_calls WHERE run_id=?1",
+                [run_id],
+                |row| row.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(calls, 2);
+    assert!(db.get_session(&session).await.unwrap().unwrap().messages.iter().any(|message| message.content.iter().any(|block|matches!(block, StoredBlock::Text{text} if text=="original user requirement"))));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn user_prompt_hook_preserves_original_and_cannot_silently_authorize_or_bypass_denial() {
+    let answer = events(vec![
+        ProviderEvent::TextDelta {
+            text: "answer".into(),
+        },
+        ProviderEvent::Finish {
+            finish_reason: FinishReason::EndTurn,
+            usage: Some(usage(3, 2)),
+        },
+    ]);
+    let (engine, provider, _, db, session, root) = hook_fixture(
+        vec![answer],
+        "USER_PROMPT_SUBMIT",
+        "transform",
+        r#"printf '%s' '{"input":{"text":"project-specific context"}}'"#,
+    )
+    .await;
+    run(&engine, &session, "unaltered user intent").await;
+    let request = provider.request_at(0);
+    assert!(
+        request
+            .messages
+            .iter()
+            .any(|message| message.content.contains("unaltered user intent"))
+    );
+    assert!(
+        request
+            .messages
+            .iter()
+            .any(|message| message.content.contains("does not grant tool permission"))
+    );
+    let detail = db.get_session(&session).await.unwrap().unwrap();
+    assert!(detail.messages.iter().any(|message| {
+        message
+            .content
+            .iter()
+            .any(|block| matches!(block, StoredBlock::Text{text} if text=="unaltered user intent"))
+    }));
+    assert!(detail.messages.iter().any(|message| {
+        message
+            .meta
+            .as_ref()
+            .is_some_and(|meta| meta["runtimeProjection"] == "user_prompt_hook")
+    }));
+    std::fs::remove_dir_all(root).unwrap();
+
+    let (engine, provider, _, db, session, root) = hook_fixture(
+        Vec::new(),
+        "USER_PROMPT_SUBMIT",
+        "security",
+        r#"printf '%s' '{"decision":"deny","code":"INPUT_POLICY_DENIED"}'"#,
+    )
+    .await;
+    run(&engine, &session, "preserved rejected original").await;
+    assert_eq!(provider.request_count(), 0);
+    assert!(
+        format!(
+            "{:?}",
+            db.get_session(&session).await.unwrap().unwrap().messages
+        )
+        .contains("preserved rejected original")
+    );
+    let run = db
+        .find_latest_root_run_by_session(&session)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        db.find_runtime_task_by_id(&run.task_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        zk_db::TaskStatus::Failed
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn stop_hook_cannot_extend_explicit_turn_budget_or_run_after_cancellation() {
+    let answer = events(vec![
+        ProviderEvent::TextDelta {
+            text: "answer".into(),
+        },
+        ProviderEvent::Finish {
+            finish_reason: FinishReason::EndTurn,
+            usage: Some(usage(3, 2)),
+        },
+    ]);
+    let (engine, provider, _, db, session, root) = hook_fixture(
+        vec![answer],
+        "STOP",
+        "transform",
+        r#"printf '%s' '{"decision":"correct","message":"keep going"}'"#,
+    )
+    .await;
+    let service = ConversationService::new(engine, db);
+    service
+        .execute_with_options(
+            &session,
+            "bounded".into(),
+            ConversationRunOptions {
+                max_turns: 1,
+                ..ConversationRunOptions::default()
+            },
+        )
+        .await;
+    assert_eq!(provider.request_count(), 1);
+    std::fs::remove_dir_all(root).unwrap();
+
+    let waiting: BoxStream<'static, ProviderEvent> = stream::pending().boxed();
+    let (engine, provider, _, db, session, root) = hook_fixture(
+        vec![Ok(waiting)],
+        "STOP",
+        "notification",
+        "touch stop-was-fired",
+    )
+    .await;
+    let job = engine.spawn_user_message(&session, "cancel me".into());
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while provider.request_count() == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    engine.interrupt(&session, "user_cancel");
+    tokio::time::timeout(Duration::from_secs(5), job)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!root.join("stop-was-fired").exists());
+    let run = db
+        .find_latest_root_run_by_session(&session)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        db.find_runtime_task_by_id(&run.task_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        zk_db::TaskStatus::Cancelled
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn post_hook_changes_only_ui_projection_and_never_tool_facts_or_model_input() {
+    let tool = events(vec![
+        ProviderEvent::ToolUseStart {
+            id: "echo-hook".into(),
+            name: "Echo".into(),
+        },
+        ProviderEvent::ToolInputDelta {
+            id: "echo-hook".into(),
+            delta: r#"{"text":"actual tool output"}"#.into(),
+        },
+        ProviderEvent::Finish {
+            finish_reason: FinishReason::ToolUse,
+            usage: Some(usage(3, 2)),
+        },
+    ]);
+    let answer = events(vec![
+        ProviderEvent::TextDelta {
+            text: "done".into(),
+        },
+        ProviderEvent::Finish {
+            finish_reason: FinishReason::EndTurn,
+            usage: Some(usage(3, 2)),
+        },
+    ]);
+    let (engine, provider, sink, db, session, root) = hook_fixture(
+        vec![tool, answer],
+        "POST_TOOL_USE",
+        "presentation",
+        r#"printf '%s' '{"presentation":"display note only"}'"#,
+    )
+    .await;
+    run(&engine, &session, "echo once").await;
+    assert_eq!(provider.request_count(), 2);
+    assert!(!format!("{:?}", provider.request_at(1).messages).contains("display note only"));
+    let projected = sink
+        .pushed
+        .lock()
+        .unwrap()
+        .iter()
+        .find_map(|(_, message)| match message {
+            ServerMessage::ToolResult {
+                tool_use_id,
+                result,
+            } if tool_use_id == "echo-hook" => Some(result.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        projected.metadata.as_ref().unwrap()["hookPresentation"]["text"],
+        "display note only"
+    );
+    assert!(projected.content.contains("actual tool output"));
+    assert!(!projected.is_error);
+    let detail = db.get_session(&session).await.unwrap().unwrap();
+    let notes = db.hook_presentations(&session, 0, 200).await.unwrap();
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0].text, "display note only");
+    let assistant = detail
+        .messages
+        .iter()
+        .find(|message| {
+            message
+                .content
+                .iter()
+                .any(|block| matches!(block,StoredBlock::ToolUse{id,..} if id=="echo-hook"))
+        })
+        .unwrap();
+    assert_eq!(
+        notes[0].assistant_message_id.as_deref(),
+        Some(assistant.id.as_str())
+    );
+    assert!(!format!("{:?}", detail.messages).contains("display note only"));
+    assert!(format!("{:?}", detail.messages).contains("actual tool output"));
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 fn trusted_url_attachment(index: usize) -> Attachment {
@@ -561,11 +940,19 @@ async fn image_request_without_configured_vision_model_fails_before_provider() {
     assert_eq!(provider.request_count(), 0);
     assert_eq!(sink.kinds(), vec!["error"]);
     assert_eq!(sink.json_at(0)["code"], "ATTACHMENT_MODEL_UNSUPPORTED");
-    let messages = db
+    let mut messages = db
         .list_messages(&session.id, None, 10)
         .await
         .expect("list messages")
         .expect("session exists");
+    messages.messages.retain(|message| {
+        message
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("subtype"))
+            .and_then(serde_json::Value::as_str)
+            != Some("task_boundary")
+    });
     assert!(
         messages.messages.is_empty(),
         "rejected input must not persist"
@@ -761,20 +1148,28 @@ async fn single_turn_streams_and_persists() {
     assert_eq!(request.messages[0].content, "hi");
 
     // 落库形状读回逐字段断言。
-    let page = db
+    let mut page = db
         .list_messages(&sid, None, 10)
         .await
         .expect("list")
         .expect("session exists");
+    page.messages.retain(|message| {
+        message
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("subtype"))
+            .and_then(serde_json::Value::as_str)
+            != Some("task_boundary")
+    });
     assert_eq!(page.messages.len(), 2);
     let user = &page.messages[0];
     assert_eq!(user.role, MessageRole::User);
-    assert_eq!(user.seq_num, 1);
+    assert_eq!(user.seq_num, 2);
     assert_eq!(user.content, vec![StoredBlock::Text { text: "hi".into() }]);
     assert_eq!(user.stop_reason, None);
     let assistant = &page.messages[1];
     assert_eq!(assistant.role, MessageRole::Assistant);
-    assert_eq!(assistant.seq_num, 2);
+    assert_eq!(assistant.seq_num, 3);
     assert_eq!(
         assistant.content,
         vec![StoredBlock::Text {
@@ -1030,11 +1425,19 @@ async fn missing_post_turn_usage_fails_before_assistant_or_tool_side_effects() {
     assert_eq!(complete["stopReason"], "error");
     let run_id = complete["runId"].as_str().expect("run id");
 
-    let page = db
+    let mut page = db
         .list_messages(&session.id, None, 10)
         .await
         .expect("message query")
         .expect("session exists");
+    page.messages.retain(|message| {
+        message
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("subtype"))
+            .and_then(serde_json::Value::as_str)
+            != Some("task_boundary")
+    });
     assert_eq!(
         page.messages.len(),
         1,
@@ -1145,11 +1548,19 @@ async fn owning_task_usage_poison_fails_before_assistant_or_tool_side_effects() 
         result.result.error_code.as_deref(),
         Some("BUDGET_USAGE_INCOMPLETE")
     );
-    let messages = db
+    let mut messages = db
         .list_messages(&session.id, None, 10)
         .await
         .expect("list transcript")
         .expect("session exists");
+    messages.messages.retain(|message| {
+        message
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("subtype"))
+            .and_then(serde_json::Value::as_str)
+            != Some("task_boundary")
+    });
     assert_eq!(messages.messages.len(), 1);
     let invocations: i64 = db
         .with_conn_blocking(|connection| {
@@ -1516,7 +1927,7 @@ async fn production_prompt_uses_bounded_sqlite_project_memory_and_ignores_legacy
 }
 
 #[tokio::test]
-async fn explicit_thinking_on_an_unsupported_model_downgrades_with_notification() {
+async fn explicit_thinking_on_an_unsupported_model_is_rejected_without_dispatch() {
     let (engine, provider, sink, db, sid) = setup_with_model(
         vec![events(vec![ProviderEvent::Finish {
             finish_reason: FinishReason::EndTurn,
@@ -1526,7 +1937,7 @@ async fn explicit_thinking_on_an_unsupported_model_downgrades_with_notification(
     )
     .await;
     let service = ConversationService::new(engine, db);
-    service
+    let outcome = service
         .execute_with_options(
             &sid,
             "think carefully".into(),
@@ -1537,13 +1948,9 @@ async fn explicit_thinking_on_an_unsupported_model_downgrades_with_notification(
         )
         .await;
 
-    assert_eq!(
-        provider.request_at(0).thinking,
-        zk_llm::ThinkingMode::Disabled
-    );
-    assert_eq!(sink.kinds().first(), Some(&"notification"));
-    assert_eq!(sink.json_at(0)["key"], "thinking_mode_downgraded");
-    assert_eq!(sink.json_at(0)["level"], "warning");
+    assert_eq!(outcome.error.as_deref(), Some("QUERY_THINKING_UNSUPPORTED"));
+    assert!(provider.requests.lock().unwrap().is_empty());
+    assert!(sink.kinds().is_empty());
 }
 
 #[tokio::test]
@@ -1582,11 +1989,19 @@ async fn thinking_mixed_stream_and_trailing_usage() {
     assert_eq!(complete["usage"]["inputTokens"], 3);
     assert_eq!(complete["usage"]["outputTokens"], 4);
 
-    let page = db
+    let mut page = db
         .list_messages(&sid, None, 10)
         .await
         .expect("list")
         .expect("session exists");
+    page.messages.retain(|message| {
+        message
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("subtype"))
+            .and_then(serde_json::Value::as_str)
+            != Some("task_boundary")
+    });
     let assistant = &page.messages[1];
     assert_eq!(
         assistant.content,
@@ -1607,11 +2022,14 @@ async fn busy_rejects_second_run_and_releases_slot() {
     let gate_stream = Arc::clone(&gate);
     let first: BoxStream<'static, ProviderEvent> = stream::once(async move {
         gate_stream.notified().await;
-        ProviderEvent::Finish {
-            finish_reason: FinishReason::EndTurn,
-            usage: Some(usage(1, 1)),
+        ProviderEvent::TextDelta {
+            text: "done".into(),
         }
     })
+    .chain(stream::iter(vec![ProviderEvent::Finish {
+        finish_reason: FinishReason::EndTurn,
+        usage: Some(usage(1, 1)),
+    }]))
     .boxed();
     let (engine, provider, sink, db, sid) = setup(vec![
         Ok(first),
@@ -1638,11 +2056,19 @@ async fn busy_rejects_second_run_and_releases_slot() {
     gate.notify_one();
     first_run.await.expect("first run joins");
     // busy 消息不落库：仅第一 run 的 user+assistant 两条。
-    let page = db
+    let mut page = db
         .list_messages(&sid, None, 10)
         .await
         .expect("list")
         .expect("session exists");
+    page.messages.retain(|message| {
+        message
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("subtype"))
+            .and_then(serde_json::Value::as_str)
+            != Some("task_boundary")
+    });
     assert_eq!(page.messages.len(), 2);
 
     // 槽位释放后新 run 正常执行。
@@ -1680,11 +2106,19 @@ async fn fatal_stream_error_emits_complete_only_after_durable_error_result() {
     );
 
     // 用户消息保留（provider 调用前已落库），助手消息不落库。
-    let page = db
+    let mut page = db
         .list_messages(&sid, None, 10)
         .await
         .expect("list")
         .expect("session exists");
+    page.messages.retain(|message| {
+        message
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("subtype"))
+            .and_then(serde_json::Value::as_str)
+            != Some("task_boundary")
+    });
     assert_eq!(page.messages.len(), 1);
     assert_eq!(page.messages[0].role, MessageRole::User);
     let terminal: (String, String, i64) = db
@@ -1715,8 +2149,8 @@ async fn setup_failure_from_chat_stream_is_fatal() {
     );
     let error = sink.json_at(0);
     assert_eq!(error["code"], "query_error");
-    // 致命（Config 类）错误同样标记可重试：旧 catch/onError 恒发 true。
-    assert_eq!(error["retryable"], true);
+    // Provider Config errors are permanent and must not invite blind retries.
+    assert_eq!(error["retryable"], false);
     let result_count: i64 = db
         .with_conn_blocking(|conn| {
             conn.query_row("SELECT COUNT(*) FROM task_results", [], |row| row.get(0))
@@ -1770,9 +2204,19 @@ async fn run_scripted_child_turns(
     scripts: Vec<Result<BoxStream<'static, ProviderEvent>, ProviderError>>,
     max_turns: u32,
 ) -> (Db, Arc<MockProvider>, String, String, SubAgentRunOutcome) {
+    run_scripted_child_with_hooks(scripts, max_turns, None).await
+}
+
+#[allow(clippy::too_many_lines)]
+async fn run_scripted_child_with_hooks(
+    scripts: Vec<Result<BoxStream<'static, ProviderEvent>, ProviderError>>,
+    max_turns: u32,
+    hooks_root: Option<&std::path::Path>,
+) -> (Db, Arc<MockProvider>, String, String, SubAgentRunOutcome) {
+    let work_dir = hooks_root.map_or("/tmp", |root| root.to_str().unwrap());
     let db = Db::open_in_memory().expect("in-memory db");
     let root_session = db
-        .create_session("qwen3.8-max-0902", "/tmp")
+        .create_session("qwen3.8-max-0902", work_dir)
         .await
         .expect("root session");
     let root_task_id = uuid::Uuid::new_v4().to_string();
@@ -1791,7 +2235,7 @@ async fn run_scripted_child_turns(
             prompt: Some("root".into()),
             task_type: "agent".into(),
             model: "qwen3.8-max-0902".into(),
-            working_dir: "/tmp".into(),
+            working_dir: work_dir.into(),
             execution_config_json: json!({
                 "budget": {
                     "tokenLimit": 1_000_000,
@@ -1825,7 +2269,7 @@ async fn run_scripted_child_turns(
             prompt: Some("child".into()),
             task_type: "agent".into(),
             model: "qwen3.8-max-0902".into(),
-            working_dir: "/tmp".into(),
+            working_dir: work_dir.into(),
             execution_config_json: json!({"isolation": "readOnly"}).to_string(),
             startup_epoch: 1,
         })
@@ -1856,29 +2300,33 @@ async fn run_scripted_child_turns(
         &FeatureFlags::with_defaults(),
         true,
     )));
+    let engine = if let Some(root) = hooks_root {
+        engine.with_hooks(Arc::new(approved_hooks(root)))
+    } else {
+        engine
+    };
     let (_mailbox_tx, mailbox) = tokio::sync::mpsc::unbounded_channel();
-    let outcome = engine
-        .run_sub_agent(
-            SubAgentRunConfig {
-                agent_id: child_task_id.clone(),
-                session_id: child_session_id,
-                run_id: child_run_id.clone(),
-                model: "qwen3.8-max-0902".into(),
-                system_prompt: "system".into(),
-                user_prompt: "child".into(),
-                work_dir: "/tmp".into(),
-                max_turns,
-                mailbox,
-                budget: TaskBudgetLimits {
-                    token_limit: budget.token_limit,
-                    cost_limit_nanos_usd: budget.cost_limit_nanos_usd,
-                    deadline_at_ms: budget.deadline_at_ms,
-                },
-                recovery_checkpoint: None,
+    let outcome = Box::pin(engine.run_sub_agent(
+        SubAgentRunConfig {
+            agent_id: child_task_id.clone(),
+            session_id: child_session_id,
+            run_id: child_run_id.clone(),
+            model: "qwen3.8-max-0902".into(),
+            system_prompt: "system".into(),
+            user_prompt: "child".into(),
+            work_dir: work_dir.into(),
+            max_turns,
+            mailbox,
+            budget: TaskBudgetLimits {
+                token_limit: budget.token_limit,
+                cost_limit_nanos_usd: budget.cost_limit_nanos_usd,
+                deadline_at_ms: budget.deadline_at_ms,
             },
-            CancellationToken::new(),
-        )
-        .await;
+            recovery_checkpoint: None,
+        },
+        CancellationToken::new(),
+    ))
+    .await;
     (db, provider, child_task_id, child_run_id, outcome)
 }
 
@@ -2195,11 +2643,19 @@ async fn stable_stream_runtime_failure_wins_over_later_finish_for_child() {
             .await
             .expect("read child Run")
             .expect("child Run exists");
-        let transcript = db
+        let mut transcript = db
             .list_messages(&run.session_id, None, 10)
             .await
             .expect("list child transcript")
             .expect("child transcript exists");
+        transcript.messages.retain(|message| {
+            message
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get("subtype"))
+                .and_then(serde_json::Value::as_str)
+                != Some("task_boundary")
+        });
         assert_eq!(
             transcript.messages.len(),
             1,
@@ -2436,6 +2892,10 @@ async fn parse_error_then_finish_still_succeeds() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Exercise terminal error precedence and its durable Run/result projection together."
+)]
 async fn stable_stream_runtime_failure_wins_over_later_finish_for_root() {
     for (runtime_code, stop_reason, result_status, result_code, run_status, exit_reason) in [
         (
@@ -2526,11 +2986,19 @@ async fn stable_stream_runtime_failure_wins_over_later_finish_for_root() {
         assert_eq!(durable_run.status, run_status);
         assert_eq!(durable_run.exit_reason.as_deref(), Some(exit_reason));
 
-        let messages = db
+        let mut messages = db
             .list_messages(&sid, None, 10)
             .await
             .expect("list transcript")
             .expect("session exists");
+        messages.messages.retain(|message| {
+            message
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get("subtype"))
+                .and_then(serde_json::Value::as_str)
+                != Some("task_boundary")
+        });
         assert_eq!(
             messages.messages.len(),
             1,
@@ -2576,11 +3044,19 @@ async fn second_turn_carries_history_and_replace_anchor() {
     assert_eq!(contents, vec!["hi", "Hello world", "more"]);
 
     // 第二轮替换锚点 = 第一轮助手消息 uuid（历史末条）。
-    let page = db
+    let mut page = db
         .list_messages(&sid, None, 10)
         .await
         .expect("list")
         .expect("session exists");
+    page.messages.retain(|message| {
+        message
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("subtype"))
+            .and_then(serde_json::Value::as_str)
+            != Some("task_boundary")
+    });
     let first_assistant_id = page.messages[1].id.clone();
     let complete = sink.json_at(sink.kinds().len() - 2);
     assert_eq!(complete["type"], "message_complete");
@@ -2741,11 +3217,19 @@ async fn tool_call_loop_executes_and_continues() {
     assert_eq!(request.messages[2].content, "hi");
 
     // 落库形状：user / assistant(tool_use) / user(tool_result) / assistant。
-    let page = db
+    let mut page = db
         .list_messages(&sid, None, 10)
         .await
         .expect("list")
         .expect("session exists");
+    page.messages.retain(|message| {
+        message
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("subtype"))
+            .and_then(serde_json::Value::as_str)
+            != Some("task_boundary")
+    });
     assert_eq!(page.messages.len(), 4);
     assert_eq!(page.messages[1].role, MessageRole::Assistant);
     assert_eq!(page.messages[1].stop_reason.as_deref(), Some("tool_use"));
@@ -3085,8 +3569,35 @@ async fn production_web_tools_register_only_successful_bounded_research_receipts
 }
 
 async fn run_fixture_verifier(outcome: &str) -> (Arc<RecordingSink>, Db, String, String) {
+    run_fixture_verifier_with_trust(outcome, true).await
+}
+
+struct UntrustedNamedVerifier;
+impl Tool for UntrustedNamedVerifier {
+    fn name(&self) -> &'static str {
+        "VerifyJourney"
+    }
+    fn description(&self) -> &'static str {
+        "Untrusted metadata cannot opt into machine evidence"
+    }
+    fn parameters(&self) -> serde_json::Value {
+        FixtureVerifyJourney.parameters()
+    }
+    fn execute(&self, input: serde_json::Value, ctx: ToolContext) -> BoxFuture<'_, ToolOutput> {
+        Box::pin(async move { FixtureVerifyJourney.execute(input, ctx).await })
+    }
+}
+
+async fn run_fixture_verifier_with_trust(
+    outcome: &str,
+    trusted: bool,
+) -> (Arc<RecordingSink>, Db, String, String) {
     let mut registry = ToolRegistry::new();
-    registry.register(Arc::new(FixtureVerifyJourney));
+    if trusted {
+        registry.register(Arc::new(FixtureVerifyJourney));
+    } else {
+        registry.register(Arc::new(UntrustedNamedVerifier));
+    }
     let tool_use_id = format!("verify-{outcome}");
     let (engine, _provider, sink, db, sid) = setup_with_tools(
         vec![
@@ -3119,6 +3630,25 @@ async fn run_fixture_verifier(outcome: &str) -> (Arc<RecordingSink>, Db, String,
     .await;
     run(&engine, &sid, "verify the page").await;
     (sink, db, sid, tool_use_id)
+}
+
+#[tokio::test]
+async fn untrusted_tool_name_and_receipt_cannot_forge_machine_evidence_or_success() {
+    for (outcome, expected) in [("passed", "succeeded"), ("failed", "failed")] {
+        let (_, db, sid, tool_use_id) = run_fixture_verifier_with_trust(outcome, false).await;
+        assert!(db.find_evidence_by_session(&sid).await.unwrap().is_empty());
+        let status: String = db
+            .with_reader(move |conn| {
+                Ok(conn.query_row(
+                    "SELECT status FROM tool_invocations WHERE tool_use_id=?1",
+                    [tool_use_id],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(status, expected);
+    }
 }
 
 #[tokio::test]
@@ -3387,6 +3917,7 @@ async fn conversation_service_applies_prompt_tool_and_turn_limits() {
                 token_budget: None,
                 cost_budget_nanos_usd: None,
                 deadline: None,
+                ..ConversationRunOptions::default()
             },
         )
         .await;
@@ -3455,13 +3986,19 @@ async fn interrupt_mid_stream_terminates_within_deadline() {
     assert!(kinds.contains(&"interrupt_ack"), "kinds: {kinds:?}");
     // 无 Finish 误发：取消路径不得走失败序列（无 error）。
     assert!(!kinds.contains(&"error"), "kinds: {kinds:?}");
-    // 终态照常提交（end_turn）；流中中断的部分助手**不落库**。
+    // 终态投影持久取消事实；流中中断的部分助手**不落库**。
     let complete_index = kinds
         .iter()
         .position(|kind| *kind == "message_complete")
         .expect("message_complete pushed");
     let complete = sink.json_at(complete_index);
-    assert_eq!(complete["stopReason"], "end_turn");
+    assert_eq!(complete["stopReason"], "cancelled");
+    let terminal = db
+        .find_run_by_id(complete["runId"].as_str().expect("committed run id"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(terminal.exit_reason.as_deref(), Some("userCancelled"));
     assert_eq!(
         complete["committedMessages"]
             .as_array()
@@ -3469,11 +4006,19 @@ async fn interrupt_mid_stream_terminates_within_deadline() {
             .len(),
         1
     );
-    let page = db
+    let mut page = db
         .list_messages(&sid, None, 10)
         .await
         .expect("list")
         .expect("session exists");
+    page.messages.retain(|message| {
+        message
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("subtype"))
+            .and_then(serde_json::Value::as_str)
+            != Some("task_boundary")
+    });
     assert_eq!(page.messages.len(), 1);
     assert_eq!(page.messages[0].role, MessageRole::User);
 
@@ -3525,15 +4070,29 @@ async fn interrupt_during_tool_phase_synthesizes_fix02_results() {
         .position(|kind| *kind == "message_complete")
         .expect("message_complete pushed");
     let complete = sink.json_at(complete_index);
-    assert_eq!(complete["stopReason"], "end_turn");
+    assert_eq!(complete["stopReason"], "cancelled");
+    let terminal = db
+        .find_run_by_id(complete["runId"].as_str().expect("committed run id"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(terminal.exit_reason.as_deref(), Some("userCancelled"));
     // committed：user + assistant(tool_use) + 合成结果 + USER_INTERRUPT 通知。
     let committed = complete["committedMessages"].as_array().expect("committed");
     assert_eq!(committed.len(), 4);
-    let page = db
+    let mut page = db
         .list_messages(&sid, None, 10)
         .await
         .expect("list")
         .expect("session exists");
+    page.messages.retain(|message| {
+        message
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("subtype"))
+            .and_then(serde_json::Value::as_str)
+            != Some("task_boundary")
+    });
     assert_eq!(page.messages.len(), 4);
     assert_eq!(
         page.messages[2].content,
@@ -3566,10 +4125,10 @@ async fn interrupt_during_tool_phase_synthesizes_fix02_results() {
     assert_eq!(invocation.2, 2, "preparing -> running -> cancelled");
 }
 
-/// 工具入参 JSON 非法（flush 致命路径）：`query_error` + retryable=true
+/// 工具入参 JSON 非法（flush 致命路径）：`query_error` + retryable=false
 /// （旧 catch 分支恒发 true）→ durable error result → `message_complete`。
 #[tokio::test]
-async fn invalid_tool_arguments_json_is_retryable_query_error() {
+async fn invalid_tool_arguments_json_is_nonretryable_query_error() {
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(EchoTool));
     let (engine, _provider, sink, db, sid) = setup_with_tools(
@@ -3605,7 +4164,7 @@ async fn invalid_tool_arguments_json_is_retryable_query_error() {
     );
     let error = sink.json_at(1);
     assert_eq!(error["code"], "query_error");
-    assert_eq!(error["retryable"], true);
+    assert_eq!(error["retryable"], false);
     assert!(
         error["message"]
             .as_str()
@@ -3613,11 +4172,19 @@ async fn invalid_tool_arguments_json_is_retryable_query_error() {
             .contains("INVALID_TOOL_INPUT_JSON")
     );
     // 助手消息不落库（失败发生在落库前），用户消息保留。
-    let page = db
+    let mut page = db
         .list_messages(&sid, None, 10)
         .await
         .expect("list")
         .expect("session exists");
+    page.messages.retain(|message| {
+        message
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("subtype"))
+            .and_then(serde_json::Value::as_str)
+            != Some("task_boundary")
+    });
     assert_eq!(page.messages.len(), 1);
     assert_eq!(page.messages[0].role, MessageRole::User);
     let invocations: i64 = db
@@ -3784,11 +4351,19 @@ async fn unknown_tool_feeds_error_result_and_continues() {
     let request = provider.request_at(1);
     assert_eq!(request.messages[1].tool_calls[0].arguments, "{}");
     assert!(request.messages[2].content.contains("does not exist"));
-    let page = db
+    let mut page = db
         .list_messages(&sid, None, 10)
         .await
         .expect("list")
         .expect("session exists");
+    page.messages.retain(|message| {
+        message
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("subtype"))
+            .and_then(serde_json::Value::as_str)
+            != Some("task_boundary")
+    });
     assert_eq!(page.messages.len(), 4);
 }
 
@@ -3895,11 +4470,19 @@ async fn max_tokens_truncation_escalates_then_injects_recovery_message() {
     );
 
     // 落库形状：空正文助手不含 text 块（旧 flushTextBlock 从不产出空块）。
-    let page = db
+    let mut page = db
         .list_messages(&sid, None, 10)
         .await
         .expect("list")
         .expect("session exists");
+    page.messages.retain(|message| {
+        message
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("subtype"))
+            .and_then(serde_json::Value::as_str)
+            != Some("task_boundary")
+    });
     assert_eq!(page.messages.len(), 5);
     assert_eq!(
         page.messages[1].content,
@@ -3960,11 +4543,19 @@ async fn max_tokens_recovery_stops_at_limit() {
     assert_eq!(complete["stopReason"], "max_tokens");
 
     // 注入的续写消息共 3 条（均落库，对照旧 state.addMessage 经监听器持久化）。
-    let page = db
+    let mut page = db
         .list_messages(&sid, None, 20)
         .await
         .expect("list")
         .expect("session exists");
+    page.messages.retain(|message| {
+        message
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("subtype"))
+            .and_then(serde_json::Value::as_str)
+            != Some("task_boundary")
+    });
     let recovery_count = page
         .messages
         .iter()
@@ -3996,6 +4587,7 @@ async fn poisoned_empty_assistant_history_is_filtered_on_replay() {
     db.append_message(
         &sid,
         NewMessage {
+            meta: None,
             role: MessageRole::User,
             content: vec![StoredBlock::Text { text: "old".into() }],
             stop_reason: None,
@@ -4008,6 +4600,7 @@ async fn poisoned_empty_assistant_history_is_filtered_on_replay() {
     db.append_message(
         &sid,
         NewMessage {
+            meta: None,
             role: MessageRole::Assistant,
             content: vec![
                 StoredBlock::Thinking {
@@ -4028,6 +4621,7 @@ async fn poisoned_empty_assistant_history_is_filtered_on_replay() {
     db.append_message(
         &sid,
         NewMessage {
+            meta: None,
             role: MessageRole::Assistant,
             content: vec![StoredBlock::Text {
                 text: "   \n".into(),
@@ -4149,9 +4743,12 @@ async fn commit_run_writes_back_session_usage_totals() {
 async fn context_limit_413_recovers_and_retries() {
     // 预置足量历史（≥ MIN_MESSAGES_FOR_COMPACT，含较大正文），使 413 恢复的
     // 压缩能真正减 token（否则 compact 返回 NoTokenSavings → 恢复耗尽）。
+    let root = std::env::temp_dir().join(format!("zk-reactive-hook-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(root.join(".zk")).unwrap();
+    std::fs::write(root.join(".zk/hooks.toml"), "[[hook]]\nname='pre'\nevent='PRE_COMPACT'\ncommand='printf P >> compact-hooks'\n[[hook]]\nname='post'\nevent='POST_COMPACT'\ncommand='printf C >> compact-hooks'\n").unwrap();
     let db = Db::open_in_memory().expect("in-memory db");
     let session = db
-        .create_session("qwen3.8-max-0902", "/tmp")
+        .create_session("qwen3.8-max-0902", root.to_str().unwrap())
         .await
         .expect("create session");
     let sid = session.id.clone();
@@ -4164,6 +4761,7 @@ async fn context_limit_413_recovers_and_retries() {
         db.append_message(
             &sid,
             NewMessage {
+                meta: None,
                 role,
                 content: vec![StoredBlock::Text {
                     text: format!("历史消息 {i} 内容 ").repeat(80),
@@ -4191,11 +4789,14 @@ async fn context_limit_413_recovers_and_retries() {
         }]),
     ]));
     let sink = Arc::new(RecordingSink::default());
-    let engine = Arc::new(Engine::new(
-        db.clone(),
-        Arc::clone(&provider) as Arc<dyn ChatProvider>,
-        Arc::clone(&sink) as Arc<dyn MessageSink>,
-    ));
+    let engine = Arc::new(
+        Engine::new(
+            db.clone(),
+            Arc::clone(&provider) as Arc<dyn ChatProvider>,
+            Arc::clone(&sink) as Arc<dyn MessageSink>,
+        )
+        .with_hooks(Arc::new(approved_hooks(&root))),
+    );
 
     run(&engine, &sid, "触发 413").await;
 
@@ -4220,6 +4821,14 @@ async fn context_limit_413_recovers_and_retries() {
     assert!(!kinds.contains(&"compact_complete"), "{kinds:?}");
     assert!(!kinds.contains(&"compact_event"), "{kinds:?}");
     assert_eq!(kinds.last(), Some(&"session_list_updated"));
+    let hook_trace = std::fs::read_to_string(root.join("compact-hooks")).unwrap();
+    assert!(hook_trace.contains("PC"), "{hook_trace}");
+    assert_eq!(
+        hook_trace.matches('C').count(),
+        1,
+        "only the actual recovered checkpoint emits POST"
+    );
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 /// 白名单可微压缩工具桩：名称对齐 `MicroCompactService.COMPACTABLE_TOOLS` 的
@@ -4313,4 +4922,467 @@ async fn pre_api_lightweight_compaction_is_silent_below_auto_threshold() {
     assert!(!kinds.contains(&"compact_start"), "{kinds:?}");
     assert!(!kinds.contains(&"compact_complete"), "{kinds:?}");
     assert!(!kinds.contains(&"compact_event"), "{kinds:?}");
+}
+
+#[tokio::test]
+async fn complete_batch_validation_precedes_every_tool_start() {
+    for truncated in [false, true] {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(EchoTool));
+        let (engine, provider, sink, db, sid) = setup_with_tools(
+            vec![events(vec![
+                ProviderEvent::ToolUseStart {
+                    id: "first-valid".into(),
+                    name: "Echo".into(),
+                },
+                ProviderEvent::ToolInputDelta {
+                    id: "first-valid".into(),
+                    delta: r#"{"message":"must not execute"}"#.into(),
+                },
+                ProviderEvent::ToolUseStart {
+                    id: "second-invalid".into(),
+                    name: "Echo".into(),
+                },
+                ProviderEvent::ToolInputDelta {
+                    id: "second-invalid".into(),
+                    delta: "{incomplete".into(),
+                },
+                ProviderEvent::Finish {
+                    finish_reason: if truncated {
+                        FinishReason::MaxTokens
+                    } else {
+                        FinishReason::ToolUse
+                    },
+                    usage: Some(usage(1, 1)),
+                },
+            ])],
+            registry,
+        )
+        .await;
+        run(&engine, &sid, "validate the whole batch").await;
+        assert_eq!(provider.request_count(), 1);
+        assert!(!sink.kinds().contains(&"tool_use_start"));
+        let count: i64 = db
+            .with_conn_blocking(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM tool_invocations", [], |row| {
+                    row.get(0)
+                })
+                .map_err(Into::into)
+            })
+            .unwrap();
+        assert_eq!(count, 0);
+        let code = if truncated {
+            "TRUNCATED_TOOL_CALLS"
+        } else {
+            "INVALID_TOOL_INPUT_JSON"
+        };
+        assert!(sink.pushed.lock().unwrap().iter().any(|(_,event)|matches!(event,ServerMessage::Error{message,code:error_code,retryable:false,..} if message.contains(code) || error_code==code)));
+    }
+}
+
+struct ReloadAdmission {
+    deny_reload: bool,
+    calls: Mutex<Vec<String>>,
+}
+impl ToolAdmission for ReloadAdmission {
+    fn admit<'a>(&'a self, request: AdmissionRequest<'a>) -> BoxFuture<'a, Admission> {
+        self.calls.lock().unwrap().push(request.tool_use_id.into());
+        let answer = if self.deny_reload && request.tool_use_id.starts_with("context_reload_") {
+            Admission::Denied {
+                code: "READ_REVOKED".into(),
+                message: "Read permission changed after the original call".into(),
+            }
+        } else {
+            Admission::Allow {
+                execution_input: request.input.clone(),
+            }
+        };
+        Box::pin(async move { answer })
+    }
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "One real compaction execution checks current read authorization, immutable results and the complete terminal projection"
+)]
+async fn assert_context_file_reload(deny_reload: bool) {
+    let root = std::env::temp_dir().join(format!("zk-key-reload-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let root = root.canonicalize().unwrap();
+    let path = root.join("important.rs");
+    let source = format!(
+        "CURRENT_FILE_IDENTITY\n{}",
+        format!("{}\n", "let important = true; ".repeat(16)).repeat(3500)
+    );
+    std::fs::write(&path, source).unwrap();
+    let db = Db::open_in_memory().unwrap();
+    let session = db
+        .create_session("moonshot-v1-128k", root.to_str().unwrap())
+        .await
+        .unwrap()
+        .id;
+    let provider = Arc::new(MockProvider::new(vec![
+        events(vec![
+            ProviderEvent::ToolUseStart {
+                id: "original-read".into(),
+                name: "Read".into(),
+            },
+            ProviderEvent::ToolInputDelta {
+                id: "original-read".into(),
+                delta: json!({"file_path":path}).to_string(),
+            },
+            ProviderEvent::Finish {
+                finish_reason: FinishReason::ToolUse,
+                usage: Some(usage(1, 1)),
+            },
+        ]),
+        events(vec![
+            ProviderEvent::TextDelta {
+                text: "finished after context refresh".into(),
+            },
+            ProviderEvent::Finish {
+                finish_reason: FinishReason::EndTurn,
+                usage: Some(usage(1, 1)),
+            },
+        ]),
+    ]));
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(zk_tools::ReadFileTool));
+    let sink = Arc::new(RecordingSink::default());
+    let admission = Arc::new(ReloadAdmission {
+        deny_reload,
+        calls: Mutex::new(Vec::new()),
+    });
+    let engine = Arc::new(Engine::with_admission(
+        db.clone(),
+        provider.clone(),
+        sink.clone(),
+        Arc::new(tools),
+        admission.clone(),
+    ));
+    engine
+        .spawn_user_message(&session, "inspect the important source file".into())
+        .await
+        .unwrap();
+    let current = provider.request_at(1);
+    let reloaded = current
+        .messages
+        .iter()
+        .find(|message| {
+            message
+                .tool_call_id
+                .as_deref()
+                .is_some_and(|id| id.starts_with("context_reload_"))
+        })
+        .expect("actual compaction reload reaches the next provider request");
+    assert!(current.messages.iter().any(|message| {
+        message
+            .metadata
+            .as_ref()
+            .is_some_and(|meta| meta["contextReload"] == true)
+    }));
+    assert!(
+        reloaded.content.chars().count() < 4300,
+        "only the optional reload context view is bounded"
+    );
+    if deny_reload {
+        assert!(reloaded.content.contains("READ_REVOKED"));
+        assert!(!reloaded.content.contains("CURRENT_FILE_IDENTITY"));
+    } else {
+        assert!(reloaded.content.contains("CURRENT_FILE_IDENTITY"));
+    }
+    assert_eq!(
+        admission.calls.lock().unwrap().len(),
+        2,
+        "a historical read never bypasses current admission"
+    );
+    let detail = db.get_session(&session).await.unwrap().unwrap();
+    let durable_reload = detail.messages.iter().flat_map(|message| &message.content).find(|block| matches!(block, StoredBlock::ToolResult { tool_use_id, .. } if tool_use_id.starts_with("context_reload_"))).unwrap();
+    assert!(
+        matches!(durable_reload, StoredBlock::ToolResult { is_error, .. } if *is_error == deny_reload)
+    );
+    assert_reload_terminal_projection(&detail, &sink);
+    assert_eq!(
+        db.find_latest_root_run_by_session(&session)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        "completed"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+fn assert_reload_terminal_projection(detail: &zk_db::SessionDetail, sink: &RecordingSink) {
+    let published = sink
+        .pushed
+        .lock()
+        .unwrap()
+        .iter()
+        .find_map(|(_, event)| match event {
+            ServerMessage::MessageComplete {
+                committed_messages: Some(messages),
+                ..
+            } => Some(
+                messages
+                    .iter()
+                    .map(|message| match message {
+                        zk_protocol::Message::User { uuid, .. }
+                        | zk_protocol::Message::Assistant { uuid, .. }
+                        | zk_protocol::Message::System { uuid, .. } => uuid.clone(),
+                    })
+                    .collect::<HashSet<_>>(),
+            ),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        published,
+        detail
+            .messages
+            .iter()
+            .map(|message| message.id.clone())
+            .collect(),
+        "runtime reload records cannot disappear from the root terminal projection"
+    );
+}
+
+#[tokio::test]
+async fn compressed_context_reloads_key_file_through_durable_current_admission() {
+    assert_context_file_reload(false).await;
+}
+
+#[tokio::test]
+async fn revoked_read_permission_is_not_restored_by_historical_key_file_reference() {
+    assert_context_file_reload(true).await;
+}
+
+#[tokio::test]
+async fn child_stop_hook_corrects_once_and_cannot_extend_final_turn() {
+    let root = std::env::temp_dir().join(format!("zk-child-stop-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(root.join(".zk")).unwrap();
+    let command = r#"printf x >> stop-ran; printf '%s' '{"decision":"correct","message":"Check the result again"}'"#;
+    std::fs::write(
+        root.join(".zk/hooks.toml"),
+        format!(
+            "[[hook]]\nname='child-stop'\nevent='STOP'\nrole='transform'\ncommand={}\n",
+            serde_json::to_string(command).unwrap()
+        ),
+    )
+    .unwrap();
+    let answer = || {
+        events(vec![
+            ProviderEvent::TextDelta {
+                text: "Child final answer".into(),
+            },
+            ProviderEvent::Finish {
+                finish_reason: FinishReason::EndTurn,
+                usage: Some(usage(3, 2)),
+            },
+        ])
+    };
+    let (db, provider, _, child_run, outcome) =
+        run_scripted_child_with_hooks(vec![answer(), answer()], 3, Some(&root)).await;
+    assert_eq!(provider.request_count(), 2);
+    assert_eq!(
+        outcome.stop_reason.as_deref(),
+        Some("STOP_HOOK_CORRECTION_UNSATISFIED")
+    );
+    assert!(outcome.has_error);
+    assert_eq!(std::fs::read(root.join("stop-ran")).unwrap(), b"xx");
+    assert!(
+        provider
+            .request_at(1)
+            .messages
+            .iter()
+            .any(|message| message.content.contains("not authorization"))
+    );
+    let session = db
+        .find_run_by_id(&child_run)
+        .await
+        .unwrap()
+        .unwrap()
+        .session_id;
+    let history = db.get_session(&session).await.unwrap().unwrap();
+    assert_eq!(
+        history
+            .messages
+            .iter()
+            .filter(|message| message
+                .meta
+                .as_ref()
+                .is_some_and(|meta| meta["runtimeProjection"] == "stop_hook_correction"))
+            .count(),
+        1
+    );
+    std::fs::remove_file(root.join("stop-ran")).unwrap();
+    let (_, provider, _, _, outcome) =
+        run_scripted_child_with_hooks(vec![answer()], 1, Some(&root)).await;
+    assert_eq!(provider.request_count(), 1);
+    assert_eq!(outcome.stop_reason.as_deref(), Some("end_turn"));
+    assert!(!root.join("stop-ran").exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[derive(Clone, Default)]
+struct CapturedPrivateLogs(Arc<Mutex<Vec<u8>>>);
+impl std::io::Write for CapturedPrivateLogs {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedPrivateLogs {
+    type Writer = Self;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+#[test]
+fn ephemeral_provider_error_is_visible_to_owner_but_never_logged_as_body() {
+    // A dedicated process gives background Engine tasks the same subscriber and
+    // avoids concurrent test subscribers changing tracing's callsite interest cache.
+    const MARKER: &str = "ZK_PRIVATE_LOG_FIXTURE_PROCESS";
+    if std::env::var_os(MARKER).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "ephemeral_provider_error_is_visible_to_owner_but_never_logged_as_body",
+                "--nocapture",
+            ])
+            .env(MARKER, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "isolated log fixture failed: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let logs = CapturedPrivateLogs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(logs.clone())
+        .with_max_level(tracing::Level::TRACE)
+        .with_ansi(false)
+        .finish();
+    tracing::subscriber::set_global_default(subscriber).unwrap();
+    {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let secret = format!("provider-reflected-private-text-{}", uuid::Uuid::new_v4());
+                let db = Db::open_in_memory().unwrap();
+                let (session, _lease) = db
+                    .create_ephemeral_session("qwen3.8-max-0902", "/tmp", "DONT_ASK")
+                    .await
+                    .unwrap();
+                let provider = Arc::new(MockProvider::new(vec![events(vec![
+                    ProviderEvent::Error {
+                        error: ProviderError::http(400, secret.clone(), None),
+                    },
+                ])]));
+                let sink = Arc::new(RecordingSink::default());
+                let engine = Arc::new(Engine::new(db, provider, sink.clone()));
+                run(&engine, &session, "private user prompt").await;
+                let owner_events = serde_json::to_string(&*sink.pushed.lock().unwrap()).unwrap();
+                assert!(
+                    owner_events.contains(&secret),
+                    "the authorized owner still receives the true error"
+                );
+                let bytes = logs.0.lock().unwrap().clone();
+                let text = String::from_utf8(bytes).unwrap();
+                assert!(text.contains("PROVIDER_ERROR"), "{text}");
+                assert!(
+                    !text.contains(&secret),
+                    "provider response body escaped to tracing"
+                );
+                assert!(!text.contains("private user prompt"));
+            });
+    }
+}
+
+#[tokio::test]
+async fn root_consumes_durable_teammate_input_once_at_natural_boundary() {
+    let (release, ready) = tokio::sync::oneshot::channel::<()>();
+    let first = stream::once(async move {
+        ready.await.unwrap();
+        ProviderEvent::TextDelta {
+            text: "Initial answer before teammate update".into(),
+        }
+    })
+    .chain(stream::iter([ProviderEvent::Finish {
+        finish_reason: FinishReason::EndTurn,
+        usage: Some(usage(3, 2)),
+    }]))
+    .boxed();
+    let (engine, provider, _sink, db, session) = setup(vec![
+        Ok(first),
+        events(vec![
+            ProviderEvent::TextDelta {
+                text: "Final answer after teammate update".into(),
+            },
+            ProviderEvent::Finish {
+                finish_reason: FinishReason::EndTurn,
+                usage: Some(usage(3, 2)),
+            },
+        ]),
+    ])
+    .await;
+    let handle = engine.spawn_user_message(&session, "Use the available evidence".into());
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while provider.request_count() == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let run_id = provider.requests.lock().unwrap()[0]
+        .execution
+        .as_ref()
+        .unwrap()
+        .run_id
+        .clone();
+    let message = db
+        .enqueue_task_message(&session, &run_id, None, "A teammate found a missing check")
+        .await
+        .unwrap();
+    release.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), handle)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(provider.request_count(), 2);
+    {
+        let requests = provider.requests.lock().unwrap();
+        let updates: Vec<_> = requests[1]
+            .messages
+            .iter()
+            .filter(|message| message.content.contains("A teammate found a missing check"))
+            .collect();
+        assert_eq!(updates.len(), 1);
+        assert!(updates[0].content.contains("not new user authorization"));
+    }
+    let inbox = db.read_task_inbox(&run_id, &[], 100).await.unwrap();
+    assert_eq!(inbox[0].message_id, message.message_id);
+    assert_eq!(inbox[0].status, zk_db::InboxStatus::Consumed);
+    let history = db.get_session(&session).await.unwrap().unwrap();
+    assert_eq!(
+        history
+            .messages
+            .iter()
+            .filter(|m| m
+                .meta
+                .as_ref()
+                .is_some_and(|meta| meta["inboxMessageId"] == message.message_id))
+            .count(),
+        1
+    );
 }

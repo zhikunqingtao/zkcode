@@ -28,6 +28,7 @@ async fn workbench_round_trip_requires_owned_run_and_owned_evidence() {
         .append_message(
             &session.id,
             NewMessage {
+                meta: None,
                 role: MessageRole::User,
                 content: vec![StoredBlock::Text {
                     text: "tests must pass".into(),
@@ -264,6 +265,7 @@ async fn session_without_run_returns_an_empty_projection() {
     db.append_message(
         &session.id,
         NewMessage {
+            meta: None,
             role: MessageRole::User,
             content: vec![StoredBlock::Text {
                 text: "must not be guessed into an execution".into(),
@@ -510,6 +512,7 @@ async fn workbench_task_search_returns_global_reference_groups_without_session_h
     db.append_message(
         &session.id,
         NewMessage {
+            meta: None,
             role: MessageRole::User,
             content: vec![StoredBlock::Text {
                 text: "verify release".into(),
@@ -565,6 +568,7 @@ async fn failed_current_run_exposes_the_previous_completed_delivery() {
         .append_message(
             &session.id,
             NewMessage {
+                meta: None,
                 role: MessageRole::User,
                 content: vec![StoredBlock::Text {
                     text: "build the report".into(),
@@ -580,6 +584,7 @@ async fn failed_current_run_exposes_the_previous_completed_delivery() {
         .append_message(
             &session.id,
             NewMessage {
+                meta: None,
                 role: MessageRole::Assistant,
                 content: vec![StoredBlock::Text {
                     text: "report delivered".into(),
@@ -691,4 +696,61 @@ async fn failed_current_run_exposes_the_previous_completed_delivery() {
         current["previousAvailableDelivery"]["result"]["text"],
         "report delivered"
     );
+}
+
+#[tokio::test]
+async fn empty_journey_cannot_pass_runtime_check_and_failure_cannot_be_hidden() {
+    let (mut app, db) = common::app_with_db();
+    let session = db
+        .create_session("test-model", "/tmp/workbench-truth")
+        .await
+        .unwrap();
+    db.start_run(
+        "truth-run",
+        &session.id,
+        None,
+        Some(zk_db::run::AGENT_TYPE_QUERY),
+        "test-model",
+    )
+    .await
+    .unwrap();
+    for (id, verdict, expected) in [
+        ("empty-journey", "verified", "NOT_VERIFIED"),
+        ("failed-journey", "failed", "FAILED"),
+    ] {
+        db.save_evidence_bundle(&EvidenceBundleRecord {
+            bundle_id: id.into(),
+            session_id: session.id.clone(),
+            agent_id: None,
+            kind: "journey".into(),
+            claim: Some("An empty claim is not a executed step".into()),
+            origin: EvidenceOrigin::Human,
+            producer_invocation_id: None,
+            verdict: verdict.into(),
+            created_at: "2026-10-07T00:00:00.000000Z".into(),
+            run_id: Some("truth-run".into()),
+            items: Vec::new(),
+        })
+        .await
+        .unwrap();
+        let (status, _, body) = call(
+            &mut app,
+            local_with_headers(
+                &format!("/api/sessions/{}/workbench/current", session.id),
+                Method::GET,
+                None,
+                &[("x-session-id", &session.id)],
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let projection = json_body(&body);
+        let check = projection["verification"]["technicalChecks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["id"] == "technical-runtime-verification")
+            .unwrap();
+        assert_eq!(check["status"], expected);
+    }
 }

@@ -31,14 +31,14 @@ const TtsPlayButton: React.FC<TtsPlayButtonProps> = ({ messageId, text }) => {
             disabled={!text.trim()}
             aria-label={title}
             title={title}
-            className={`shrink-0 rounded p-1 transition-colors disabled:opacity-40
-                ${playing ? 'text-red-400 hover:bg-red-500/10'
-                    : failed ? 'text-red-400 hover:bg-red-500/10'
-                        : 'text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]'}`}
+            className={`message-action-button shrink-0 flex items-center justify-center rounded-[10px] transition-colors disabled:opacity-40
+                ${playing ? 'text-err hover:bg-errsoft'
+                    : failed ? 'text-err hover:bg-errsoft'
+                        : 'text-t2 hover:bg-hover2 hover:text-t1'}`}
         >
-            {loading ? <Loader2 size={14} className="animate-spin" />
-                : playing ? <Square size={12} fill="currentColor" />
-                    : <Volume2 size={14} />}
+            {loading ? <Loader2 size={18} className="animate-spin" />
+                : playing ? <Square size={18} fill="currentColor" />
+                    : <Volume2 size={18} />}
         </button>
     );
 };

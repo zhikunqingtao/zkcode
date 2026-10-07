@@ -37,7 +37,7 @@ use std::time::Duration;
 
 use futures::future::BoxFuture;
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -50,7 +50,7 @@ use crate::jsonrpc::{
 use crate::transport::{DisconnectCallback, McpTransport, NotificationHandler, timeout_or_default};
 
 /// SIGTERM → SIGKILL 宽限期（对照 Java `process.waitFor(5, SECONDS)`）。
-const TERMINATE_GRACE: Duration = Duration::from_secs(5);
+const MAX_STDIO_LINE_BYTES: u64 = 8 * 1024 * 1024;
 
 /// 等待响应的一次性通道。
 type Pending = oneshot::Sender<Result<Option<Value>, McpProtocolError>>;
@@ -129,6 +129,11 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 /// MCP STDIO 传输实现。
 pub struct StdioTransport {
+    close_lock: tokio::sync::Mutex<()>,
+    execution_context: RwLock<Option<zk_tools::ToolContext>>,
+    resource_lease: Mutex<Option<zk_tools::tool::ExecutionResourceLease>>,
+    process_group: Mutex<Option<u32>>,
+    released_process_group: Mutex<Option<u32>>,
     command: String,
     args: Vec<String>,
     env: BTreeMap<String, String>,
@@ -143,7 +148,7 @@ impl std::fmt::Debug for StdioTransport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("StdioTransport")
             .field("command", &self.command)
-            .field("args", &self.args)
+            .field("argument_count", &self.args.len())
             .field("connected", &self.shared.connected.load(Ordering::SeqCst))
             .finish_non_exhaustive()
     }
@@ -156,6 +161,11 @@ impl StdioTransport {
     #[must_use]
     pub fn new(config: &McpServerConfig) -> Self {
         Self {
+            close_lock: tokio::sync::Mutex::new(()),
+            execution_context: RwLock::new(None),
+            resource_lease: Mutex::new(None),
+            process_group: Mutex::new(None),
+            released_process_group: Mutex::new(None),
             command: config.command.clone().unwrap_or_default(),
             args: config.args.clone(),
             env: config.env.clone(),
@@ -184,13 +194,42 @@ impl StdioTransport {
 }
 
 impl McpTransport for StdioTransport {
+    fn set_execution_context(&self, context: zk_tools::ToolContext) {
+        *self
+            .execution_context
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = Some(context);
+    }
+
     fn next_request_id(&self) -> RequestId {
         RequestId::Number(self.request_id.fetch_add(1, Ordering::SeqCst))
     }
 
     fn connect(&self) -> BoxFuture<'_, Result<(), McpProtocolError>> {
         Box::pin(async move {
+            let context = self
+                .execution_context
+                .read()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
+            if let Some(context) = &context {
+                if context.cancel.is_cancelled() {
+                    return Err(McpProtocolError::internal("MCP scope cancelled"));
+                }
+                let lease = context
+                    .register_execution_resource(
+                        "processGroup",
+                        None,
+                        serde_json::json!({"protocol":"mcp-stdio", "phase":"reserved"}),
+                    )
+                    .await
+                    .map_err(McpProtocolError::internal)?;
+                *lock(&self.resource_lease) = lease;
+            }
             let mut builder = Command::new(&self.command);
+            if let Some(context) = &context {
+                builder.current_dir(context.working_dir());
+            }
             builder
                 .args(&self.args)
                 .envs(&self.env)
@@ -200,14 +239,25 @@ impl McpTransport for StdioTransport {
                 .kill_on_drop(true);
             #[cfg(unix)]
             builder.process_group(0);
-            let mut child = builder.spawn().map_err(|error| {
-                McpProtocolError::wrapped(format!("Failed to start STDIO process: {error}"))
-            })?;
+            let mut child = match builder.spawn() {
+                Ok(child) => child,
+                Err(error) => {
+                    self.close().await;
+                    return Err(McpProtocolError::wrapped(format!(
+                        "Failed to start STDIO process: {}",
+                        error.kind()
+                    )));
+                }
+            };
 
             let stdout = child.stdout.take();
             let stderr = child.stderr.take();
-            *self.stdin.lock().await = child.stdin.take();
+            let stdin = child.stdin.take();
             let pid = child.id();
+            *lock(&self.process_group) = pid;
+            *lock(&self.released_process_group) = None;
+            *self.child_slot() = Some(child);
+            *self.stdin.lock().await = stdin;
 
             let shared = Arc::clone(&self.shared);
             let reader = tokio::spawn(async move { read_loop(stdout, shared).await });
@@ -221,7 +271,19 @@ impl McpTransport for StdioTransport {
                 tasks.push(reader);
                 tasks.push(drain);
             }
-            *self.child_slot() = Some(child);
+            let lease = lock(&self.resource_lease).clone();
+            if let (Some(context), Some(lease), Some(pid)) = (&context, lease, pid)
+                && (context
+                    .bind_execution_resource_external(&lease, pid.to_string())
+                    .await
+                    .is_err()
+                    || context.cancel.is_cancelled())
+            {
+                self.close().await;
+                return Err(McpProtocolError::internal(
+                    "MCP scope resource binding failed or cancelled",
+                ));
+            }
             self.shared.connected.store(true, Ordering::SeqCst);
             tracing::info!(?pid, command = %self.command, "STDIO transport connected");
             Ok(())
@@ -337,16 +399,67 @@ impl McpTransport for StdioTransport {
 
     fn close(&self) -> BoxFuture<'_, ()> {
         Box::pin(async move {
+            let _close = self.close_lock.lock().await;
             self.shared.mark_disconnected("Transport closed", false);
             let child = self.child_slot().take();
-            if let Some(mut child) = child {
-                terminate(&mut child).await;
+            let pid = lock(&self.process_group).take();
+            let released = if let Some(mut child) = child {
+                let released = match pid {
+                    Some(pid) => zk_tools::process::terminate_process_group(&mut child, pid).await,
+                    None => false,
+                };
+                if !released {
+                    *self.child_slot() = Some(child);
+                    *lock(&self.process_group) = pid;
+                }
+                released
+            } else {
+                pid.is_none()
+            };
+            if released && pid.is_some() {
+                *lock(&self.released_process_group) = pid;
+            }
+            let context = self
+                .execution_context
+                .read()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
+            let lease = lock(&self.resource_lease).clone();
+            if let (Some(context), Some(lease)) = (context, lease) {
+                let terminal = if released {
+                    zk_tools::tool::ExecutionResourceTerminal::Released
+                } else {
+                    zk_tools::tool::ExecutionResourceTerminal::Unconfirmed
+                };
+                let mut persisted = context
+                    .finish_execution_resource(lease.clone(), terminal)
+                    .await;
+                let confirmed_pid = *lock(&self.released_process_group);
+                if released
+                    && persisted.is_err()
+                    && let Some(pid) = confirmed_pid
+                {
+                    persisted = context
+                        .reconcile_execution_resource(&lease, pid.to_string())
+                        .await;
+                }
+                if released && persisted.is_ok() {
+                    lock(&self.resource_lease).take();
+                } else {
+                    tracing::warn!("MCP STDIO cleanup could not be persisted");
+                }
             }
             drop(self.stdin.lock().await.take());
             for task in lock(&self.tasks).drain(..) {
                 task.abort();
             }
         })
+    }
+
+    fn cleanup_confirmed(&self) -> bool {
+        self.child_slot().is_none()
+            && lock(&self.process_group).is_none()
+            && lock(&self.resource_lease).is_none()
     }
 }
 
@@ -355,20 +468,24 @@ async fn read_loop(stdout: Option<ChildStdout>, shared: Arc<StdioShared>) {
     let Some(stdout) = stdout else {
         return;
     };
-    let mut lines = BufReader::new(stdout).lines();
+    let mut reader = BufReader::new(stdout);
     loop {
-        match lines.next_line().await {
-            Ok(Some(line)) => {
-                if line.trim().is_empty() {
-                    continue;
-                }
-                dispatch_line(&line, &shared);
-            }
-            Ok(None) => break,
-            Err(error) => {
-                tracing::warn!(%error, "STDIO read error");
+        let mut bytes = Vec::new();
+        let read = (&mut reader)
+            .take(MAX_STDIO_LINE_BYTES + 1)
+            .read_until(b'\n', &mut bytes)
+            .await;
+        match read {
+            Ok(0) | Err(_) => break,
+            Ok(_) if bytes.len() as u64 > MAX_STDIO_LINE_BYTES => {
+                tracing::warn!("MCP STDIO response exceeded line limit");
                 break;
             }
+            Ok(_) => match std::str::from_utf8(&bytes) {
+                Ok(line) if !line.trim().is_empty() => dispatch_line(line, &shared),
+                Ok(_) => {}
+                Err(_) => break,
+            },
         }
     }
     // stdout 关闭 = 再也收不到响应（进程退出或自行关流）：立刻置断连并失败掉
@@ -380,12 +497,15 @@ async fn read_loop(stdout: Option<ChildStdout>, shared: Arc<StdioShared>) {
 fn dispatch_line(line: &str, shared: &StdioShared) {
     let Ok(raw) = serde_json::from_str::<Value>(line) else {
         // 非 JSON 行（服务器把日志写进了 stdout）——丢弃并记录，绝不当成响应。
-        tracing::debug!(line, "Ignoring non-JSON line on MCP STDIO stdout");
+        tracing::debug!(
+            bytes = line.len(),
+            "Ignoring non-JSON line on MCP STDIO stdout"
+        );
         return;
     };
     let Ok(message) = serde_json::from_value::<IncomingMessage>(raw.clone()) else {
         tracing::debug!(
-            line,
+            bytes = line.len(),
             "Ignoring malformed JSON-RPC message on MCP STDIO stdout"
         );
         return;
@@ -411,45 +531,23 @@ fn dispatch_line(line: &str, shared: &StdioShared) {
         }
         return;
     }
-    tracing::debug!(line, "Unrecognized MCP STDIO message, dropping");
+    tracing::debug!(
+        bytes = line.len(),
+        "Unrecognized MCP STDIO message, dropping"
+    );
 }
 
 /// 抽干 stderr（防管道写满导致子进程阻塞）。
-async fn drain_stderr(stderr: Option<ChildStderr>, command: String) {
-    let Some(stderr) = stderr else {
+async fn drain_stderr(stderr: Option<ChildStderr>, _command: String) {
+    let Some(mut stderr) = stderr else {
         return;
     };
-    let mut lines = BufReader::new(stderr).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
-        tracing::debug!(command = %command, line, "MCP STDIO server stderr");
-    }
-}
-
-/// 终止子进程：SIGTERM → 宽限 [`TERMINATE_GRACE`] → SIGKILL（整进程组）。
-async fn terminate(child: &mut Child) {
-    #[cfg(unix)]
-    if let Some(pid) = child.id() {
-        signal_group(pid, nix::sys::signal::Signal::SIGTERM);
-        if tokio::time::timeout(TERMINATE_GRACE, child.wait())
-            .await
-            .is_ok()
-        {
-            return;
+    // Remote stderr may contain credentials; drain bounded chunks without logging contents.
+    let mut buffer = [0u8; 8192];
+    while let Ok(read) = stderr.read(&mut buffer).await {
+        if read == 0 {
+            break;
         }
-        signal_group(pid, nix::sys::signal::Signal::SIGKILL);
-    }
-    let _ = child.kill().await;
-    let _ = child.wait().await;
-}
-
-/// 对进程组发信号（`nix::killpg` 安全封装；组已消失时静默）。
-#[cfg(unix)]
-fn signal_group(pid: u32, signal: nix::sys::signal::Signal) {
-    let Ok(raw) = i32::try_from(pid) else {
-        return;
-    };
-    if let Err(error) = nix::sys::signal::killpg(nix::unistd::Pid::from_raw(raw), signal) {
-        tracing::debug!(pid, %error, ?signal, "killpg failed (process already gone?)");
     }
 }
 

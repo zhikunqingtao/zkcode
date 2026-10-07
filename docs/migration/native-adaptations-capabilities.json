@@ -1,0 +1,579 @@
+{
+  "sourceBaseline": "3e536438",
+  "sourceTarget": "053adf90",
+  "scope": "Explicit source-only/native adaptation boundaries; coverage is not a claim of executing source Java or browser tests.",
+  "capabilities": [
+    {
+      "id": "native-sse-error-shape",
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/controller/SseStreamHandler.java"
+      ],
+      "implementationPaths": [
+        "crates/zk-server/src/api/query.rs",
+        "crates/zk-server/src/error.rs"
+      ],
+      "status": "implemented_named_native_regressions_passed",
+      "notes": "Parent source audit confirms the Java change guards nullable message type/content and emits JSON exception responses. Native stream uses typed result/complete/error events rather than the Java INFO branch; ApiError::IntoResponse emits structured JSON and status. No Java null-handling branch is imported.",
+      "validation": {
+        "status": "passed_named_native_regressions",
+        "tests": [
+          "error::tests::response_serializes_flat_contract",
+          "unknown_session_gets_query_error_only"
+        ],
+        "evidenceRef": "#currentExecutionEvidence/nativeWorkspace",
+        "clippyEvidenceRef": "#currentExecutionEvidence/strictClippy",
+        "limits": "Only listed native assertions are evidenced. Source Java/remote API execution is not implied. Formal dev lifecycle passed independently; release browser E2E covers only its four explicit cases. Product matrix records additional component/native coverage and remaining limits."
+      },
+      "previousValidation": {
+        "status": "existing_equivalent_reviewed",
+        "validation": "Source/type-contract review; final actual router/server workspace gate is owned by root."
+      }
+    },
+    {
+      "id": "native-dev-entry-and-runtime-hygiene",
+      "sourcePaths": [
+        "start.sh",
+        "stop.sh",
+        ".gitignore"
+      ],
+      "implementationPaths": [
+        "dev",
+        "scripts/dev/lifecycle.sh",
+        "scripts/dev/exec-env.py",
+        ".gitignore"
+      ],
+      "status": "existing_equivalent_validated",
+      "notes": "Source start.sh only exports LOG_DIR for Java logging: native launcher writes explicit runtime log files and dev logs exposes that path. Source stop removes forced git worktree/branch deletion: native stop only handles owned service PID records and does not remove git worktrees or branches. Native .runtime/.zk/.tmp/database/log/test-results ignore rules cover generated state; keep .zkcode/skills tracked. Do not import Java-specific .ai-code-assistant ignores or silently hide repository planning documentation.",
+      "validation": {
+        "status": "native_dev_unit_and_formal_lifecycle_passed",
+        "unit": {
+          "status": "native_dev_unit_snapshot_passed_formal_lifecycle_pending",
+          "command": "python-service/.venv/bin/python -m unittest discover -s scripts/dev/tests -v",
+          "result": "84 tests passed using supported Python 3.11; formal latest-source dev lifecycle still pending.",
+          "evidence": {
+            "path": "/tmp/zk-dev-final-tests3.log",
+            "sha256": "dba47ab23dcca440b3cb6d8a43aa9cedfc8a899a34303039bafae1da7e3cdd2e"
+          }
+        },
+        "formalLifecycleEvidenceRef": "#currentExecutionEvidence/formalDevLifecycle"
+      },
+      "previousValidation": {
+        "status": "existing_equivalent_reviewed",
+        "validation": "Native dev unittest suite and explicit lifecycle source review; see release-gates.json for final supported-Python run."
+      },
+      "previousUnitValidation": {
+        "status": "native_dev_unit_snapshot_passed_formal_lifecycle_pending",
+        "command": "python-service/.venv/bin/python -m unittest discover -s scripts/dev/tests -v",
+        "result": "84 tests passed using supported Python 3.11; formal latest-source dev lifecycle still pending.",
+        "evidence": {
+          "path": "/tmp/zk-dev-final-tests3.log",
+          "sha256": "dba47ab23dcca440b3cb6d8a43aa9cedfc8a899a34303039bafae1da7e3cdd2e"
+        }
+      }
+    },
+    {
+      "id": "supporting-architecture-doc-adaptation",
+      "sourcePaths": [
+        "docs/ZhikunCode-Architecture.html",
+        "docs/ZhikunCode-Capability-Overview.html",
+        "docs/documentation-update-2026-09-16.md",
+        "docs/index.html",
+        "docs/session-merge-architecture-v2.md"
+      ],
+      "implementationPaths": [
+        "README.md",
+        "CHANGELOG.md",
+        "docs/configuration.md",
+        "docs/architecture.md",
+        "docs/zkcode-architecture-overview.html",
+        "docs/migration/2026-10-migration.md"
+      ],
+      "status": "documentation_reviewed_with_historical_diagram_boundary",
+      "notes": "Keep repository-native Rust architecture and update product/configuration migration documentation; Java backend deployment/OSS/Meoo descriptions are excluded. Merge design is implemented and evidenced in merge-capabilities.json, not copied as an alternative Java service design. Old HTML exports and dated update notes are reference material, not production components.",
+      "validation": {
+        "status": "reviewed",
+        "checked": [
+          "README/CHANGELOG product/configuration claims read against the current native contract and gate records",
+          "Corrected Python3.11 policy and enabled explicit-only Worktree delivery in architecture.md",
+          "Added Kimi Code/OpenRouter and fast-route precedence in configuration.md",
+          "Original HTML metadata explicitly dates the diagram 2026-08-31 HEAD0296619 dirty: retained as historical reference with prominent linked warning; not relabeled as a current complete diagram"
+        ],
+        "evidence": [
+          {
+            "path": "/Users/guoqingtao/Desktop/dev/code/zkcode/README.md",
+            "sha256": "44a708b196f886eb864658753580e1cc18e2153bd7243611b9d0eb5b130534d0"
+          },
+          {
+            "path": "/Users/guoqingtao/Desktop/dev/code/zkcode/CHANGELOG.md",
+            "sha256": "6aa70deaca88a9941b14dea7c62c9036fe1057d09a32179ec70fede3910c85e6"
+          },
+          {
+            "path": "/Users/guoqingtao/Desktop/dev/code/zkcode/docs/architecture.md",
+            "sha256": "262b04f055995182bd769ea051a8f75e785e8f6493ccf600b8b8807413d9ac9b"
+          },
+          {
+            "path": "/Users/guoqingtao/Desktop/dev/code/zkcode/docs/configuration.md",
+            "sha256": "4280048cd37135af272d1fd2d076d751e25743d9dd91a89bc4127fec95a89908"
+          },
+          {
+            "path": "/Users/guoqingtao/Desktop/dev/code/zkcode/docs/zkcode-architecture-overview.html",
+            "sha256": "a6edd98ce9158ba25d4d068a13bb392f45a51e5d27827c2b5e84d8c95ea88f08"
+          }
+        ],
+        "limits": "Historical diagram intentionally remains a dated reference. Current measured status is in the live migration ledger; npm audit/user decisions remain unresolved.",
+        "linkCheck": {
+          "path": "/tmp/zk-migration-doc-links-final.json",
+          "sha256": "771d7a95a586210213a0a0fe73e69029ee551385aa52be5e260d2596edfe5c2d"
+        }
+      },
+      "previousValidation": "README/CHANGELOG/configuration updated by root. Final documentation wording and links still need the parent release review."
+    },
+    {
+      "id": "support-dto-runtime-source-review",
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/llm/LlmProvidersProperties.java",
+        "backend/src/main/java/com/aicodeassistant/run/RunEnvelope.java",
+        "backend/src/main/java/com/aicodeassistant/run/RunEnvelopeRepository.java",
+        "backend/src/main/java/com/aicodeassistant/run/RunExecutionRegistry.java",
+        "backend/src/main/java/com/aicodeassistant/run/RunTracker.java",
+        "backend/src/main/java/com/aicodeassistant/session/MessagePersistenceException.java",
+        "backend/src/main/java/com/aicodeassistant/session/SessionExecutionBusyException.java",
+        "backend/src/main/java/com/aicodeassistant/session/SessionExecutionGate.java",
+        "backend/src/main/java/com/aicodeassistant/session/SessionMessagePersistence.java",
+        "backend/src/main/java/com/aicodeassistant/tool/task/TaskExecutionResult.java",
+        "backend/src/main/java/com/aicodeassistant/tool/task/TaskState.java",
+        "backend/src/main/java/com/aicodeassistant/tool/task/TaskGetTool.java",
+        "backend/src/main/java/com/aicodeassistant/tool/task/TaskListTool.java",
+        "backend/src/main/java/com/aicodeassistant/tool/task/TaskStopTool.java",
+        "backend/src/main/java/com/aicodeassistant/llm/LlmApiException.java"
+      ],
+      "implementationPaths": [
+        "crates/zk-llm/src/config.rs",
+        "crates/zk-llm/src/secret.rs",
+        "crates/zk-engine/src/engine.rs",
+        "crates/zk-engine/src/task/runtime.rs",
+        "crates/zk-db/src/message.rs",
+        "crates/zk-db/src/runtime_ledger.rs",
+        "crates/zk-db/src/session_merge.rs",
+        "crates/zk-tools/src/task_tools.rs",
+        "crates/zk-llm/src/error.rs",
+        "crates/zk-llm/src/registry.rs"
+      ],
+      "status": "implemented_named_native_regressions_passed",
+      "notes": "Read complete source net hunks, not class-name inference. Provider key strategy is native env+ApiKeyRing. Run usage is authoritative physical-call ledger/usage_complete rather than best-effort Java counters. Native failure cleanup and V4 immutable verification/terminal outcomes remain. Steering meta is durable before ACK, and JSON Value avoids Java Map.copyOf null mutation failures. Message persistence failure returns before tool/next provider admission. Session merge takes DB reservations and checks active tasks/runs/interactions/unreleased resources, including actual background owners. Task reads/stops are session-scoped, cancel-request and observed terminal/cleanup are distinct, and SQLite snapshots replace Java mutable DTO locks. No claim that Java JUnit tests executed; runtime/root final tests remain authoritative. LlmApiException retry suppression maps to the production registry gate requiring retryable=true, no emitted content and no prior exposed error before any RetryState invocation; the legacy RetryPolicy helper alone is not the production policy proof.",
+      "validation": {
+        "status": "passed_named_native_regressions",
+        "tests": [
+          "steering_is_durable_idempotent_and_applied_at_next_model_boundary",
+          "failed_partial_answer_storage_prevents_a_recovery_request",
+          "runtime_ledger::tests::tool_start_rechecks_run_task_and_root_usage_at_the_physical_boundary",
+          "registry::tests::explicitly_non_retryable_5xx_never_retries_or_falls_back"
+        ],
+        "evidenceRef": "#currentExecutionEvidence/nativeWorkspace",
+        "clippyEvidenceRef": "#currentExecutionEvidence/strictClippy",
+        "limits": "Only listed native assertions are evidenced. Source Java/remote API execution is not implied. Formal dev lifecycle passed independently; release browser E2E covers only its four explicit cases. Product matrix records additional component/native coverage and remaining limits."
+      },
+      "previousValidation": {
+        "status": "source_diff_reviewed_pending_final_gate",
+        "validation": "Referenced runtime-capabilities.json and root-capabilities.json targeted evidence plus parent final workspace gate; source review performed after initial capability pass."
+      }
+    },
+    {
+      "id": "source-queryconfig-comment",
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/engine/QueryConfig.java"
+      ],
+      "implementationPaths": [
+        "crates/zk-llm/src/models.rs",
+        "crates/zk-engine/src/engine.rs"
+      ],
+      "status": "existing_equivalent_reviewed",
+      "notes": "The entire source net diff replaces only the deepseek-v4-pro example with deepseek-flash in a comment. Native recommended_max_tokens uses model capability output limits and retains existing models.",
+      "validation": "Full source net-hunk review; no behavior test required for the comment itself."
+    },
+    {
+      "id": "retained-native-skill-invocation-budget",
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/skill/SkillTokenBudget.java"
+      ],
+      "implementationPaths": [
+        "crates/zk-server/src/skill/tool.rs"
+      ],
+      "status": "implemented_named_native_regressions_passed",
+      "notes": "Source deletes the cumulative 5000-per-skill/25000-per-session counter. Rust never had that cumulative state. Preserve existing per-invocation token_budget argument and 32768 cap; do not reintroduce deleted quota or erase useful native bounded-resource behavior.",
+      "validation": {
+        "status": "passed_named_native_regressions",
+        "tests": [
+          "skill::tool::tests::rejects_disabled_unknown_tool_and_over_budget_skills"
+        ],
+        "evidenceRef": "#currentExecutionEvidence/nativeWorkspace",
+        "clippyEvidenceRef": "#currentExecutionEvidence/strictClippy",
+        "limits": "Only listed native assertions are evidenced. Source Java/remote API execution is not implied. Formal dev lifecycle passed independently; release browser E2E covers only its four explicit cases. Product matrix records additional component/native coverage and remaining limits."
+      },
+      "previousValidation": {
+        "status": "existing_equivalent_reviewed",
+        "validation": "Parent verified native baseline and current SkillTool quota semantics; source deletion blob retained per commit."
+      }
+    },
+    {
+      "id": "summary-mode-and-usage-dto-followup",
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/llm/LlmProvider.java",
+        "backend/src/main/java/com/aicodeassistant/llm/SummaryRequest.java",
+        "backend/src/main/java/com/aicodeassistant/llm/SummaryResult.java",
+        "backend/src/main/java/com/aicodeassistant/engine/CompactConfiguration.java"
+      ],
+      "implementationPaths": [
+        "crates/zk-engine/src/llm_summarizer.rs",
+        "crates/zk-llm/src/openai_compat.rs",
+        "crates/zk-llm/src/registry.rs"
+      ],
+      "status": "implemented_named_native_regressions_passed",
+      "notes": "Implemented dedicated SummaryThinkingMode Low/Off/High/Max handling with model-matrix validation and nonstreaming summary transport. The actual loopback test verifies stream=false, one 429 retry with the same credential, and unknown partial usage; independent summary physical attempts remain accounted. No credentialed external summary API was called.",
+      "validation": {
+        "status": "passed_named_native_regressions",
+        "tests": [
+          "llm_summarizer::tests::summary_modes_match_supported_model_matrix",
+          "openai_compat::tests::summary_wire_override_supports_low_off_without_changing_chat",
+          "summary_transport::tests::summary_wire_preserves_usage_and_uses_endpoint_output_limit",
+          "summary_http_is_nonstreaming_retries_once_with_same_key_and_keeps_partial_usage_unknown",
+          "registry::tests::independent_summary_retries_only_one_429_and_accounts_every_attempt"
+        ],
+        "evidenceRef": "#currentExecutionEvidence/nativeWorkspace",
+        "clippyEvidenceRef": "#currentExecutionEvidence/strictClippy",
+        "limits": "Only listed native assertions are evidenced. Source Java/remote API execution is not implied. Formal dev lifecycle passed independently; release browser E2E covers only its four explicit cases. Product matrix records additional component/native coverage and remaining limits."
+      },
+      "previousValidation": {
+        "status": "pending_owner_fix_and_verification",
+        "validation": "Exact source hunks read; fixes/tests pending runtime owner."
+      },
+      "previousNotes": "Source DTO review found low/off summary mode support absent from initial native port, plus partial usage fields could be synthesized as zero by generic usage parsing. Runtime owner is implementing/finally testing these; no completed claim until updated evidence. Native streaming summary path is acceptable only if stop/timeout/raw-usage integrity and unsupported mode validation remain equivalent."
+    },
+    {
+      "id": "configurable-image-input-mode-followup",
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/llm/ModelCapabilities.java",
+        "backend/src/main/java/com/aicodeassistant/llm/ModelCapabilitiesProperties.java"
+      ],
+      "implementationPaths": [
+        "crates/zk-llm/src/models.rs",
+        "crates/zk-llm/src/user_images.rs",
+        "crates/zk-llm/src/openai_compat.rs",
+        "crates/zk-llm/src/anthropic.rs"
+      ],
+      "status": "implemented_named_native_regressions_passed",
+      "notes": "Native ModelCapabilitiesOverride validates URL/BASE64_ONLY; shared preparation consumes effective capabilities. Real local Chat/Anthropic/Responses wire tests preserve bytes and omit internal identities; actual socket cancellation is verified. Original sources, authorized URL policy and final payload budget remain enforced. External providers were not contacted.",
+      "validation": {
+        "status": "passed_named_native_regressions",
+        "tests": [
+          "models::tests::configured_image_input_mode_is_explicit_and_validated",
+          "user_images::tests::url_capable_provider_keeps_native_image_representation",
+          "real_chat_anthropic_and_responses_preserve_image_bytes_without_internal_identity",
+          "cancellation_drops_active_image_download_before_any_provider_request"
+        ],
+        "evidenceRef": "#currentExecutionEvidence/nativeWorkspace",
+        "clippyEvidenceRef": "#currentExecutionEvidence/strictClippy",
+        "limits": "Only listed native assertions are evidenced. Source Java/remote API execution is not implied. Formal dev lifecycle passed independently; release browser E2E covers only its four explicit cases. Product matrix records additional component/native coverage and remaining limits."
+      },
+      "previousValidation": {
+        "status": "implemented_pending_final_integration_gate",
+        "validation": "models::tests::configured_image_input_mode_is_explicit_and_validated exists; seven user_images and two real wire tests previously passed. Latest Anthropic/dispatch evidence changes require final shared gate."
+      },
+      "previousNotes": "Native ModelCapabilitiesOverride deserializes URL/BASE64_ONLY and rejects invalid values; shared user_images preparation consumes effective capabilities. Runtime is completing native Anthropic dispatch/cancel integration. Preserve original bytes, native authorized URL policy and independent final payload budget."
+    },
+    {
+      "id": "bundled-skills-native-prompt-adaptation",
+      "sourcePaths": [
+        "backend/src/main/resources/skills/bundled/debug.md",
+        "backend/src/main/resources/skills/bundled/fix.md",
+        "backend/src/main/resources/skills/bundled/remember.md",
+        "backend/src/main/resources/skills/bundled/review.md",
+        "backend/src/main/resources/skills/bundled/stuck.md",
+        "backend/src/main/resources/skills/bundled/test-driven-development.md",
+        "backend/src/main/resources/skills/bundled/verify.md"
+      ],
+      "implementationPaths": [
+        "crates/zk-server/resources/skills/bundled",
+        "crates/zk-server/src/skill/registry.rs",
+        "crates/zk-server/src/skill/tool.rs"
+      ],
+      "status": "implemented_named_native_regressions_passed",
+      "notes": "Compared exact final source bytes: debug/review/test-driven-development/verify are exact imports. remember adapts to the user-selected SQLite content source and actual native Memory tool, with no parallel Markdown truth source. Source deletes fix/stuck; retain native entry points by user requirement. Source-audit found stuck allowed-tools referenced unregistered FileRead/Search; root changed to Read/Grep/Glob and replaced forced Maven workflow with actual project build detection. fix has no unknown allowed-tool restriction. Canonical global switches remain enforced for both retained entries.",
+      "validation": {
+        "status": "passed_named_native_regressions",
+        "tests": [
+          "skill::tool::tests::retained_builtins_execute_with_registered_names_and_global_switches",
+          "skill::registry::tests::migrated_project_skills_parse_with_real_tool_names_and_project_priority"
+        ],
+        "evidenceRef": "#currentExecutionEvidence/nativeWorkspace",
+        "clippyEvidenceRef": "#currentExecutionEvidence/strictClippy",
+        "limits": "Only listed native assertions are evidenced. Source Java/remote API execution is not implied. Formal dev lifecycle passed independently; release browser E2E covers only its four explicit cases. Product matrix records additional component/native coverage and remaining limits."
+      },
+      "previousValidation": {
+        "status": "implemented_pending_final_verification",
+        "validation": "Byte comparison plus full native remember diff review. Root added retained_fix_and_stuck_execute_with_registered_names_and_global_switches; final test pending owner workspace gate."
+      }
+    },
+    {
+      "id": "final-provider-wire-and-raster-guard",
+      "sourceCommits": [
+        "591f913a"
+      ],
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/llm/FinalProviderPayloadGuard.java",
+        "backend/src/main/java/com/aicodeassistant/llm/InlineImageBudget.java"
+      ],
+      "implementationPaths": [
+        "crates/zk-llm/src/payload_guard.rs",
+        "crates/zk-llm/src/openai_compat.rs",
+        "crates/zk-llm/src/anthropic.rs",
+        "crates/zk-engine/src/context/image_budget.rs"
+      ],
+      "status": "implemented_named_native_regressions_passed",
+      "notes": "Final projected provider JSON is wire-counted before HTTP: independent 64MiB cap, input budget subtracting requested output and max(2048,ceil(5% context)). Real user/assistant content image parts (including Anthropic tool_result content) alone receive raster estimates; tool input, schema, metadata, system content, signatures and opaque state keep conservative textual/byte accounting. Pure bounded PNG/JPEG/GIF/WebP header reads avoid ImageReader metadata decompression, enforce 10MiB bytes and 40M pixels, and treat genuine animation structurally. Unknown/malformed formats retain encoded-size estimate. This is local admission, never provider billing. OpenAI Chat/Responses and Anthropic call final validate after projection; Kimi/custom BASE64_ONLY uses the shared estimator after URL conversion. Handoff assets now use complete_image_media_type, preserving valid GIF/WebP while checking PNG chunk completion and IDAT/IEND, JPEG scan/end marker, GIF color-table/subblock/trailer and WebP declared RIFF/chunk lengths. Parsing is bounded and does not decode raster pixels.",
+      "validation": {
+        "status": "passed_named_native_regressions",
+        "tests": [
+          "payload_guard::tests::complete_raster_containers_preserve_gif_webp_and_reject_truncated_or_header_only_data",
+          "payload_guard::tests::wire_limit_is_independent_of_raster_and_character_estimates",
+          "payload_guard::tests::only_real_media_parts_receive_raster_estimate",
+          "payload_guard::tests::opaque_signature_and_unicode_use_conservative_counts"
+        ],
+        "evidenceRef": "#currentExecutionEvidence/nativeWorkspace",
+        "clippyEvidenceRef": "#currentExecutionEvidence/strictClippy",
+        "limits": "Only listed native assertions are evidenced. Source Java/remote API execution is not implied. Formal dev lifecycle passed independently; release browser E2E covers only its four explicit cases. Product matrix records additional component/native coverage and remaining limits."
+      },
+      "previousValidation": {
+        "status": "implemented_targeted_tests_passed_pending_final_gate",
+        "validation": [
+          {
+            "command": "cargo test -q -p zk-llm --lib payload_guard::",
+            "result": "7 passed in1.75s including ordinary-context-budget assertions",
+            "evidence": "/tmp/zk-payload-guard-tests-final.log"
+          },
+          {
+            "command": "cargo clippy -q -p zk-llm --all-targets -- -D warnings",
+            "result": "passed after test helper extraction and header helper reuse",
+            "evidence": "/tmp/zk-user-images-clippy-final.log"
+          }
+        ],
+        "pendingValidation": [
+          "complete_raster_containers_preserve_gif_webp_and_reject_truncated_or_header_only_data (added after prior7-pass snapshot)"
+        ]
+      },
+      "remainingValidationLimits": [
+        "Remote provider acceptance and browser product flow remain separate; all specifically named prior pending raster-container tests passed in resume7."
+      ]
+    },
+    {
+      "id": "current-user-image-transcoding-and-cancellable-owner",
+      "sourceCommits": [
+        "591f913a"
+      ],
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/engine/UserImageTranscoder.java"
+      ],
+      "implementationPaths": [
+        "crates/zk-llm/src/user_images.rs",
+        "crates/zk-llm/src/payload_guard.rs",
+        "crates/zk-llm/src/provider.rs",
+        "crates/zk-llm/src/openai_compat.rs",
+        "crates/zk-llm/tests/image_wire.rs",
+        "crates/zk-engine/src/context/image_budget.rs",
+        "crates/zk-engine/src/engine.rs"
+      ],
+      "status": "implemented_named_native_regressions_passed",
+      "notes": "Immutable current source message ID captured at Run entry and preserved across tool turns/compaction; current images mandatory, newest history omitted with explicit request-copy placeholders when unavailable/over count/budget. DB originals unchanged. At most min(8,model cap); header-only validation and original byte identity. Native authorized URL policy kept; OSS publication excluded and existing native10MiB image download cap preserved.32MiB LRU/30minute cache is scoped to immutable current message rather than globalURL. An actual slow-download socket test exposed reqwest future-drop leaving background connection alive; replaced image-only fetch with owned Hyper driver (Drop abort) and existing nativeTLS certificate validation. No redirects/retry;30second timeout; cancellation stops actualsocket and stream without Finish. All failures before provider request are Preflight for knownzero physicalLLMuse, cancellation dedicatedCancelled.  Native Anthropic/Chat/Responses loopback transport, dispatch identity replacement, durable notice ownership, and actual Read→engine→provider identity confirmation passed in resume7. Actual slow socket cancellation and chunked overflow closure also passed. This does not claim every source mock permutation or remote image/provider combination was exercised.",
+      "validation": {
+        "status": "passed_named_native_regressions",
+        "tests": [
+          "user_images::tests::dispatch_evidence_tracks_retained_indices_and_replaces_failed_attempt_sources",
+          "actual_read_confirms_all_source_identities_only_after_successful_delivery",
+          "late_notice_uses_persisted_owner_and_rejects_foreign_message_ids",
+          "real_chat_anthropic_and_responses_preserve_image_bytes_without_internal_identity",
+          "cancellation_drops_active_image_download_before_any_provider_request",
+          "chunked_image_body_over_limit_closes_download_before_any_provider_request",
+          "context::image_budget::tests::request_copy_prioritizes_run_original_images_over_newer_steering_and_history",
+          "user_images::tests::url_capable_provider_keeps_native_image_representation"
+        ],
+        "evidenceRef": "#currentExecutionEvidence/nativeWorkspace",
+        "clippyEvidenceRef": "#currentExecutionEvidence/strictClippy",
+        "limits": "Only listed native assertions are evidenced. Source Java/remote API execution is not implied. Formal dev lifecycle passed independently; release browser E2E covers only its four explicit cases. Product matrix records additional component/native coverage and remaining limits."
+      },
+      "previousValidation": {
+        "status": "implemented_targeted_tests_passed_pending_final_gate",
+        "validation": [
+          {
+            "command": "cargo test -q -p zk-llm --lib user_images::",
+            "result": "7 passed; priority, originals, count/budget, realHTTP failure+cache, no redirect, LRUscope/expiry, URLmode",
+            "evidence": "/tmp/zk-user-image-tests3.log"
+          },
+          {
+            "command": "cargo test -q -p zk-llm --test image_wire",
+            "result": "2 passed in0.96s; actualChat/Anthropic/Responses1.1MiBPNG byte identity/privateIDs and slowGETactualsocket cancellation",
+            "evidence": "/tmp/zk-image-wire-tests4.log"
+          }
+        ],
+        "pendingValidation": [
+          "dispatch_evidence_tracks_retained_indices_and_replaces_failed_attempt_sources",
+          "Actual engine notice persistence, successful Finish confirmation, failure/retry nonconfirmation and one-attempt history compaction",
+          "Native URL-model20-image compatibility and Anthropic BASE64_ONLY actual integration"
+        ]
+      },
+      "remainingValidationLimits": [
+        "No remote credentialed API test; the complete source failure/retry/compaction permutation matrix was not independently recreated just because these native fixtures passed."
+      ],
+      "previousNotes": "Immutable current source message ID captured at Run entry and preserved across tool turns/compaction; current images mandatory, newest history omitted with explicit request-copy placeholders when unavailable/over count/budget. DB originals unchanged. At most min(8,model cap); header-only validation and original byte identity. Native authorized URL policy kept; OSS publication excluded and existing native10MiB image download cap preserved.32MiB LRU/30minute cache is scoped to immutable current message rather than globalURL. An actual slow-download socket test exposed reqwest future-drop leaving background connection alive; replaced image-only fetch with owned Hyper driver (Drop abort) and existing nativeTLS certificate validation. No redirects/retry;30second timeout; cancellation stops actualsocket and stream without Finish. All failures before provider request are Preflight for knownzero physicalLLMuse, cancellation dedicatedCancelled. Native Anthropic BASE64_ONLY integration being finalized by runtime owner. Follow-up exact image-test audit found missing engine delivery identity/visible notices; added clone-shared delivered_image_sources and image_notices. Each physical attempt replaces evidence; converter deletions keep source indices aligned. Source identities are only confirmed by engine after complete successful Finish, integration owned by runtime. Latest helper regression is pending the root shared test gate; old successful wire test does not claim these new branches passed."
+    }
+  ],
+  "currentExecutionEvidence": {
+    "nativeWorkspace": {
+      "command": "ZK_RUN_GIT_TESTS=true CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --workspace --all-features --locked --no-fail-fast",
+      "status": "passed",
+      "result": "106 harness summaries; 2852 passed, 0 failed, 8 ignored. Ignored cases are not verified.",
+      "evidence": {
+        "path": "/tmp/zk-workspace-tests-resume7.txt",
+        "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7"
+      }
+    },
+    "strictClippy": {
+      "command": "CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo clippy --workspace --all-features --all-targets --locked -- -D warnings",
+      "status": "passed",
+      "evidence": {
+        "path": "/tmp/zk-workspace-clippy-resume10.txt",
+        "sha256": "d2c539975b17f1983e2c2f9465869204726adf8cf656244c3e35b4ca27489d0c"
+      }
+    },
+    "machineContracts": {
+      "command": "./scripts/parity/check-contracts.sh",
+      "status": "passed",
+      "evidence": {
+        "path": "/tmp/zk-release-contracts-resume7.log",
+        "sha256": "dd7dca9f28ae775b866302044d05a2c4700f78b16d8efd9ce8ec2ee7f9173de5"
+      },
+      "downstreamKinds": 60,
+      "databaseTables": 56,
+      "defaultTools": 34,
+      "compiledToolSchemaSha256": "315d341299f27dbe83a7e2ce808b994b72b9a701914e955920ddbf0abfd36e35"
+    },
+    "frontendUnit": {
+      "command": "cd frontend && npm test -- --run --reporter=verbose",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "135 files;1190 passed;16 unchanged baseline skips not counted as verified;141.86s",
+      "evidence": {
+        "path": "/tmp/zk-frontend-product-final-tests.txt",
+        "sha256": "2cfd332e58298aa51e36b6ad5b5d6504a7c68d970c88857208a579ab8e1ec819"
+      }
+    },
+    "latestBackendE2E": {
+      "command": "cd frontend && ZK_E2E_SERVER_BINARY=/Users/guoqingtao/Desktop/dev/code/zkcode/target/release/zk-server npm run test:e2e:production",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "4 passed in19.3s; actual release Rust binary, installed Chrome, fresh isolated SQLite and scripted local provider.",
+      "evidence": {
+        "path": "/tmp/zk-frontend-production-release-final.txt",
+        "sha256": "f72567c6cabc2dedae57f04c3b1d8ab2d96c76921a5dc49f15f8b4f880ed0e17"
+      },
+      "binaryEvidence": {
+        "path": "/Users/guoqingtao/Desktop/dev/code/zkcode/target/release/zk-server",
+        "sha256": "5c7985aba8e25b2356f343c401f21b72b191f3a6c99ef7b8e3a23198a8817491",
+        "version": "zk-server 0.1.0 (git 08cbdc45e12cc28f3f13aaafbd0b056b980dfb1a, built 1791332366, schema 2, ws 4)",
+        "sha256Before": "5c7985aba8e25b2356f343c401f21b72b191f3a6c99ef7b8e3a23198a8817491",
+        "sha256After": "5c7985aba8e25b2356f343c401f21b72b191f3a6c99ef7b8e3a23198a8817491"
+      },
+      "binaryHashBeforeEqualsAfter": true,
+      "cases": [
+        "real backend: upgraded diagram and math renderers display the assistant response",
+        "real backend: browser chat is durable before message_complete",
+        "real backend: settings, Skill management, and revisioned memory use native contracts",
+        "real backend: merge UI produces a charged, durable handoff and inherits primary permission"
+      ],
+      "limits": "These four browser cases do not cover every product scenario, external provider availability, source browser references, or source Java tests. Flat intermediate assistant-segment behavior has focused native-wire unit coverage; the plain chat E2E covers final completion and task boundary.",
+      "binaryIdentityRecord": {
+        "path": "/tmp/zk-frontend-release-binary-evidence.json",
+        "sha256": "51cda4f879900e2ea6f8890c72847f87eb7d576392ef7091158d47f15bd19e2c"
+      }
+    },
+    "previousDebugBackendE2E": {
+      "command": "cd frontend && ZK_E2E_SERVER_BINARY=/Users/guoqingtao/Desktop/dev/code/zkcode/target/debug/zk-server npm run test:e2e:production",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "4 passed in 21.3s using installed Chrome, fresh isolated SQLite, actual latest Rust server and scripted local provider.",
+      "evidence": {
+        "path": "/tmp/zk-frontend-production-latest.txt",
+        "sha256": "f83589d871f65cfa5e20186ca70ee81d14ff5d2f63b1edcf1b8a2e7f248aa4f5"
+      },
+      "binaryEvidence": {
+        "path": "/Users/guoqingtao/Desktop/dev/code/zkcode/target/debug/zk-server",
+        "sha256": "de3da835bd01a7a7fe3ecd6c6261af12d9b99a7690d0d47cd431332ecdd3c6d6",
+        "identityScope": "Historical executable used for /tmp/zk-frontend-production-latest.txt, recorded before/after execution; this path was rebuilt later. Never infer historical identity from the current file."
+      },
+      "binaryHashBeforeEqualsAfter": true,
+      "cases": [
+        "real backend: upgraded diagram and math renderers display the assistant response",
+        "real backend: browser chat is durable before message_complete",
+        "real backend: settings, Skill management, and revisioned memory use native contracts",
+        "real backend: merge UI produces a charged, durable handoff and inherits primary permission"
+      ],
+      "limits": "These four browser cases do not cover every product scenario, external provider availability, source browser references, or source Java tests. Flat intermediate assistant-segment behavior has focused native-wire unit coverage; the plain chat E2E covers final completion and task boundary.",
+      "identityCorrection": "Corrected documentation writer that accidentally hashed the later rebuilt debug path rather than the executable identity recorded during the run."
+    },
+    "formalDevLifecycle": {
+      "status": "passed",
+      "sync": {
+        "status": "passed",
+        "result": "exit0; supported local environment synced and debug binary built",
+        "evidence": {
+          "path": "/tmp/zk-dev-sync-online-latest.log",
+          "sha256": "55c5e8b42f9d845c601d6d3cf32545b23cd474cd007262256ab2fc1cba0d0948"
+        },
+        "command": "./dev sync --build"
+      },
+      "doctor": {
+        "status": "passed",
+        "result": "ok=true; every reported check is true",
+        "evidence": {
+          "path": "/tmp/zk-doctor-deep-final.json",
+          "sha256": "19b4b8cb97c26935d64ef0ceacebc8e00d77925a92a5b139f4ca0ed231dafa5a"
+        },
+        "command": "./dev doctor --deep --json"
+      }
+    },
+    "defaultWorkspace": {
+      "status": "passed",
+      "result": "106 harnesses;2852 passed,0 failed,8 ignored; ZK_RUN_GIT_TESTS=true",
+      "evidence": {
+        "path": "/tmp/zk-workspace-tests-default-final.txt",
+        "sha256": "c0c9fb73f284c8b10c830886ec5e4f416d92dad7a5ba20f1f0a704ed0752a567"
+      }
+    },
+    "engineNoDefaultFeatures": {
+      "status": "passed",
+      "result": "616 passed; optional image thumbnail feature disabled",
+      "evidence": {
+        "path": "/tmp/zk-engine-no-default-final.txt",
+        "sha256": "bdd59d268e7d6123198fa92c90b7df41a76811fc3b7e103c0aabf2ac9fb39eae"
+      }
+    },
+    "nativeJourney": {
+      "status": "passed",
+      "result": "1 passed; real Rust→UDS→Python→Chromium and HTTP managed previews/evidence/resource cleanup",
+      "evidence": {
+        "path": "/tmp/zk-verify-journey-native-final.txt",
+        "sha256": "d7a59ab06950e8b15d1b1dcb4b350f5f845c1f515dc651f2a1d573c0f55b1d07"
+      }
+    },
+    "previousFrontendUnit": {
+      "command": "cd frontend && npm run test:run",
+      "status": "passed",
+      "result": "135 files; 1185 passed, 16 skipped. Skips are not verified.",
+      "evidence": {
+        "path": "/tmp/zk-frontend-native-segment-full.txt",
+        "sha256": "72c0e93f5abb385473d216d15cc43b1e56f27eeefc0ca36138139f502bd1ae89"
+      }
+    }
+  },
+  "currentExecutionScope": "Named native assertions passed in the complete workspace run and strict Clippy passed. Formal dev sync/build and deep doctor passed. Release-binary browser E2E passed only its four explicit cases. Product acceptance is itemized in product-acceptance-matrix.json. Source Java permutations, paid remote services and the remaining baseline skipped frontend assertions are not claimed passed. Previous validation remains historical.",
+  "productAcceptanceMatrix": "docs/migration/product-acceptance-matrix.json"
+}

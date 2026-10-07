@@ -46,10 +46,15 @@ uuid = { workspace = true }
 # （uuid v4 的传递依赖），不新增供应链面。
 getrandom = { workspace = true }
 sha2 = { workspace = true }
+base64 = { workspace = true }
 # STDIO 传输关闭序列的进程组信号（killpg SIGTERM→5s→SIGKILL），与
 # zk-tools/src/process.rs 同一范式——workspace `unsafe_code = "forbid"`，
 # 故不用 libc 裸调用。
 nix = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Already pinned transitively by native-tls; use the safe native Keychain API.
+security-framework = "=3.7.0"
 
 [dev-dependencies]
 # SSE / Streamable HTTP 传输的集成测试用裸 `TcpListener` 手写最小 HTTP 响应，

@@ -82,6 +82,12 @@ pub trait ToolFacts: Send + Sync {
     /// `Tool#getName()`。
     fn name(&self) -> &str;
 
+    /// Host-owned Hook facts. Native registry and remote/model tools always keep
+    /// the default; a tool name or input field can never select this analyzer.
+    fn host_hook_facts(&self) -> Option<&serde_json::Value> {
+        None
+    }
+
     /// 是否为 MCP 桥接工具（决定 `mcp-v1` 分析器路由）。
     ///
     /// 旧源 `OperationAnalyzerRegistry` 以 `tool instanceof McpTool` 判定。
@@ -131,6 +137,12 @@ pub trait ToolFacts: Send + Sync {
 
     /// `Tool#isReadOnly(ToolInput)`：`BashAnalyzer` 据此判 `SAFE` 与 effects。
     fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+        false
+    }
+
+    /// Trusted native adapter may narrow one invocation to an internal display-only action.
+    /// Never derive this from model-supplied metadata or an MCP tool declaration.
+    fn is_safe_internal_projection(&self) -> bool {
         false
     }
 
@@ -250,6 +262,16 @@ pub trait ArtifactPublicationPort: Send + Sync {
 pub trait ModeProvider: Send + Sync {
     /// 返回 root session 的当前权限模式；未设置时旧源返回 `DEFAULT`。
     fn mode(&self, root_session_id: &str) -> PermissionMode;
+
+    /// Recheck inside the caller's writer transaction without reacquiring it.
+    /// Persistent hosts must override this; the default is for memory-only providers.
+    fn mode_in_current_write(
+        &self,
+        _conn: &rusqlite::Connection,
+        root_session_id: &str,
+    ) -> PermissionMode {
+        self.mode(root_session_id)
+    }
 }
 
 /// 永远返回 `DEFAULT` 的模式提供者（旧源未设置模式时的等价行为）。
@@ -291,6 +313,23 @@ pub trait RunEventSink: Send + Sync {
         tool_use_id: Option<&str>,
         payload: &serde_json::Value,
     );
+
+    /// Required admission audit. Persistent implementations propagate failure so
+    /// permission consumption and the physical-start decision roll back together.
+    ///
+    /// # Errors
+    /// Returns a persistence failure when the required audit cannot be stored.
+    fn append_required_event_in_current_write(
+        &self,
+        conn: &rusqlite::Connection,
+        run_id: &str,
+        event_type: &str,
+        tool_use_id: Option<&str>,
+        payload: &serde_json::Value,
+    ) -> Result<(), zk_db::DbError> {
+        self.append_event_in_current_write(conn, run_id, event_type, tool_use_id, payload);
+        Ok(())
+    }
 }
 
 /// 丢弃全部事件的 sink（单元测试与嵌入式调用用）。

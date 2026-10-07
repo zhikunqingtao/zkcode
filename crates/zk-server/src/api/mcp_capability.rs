@@ -337,10 +337,16 @@ pub(crate) async fn toggle_capability(
 ) -> Result<Response, ApiError> {
     let enabled = require_spring_bool(&query, "enabled")?;
     let registry = Arc::clone(&state.mcp_capabilities);
-    if enabled {
-        let Some(definition) = registry.find_by_id(&id) else {
-            return Ok(not_found());
-        };
+    let Some(current) = registry.find_by_id(&id) else {
+        return Ok(not_found());
+    };
+    let manager = state.mcp();
+    manager
+        .load_service_preferences()
+        .await
+        .map_err(|error| manager_error(&error))?;
+    if enabled && manager.is_service_enabled(&current.extract_server_key()) {
+        let definition = current;
         tokio::time::timeout(
             Duration::from_secs(5),
             validate_capability_destination(&definition),
@@ -352,8 +358,9 @@ pub(crate) async fn toggle_capability(
     let Ok(definition) = registry.toggle_enabled(&id, enabled) else {
         return Ok(not_found());
     };
-    let manager = state.mcp();
-    let status = if enabled {
+    let status = if !manager.is_service_enabled(&definition.extract_server_key()) {
+        "service_disabled".to_owned()
+    } else if enabled {
         let connection = manager
             .enable_from_registry(&definition)
             .await
@@ -370,7 +377,9 @@ pub(crate) async fn toggle_capability(
             .list_enabled()
             .iter()
             .any(|other| other.id != id && other.extract_server_key() == server_key);
-        if !other_enabled {
+        if other_enabled {
+            manager.refresh_service_tools(&server_key);
+        } else {
             let _removed = manager.remove_server(&server_key).await;
         }
         "disabled".to_owned()
@@ -403,6 +412,12 @@ pub(crate) async fn list_server_tools(
     };
     let server_key = definition.extract_server_key();
     let manager = state.mcp();
+    if let Err(error) = manager.load_service_preferences().await {
+        return manager_error(&error).into_response();
+    }
+    if !manager.is_service_enabled(&server_key) {
+        return ok_json(json!({"id":id,"serverKey":server_key,"status":"service_disabled"}));
+    }
     let Some(connection) = manager
         .get_connection(&server_key)
         .filter(|connection| connection.is_alive())
@@ -443,18 +458,11 @@ pub(crate) async fn test_capability(
     let Some(definition) = state.mcp_capabilities.find_by_id(&id) else {
         return Ok(not_found());
     };
-    tokio::time::timeout(
-        Duration::from_secs(5),
-        validate_capability_destination(&definition),
-    )
-    .await
-    .map_err(|_| capability_security_error("MCP capability DNS validation timed out"))?
-    .map_err(capability_security_error)?;
-    let config = state.mcp().build_resolved_config_from_registry(&definition);
-    let connection = McpServerConnection::new(config);
-    connection.connect().await;
-    let alive = connection.is_alive();
-    connection.close().await;
+    let alive = state
+        .mcp()
+        .probe_registry_service(&definition)
+        .await
+        .map_err(|error| manager_error(&error))?;
     let status = if alive { "reachable" } else { "unreachable" };
     Ok(ok_json(json!({
         "id": id,

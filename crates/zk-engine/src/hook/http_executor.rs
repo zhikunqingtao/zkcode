@@ -98,10 +98,14 @@ impl HttpHookExecutor {
             .ok_or_else(|| HttpHookError::InvalidUrl("missing port".to_owned()))?;
 
         // 异步 DNS 解析（不阻塞 runtime）；逐 IP 校验后钉入客户端。
-        let resolved: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), port))
-            .await
-            .map_err(|_| HttpHookError::Dns { host: host.clone() })?
-            .collect();
+        let resolved: Vec<SocketAddr> = tokio::time::timeout(
+            HTTP_HOOK_TIMEOUT,
+            tokio::net::lookup_host((host.as_str(), port)),
+        )
+        .await
+        .map_err(|_| HttpHookError::Dns { host: host.clone() })?
+        .map_err(|_| HttpHookError::Dns { host: host.clone() })?
+        .collect();
         if resolved.is_empty() {
             return Err(HttpHookError::Dns { host });
         }
@@ -116,6 +120,8 @@ impl HttpHookExecutor {
 
         // 钉住已校验 IP：reqwest 出站不再重解析，消除 DNS rebinding TOCTOU。
         let client = reqwest::Client::builder()
+            // An environment proxy must not re-resolve or route around the bound address policy.
+            .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(HTTP_HOOK_TIMEOUT)
             .resolve_to_addrs(&host, &resolved)

@@ -7,11 +7,11 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+use zk_authz::PermissionMode;
 use zk_db::time;
 use zk_engine::admission::{Admission, AdmissionRequest, ToolAdmission};
 use zk_engine::hook::{HookContext, HookService, PreHookDecision};
 use zk_server::authz::EngineAdmission;
-use zk_server::interaction::runs;
 use zk_server::state::AppState;
 use zk_tools::{ReadFileTool, ToolContext, ToolRegistry};
 
@@ -51,7 +51,7 @@ fn write_transform_hook(workspace: &std::path::Path, file_path: &std::path::Path
 [[hook]]
 name = "rewrite-read-path"
 event = "pre-tool-execution"
-role = "security"
+role = "transform"
 matcher = "^Read$"
 priority = 1
 command = '''printf '%s' '{output}' '''
@@ -61,12 +61,13 @@ timeout_secs = 5
     std::fs::write(workspace.join(".zk/hooks.toml"), config).expect("write hook config");
 }
 
-async fn seed_running_context(state: &AppState, workspace: &str) {
+async fn seed_running_context(state: &AppState, workspace: &str) -> HookContext {
     state
         .db
         .create_project("Hook Admission Project", workspace)
         .await
         .expect("create trusted project");
+    let workspace_root = std::path::PathBuf::from(workspace);
     let workspace = workspace.to_owned();
     state
         .db
@@ -77,18 +78,45 @@ async fn seed_running_context(state: &AppState, workspace: &str) {
                  VALUES(?1,'test-model',?2,?3,?3)",
                 rusqlite::params![SESSION, workspace, now],
             )?;
-            runs::start_in_current_write(conn, RUN, SESSION, None, Some("main"), "test-model")
+            Ok(())
         })
         .await
-        .expect("seed session and run");
+        .expect("seed session");
+    state
+        .db
+        .start_root_run_with_budget(
+            RUN,
+            SESSION,
+            None,
+            "test-model",
+            &zk_db::TaskBudgetLimits {
+                deadline_at_ms: Some(time::now_millis() + 60_000),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("start owned root with a finite deadline");
+    state
+        .authz
+        .modes
+        .set_mode(SESSION, PermissionMode::AutoApprove)
+        .await
+        .expect("approve the fixture host operation independently of Read");
+    let run = state.db.find_run_by_id(RUN).await.unwrap().unwrap();
+    state
+        .execution_supervisor
+        .hook_context(
+            &run.task_id,
+            RUN,
+            SESSION,
+            &workspace_root,
+            CancellationToken::new(),
+        )
+        .with_tool("Read")
 }
 
-async fn apply_hook(service: &HookService, workspace: &str, input: &Value) -> Value {
-    let context = HookContext::new()
-        .with_tool("Read")
-        .with_session(SESSION)
-        .with_working_dir(workspace);
-    match service.evaluate_pre_tool(&context, input).await {
+async fn apply_hook(service: &HookService, context: &HookContext, input: &Value) -> Value {
+    match service.evaluate_pre_tool(context, input).await {
         PreHookDecision::Continue { input } => input,
         denial @ PreHookDecision::Deny { .. } => {
             panic!("hook should return a transformed input, got {denial:?}")
@@ -110,23 +138,23 @@ async fn transformed_input_is_readmitted_before_real_tool_execution() {
     let workspace_text = workspace.to_string_lossy().into_owned();
 
     let state = AppState::for_tests();
-    seed_running_context(&state, &workspace_text).await;
+    let context = seed_running_context(&state, &workspace_text).await;
 
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(ReadFileTool));
     let registry = Arc::new(registry);
     let admission = EngineAdmission::new_dont_ask(state.authz.clone(), Arc::clone(&registry));
-    let hooks = HookService::disabled();
 
     // A real shell hook rewrites an initially outside-workspace request to a
     // trusted file. Production Admission sees the rewritten input and permits it.
     write_transform_hook(&workspace, &allowed_file);
     let transformed = apply_hook(
-        &hooks,
-        &workspace_text,
+        &state.hooks,
+        &context,
         &json!({ "file_path": outside_file }),
     )
     .await;
+    assert_eq!(transformed, json!({ "file_path": allowed_file }));
     let execution_input = match admission
         .admit(AdmissionRequest {
             session_id: SESSION,
@@ -165,11 +193,12 @@ async fn transformed_input_is_readmitted_before_real_tool_execution() {
     // Re-admission must reject it, so the tool is never called with that value.
     write_transform_hook(&workspace, &outside_file);
     let transformed = apply_hook(
-        &hooks,
-        &workspace_text,
+        &state.hooks,
+        &context,
         &json!({ "file_path": allowed_file }),
     )
     .await;
+    assert_eq!(transformed, json!({ "file_path": outside_file }));
     let denied = admission
         .admit(AdmissionRequest {
             session_id: SESSION,
@@ -184,4 +213,38 @@ async fn transformed_input_is_readmitted_before_real_tool_execution() {
         matches!(denied, Admission::Denied { .. }),
         "outside-workspace hook rewrite must be denied, got {denied:?}"
     );
+    state.hooks.drain_run(RUN).await;
+    assert_released_hook_resources(&state).await;
+}
+
+async fn assert_released_hook_resources(state: &AppState) {
+    let resources: Vec<(String, Option<String>, String)> = state
+        .db
+        .with_reader(|conn| {
+            let mut query = conn.prepare(
+                "SELECT resource_kind,external_id,status FROM execution_resources WHERE run_id=?1",
+            )?;
+            Ok(query
+                .query_map([RUN], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                .collect::<Result<Vec<_>, _>>()?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        resources.len(),
+        2,
+        "both real shell Hooks must have an owner"
+    );
+    for (kind, pid, status) in resources {
+        assert_eq!(kind, "processGroup");
+        assert_eq!(status, "released");
+        assert!(
+            !std::process::Command::new("/bin/kill")
+                .args(["-0", &format!("-{}", pid.unwrap())])
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
 }

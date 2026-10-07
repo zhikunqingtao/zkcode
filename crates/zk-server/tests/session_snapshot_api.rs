@@ -23,6 +23,89 @@ fn fixture(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
 }
 
 #[tokio::test]
+async fn temporary_conversations_cannot_export_or_resume_durable_snapshots() {
+    let (workspace, snapshot_dir) = fixture("temporary");
+    let db = zk_db::Db::open_in_memory().unwrap();
+    let (session, _lease) = db
+        .create_ephemeral_session("fixture", workspace.to_str().unwrap(), "DONT_ASK")
+        .await
+        .unwrap();
+    let mut config = Config::test_config();
+    config.snapshot_dir = Some(snapshot_dir.clone());
+    let mut router = build_router(AppState::new(db, config));
+    for suffix in ["snapshot", "snapshot/resume"] {
+        let (status, _, body) = call(
+            &mut router,
+            local_post(&format!("/api/sessions/{session}/{suffix}"), None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{}", json_body(&body));
+        assert_eq!(json_body(&body)["code"], "EPHEMERAL_OPERATION_UNSUPPORTED");
+    }
+    assert!(std::fs::read_dir(snapshot_dir).unwrap().next().is_none());
+}
+
+#[tokio::test]
+async fn temporary_live_content_cannot_use_export_or_resume_routes() {
+    let (workspace, _) = fixture("temporary-live");
+    let db = zk_db::Db::open_in_memory().unwrap();
+    let (session, lease) = db
+        .create_ephemeral_session("fixture", workspace.to_str().unwrap(), "DONT_ASK")
+        .await
+        .unwrap();
+    db.append_message(
+        &session,
+        NewMessage {
+            meta: None,
+            role: MessageRole::User,
+            content: vec![StoredBlock::Text {
+                text: "private live content".into(),
+            }],
+            stop_reason: None,
+            input_tokens: 0,
+            output_tokens: 0,
+        },
+    )
+    .await
+    .unwrap();
+    let mut router = build_router(AppState::new(db, Config::test_config()));
+    for suffix in ["", "/messages"] {
+        let (status, _, body) = call(
+            &mut router,
+            local_get(&format!("/api/sessions/{session}{suffix}")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{}", json_body(&body));
+        assert!(String::from_utf8_lossy(&body).contains("private live content"));
+    }
+    let mut lease = Some(lease);
+    for expired in [false, true] {
+        if expired {
+            drop(lease.take());
+        }
+        for suffix in ["export", "export?format=markdown", "resume"] {
+            let (status, _, body) = call(
+                &mut router,
+                local_post(&format!("/api/sessions/{session}/{suffix}"), None),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{}", json_body(&body));
+            assert_eq!(json_body(&body)["code"], "EPHEMERAL_OPERATION_UNSUPPORTED");
+            assert!(!String::from_utf8_lossy(&body).contains("private live content"));
+        }
+    }
+    for suffix in ["export", "resume"] {
+        let (status, _, body) = call(
+            &mut router,
+            local_post(&format!("/api/sessions/missing/{suffix}"), None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(json_body(&body)["code"], "SESSION_NOT_FOUND");
+    }
+}
+
+#[tokio::test]
 async fn save_restart_resume_is_idempotent_and_delete_is_durable() {
     let (workspace, snapshot_dir) = fixture("roundtrip");
     let db = zk_db::Db::open_in_memory().expect("db");
@@ -33,6 +116,7 @@ async fn save_restart_resume_is_idempotent_and_delete_is_durable() {
     db.append_message(
         &session.id,
         NewMessage {
+            meta: None,
             role: MessageRole::User,
             content: vec![StoredBlock::Text {
                 text: "saved message".to_owned(),
@@ -59,6 +143,7 @@ async fn save_restart_resume_is_idempotent_and_delete_is_durable() {
     db.append_message(
         &session.id,
         NewMessage {
+            meta: None,
             role: MessageRole::Assistant,
             content: vec![StoredBlock::Text {
                 text: "unsaved message".to_owned(),

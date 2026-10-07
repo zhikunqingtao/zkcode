@@ -106,7 +106,8 @@ impl CircuitBreaker {
 
     /// 指定时刻记一次服务端失败（单测入口）。
     pub fn record_status_at(&self, status: u16, now_ms: u64) {
-        if status < 500 {
+        // 529 is a model capacity signal, handled by the registry model cooldown.
+        if status < 500 || status == 529 {
             return;
         }
         let half_open = self.state_at(now_ms) == BreakerState::HalfOpen;

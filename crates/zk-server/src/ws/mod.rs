@@ -70,7 +70,10 @@ pub use zk_protocol::WS_PROTOCOL_VERSION;
 ///
 /// 语义：critical = 离线/背压时必须暂存重放（per-session pending 队列）；
 /// 其余（含 `stream_delta` / `thinking_delta` 高频 delta 类）= 可丢弃。
-pub const CRITICAL_MESSAGE_TYPES: [&str; 15] = [
+pub const CRITICAL_MESSAGE_TYPES: [&str; 18] = [
+    "system_message",
+    "assistant_segment_complete",
+    "task_boundary",
     "permission_request",
     "tool_result",
     "tool_finished",

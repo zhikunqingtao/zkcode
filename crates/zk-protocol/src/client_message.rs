@@ -42,6 +42,9 @@ pub enum ClientMessage {
     /// **Phase 2+ 建模未激活**。
     #[serde(rename_all = "camelCase")]
     RunInput {
+        /// Optional display metadata; the server owns steering classification.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        meta: Option<serde_json::Value>,
         /// 请求 ID。
         request_id: String,
         /// 追加指令文本。
@@ -92,6 +95,9 @@ pub enum ClientMessage {
     /// **Phase 1 激活**。
     #[serde(rename_all = "camelCase")]
     SetPermissionMode {
+        /// Correlates the confirmation or error with this operation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
         /// 目标模式（`DEFAULT` / `AUTO_APPROVE` 等）。
         mode: String,
     },

@@ -235,10 +235,12 @@ pub enum ToolEvent {
 /// 该参数，直接注入上下文。
 #[derive(Clone, Default)]
 pub struct CallEnv {
+    ephemeral_content: bool,
     working_dir: Option<PathBuf>,
     session_id: Option<String>,
     run_id: Option<String>,
     authorized_write_path: Option<PathBuf>,
+    authorized_shell_cwd: Option<PathBuf>,
     capability_revocation: Option<CancellationToken>,
     resource_owner: Option<ExecutionResourceOwner>,
     resource_observer: Option<Arc<dyn ExecutionResourceObserver>>,
@@ -246,6 +248,17 @@ pub struct CallEnv {
 }
 
 impl CallEnv {
+    /// Host-derived content retention; model inputs cannot override it.
+    #[must_use]
+    pub const fn with_ephemeral_content(mut self, ephemeral: bool) -> Self {
+        self.ephemeral_content = ephemeral;
+        self
+    }
+    /// Whether body-bearing side products must remain in memory.
+    #[must_use]
+    pub const fn is_ephemeral(&self) -> bool {
+        self.ephemeral_content
+    }
     /// 空环境（等价 [`Default`]）。
     #[must_use]
     pub fn new() -> Self {
@@ -296,6 +309,13 @@ impl CallEnv {
         self
     }
 
+    /// Carry the server's Bash cwd identity into the physical invocation.
+    #[must_use]
+    pub fn with_authorized_shell_cwd(mut self, path: impl Into<PathBuf>) -> Self {
+        self.authorized_shell_cwd = Some(path.into());
+        self
+    }
+
     /// Attach the exact dynamic-directory binding lifetime for this call.
     #[must_use]
     pub fn with_capability_revocation(mut self, token: CancellationToken) -> Self {
@@ -342,6 +362,10 @@ impl CallEnv {
 
     /// 施加到上下文（缺省项保持 [`ToolContext::new`] 的默认值）。
     fn apply(self, mut ctx: ToolContext, owners: ExecutionOwnerRegistry) -> ToolContext {
+        ctx = ctx.with_ephemeral_content(self.ephemeral_content);
+        if let Some(cwd) = self.authorized_shell_cwd {
+            ctx = ctx.with_authorized_shell_cwd(cwd);
+        }
         if let Some(working_dir) = self.working_dir {
             ctx = ctx.with_working_dir(working_dir);
         }
@@ -437,6 +461,14 @@ impl Default for ToolExecutor {
 }
 
 impl ToolExecutor {
+    /// Bind an internal Run-owned process to this supervisor without exposing a
+    /// model-callable tool or bypassing its physical resource ledger.
+    #[must_use]
+    pub fn process_context(&self, cancel: CancellationToken, env: CallEnv) -> ToolContext {
+        let (progress, _receiver) = mpsc::unbounded_channel();
+        env.apply(ToolContext::new(cancel, progress), self.owners.clone())
+    }
+
     /// 以默认并发上限（[`MAX_CONCURRENT_TOOLS`]）构造。
     #[must_use]
     pub fn new() -> Self {
@@ -610,10 +642,13 @@ async fn run_spawned_call(call: SpawnedCall) {
     // ToolContext itself moves into the tool future.
     let cleanup_ctx = ctx.clone();
     let timeout = match call.tool.timeout_policy() {
-        crate::tool::ToolTimeoutPolicy::Executor => call.tool.timeout().min(MAX_TOOL_TIMEOUT),
-        crate::tool::ToolTimeoutPolicy::TaskRuntime => Duration::from_mins(32),
+        crate::tool::ToolTimeoutPolicy::Executor => Some(call.tool.timeout().min(MAX_TOOL_TIMEOUT)),
+        crate::tool::ToolTimeoutPolicy::TaskRuntime => Some(Duration::from_mins(32)),
+        crate::tool::ToolTimeoutPolicy::DurableInteraction => None,
     };
-    let work = call.tool.execute(call.input, ctx);
+    // Construct the tool future inside the unwind boundary as well: an adapter
+    // may panic before returning its future. Only this invocation is cancelled.
+    let work = Box::pin(execute_catching_panic(call.tool.as_ref(), call.input, ctx));
     let Some(output) = drive_tool(
         work,
         timeout,
@@ -647,6 +682,34 @@ async fn run_spawned_call(call: SpawnedCall) {
             cleanup_status: cleanup_ctx.execution_cleanup_status(),
         })
         .await;
+}
+
+async fn execute_catching_panic(
+    tool: &dyn Tool,
+    input: serde_json::Value,
+    ctx: ToolContext,
+) -> ToolOutput {
+    let cancel = ctx.cancel.clone();
+    if let Ok(output) = std::panic::AssertUnwindSafe(async { tool.execute(input, ctx).await })
+        .catch_unwind()
+        .await
+    {
+        output
+    } else {
+        // Nested process/resource drivers retain their own supervision and
+        // durable cleanup obligations. A panic proves neither their exit nor
+        // that the tool did not apply an external effect.
+        cancel.cancel();
+        tracing::error!("tool execution terminated without a result");
+        let mut output = ToolOutput::error(
+            "TOOL_EXECUTION_TERMINATED_WITHOUT_RESULT: tool execution failed unexpectedly; effects are UNKNOWN. Do not automatically retry; inspect the resulting state first.",
+        );
+        output.metadata = Some(serde_json::json!({"structuredResult": {
+            "code":"TOOL_EXECUTION_TERMINATED_WITHOUT_RESULT",
+            "executionStatus":"failed", "effectState":"UNKNOWN", "retryability":"NEVER"
+        }}));
+        output
+    }
 }
 
 async fn admit_call(call: &SpawnedCall) -> Result<ExecutionGuards, AdmissionFailure> {
@@ -710,7 +773,7 @@ async fn admit_call(call: &SpawnedCall) -> Result<ExecutionGuards, AdmissionFail
 #[allow(clippy::too_many_arguments)] // one supervised call's immutable execution envelope
 async fn drive_tool(
     mut work: BoxFuture<'_, ToolOutput>,
-    timeout: Duration,
+    timeout: Option<Duration>,
     cancel: &CancellationToken,
     cleanup_ctx: &ToolContext,
     capability_revocation: Option<&CancellationToken>,
@@ -718,7 +781,12 @@ async fn drive_tool(
     tool_use_id: &str,
     progress_rx: &mut mpsc::Receiver<String>,
 ) -> Option<ToolOutput> {
-    let deadline = tokio::time::sleep(timeout);
+    let deadline = async move {
+        match timeout {
+            Some(duration) => tokio::time::sleep(duration).await,
+            None => std::future::pending::<()>().await,
+        }
+    };
     tokio::pin!(deadline);
     let mut progress_open = true;
     let revocation = capability_revocation.cloned();
@@ -766,7 +834,7 @@ async fn drive_tool(
                 }
                 return Some(ToolOutput::error(format!(
                     "Tool execution timed out after {}ms",
-                    timeout.as_millis()
+                    timeout.unwrap_or_default().as_millis()
                 )));
             }
             progress = progress_rx.recv(), if progress_open => match progress {
@@ -842,6 +910,120 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    struct PanicTool {
+        on_construction: bool,
+        cleanup_release: Option<Arc<Notify>>,
+    }
+
+    impl Tool for PanicTool {
+        fn name(&self) -> &'static str {
+            "PanicFixture"
+        }
+        fn description(&self) -> &'static str {
+            "panic boundary regression"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            json!({"type":"object"})
+        }
+        fn is_read_only(&self, _: &serde_json::Value) -> bool {
+            true
+        }
+        fn execute(&self, _: serde_json::Value, ctx: ToolContext) -> BoxFuture<'_, ToolOutput> {
+            assert!(
+                !self.on_construction,
+                "panic while constructing tool future"
+            );
+            let release = self.cleanup_release.clone();
+            Box::pin(async move {
+                if let Some(release) = release {
+                    let cancel = ctx.cancel.clone();
+                    ctx.spawn_owned_execution(Box::pin(async move {
+                        cancel.cancelled().await;
+                        release.notified().await;
+                    }))
+                    .unwrap();
+                }
+                panic!("panic while polling tool future");
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn panicking_tool_generates_one_unknown_failure_and_releases_leaf_slot() {
+        for on_construction in [false, true] {
+            let executor = ToolExecutor::with_concurrency(1);
+            let cancel = CancellationToken::new();
+            let bad = executor.spawn_call(
+                Arc::new(PanicTool {
+                    on_construction,
+                    cleanup_release: None,
+                }),
+                "bad".into(),
+                json!({}),
+                &cancel,
+            );
+            let calls = Arc::new(AtomicUsize::new(0));
+            let healthy = executor.spawn_call(
+                Arc::new(CountingTool {
+                    calls: calls.clone(),
+                }),
+                "good".into(),
+                json!({}),
+                &cancel,
+            );
+            let (bad, good) = tokio::time::timeout(Duration::from_secs(2), async {
+                tokio::join!(collect(bad), collect(healthy))
+            })
+            .await
+            .unwrap();
+            assert_eq!(bad.len(), 1);
+            let ToolEvent::Finished { output, .. } = &bad[0] else {
+                panic!("terminal required")
+            };
+            assert!(output.is_error);
+            assert!(
+                output
+                    .content
+                    .starts_with("TOOL_EXECUTION_TERMINATED_WITHOUT_RESULT:")
+            );
+            let fact = &output.metadata.as_ref().unwrap()["structuredResult"];
+            assert_eq!(fact["effectState"], "UNKNOWN");
+            assert_eq!(fact["retryability"], "NEVER");
+            assert!(
+                matches!(good.as_slice(), [ToolEvent::Finished { output, .. }] if !output.is_error)
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert!(
+                !cancel.is_cancelled(),
+                "a tool panic cannot cancel its parent/siblings"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn panic_keeps_nested_cleanup_owned_until_it_really_exits() {
+        let executor = ToolExecutor::with_concurrency(1);
+        let release = Arc::new(Notify::new());
+        let events = collect(executor.spawn_call(
+            Arc::new(PanicTool {
+                on_construction: false,
+                cleanup_release: Some(release.clone()),
+            }),
+            "bad".into(),
+            json!({}),
+            &CancellationToken::new(),
+        ))
+        .await;
+        assert!(
+            matches!(events.as_slice(), [ToolEvent::Finished { output, .. }] if output.is_error)
+        );
+        let pending = executor.shutdown(Duration::ZERO).await;
+        assert!(!pending.drained);
+        assert_eq!(pending.owners_remaining, 1);
+        release.notify_one();
+        assert!(executor.shutdown(Duration::from_secs(2)).await.drained);
     }
 
     struct LeaseProbeTool {

@@ -8,7 +8,7 @@
 //! - Java 侧从 `ToolUseContext` 直接取 `sessionId` / `workingDirectory` /
 //!   `nestingDepth`；Rust 侧 `ToolContext` 无 `nestingDepth` 字段，故经
 //!   [`ContextInfoPort`] 端口反转注入（生产实现由 `zk-server` 组合根提供）。
-//!   端口不可用时回退为 `ToolContext` 自带的 `session_id` / `working_dir`。
+//!   端口异步读取真实账本；不可用时明确报错，绝不返回伪造的零用量。
 
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -24,7 +24,11 @@ use crate::tool::{Tool, ToolContext, ToolOutput};
 /// 生产实现由组合根注入，从 `AppState` 取 session 级 Token 统计。
 pub trait ContextInfoPort: Send + Sync {
     /// 获取指定会话的上下文信息。
-    fn get_context_info(&self, session_id: &str) -> ContextInfo;
+    fn get_context_info<'a>(
+        &'a self,
+        session_id: &'a str,
+        run_id: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<ContextInfo, String>>;
 }
 
 /// 上下文信息快照（对照旧 `CtxInspectTool` 输出字段）。
@@ -50,7 +54,7 @@ pub struct CtxInspectTool {
 }
 
 impl CtxInspectTool {
-    /// 构造（无端口时回退为 `ToolContext` 自带字段）。
+    /// 构造（无端口时工具返回不可用诊断）。
     #[must_use]
     pub fn new(port: Option<Arc<dyn ContextInfoPort>>) -> Self {
         Self { port }
@@ -83,32 +87,31 @@ impl Tool for CtxInspectTool {
     }
 
     fn execute(&self, input: Value, ctx: ToolContext) -> BoxFuture<'_, ToolOutput> {
-        let _level = optional_str(&input, "detail_level").unwrap_or("summary");
-        let session_id = ctx.session_id().unwrap_or("unknown");
-        let working_dir = ctx.working_dir().display().to_string();
-
-        let info = if let Some(port) = &self.port {
-            port.get_context_info(session_id)
-        } else {
-            ContextInfo {
-                session_id: session_id.to_owned(),
-                message_count: 0,
-                total_input_tokens: 0,
-                total_output_tokens: 0,
-                nesting_depth: 0,
-                working_directory: working_dir,
+        Box::pin(async move {
+            let level = optional_str(&input, "detail_level").unwrap_or("summary");
+            if !matches!(level, "summary" | "detailed") {
+                return ToolOutput::error("CONTEXT_DETAIL_INVALID: use summary or detailed");
             }
-        };
-
-        let mut output = String::from("## 上下文检查\n\n");
-        let _ = writeln!(output, "- 会话 ID: {}", info.session_id);
-        let _ = writeln!(output, "- 工作目录: {}", info.working_directory);
-        let _ = writeln!(output, "- 嵌套深度: {}", info.nesting_depth);
-        let _ = writeln!(output, "- 消息数: {}", info.message_count);
-        let _ = writeln!(output, "- 输入 Token: {}", info.total_input_tokens);
-        let _ = writeln!(output, "- 输出 Token: {}", info.total_output_tokens);
-
-        Box::pin(futures::future::ready(ToolOutput::ok(output)))
+            let Some(session_id) = ctx.session_id() else {
+                return ToolOutput::error("CONTEXT_SESSION_REQUIRED");
+            };
+            let Some(port) = self.port.as_ref() else {
+                return ToolOutput::error("CONTEXT_INFO_UNAVAILABLE");
+            };
+            let info = match port.get_context_info(session_id, ctx.run_id()).await {
+                Ok(info) => info,
+                Err(code) => return ToolOutput::error(code),
+            };
+            let mut output = String::from("## 上下文检查\n\n");
+            let _ = writeln!(output, "- 会话 ID: {}", info.session_id);
+            let _ = writeln!(output, "- 工作目录: {}", info.working_directory);
+            let _ = writeln!(output, "- 嵌套深度: {}", info.nesting_depth);
+            let _ = writeln!(output, "- 已存消息数: {}", info.message_count);
+            let _ = writeln!(output, "- 会话累计输入 Token: {}", info.total_input_tokens);
+            let _ = writeln!(output, "- 会话累计输出 Token: {}", info.total_output_tokens);
+            output.push_str("\n累计用量不是当前模型上下文窗口占用；最终请求还包含系统指令、工具定义和压缩策略。\n");
+            ToolOutput::ok(output)
+        })
     }
 }
 
@@ -130,25 +133,30 @@ mod tests {
     struct MockPort;
 
     impl ContextInfoPort for MockPort {
-        fn get_context_info(&self, session_id: &str) -> ContextInfo {
-            ContextInfo {
-                session_id: session_id.to_owned(),
-                message_count: 42,
-                total_input_tokens: 1000,
-                total_output_tokens: 500,
-                nesting_depth: 1,
-                working_directory: "/tmp/zk-ctx".to_owned(),
-            }
+        fn get_context_info<'a>(
+            &'a self,
+            session_id: &'a str,
+            _run_id: Option<&'a str>,
+        ) -> BoxFuture<'a, Result<ContextInfo, String>> {
+            Box::pin(async move {
+                Ok(ContextInfo {
+                    session_id: session_id.to_owned(),
+                    message_count: 42,
+                    total_input_tokens: 1000,
+                    total_output_tokens: 500,
+                    nesting_depth: 1,
+                    working_directory: "/tmp/zk-ctx".to_owned(),
+                })
+            })
         }
     }
 
     #[tokio::test]
-    async fn without_port_uses_context_defaults() {
+    async fn without_port_reports_unavailable_instead_of_fabricated_zero_usage() {
         let tool = CtxInspectTool::new(None);
         let output = tool.execute(json!({}), ctx()).await;
-        assert!(!output.is_error);
-        assert!(output.content.contains("test-session"));
-        assert!(output.content.contains("/tmp/zk-ctx"));
+        assert!(output.is_error);
+        assert_eq!(output.content, "CONTEXT_INFO_UNAVAILABLE");
     }
 
     #[tokio::test]

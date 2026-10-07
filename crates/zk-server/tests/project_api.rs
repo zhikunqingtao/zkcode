@@ -618,5 +618,33 @@ async fn openapi_includes_project_paths() {
     ] {
         assert!(paths.contains_key(path), "missing {path}");
     }
-    assert_eq!(paths.len(), 63);
+    for path in [
+        "/api/code-diagrams/generate",
+        "/api/code-path/endpoints",
+        "/api/code-path/trace",
+        "/api/analysis/change-impact",
+        "/api/code-quality/complexity",
+        "/api/git/log",
+        "/api/git/diff",
+        "/api/git/blame",
+        "/api/git/cancel",
+        "/api/code-analysis/cancel",
+        "/api/sessions/{id}/tool-presentations",
+        "/api/sessions/{id}/hooks",
+        "/api/sessions/{sessionId}/history/rewind/preview",
+        "/api/sessions/{id}/repl-service",
+        "/api/mcp/services",
+        "/api/mcp/services/{name}",
+        "/api/mcp/services/{name}/toggle",
+        "/api/mcp/services/{name}/oauth",
+        "/api/mcp/services/{name}/oauth/authorize",
+        "/api/mcp/services/{name}/oauth/logout",
+        "/api/mcp/contexts",
+        "/api/mcp/contexts/{runId}",
+        "/api/mcp/contexts/{runId}/capabilities",
+        "/api/mcp/contexts/{runId}/capabilities/requests",
+    ] {
+        assert!(paths.contains_key(path), "missing {path}");
+    }
+    assert_eq!(paths.len(), 87);
 }

@@ -79,7 +79,7 @@ export interface OpenApiSpec {
     tags?: TagObject[];
 }
 
-export type DataSource = 'merged' | 'java' | 'python';
+export type DataSource = 'merged' | 'backend' | 'python';
 
 // ── Store 状态 ──
 
@@ -104,9 +104,16 @@ export interface ApiContractState {
 
 const SOURCE_ENDPOINT_MAP: Record<DataSource, string> = {
     merged: '/api/analysis/openapi/merged',
-    java: '/api/analysis/openapi/java',
+    backend: '/api/analysis/openapi/backend',
     python: '/api/analysis/openapi/python',
 };
+let pendingSpec: AbortController | null = null;
+
+export function cancelPendingApiContract(): void {
+    pendingSpec?.abort();
+    pendingSpec = null;
+    useApiContractStore.setState({ isLoading: false });
+}
 
 export const useApiContractStore = create<ApiContractState>()(
     subscribeWithSelector(immer((set) => ({
@@ -121,25 +128,30 @@ export const useApiContractStore = create<ApiContractState>()(
 
         fetchOpenApiSpec: async (source) => {
             const targetSource = source ?? 'merged';
+            pendingSpec?.abort();
+            const request = new AbortController();
+            pendingSpec = request;
             set(d => {
                 d.isLoading = true;
                 d.error = null;
                 d.warnings = [];
                 d.source = targetSource;
+                d.openApiSpec = null;
+                d.selectedEndpoint = null;
             });
             try {
-                const resp = await fetch(SOURCE_ENDPOINT_MAP[targetSource]);
+                const resp = await fetch(SOURCE_ENDPOINT_MAP[targetSource], { signal: request.signal });
                 await ensurePythonPanelResponse(resp);
                 const json = await resp.json();
 
                 // API 可能返回 { openapi, info, paths, ... } 或 { data: ..., warnings: [...] }
                 const spec: OpenApiSpec = json.openapi ? json : json.data;
-                const warnings: string[] = json.warnings ?? [];
+                const warnings: string[] = Array.isArray(json.warnings) ? json.warnings.filter((value: unknown) => typeof value === 'string') : [];
 
-                if (!spec || !spec.paths) {
+                if (!spec || !spec.openapi?.startsWith('3.') || !spec.paths || typeof spec.paths !== 'object' || Array.isArray(spec.paths)) {
                     throw new Error('Invalid OpenAPI specification: missing paths');
                 }
-
+                if (pendingSpec !== request || request.signal.aborted) return;
                 set(d => {
                     d.openApiSpec = spec as OpenApiSpec;
                     d.warnings = warnings;
@@ -147,11 +159,14 @@ export const useApiContractStore = create<ApiContractState>()(
                     d.selectedEndpoint = null;
                 });
             } catch (e) {
+                if (pendingSpec !== request || request.signal.aborted) return;
                 set(d => {
                     d.error = e instanceof Error ? e.message : String(e);
                     d.isLoading = false;
                     d.openApiSpec = null;
                 });
+            } finally {
+                if (pendingSpec === request) pendingSpec = null;
             }
         },
 
@@ -163,7 +178,7 @@ export const useApiContractStore = create<ApiContractState>()(
 
         applyVisualizationHint: (props) => set(d => { d.lastHint = props ?? null; }),
 
-        reset: () => set(d => {
+        reset: () => { cancelPendingApiContract(); set(d => {
             d.openApiSpec = null;
             d.source = 'merged';
             d.selectedEndpoint = null;
@@ -172,6 +187,6 @@ export const useApiContractStore = create<ApiContractState>()(
             d.error = null;
             d.warnings = [];
             d.lastHint = null;
-        }),
+        }); },
     })))
 );

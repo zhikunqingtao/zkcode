@@ -1,0 +1,1047 @@
+{
+  "sourceRange": "3e536438..053adf90",
+  "targetBaseline": "08cbdc45",
+  "scope": "Authorization, permission, commands, Skill and memory",
+  "method": "Changed assertions read and compared with production. Adaptations/exclusions explicit. Named tests do not imply final pass without release-gates execution.",
+  "paths": {
+    "backend/src/test/java/com/aicodeassistant/authorization/AuthorizationModeChangeTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/authorization/AuthorizationModeChangeTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "1d775a01785e5ad080a18c703caeed1b1e923e0edca41fdb2825fcf67b356f0f",
+      "changedMethods": [
+        "answered"
+      ],
+      "sourceAssertions": [
+        "Reevaluate pending grants against latest permissions; cancellation and late approval cannot execute denied work."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/authz.rs",
+        "crates/zk-authz/src/service.rs"
+      ],
+      "actualNativeAssertions": [],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Prior native authz/gateway suites passed; final workspace verifies latest DB-authoritative modes. Source mocks are not execution evidence.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/authorization/AuthorizationServiceAutoApproveTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/authorization/AuthorizationServiceAutoApproveTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "83b8c8050164a52d7406b0a174d673af3b072cfbff1180626d5588dd883120cc",
+      "changedMethods": [],
+      "sourceAssertions": [
+        "Only changed assertion introduces Meoo deployment authorization."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/authz.rs",
+        "crates/zk-authz/src/service.rs"
+      ],
+      "actualNativeAssertions": [],
+      "disposition": "excluded_user_scope_delta",
+      "verificationNotes": "Meoo publishing explicitly excluded; unchanged native authorization retained.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/authorization/AuthorizationServiceProjectFileScopeTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/authorization/AuthorizationServiceProjectFileScopeTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "3b7d6489b00c0166e7444a1b18d90f5921623325e998d38fd0165d3cf42390c2",
+      "changedMethods": [
+        "planAllowsAnalyzedHandoffReadButNotAnUnknownToolWithTheSameName",
+        "defaultModeAutoAllowsOnlyTrustedOrdinaryFileWrites"
+      ],
+      "sourceAssertions": [
+        "HandoffRead is a native reference read without new authority."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/authz.rs",
+        "crates/zk-authz/src/service.rs",
+        "crates/zk-server/src/handoff.rs"
+      ],
+      "actualNativeAssertions": [],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Current root/package ownership rechecked; same-named MCP tools do not inherit native privileges.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/authorization/OperationAnalyzerRegistryTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/authorization/OperationAnalyzerRegistryTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "720984750167cc6848b009a2e1db139cd71cb325c1ed76de5fa43b9ddd1e8ad7",
+      "changedMethods": [
+        "handoffReadRequiresBuiltinIdentityAndRechecksTheRootBinding",
+        "mcpToolsUseDedicatedAnalyzerWithoutExpandingGenericControlTools"
+      ],
+      "sourceAssertions": [
+        "HandoffRead classification is read-only and explicit core-tool registration required."
+      ],
+      "nativeImplementation": [
+        "crates/zk-authz/src/analyzer.rs",
+        "crates/zk-server/src/handoff.rs"
+      ],
+      "actualNativeAssertions": [],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Native metadata and execution-time ownership replace Java analyzer registration.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/command/impl/ClearCommandTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/command/impl/ClearCommandTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "bbb262dc69bcb00a765551b4af0612dabcc1f4a46d8ee56eeb0bb3f4525b55e2",
+      "changedMethods": [
+        "replacementInheritsPersistedPermission"
+      ],
+      "sourceAssertions": [
+        "Replacement inherits persisted permission; missing/unreadable permission must not default and create session."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/command/builtin/clear.rs",
+        "crates/zk-server/src/authz.rs"
+      ],
+      "actualNativeAssertions": [
+        "missing_or_unreadable_permission_never_creates_a_replacement"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Added failure regression after source audit; final execution pending.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "currentNativeExecution": {
+        "status": "passed_named_assertions",
+        "tests": [
+          "command::builtin::clear::tests::missing_or_unreadable_permission_never_creates_a_replacement"
+        ],
+        "evidence": {
+          "path": "/tmp/zk-workspace-tests-resume7.txt",
+          "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7"
+        },
+        "unmatchedAuditNames": [],
+        "limits": "Native assertions only; source Java not executed and exhaustive source permutation coverage remains unclaimed."
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/command/impl/EnhancedCommandsGoldenTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/command/impl/EnhancedCommandsGoldenTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "4b713f0165aa6553a00ffb63522b680c80678d0194c982b63d0bb5c3bbaf3c10",
+      "changedMethods": [
+        "fastModeEnable",
+        "fastModeNotWired",
+        "effortUsage",
+        "effortNotWired",
+        "vimToggle",
+        "vimNotWired",
+        "themeReturnsJsx",
+        "themeNoArgReturnsHonestText",
+        "themeWithArgNotChanged",
+        "outputStyleNotWired",
+        "colorNotWired"
+      ],
+      "sourceAssertions": [
+        "Commands cannot report success for unimplemented effects."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/command/builtin/mod.rs",
+        "crates/zk-server/src/command/builtin/help.rs"
+      ],
+      "actualNativeAssertions": [
+        "unavailable_commands_are_hidden_from_details_aliases_lists_and_suggestions"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Source-only fake CLI controls remain unregistered; functioning Rust UI preferences preserved. Help regression passed /tmp/zk-root-help-final.txt.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "currentNativeExecution": {
+        "status": "passed_named_assertions",
+        "tests": [
+          "command::builtin::help::tests::unavailable_commands_are_hidden_from_details_aliases_lists_and_suggestions"
+        ],
+        "evidence": {
+          "path": "/tmp/zk-workspace-tests-resume7.txt",
+          "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7"
+        },
+        "unmatchedAuditNames": [],
+        "limits": "Native assertions only; source Java not executed and exhaustive source permutation coverage remains unclaimed."
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/command/impl/ModelCommandTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/command/impl/ModelCommandTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "258b740186cf18c4d4896ec11cb4636a1ea71b14d0567268b6fb3c54d967756d",
+      "changedMethods": [
+        "noArgsListsNeutralModels",
+        "unknownModelReturnsError",
+        "knownModelReturnsHonestReceiptWithoutSwitching",
+        "descriptionIsStaticAndDoesNotGuessCurrentModel"
+      ],
+      "sourceAssertions": [
+        "Source removes disabled model CLI operations."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/command/builtin/model.rs",
+        "crates/zk-server/src/api/config.rs"
+      ],
+      "actualNativeAssertions": [],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Decision 14 preserves functioning Rust current-session selection and separates new-session default; Java removal not copied over valuable Rust behavior.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/command/impl/PlanCommandTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/command/impl/PlanCommandTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "78a101f419d88893443ef6f2e8372e18429c8d569a66a396f63f9c02120913a0",
+      "changedMethods": [
+        "describesThePanelEventWithoutClaimingAPermissionChange"
+      ],
+      "sourceAssertions": [
+        "Session-scoped plan display does not grant permission."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/command/builtin/plan.rs",
+        "crates/zk-server/tests/skill_ws.rs"
+      ],
+      "actualNativeAssertions": [
+        "plan_panel_events_are_session_scoped_and_do_not_change_permissions"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Real WebSocket regression added; final workspace result pending.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "currentNativeExecution": {
+        "status": "passed_named_assertions",
+        "tests": [
+          "plan_panel_events_are_session_scoped_and_do_not_change_permissions"
+        ],
+        "evidence": {
+          "path": "/tmp/zk-workspace-tests-resume7.txt",
+          "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7"
+        },
+        "unmatchedAuditNames": [],
+        "limits": "Native assertions only; source Java not executed and exhaustive source permutation coverage remains unclaimed."
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/permission/PermissionModeManagerTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/permission/PermissionModeManagerTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "acfc66ae678fb2aadc534c65f22e7a3dd6a0e6d5592e2d83ec4907864d1971df",
+      "changedMethods": [
+        "setUp",
+        "selectionSurvivesRestartAndRemainsSessionScoped",
+        "existingReadersObserveSavedChangesWithoutStaleCaches",
+        "failedSaveKeepsPreviousModeAndDoesNotConfirmTheChange",
+        "missingOrDeletedSessionsCannotRetainElevatedPermissions",
+        "clearingSelectionPersistsTheDefault",
+        "rolledBackTransactionNeitherPersistsNorConfirmsSelection",
+        "autoApproveIsCommittedBeforeBestEffortConfirmation",
+        "explicitlySettingImplicitDefaultDoesNotEmitFalseChange",
+        "sameModeRequestStillConfirmsSavedValue"
+      ],
+      "sourceAssertions": [
+        "DB persistence precedes ACK; latest state/restart/no-op/requestId confirmations; missing/deleted/read/write failures fail closed."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/authz.rs",
+        "crates/zk-db/src/skill_state.rs"
+      ],
+      "actualNativeAssertions": [
+        "persisted_permissions_observe_other_writers_and_deleted_sessions_fail_closed"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Stale cached authority fixed. Private ephemeral modes only for isolated verification/test. Cache cleanup is not public reset; existing permission remains persisted.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "currentNativeExecution": {
+        "status": "passed_named_assertions",
+        "tests": [
+          "authz::migration_permission_tests::persisted_permissions_observe_other_writers_and_deleted_sessions_fail_closed"
+        ],
+        "evidence": {
+          "path": "/tmp/zk-workspace-tests-resume7.txt",
+          "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7"
+        },
+        "unmatchedAuditNames": [],
+        "limits": "Native assertions only; source Java not executed and exhaustive source permutation coverage remains unclaimed."
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/skill/SkillAvailabilityTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/skill/SkillAvailabilityTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "fed34520ac93049586e1917b4cb8034244b94eb7fdd17029d05e9b2c81e06c06",
+      "changedMethods": [
+        "disabledDefinitionCannotResolveByInternalNameCaseOrAliasAndReloadKeepsChoice",
+        "newDefinitionsDefaultEnabledAndUnknownManagementIdsCannotCreatePreferences",
+        "invalidNamesAreSkippedWithoutBlockingOtherRegistrations",
+        "quotedIdsPreserveWhitespaceAndEscapesWithoutExecutingAShorterId",
+        "slashCommandRejectsDisabledAliasesAndNeverListsThemAsAvailable",
+        "publishAdaptersDisappearFromVisibleCommandsAndSuggestionsAndRejectInvocation",
+        "helpListAndDetailsHideDisabledPublishSkillsAndRecoverWhenEnabled",
+        "explicitlyRequestedHelpStillWorksForOrdinaryHiddenCommands"
+      ],
+      "sourceAssertions": [
+        "Disabled skills disappear from runtime resolution/catalog/help including case/aliases; management separate."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/skill/registry.rs",
+        "crates/zk-server/src/skill/tool.rs",
+        "crates/zk-server/src/engine_bridge.rs"
+      ],
+      "actualNativeAssertions": [
+        "case_changed_reload_preserves_global_switch_and_invalid_names_are_skipped",
+        "production_catalog_tracks_global_switches_and_bundled_review_keeps_literal_scope"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Case-folded keys, quoted/Unicode IDs, whitespace-only rejection. Meoo/new publishing excluded.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "currentNativeExecution": {
+        "status": "passed_named_assertions",
+        "tests": [
+          "skill::registry::tests::case_changed_reload_preserves_global_switch_and_invalid_names_are_skipped",
+          "skill::tool::tests::production_catalog_tracks_global_switches_and_bundled_review_keeps_literal_scope"
+        ],
+        "evidence": {
+          "path": "/tmp/zk-workspace-tests-resume7.txt",
+          "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7"
+        },
+        "unmatchedAuditNames": [],
+        "limits": "Native assertions only; source Java not executed and exhaustive source permutation coverage remains unclaimed."
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/skill/SkillHotReloadAvailabilityTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/skill/SkillHotReloadAvailabilityTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "938cb20a2cfe23e2d4a0ac3e1ce30308c57d05b3e6544bc0d108c5f1b487df57",
+      "changedMethods": [
+        "realFileWatcherRefreshesDefinitionsWithoutResettingDisabledState",
+        "markdown"
+      ],
+      "sourceAssertions": [
+        "Disable state survives removal/reload/re-enable; catalog live."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/skill/registry.rs",
+        "crates/zk-server/src/skill/tool.rs",
+        "crates/zk-server/src/engine_bridge.rs"
+      ],
+      "actualNativeAssertions": [
+        "global_switches_survive_reload_and_failed_save_keeps_last_state",
+        "case_changed_reload_preserves_global_switch_and_invalid_names_are_skipped"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Registry reload uses transactional state. New case regression awaits final run.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "currentNativeExecution": {
+        "status": "passed_named_assertions",
+        "tests": [
+          "skill::registry::tests::case_changed_reload_preserves_global_switch_and_invalid_names_are_skipped",
+          "skill::registry::tests::global_switches_survive_reload_and_failed_save_keeps_last_state"
+        ],
+        "evidence": {
+          "path": "/tmp/zk-workspace-tests-resume7.txt",
+          "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7"
+        },
+        "unmatchedAuditNames": [],
+        "limits": "Native assertions only; source Java not executed and exhaustive source permutation coverage remains unclaimed."
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/skill/SkillRegistrySkillLoadTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/skill/SkillRegistrySkillLoadTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "068a86e2086abb124b10611d2a1a8519bdefe6ea423e49532d4daff6037652a5",
+      "changedMethods": [
+        "testProjectSkillsCanBeLoaded",
+        "projectSkillLoadsWithParsedMetadataAndSource",
+        "projectDefinitionOverridesBundledDefinitionWhenRegistered",
+        "freshRegistryKeepsBundledSkillAfterProjectCopyIsRemoved",
+        "testLoadedSkillsHaveFrontmatter",
+        "allThirteenBundledSkillsRemainLoadableAndNonEmpty",
+        "loadAndRegister",
+        "startWatching",
+        "close"
+      ],
+      "sourceAssertions": [
+        "Discovery/source priority and restoration after override deletion."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/skill/registry.rs",
+        "crates/zk-server/src/skill/tool.rs",
+        "crates/zk-server/src/engine_bridge.rs"
+      ],
+      "actualNativeAssertions": [
+        "register_respects_source_priority",
+        "unregister_by_path_restores_builtin",
+        "builtin_skills_cover_fourteen_names"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Preserves native fix/stuck and 14 valuable builtins. Source Meoo/new publishing skills excluded, so Java counts differ.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "currentNativeExecution": {
+        "status": "passed_named_assertions",
+        "tests": [
+          "skill::registry::tests::builtin_skills_cover_fourteen_names",
+          "skill::registry::tests::register_respects_source_priority",
+          "skill::registry::tests::unregister_by_path_restores_builtin"
+        ],
+        "evidence": {
+          "path": "/tmp/zk-workspace-tests-resume7.txt",
+          "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7"
+        },
+        "unmatchedAuditNames": [],
+        "limits": "Native assertions only; source Java not executed and exhaustive source permutation coverage remains unclaimed."
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/skill/SkillReviewScopeTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/skill/SkillReviewScopeTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "6bd98efae6a92c013206e0472080334cfdcc27ad08801a35d44c2f817ef0a776",
+      "changedMethods": [
+        "setUp",
+        "actualBundledReviewReceivesWholeScopeExactlyOnceWithoutRecursiveSubstitution",
+        "omittedAndEmptyScopeDoNotLeaveAnUnfilledTemplate",
+        "customReviewKeepsItsOwnArgumentSyntax",
+        "resolvedIdentityControlsSpecialHandlingNotTheInvokedAlias",
+        "disabledReviewIsRejectedBeforeRenderingAndReenabledReviewWorks",
+        "toolValidatesFullScopeBeforeRendering",
+        "dangerousScopeStillFails",
+        "repeatedBundledReviewKeepsWholeScopeInTheSameSession",
+        "quotedCanonicalIdAndScopeFormattingStayCompatibleWithSkillManagement",
+        "render"
+      ],
+      "sourceAssertions": [
+        "Builtin review takes entire raw scope once, no recursive placeholders; custom skills use declared args."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/skill/registry.rs",
+        "crates/zk-server/src/skill/tool.rs",
+        "crates/zk-server/src/engine_bridge.rs",
+        "crates/zk-server/src/skill/parser.rs"
+      ],
+      "actualNativeAssertions": [
+        "production_catalog_tracks_global_switches_and_bundled_review_keeps_literal_scope"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Bundled identity controls scope. Rust arguments are literal prompt text, not shell evaluation; Java metacharacter denylist/2000-character cap not copied. Native 32KiB input/per-invocation limits and authorization retained.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "currentNativeExecution": {
+        "status": "passed_named_assertions",
+        "tests": [
+          "skill::tool::tests::production_catalog_tracks_global_switches_and_bundled_review_keeps_literal_scope"
+        ],
+        "evidence": {
+          "path": "/tmp/zk-workspace-tests-resume7.txt",
+          "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7"
+        },
+        "unmatchedAuditNames": [],
+        "limits": "Native assertions only; source Java not executed and exhaustive source permutation coverage remains unclaimed."
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/skill/SkillStateServiceTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/skill/SkillStateServiceTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "101ad342b21d243890928a3d4710532effa27cae29eff44b73f12c3069a282de",
+      "changedMethods": [
+        "defaultsNewSkillsToEnabledAndRestoresChoicesAcrossRestart",
+        "concurrentSavesDoNotLoseChoices",
+        "failedSaveLeavesPriorRuntimeStateAndPriorFileUntouched",
+        "malformedStateKeepsContextAvailableButDisablesAllSkillsAndCannotBeOverwritten",
+        "unreadableStatePathAlsoFailsClosedWithoutReplacingIt",
+        "emptyOrUnsupportedStateFormatsRemainReadOnly"
+      ],
+      "sourceAssertions": [
+        "Global transactions preserve last valid state on failure; startup/read error must not enable all."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/skill/registry.rs",
+        "crates/zk-server/src/skill/tool.rs",
+        "crates/zk-server/src/engine_bridge.rs",
+        "crates/zk-db/src/skill_state.rs"
+      ],
+      "actualNativeAssertions": [
+        "global_switches_survive_reload_and_failed_save_keeps_last_state"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "SQLite replaces Java settings-file storage per decision 18; unavailable authoritative state distinguished from last save failure.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "currentNativeExecution": {
+        "status": "passed_named_assertions",
+        "tests": [
+          "skill::registry::tests::global_switches_survive_reload_and_failed_save_keeps_last_state"
+        ],
+        "evidence": {
+          "path": "/tmp/zk-workspace-tests-resume7.txt",
+          "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7"
+        },
+        "unmatchedAuditNames": [],
+        "limits": "Native assertions only; source Java not executed and exhaustive source permutation coverage remains unclaimed."
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/skill/SkillSystemGoldenTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/skill/SkillSystemGoldenTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "c10d5dfc6e569c500a44729e797f8729c1bbf3eabb727994255766e65c9a6503",
+      "changedMethods": [
+        "setUp",
+        "inlineExecution",
+        "repeatedAndMultipleSkillLoadsDoNotUseCumulativeBudgets",
+        "invalidArgsReturnError",
+        "callSuccess"
+      ],
+      "sourceAssertions": [
+        "Skill prompt metadata render correctly; removed cumulative quota does not block repeated calls."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/skill/registry.rs",
+        "crates/zk-server/src/skill/tool.rs",
+        "crates/zk-server/src/engine_bridge.rs"
+      ],
+      "actualNativeAssertions": [
+        "renders_inline_prompt_and_emits_narrowing_directive",
+        "retained_builtins_execute_with_registered_names_and_global_switches"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Native never had Java cumulative 5000/25000 quota. Real cost/per-invocation bounds retained; five builtin YAML lists repaired to actual parser syntax.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "currentNativeExecution": {
+        "status": "passed_named_assertions",
+        "tests": [
+          "skill::tool::tests::renders_inline_prompt_and_emits_narrowing_directive",
+          "skill::tool::tests::retained_builtins_execute_with_registered_names_and_global_switches"
+        ],
+        "evidence": {
+          "path": "/tmp/zk-workspace-tests-resume7.txt",
+          "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7"
+        },
+        "unmatchedAuditNames": [],
+        "limits": "Native assertions only; source Java not executed and exhaustive source permutation coverage remains unclaimed."
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/skill/SkillTokenBudgetTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/skill/SkillTokenBudgetTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "b5e0566205685dca14530a30984f8580d806a1a28db30432345ad73be38730c1",
+      "changedMethods": [
+        "setUp",
+        "testCanConsume_UnderLimit",
+        "testCanConsume_ExceedsSingleSkillLimit",
+        "testCanConsume_ExactlySingleSkillLimit_Passes",
+        "testCanConsume_ExceedsSessionLimit",
+        "testMultipleSkills_IndependentBudgets",
+        "testDifferentSessions_Independent",
+        "testClearSession_ResetsAll",
+        "testClearSession_DoesNotAffectOtherSessions",
+        "testGetStatus_ReturnsCorrectValues",
+        "testGetStatus_UnknownSession_ReturnsDefaults",
+        "testGetStatus_ExhaustedBudget_CanContinueFalse",
+        "testConcurrentAccess_ThreadSafe"
+      ],
+      "sourceAssertions": [
+        "Entire Java cumulative quota suite removed upstream."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/skill/registry.rs",
+        "crates/zk-server/src/skill/tool.rs",
+        "crates/zk-server/src/engine_bridge.rs"
+      ],
+      "actualNativeAssertions": [],
+      "disposition": "reviewed_upstream_removal",
+      "verificationNotes": "No corresponding native quota. Removal does not remove Rust invocation or monetary budgets.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/controller/SkillControllerTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/controller/SkillControllerTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "cce9450bc0383022c0cbbaca13a4fc8e05f8a798bf95e2049339f1123fb9e30d",
+      "changedMethods": [
+        "configureMvc"
+      ],
+      "sourceAssertions": [
+        "Disabled runtime detail 404; canonical management remains inspectable; unknown404/state503/save failure preserves state."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/api/skill.rs",
+        "crates/zk-server/src/api/mod.rs"
+      ],
+      "actualNativeAssertions": [
+        "disabled_runtime_details_stay_hidden_while_canonical_management_remains_available"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Audit fixed runtime detail route exposing disabled definitions; HTTP regression added, final execution pending.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "currentNativeExecution": {
+        "status": "passed_named_assertions",
+        "tests": [
+          "disabled_runtime_details_stay_hidden_while_canonical_management_remains_available"
+        ],
+        "evidence": {
+          "path": "/tmp/zk-workspace-tests-resume7.txt",
+          "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7"
+        },
+        "unmatchedAuditNames": [],
+        "limits": "Native assertions only; source Java not executed and exhaustive source permutation coverage remains unclaimed."
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/websocket/WebSocketSkillConfigurationTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/websocket/WebSocketSkillConfigurationTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "5a2d568378fbc1f1323ffc6c153eeb4378b809e81eeee46e8be86d66fd8b6f0c",
+      "changedMethods": [
+        "reviewScopeReachesTheActualPromptCommandHandlerWithoutChangingSkillAvailability",
+        "successiveUserMessagesUseCurrentSkillsThroughTheRealPromptAndConfigurationBuilders"
+      ],
+      "sourceAssertions": [
+        "Each turn sees effective catalog; disabled content absent from model payload; reenable restores catalog."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/skill/registry.rs",
+        "crates/zk-server/src/skill/tool.rs",
+        "crates/zk-server/src/engine_bridge.rs",
+        "crates/zk-server/tests/skill_ws.rs"
+      ],
+      "actualNativeAssertions": [
+        "production_catalog_tracks_global_switches_and_bundled_review_keeps_literal_scope",
+        "skill_command_pushes_prompt_notice_and_injects_rendered_text"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Production registry live filter and held executor recheck. Real WS injection/catalog tests cover distinct boundaries; Java mock engine not claimed as native full request evidence.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "currentNativeExecution": {
+        "status": "passed_named_assertions",
+        "tests": [
+          "skill::tool::tests::production_catalog_tracks_global_switches_and_bundled_review_keeps_literal_scope",
+          "skill_command_pushes_prompt_notice_and_injects_rendered_text"
+        ],
+        "evidence": {
+          "path": "/tmp/zk-workspace-tests-resume7.txt",
+          "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7"
+        },
+        "unmatchedAuditNames": [],
+        "limits": "Native assertions only; source Java not executed and exhaustive source permutation coverage remains unclaimed."
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/memdir/MemdirUserEditTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/memdir/MemdirUserEditTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "72e30170cf22f180189d3b5d0a60c4bcbcdb003c614603374e61759ebe99d765",
+      "changedMethods": [
+        "setUp",
+        "headerlessTextWrappedAsUserEntry",
+        "validHeaderPreserved",
+        "forgedHeaderInBodyEscaped",
+        "roundTripPreservesEntries",
+        "oversizeThrowsAndDoesNotWrite",
+        "backupCreatedBeforeOverwrite",
+        "noBackupWhenFileAbsent",
+        "blankContentEntriesDropped",
+        "invalidFieldsDegradeGracefully",
+        "entryContentForgedHeaderEscaped",
+        "entriesRebuiltInStandardFormat",
+        "entriesOversizeThrows",
+        "emptyEntriesWriteEmptyFile"
+      ],
+      "sourceAssertions": [
+        "Roundtrip user edits, scope isolation, malformed-input rejection and safe saves."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/api/memory.rs",
+        "crates/zk-db/src/memory.rs",
+        "crates/zk-db/tests/migration_integrity.rs"
+      ],
+      "actualNativeAssertions": [
+        "markdown_view_roundtrips_metadata_content_and_reserved_markers",
+        "document_cas_observes_tool_writes_and_rolls_back_cross_scope_ids"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Approved SQLite authority/reversible Markdown/CAS supersede Java file backups/old proprietary headers/file fallback. No old data import. User content/revisions retained.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "currentNativeExecution": {
+        "status": "passed_named_assertions",
+        "tests": [
+          "api::memory::tests::markdown_view_roundtrips_metadata_content_and_reserved_markers",
+          "document_cas_observes_tool_writes_and_rolls_back_cross_scope_ids"
+        ],
+        "evidence": {
+          "path": "/tmp/zk-workspace-tests-resume7.txt",
+          "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7"
+        },
+        "unmatchedAuditNames": [],
+        "limits": "Native assertions only; source Java not executed and exhaustive source permutation coverage remains unclaimed."
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/config/database/V025AddSessionPermissionModeTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/config/database/V025AddSessionPermissionModeTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "4bbd068767acb28075f0624489c72e6f220ca2b7aa670619d833fcb897f08095",
+      "changedMethods": [
+        "setUp",
+        "oldAndNewSessionsDefaultToStandardWithoutChangingExistingData",
+        "rejectsInvalidAndNullModes",
+        "validationRejectsANullableColumnWithoutTheDefault",
+        "insertSession"
+      ],
+      "sourceAssertions": [
+        "Legacy migration adds permission to old sessions."
+      ],
+      "nativeImplementation": [
+        "crates/zk-db/migrations/V2__init_session_message.sql"
+      ],
+      "actualNativeAssertions": [],
+      "disposition": "excluded_historical_data",
+      "verificationNotes": "User confirms no historical users/data. Fresh schema contains permission_mode; old Java DB migration excluded.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/command/impl/CompactCommandTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/command/impl/CompactCommandTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "490fc6a2c152dc6a9201746c469318abacf2f7e945ffa6ad493922b07df8f92c",
+      "changedMethods": [
+        "countingAndPreviewUseCurrentModelOrRegisteredDefault"
+      ],
+      "sourceAssertions": [
+        "Blank/current model selection for token counting and local preview."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/command/builtin/compact.rs"
+      ],
+      "actualNativeAssertions": [
+        "short_conversation_skips_with_the_legacy_reason"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Empty or whitespace model now resolves ProviderRegistry configured default. No unowned physical LLM request from slash preview.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "currentNativeExecution": {
+        "status": "passed_named_assertions",
+        "tests": [
+          "command::builtin::compact::tests::short_conversation_skips_with_the_legacy_reason"
+        ],
+        "evidence": {
+          "path": "/tmp/zk-workspace-tests-resume7.txt",
+          "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7"
+        },
+        "unmatchedAuditNames": [],
+        "limits": "Native assertions only; source Java not executed and exhaustive source permutation coverage remains unclaimed."
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/config/SecurityConfigCorsTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/config/SecurityConfigCorsTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "04ef5aa8333ba40292d2319997c1f01bcdef1dd4c1ab786e88d2c9ec49616719",
+      "changedMethods": [
+        "defaultCspResponseKeepsExistingMediaSources",
+        "customDomainIsAllowedOnlyForImagesAndMediaInActualResponseHeader",
+        "invalidDisabledOssConfigurationDoesNotPreventStartupOrChangeCsp",
+        "invalidEnabledOssConfigurationStillPreventsStartup",
+        "responseCsp",
+        "test"
+      ],
+      "sourceAssertions": [
+        "New delta validates configured OSS CSP media domains and invalid publishing settings."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/api/mod.rs"
+      ],
+      "actualNativeAssertions": [],
+      "disposition": "excluded_user_scope_delta",
+      "verificationNotes": "All added assertions concern excluded OSS publishing/CSP expansion. Preserve existing native local security and media handling.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/config/database/V026ExtendSessionMergesTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/config/database/V026ExtendSessionMergesTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "c29a786c1c1bd28c55991f57a1fc05a2780dd2dc6fc55a2920bd966382dc3c1c",
+      "changedMethods": [
+        "legacy"
+      ],
+      "sourceAssertions": [
+        "Legacy rows, active slots, completed hashes, unit result and FK constraints."
+      ],
+      "nativeImplementation": [
+        "crates/zk-db/migrations/V2__init_session_message.sql",
+        "crates/zk-db/tests/migration_integrity.rs"
+      ],
+      "actualNativeAssertions": [
+        "fresh_merge_schema_rejects_unsealed_completion_and_incomplete_unit_results"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Historical backfill/reexecution excluded. Fresh native constraints require sealed completed summaries and completed unit result hashes. Native per-source transactional gating replaces Java single global active slot; independent merges remain isolated.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "currentNativeExecution": {
+        "status": "passed_named_assertions",
+        "tests": [
+          "fresh_merge_schema_rejects_unsealed_completion_and_incomplete_unit_results"
+        ],
+        "evidence": {
+          "path": "/tmp/zk-workspace-tests-resume7.txt",
+          "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7"
+        },
+        "unmatchedAuditNames": [],
+        "limits": "Native assertions only; source Java not executed and exhaustive source permutation coverage remains unclaimed."
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/config/database/V027AddRunUsageSnapshotTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/config/database/V027AddRunUsageSnapshotTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "b6fb4621921dbef540e559840d35a4baaa87ed77beebd535996610c25b096ff4",
+      "changedMethods": [
+        "setUp",
+        "keepsLegacyRowsAndMarksTheirUsageUnknownWithoutBackfill",
+        "reexecutionIsIdempotentAndDatabaseDefaultsAreTheOnlyUnknownSource",
+        "rejectsUnrecognizedStatusAndNegativeSequence",
+        "validationRejectsMissingOrWeakColumns"
+      ],
+      "sourceAssertions": [
+        "Legacy usage migration and unknown-versus-zero snapshot constraints."
+      ],
+      "nativeImplementation": [
+        "crates/zk-db/migrations/V2__init_session_message.sql",
+        "crates/zk-db/src/runtime_ledger.rs"
+      ],
+      "actualNativeAssertions": [],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Historical column migration excluded. Native immutable llm_call ledger, usage completeness and sequence projection supply fresh-run truth; no blind zero backfill or imported Java rows.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/controller/QueryControllerMaxBudgetUsdTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/controller/QueryControllerMaxBudgetUsdTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "e26050e45ac6078bcc5c6dbb5aa1eba5e11696d1906fd3d99902ebc0e9f0b034",
+      "changedMethods": [
+        "allRestEntrypointsRejectAnyNonNullMaxBudgetUsdBeforeAnyWork",
+        "pureSseAcceptStillReturnsJsonForBudgetRejectionAndSessionNotFound",
+        "explicitNullMaxBudgetUsdStillRunsOriginalSessionResolution"
+      ],
+      "sourceAssertions": [
+        "Java rejects all nonnull USD budgets before any request, while null retains session resolution."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/api/query.rs",
+        "crates/zk-server/tests/query_api.rs"
+      ],
+      "actualNativeAssertions": [
+        "query_hard_limits_are_enforced",
+        "conversation_requires_an_existing_session"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Approved plan preserves working Rust real amount limits rather than Java unsupported behavior. Native validates positive bounded input then reserves/enforces actual costs; original accepted range retained. JSON errors precede SSE startup.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "currentNativeExecution": {
+        "status": "passed_named_assertions",
+        "tests": [
+          "conversation_requires_an_existing_session",
+          "query_hard_limits_are_enforced"
+        ],
+        "evidence": {
+          "path": "/tmp/zk-workspace-tests-resume7.txt",
+          "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7"
+        },
+        "unmatchedAuditNames": [],
+        "limits": "Native assertions only; source Java not executed and exhaustive source permutation coverage remains unclaimed."
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/tool/ToolSearchAvailabilityTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/tool/ToolSearchAvailabilityTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "5ebc686ece44b76f240c9ceba3016d069ee9bbb396377b362dfaad5fb86acd2b",
+      "changedMethods": [
+        "everySearchBranchExcludesDisabledSchemaAndCanRecoverAfterEnable"
+      ],
+      "sourceAssertions": [
+        "All search paths exclude disabled tools and recover after enabling."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/skill/registry.rs",
+        "crates/zk-server/src/skill/tool.rs",
+        "crates/zk-server/src/engine_bridge.rs",
+        "crates/zk-tools/src/tool_search/tool.rs"
+      ],
+      "actualNativeAssertions": [
+        "production_catalog_tracks_global_switches_and_bundled_review_keeps_literal_scope",
+        "invocation_scoped_catalog_hides_global_entries"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Production catalog test now invokes select/keyword/name-required forms on disabled Skill and reenable. Rust does not keep Java deferred activation cache or registered tool aliases, so no stale activated schemas.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "currentNativeExecution": {
+        "status": "passed_named_assertions",
+        "tests": [
+          "skill::tool::tests::production_catalog_tracks_global_switches_and_bundled_review_keeps_literal_scope",
+          "tool_search::tool::tests::invocation_scoped_catalog_hides_global_entries"
+        ],
+        "evidence": {
+          "path": "/tmp/zk-workspace-tests-resume7.txt",
+          "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7"
+        },
+        "unmatchedAuditNames": [],
+        "limits": "Native assertions only; source Java not executed and exhaustive source permutation coverage remains unclaimed."
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/tool/config/ConfigMessageToolGoldenTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/tool/config/ConfigMessageToolGoldenTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "05bebfd89388f53c9f17b8d5f7d7b9355a714efbcbffe5e6f76eb96a2bd44029",
+      "changedMethods": [
+        "listSettings",
+        "promptDoesNotPromiseActiveApplicationSettings"
+      ],
+      "sourceAssertions": [
+        "Config tool must distinguish private stored values from active app settings."
+      ],
+      "nativeImplementation": [
+        "crates/zk-tools/src/config_tool.rs"
+      ],
+      "actualNativeAssertions": [],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Native list/get/set/reset text and prompt explicitly say tool-only store. Seven native config tests passed /tmp/zk-root-config-tool-tests.txt; no model/theme settings side effects.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/tool/impl/HandoffReadToolTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/tool/impl/HandoffReadToolTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "713e0c8f12b0c23fd5ffb6fa0b7b7d5e55257d455782c91cc14d2085f6e43c7a",
+      "changedMethods": [
+        "setup",
+        "pngWithinTheBoundaryStillReachesTheImageInjector",
+        "oversizedPngIsExplicitlyUnreadAndItsOriginalIsPreserved",
+        "writeValidPng"
+      ],
+      "sourceAssertions": [
+        "Exact 1125000-byte image read ceiling, real injector acceptance and original preservation on oversized images."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/handoff.rs",
+        "crates/zk-db/src/session_merge.rs",
+        "crates/zk-engine/src/context/image_budget.rs"
+      ],
+      "actualNativeAssertions": [
+        "handoff_preserves_owned_files_and_paginates_original_text_after_source_deletion"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Native identical tool ceiling, actual stored length before BLOB allocation, hash validation, complete raster validator, trusted producer. Added explicit HANDOFF_ASSET_TOO_LARGE; current engine image tests record actual dispatch, Java synthetic image boundaries not executed.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "currentNativeExecution": {
+        "status": "passed_named_assertions",
+        "tests": [
+          "handoff_preserves_owned_files_and_paginates_original_text_after_source_deletion"
+        ],
+        "evidence": {
+          "path": "/tmp/zk-workspace-tests-resume7.txt",
+          "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7"
+        },
+        "unmatchedAuditNames": [],
+        "limits": "Native assertions only; source Java not executed and exhaustive source permutation coverage remains unclaimed."
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/security/WorkspaceFileBoundaryTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/security/WorkspaceFileBoundaryTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "12843fbade74b48b25483ce5bae569b2c4b596fb0caf5cac0812f935169bf58f",
+      "changedMethods": [
+        "rootsNamedLikeExcludedDirectoriesRemainDirectlySearchable",
+        "paginationSlicesRestoredSearchRootPaths",
+        "multiFileSearchRestoresAbsolutePathsWithoutAssumingOrder"
+      ],
+      "sourceAssertions": [
+        "Explicit excluded root remains searchable; nested mixed-case sensitive paths stay protected; paging and result identities stable."
+      ],
+      "nativeImplementation": [
+        "crates/zk-tools/src/grep.rs"
+      ],
+      "actualNativeAssertions": [
+        "broad_search_excludes_protected_descendants_but_explicit_root_is_searchable",
+        "exact_paging_context_validation_and_disabled_offset"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Preserves Rust relative output paths and original non-sensitive search range per decision19; adds case-insensitive sensitive descendant protection and root exception. Java absolute-output strings not imposed on native consumers.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "currentNativeExecution": {
+        "status": "passed_named_assertions",
+        "tests": [
+          "grep::tests::broad_search_excludes_protected_descendants_but_explicit_root_is_searchable",
+          "grep::tests::exact_paging_context_validation_and_disabled_offset"
+        ],
+        "evidence": {
+          "path": "/tmp/zk-workspace-tests-resume7.txt",
+          "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7"
+        },
+        "unmatchedAuditNames": [],
+        "limits": "Native assertions only; source Java not executed and exhaustive source permutation coverage remains unclaimed."
+      }
+    }
+  }
+}

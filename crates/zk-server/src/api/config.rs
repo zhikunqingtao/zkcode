@@ -68,6 +68,9 @@ pub(crate) struct UserConfig {
     pub auto_compact_enabled: bool,
     /// 自动压缩阈值（百分比）。
     pub auto_compact_threshold: i64,
+    /// Optional local editor settings; absent preserves existing clients and defaults.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub editor_preferences: Option<super::editor_preferences::EditorPreferences>,
 }
 
 impl Default for UserConfig {
@@ -91,6 +94,7 @@ impl Default for UserConfig {
             analytics_enabled: false,
             auto_compact_enabled: true,
             auto_compact_threshold: 80,
+            editor_preferences: None,
         }
     }
 }
@@ -180,6 +184,12 @@ pub(crate) async fn put_config(
         // 旧 `@RequestBody Map<String,Object>`：缺失/非法 JSON/非对象体 → 400。
         return Err(ApiError::invalid_request_body());
     };
+    if let Some(value) = updates.get("editorPreferences") {
+        let preferences: super::editor_preferences::EditorPreferences =
+            serde_json::from_value(value.clone())
+                .map_err(|_| ApiError::validation("Invalid editor preferences"))?;
+        preferences.validate()?;
+    }
     let current = load_stored_user_config(&state).await?;
     // 旧 `updateUserConfig` 的 putAll 合并：当前配置序列化为 JSON 对象后
     // 顶层键覆盖（未知键随合并进入但不落形状——serde 忽略未知字段）。

@@ -5,17 +5,21 @@
  * 包含: 主题设置、模型选择、权限模式、快捷键等
  */
 
-import React, { useCallback, useEffect, useState } from 'react';
-import { X, Moon, Sun, Monitor, Keyboard, Shield, Globe, Sparkles, KeyRound } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { X, Sun, Keyboard, Shield, Globe, KeyRound } from 'lucide-react';
 import { useConfigStore } from '@/store/configStore';
 import { useSessionStore } from '@/store/sessionStore';
-import { usePermissionStore } from '@/store/permissionStore';
-import { useNotificationStore } from '@/store/notificationStore';
 import { useModelStore } from '@/store/modelStore';
+import { ThemePicker } from '@/components/theme/ThemePicker';
+import { useSessionPermissionSelection } from '@/hooks/useSessionPermissionSelection';
+import { useSessionModelSelection } from '@/hooks/useSessionModelSelection';
+import { SpaceshipFxControls } from '@/components/theme/SpaceshipFxControls';
+import { InkHavocFxControls } from '@/components/theme/InkHavocFxControls';
+import { JellyFxControls } from '@/components/theme/JellyFxControls';
 import { ApiKeysTab } from '@/components/settings/ApiKeysTab';
-import { sendSetModel, sendSetPermissionMode } from '@/api/stompClient';
-import { isSessionBound } from '@/api/dispatch';
-import type { ThemeConfig, PermissionMode } from '@/types';
+import { SessionExecutionControls } from '@/components/settings/SessionExecutionControls';
+import { KeybindingsEditor } from '@/components/settings/KeybindingsEditor';
+import type { PermissionMode } from '@/types';
 
 interface SettingsPanelProps {
     onClose: () => void;
@@ -23,9 +27,10 @@ interface SettingsPanelProps {
 
 export const SettingsPanel: React.FC<SettingsPanelProps> = ({ onClose }) => {
     const [activeSection, setActiveSection] = useState<'general' | 'api-keys'>('general');
-    const { theme, setTheme, locale, setLocale } = useConfigStore();
-    const { sessionId, model, setModel, effortValue, setEffort } = useSessionStore();
-    const { permissionMode } = usePermissionStore();
+    const { theme, locale, setLocale, defaultModel, asrContextEnabled, setAsrContextEnabled, saveConfig } = useConfigStore();
+    const { model } = useSessionStore();
+    const permissionSelection = useSessionPermissionSelection();
+    const { permissionMode, selectMode: handlePermissionModeChange } = permissionSelection;
     const {
         models: availableModels,
         loaded: modelsLoaded,
@@ -33,45 +38,16 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ onClose }) => {
         error: modelsError,
         fetchModels,
     } = useModelStore();
-    const addNotification = useNotificationStore(state => state.addNotification);
-    const hasBoundSession = Boolean(sessionId && isSessionBound(sessionId));
-    const isMac = navigator.platform.includes('Mac');
+    const hasBoundSession = !permissionSelection.disabled;
 
     useEffect(() => {
         if (!modelsLoaded) void fetchModels();
     }, [fetchModels, modelsLoaded]);
 
-    const handleThemeChange = useCallback((mode: ThemeConfig['mode']) => {
-        setTheme({ mode });
-    }, [setTheme]);
-
-    const handlePermissionModeChange = useCallback((mode: PermissionMode) => {
-        if (!hasBoundSession) {
-            addNotification({
-                key: 'permission-mode-no-session',
-                level: 'error',
-                message: '请先创建或选择会话，再切换权限模式',
-            });
-            return;
-        }
-        if (!sendSetPermissionMode(mode.toUpperCase())) {
-            addNotification({
-                key: 'permission-mode-send-failed',
-                level: 'error',
-                message: '权限模式切换发送失败，请检查连接后重试',
-            });
-        }
-    }, [addNotification, hasBoundSession]);
-
-    const handleModelChange = useCallback((newModel: string) => {
-        if (!newModel) return;
-        setModel(newModel);
-        void useConfigStore.getState().saveConfig({ defaultModel: newModel });
-        if (hasBoundSession) sendSetModel(newModel);
-    }, [hasBoundSession, setModel]);
+    const modelSelection = useSessionModelSelection();
 
     return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs">
             <div
                 role="dialog"
                 aria-modal="true"
@@ -128,47 +104,26 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ onClose }) => {
                             <Sun className="w-4 h-4" />
                             主题
                         </h3>
-                        <div className="grid grid-cols-4 gap-3">
-                            <ThemeOption
-                                icon={Sun}
-                                label="浅色"
-                                selected={theme.mode === 'light'}
-                                onClick={() => handleThemeChange('light')}
-                            />
-                            <ThemeOption
-                                icon={Moon}
-                                label="深色"
-                                selected={theme.mode === 'dark'}
-                                onClick={() => handleThemeChange('dark')}
-                            />
-                            <ThemeOption
-                                icon={Monitor}
-                                label="跟随系统"
-                                selected={theme.mode === 'system'}
-                                onClick={() => handleThemeChange('system')}
-                            />
-                            <ThemeOption
-                                icon={Sparkles}
-                                label="液态玻璃"
-                                selected={theme.mode === 'glass'}
-                                onClick={() => handleThemeChange('glass')}
-                            />
-                        </div>
+                        <ThemePicker />
+                        {theme.mode === 'spaceship' && <SpaceshipFxControls />}
+                        {(theme.mode === 'ink-havoc' || theme.mode === 'ink-havoc-night') && <InkHavocFxControls />}
+                        {theme.mode === 'jelly' && <JellyFxControls />}
                     </section>
 
                     {/* Model Section */}
                     <section>
                         <h3 className="text-sm font-medium text-[var(--text-secondary)] mb-3 flex items-center gap-2">
                             <Globe className="w-4 h-4" />
-                            模型
+                            当前会话模型
                         </h3>
                         <select
+                            aria-label="当前会话模型"
                             value={model || ''}
-                            disabled={modelsLoading || availableModels.length === 0}
-                            onChange={(e) => handleModelChange(e.target.value)}
+                            disabled={modelSelection.disabled}
+                            onChange={(e) => modelSelection.selectModel(e.target.value)}
                             className="w-full px-3 py-2 rounded-lg border border-[var(--border)]
                                 bg-[var(--bg-secondary)] text-[var(--text-primary)]
-                                focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                focus:outline-hidden focus:ring-2 focus:ring-blue-500"
                         >
                             {!availableModels.length && (
                                 <option value="">
@@ -192,25 +147,18 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ onClose }) => {
                             </button>
                         )}
 
-                        {/* Effort Slider */}
-                        <div className="mt-4">
-                            <label className="text-sm text-[var(--text-secondary)]">
-                                努力程度: {effortValue}
-                            </label>
-                            <input
-                                type="range"
-                                min={1}
-                                max={5}
-                                value={effortValue}
-                                onChange={(e) => setEffort(parseInt(e.target.value))}
-                                className="w-full mt-2"
-                            />
-                            <div className="flex justify-between text-xs text-[var(--text-muted)] mt-1">
-                                <span>快速</span>
-                                <span>平衡</span>
-                                <span>深度</span>
-                            </div>
-                        </div>
+                        <label className="mt-4 block text-sm text-t2">新会话默认模型</label>
+                        <select aria-label="新会话默认模型" value={defaultModel ?? ''}
+                            disabled={modelsLoading || availableModels.length === 0}
+                            onChange={e => void saveConfig({ defaultModel: e.target.value })}
+                            className="mt-2 w-full rounded-lg border border-hairline bg-sunken2 px-3 py-2 text-t1">
+                            {availableModels.map(item => <option key={item.id} value={item.id}>{item.displayName}</option>)}
+                        </select>
+                        <label className="mt-4 flex items-start gap-2 text-sm text-t2">
+                            <input type="checkbox" checked={asrContextEnabled} onChange={e => setAsrContextEnabled(e.target.checked)} />
+                            语音识别使用最近 3 轮对话作为上下文（可选）
+                        </label>
+                        <SessionExecutionControls />
                     </section>
 
                     {/* Permission Section */}
@@ -280,7 +228,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ onClose }) => {
                             onChange={(e) => setLocale(e.target.value)}
                             className="w-full px-3 py-2 rounded-lg border border-[var(--border)]
                                 bg-[var(--bg-secondary)] text-[var(--text-primary)]
-                                focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                focus:outline-hidden focus:ring-2 focus:ring-blue-500"
                         >
                             <option value="zh-CN">简体中文</option>
                             <option value="zh-TW">繁體中文</option>
@@ -295,11 +243,10 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ onClose }) => {
                             <Keyboard className="w-4 h-4" />
                             快捷键
                         </h3>
+                        <KeybindingsEditor />
                         <div className="space-y-2 text-sm">
-                            <ShortcutItem keys={['Enter']} description="发送消息" />
                             <ShortcutItem keys={['Shift', 'Enter']} description="换行" />
                             <ShortcutItem keys={['/']} description="打开命令面板" />
-                            <ShortcutItem keys={[isMac ? '⌘' : 'Ctrl', 'K']} description="全局命令面板" />
                             <ShortcutItem keys={['Esc']} description="取消/关闭" />
                             <ShortcutItem keys={['Ctrl', 'C']} description="中断生成" />
                         </div>
@@ -367,35 +314,6 @@ function SettingsTabButton({
     );
 }
 
-// Theme Option Component
-function ThemeOption({
-    icon: Icon,
-    label,
-    selected,
-    onClick,
-}: {
-    icon: typeof Sun;
-    label: string;
-    selected: boolean;
-    onClick: () => void;
-}) {
-    return (
-        <button
-            onClick={onClick}
-            className={`flex flex-col items-center gap-2 p-4 rounded-lg border transition-all
-                ${selected
-                    ? 'border-blue-500 bg-blue-500/10'
-                    : 'border-[var(--border)] hover:border-blue-500/50 hover:bg-[var(--bg-hover)]'
-                }`}
-        >
-            <Icon className={`w-5 h-5 ${selected ? 'text-blue-500' : 'text-[var(--text-secondary)]'}`} />
-            <span className={`text-sm ${selected ? 'text-blue-500' : 'text-[var(--text-primary)]'}`}>
-                {label}
-            </span>
-        </button>
-    );
-}
-
 // Permission Option Component
 function PermissionOption({
     label,
@@ -443,7 +361,7 @@ function ShortcutItem({ keys, description }: { keys: string[]; description: stri
                 {keys.map((key, index) => (
                     <React.Fragment key={key}>
                         <kbd className="px-2 py-0.5 bg-[var(--bg-secondary)] border border-[var(--border)]
-                            rounded text-xs text-[var(--text-primary)]">
+                            rounded-sm text-xs text-[var(--text-primary)]">
                             {key}
                         </kbd>
                         {index < keys.length - 1 && <span className="text-[var(--text-muted)]">+</span>}

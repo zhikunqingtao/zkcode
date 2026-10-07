@@ -42,9 +42,9 @@ async fn conversation_requires_an_existing_session() {
 async fn query_hard_limits_are_enforced() {
     let mut router = common::app();
     for (field, value, code) in [
-        ("maxTurns", "5", "QUERY_MAX_TURNS_INVALID"),
-        ("maxBudgetUsd", "1.01", "QUERY_BUDGET_INVALID"),
-        ("timeoutSeconds", "91", "QUERY_TIMEOUT_INVALID"),
+        ("maxTurns", "0", "QUERY_MAX_TURNS_INVALID"),
+        ("maxBudgetUsd", "0", "QUERY_BUDGET_INVALID"),
+        ("timeoutSeconds", "0", "QUERY_TIMEOUT_INVALID"),
     ] {
         let body = format!(r#"{{"prompt":"hello","{field}":{value}}}"#);
         let (status, _, response) = call(&mut router, local_post("/api/query", Some(body))).await;

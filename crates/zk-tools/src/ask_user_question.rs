@@ -7,27 +7,9 @@
 //! （`ELICITATION_CANCELLED` / `ELICITATION_EXPIRED` / `ELICITATION_FAILED` /
 //! `ELICITATION_RESULT_SERIALIZATION_FAILED`）。
 //!
-//! 三路竞态（本任务判据）：`tokio::select!` 在
-//! ① [`ElicitationSink::request_and_wait`] 的完成、
-//! ② [`QUESTION_TIMEOUT`] 本地看门狗、
-//! ③ [`ToolContext::cancel`] 取消令牌 三者之间取先到者。
-//!
-//! 差异（留痕 docs/compatibility.md §9）：
-//!
-//! - 旧 `ElicitationService.requestAndWait` **忽略** `timeoutMs`（超时权在
-//!   数据库侧交互过期），故旧实现在数据库过期机制失效时会无限期挂住工具
-//!   线程；本实现保留数据库权威的同时另加进程内 5 分钟看门狗，超时按旧
-//!   `TIMEOUT` 分支产出 `ELICITATION_EXPIRED`，语义一致且不会挂死。
-//! - 取消令牌命中时按旧 `CANCELLED` 分支产出 `ELICITATION_CANCELLED`——旧
-//!   实现无工具级取消面（取消经数据库交互级联到 `CANCELLED` 状态），本实现
-//!   多一条更快的本地路径，终态错误码相同。
-//! - 未接线 [`ElicitationSink`] 时按旧 `ERROR` 分支产出 `ELICITATION_FAILED`
-//!   （旧实现的服务由容器保证非空，本实现的 `None` 只出现在单测 / 未装配的
-//!   降级部署）。
-//! - `questions` 缺失 / 非数组时旧实现走同一条 `null || isEmpty` 判断，本实现
-//!   与之逐字一致地返回 `ELICITATION_QUESTION_COUNT_INVALID`。
-//! - 旧 schema 声明的 `multiSelect` 未被 `call` 消费（发问只下发
-//!   `question` + `options`），本实现保留 schema 字段、同样不消费。
+//! 问题的持久终态与取消令牌竞争。送达前 600 秒、首投后 30 秒及
+//! 确认送达后的作答期限由交互服务维护；工具不以本地定时器提前耗尽送达窗口。
+//! `multiSelect` 随问题持久化，并在恢复投递时保留。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -137,6 +119,14 @@ impl Tool for AskUserQuestionTool {
         MAX_TOOL_TIMEOUT
     }
 
+    fn timeout_policy(&self) -> crate::tool::ToolTimeoutPolicy {
+        crate::tool::ToolTimeoutPolicy::DurableInteraction
+    }
+
+    fn uses_execution_slot(&self) -> bool {
+        false
+    }
+
     fn execute(&self, input: Value, ctx: ToolContext) -> BoxFuture<'_, ToolOutput> {
         Box::pin(async move { self.run(input, ctx).await })
     }
@@ -165,6 +155,10 @@ impl AskUserQuestionTool {
                 "AskUserQuestion: sending question"
             );
             let request = ElicitationRequest {
+                multi_select: question
+                    .get("multiSelect")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
                 session_id: session.clone(),
                 run_id: ctx.run_id().map(str::to_owned),
                 question: text,
@@ -180,8 +174,11 @@ impl AskUserQuestionTool {
                 ElicitationOutcome::Timeout => {
                     return failure(
                         "ELICITATION_EXPIRED",
-                        "User did not respond within 5 minutes.",
+                        "The question was delivered, but no answer was received before the deadline.",
                     );
+                }
+                ElicitationOutcome::Undeliverable(reason) => {
+                    return failure("ELICITATION_UNDELIVERABLE", reason);
                 }
                 ElicitationOutcome::Error(error) => {
                     return failure("ELICITATION_FAILED", format!("Error: {error}"));
@@ -207,7 +204,7 @@ impl AskUserQuestionTool {
         }
     }
 
-    /// 单问的三路竞态：交互终态 / 5 分钟看门狗 / 取消令牌。
+    /// 单问等待：持久交互终态 / 取消令牌。
     async fn ask(&self, request: ElicitationRequest, ctx: &ToolContext) -> ElicitationOutcome {
         let Some(sink) = self.sink.as_ref() else {
             return ElicitationOutcome::Error("elicitation sink is not configured".to_owned());
@@ -216,7 +213,6 @@ impl AskUserQuestionTool {
             biased;
             () = ctx.cancel.cancelled() => ElicitationOutcome::Cancelled,
             outcome = sink.request_and_wait(request) => outcome,
-            () = tokio::time::sleep(QUESTION_TIMEOUT) => ElicitationOutcome::Timeout,
         }
     }
 }
@@ -390,7 +386,13 @@ mod tests {
             ),
             (
                 ElicitationOutcome::Timeout,
-                "ELICITATION_EXPIRED: User did not respond within 5 minutes.",
+                "ELICITATION_EXPIRED: The question was delivered, but no answer was received before the deadline.",
+            ),
+            (
+                ElicitationOutcome::Undeliverable(
+                    "Question could not be dispatched before the delivery deadline.".into(),
+                ),
+                "ELICITATION_UNDELIVERABLE: Question could not be dispatched before the delivery deadline.",
             ),
             (
                 ElicitationOutcome::Error("boom".to_owned()),
@@ -479,18 +481,19 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn watchdog_expires_a_pending_elicitation_after_five_minutes() {
+    async fn local_watchdog_does_not_override_the_durable_deadline() {
         let tool = AskUserQuestionTool::with_elicitation_sink(Arc::new(PendingSink));
-        let output = tool
-            .execute(
-                json!({ "questions": [question("q?", &["a", "b"])] }),
-                ctx(CancellationToken::new()),
-            )
-            .await;
-        assert_eq!(
-            output.content,
-            "ELICITATION_EXPIRED: User did not respond within 5 minutes."
+        let cancel = CancellationToken::new();
+        let context = ctx(cancel.clone());
+        let future = tool.execute(json!({"questions":[question("q?", &["a","b"])]}), context);
+        tokio::pin!(future);
+        assert!(
+            tokio::time::timeout(Duration::from_mins(11), &mut future)
+                .await
+                .is_err()
         );
+        cancel.cancel();
+        assert!(future.await.content.starts_with("ELICITATION_CANCELLED"));
     }
 
     #[tokio::test]

@@ -1,3 +1,8 @@
+import { usePromptDraftStore } from '@/store/promptDraftStore';
+import { useDialogStore } from '@/store/dialogStore';
+import { useExecutionPreferencesStore } from '@/store/executionPreferencesStore';
+import { useEditorPreferencesStore } from '@/store/editorPreferencesStore';
+import { openCommandPanel } from './commandPanels';
 /**
  * WebSocket 消息分发器 — 覆盖全部 40 种 Server→Client 消息类型
  * SPEC: §8.5.3 dispatch 函数
@@ -28,6 +33,7 @@ import { useAnomalyStore } from '@/store/anomalyStore';
 import { useJourneyVerifyStore } from '@/store/journeyVerifyStore';
 import { useEvidenceStore } from '@/store/evidenceStore';
 import { useRunStore } from '@/store/runStore';
+import { useToolPresentationStore } from '@/store/toolPresentationStore';
 import { anomalyEngine } from '@/services/AnomalyDetectionEngine';
 import { mapRunChecksResponseToRiskAssessment } from '@/utils/aposAdapters';
 import { generateUUID } from '@/utils/uuid';
@@ -124,6 +130,8 @@ function acceptV4Event(data: Partial<ServerMessage>): boolean {
 
 interface PendingBind {
     sessionId: string;
+    newSessionDraftId?: string;
+    isCurrent?: () => boolean;
     bindingEpoch: number;
     restoreAccepted: boolean;
     resolve: (restored: boolean) => void;
@@ -160,6 +168,10 @@ const RECOVERY_BYPASS_TYPES: ReadonlySet<string> = new Set([
 
 /** 已绑定的会话 ID — 跟踪当前 WS 连接已绑定的 sessionId，避免重复发送 bind-session */
 let boundSessionId: string | null = null;
+const bindingListeners = new Set<() => void>();
+const notifySessionBinding = () => bindingListeners.forEach(listener => listener());
+export const subscribeSessionBinding = (listener: () => void) => { bindingListeners.add(listener); return () => { bindingListeners.delete(listener); }; };
+export const isSessionBindingReady = (sessionId: string) => isSessionBound(sessionId) && !activeRecoveryId;
 
 interface InteractionView {
     protocolVersion: number;
@@ -242,6 +254,7 @@ function handleInteractionCreated(interaction: InteractionView): void {
             requestId: interaction.interactionId,
             question: String(prompt.question ?? ''),
             options: prompt.options ?? [],
+            multiSelect: prompt.multiSelect === true,
             decisionDeadlineAt: deadline,
         });
         queueInteractionAck(interaction.sessionId, interaction.interactionId,
@@ -252,6 +265,7 @@ function handleInteractionCreated(interaction: InteractionView): void {
 /** 标记会话已绑定 */
 export function markSessionBound(sessionId: string): void {
     boundSessionId = sessionId;
+    notifySessionBinding();
     // 切换 Session 后不保留其他 Session 的前端 ACK；再次进入时由服务端 pending
     // 权威数据重放，避免终态消息未送达时在浏览器进程内长期积累陈旧条目。
     for (const [interactionId, pending] of pendingInteractionAcks) {
@@ -269,7 +283,9 @@ export function isSessionBound(sessionId: string): boolean {
 
 /** 重置绑定状态 — WS 重连时调用，确保下次发消息时重新发送 bind-session */
 export function resetBoundSession(): void {
+    usePermissionStore.getState().clearModeChange();
     boundSessionId = null;
+    notifySessionBinding();
     boundBindingEpoch = 0;
     boundBindRequestId = null;
 }
@@ -319,6 +335,7 @@ export function bindSessionAndWait(
     sessionId: string,
     publish: (payload: { sessionId: string; protocolVersion: number; bindRequestId: string; bindingEpoch: number; afterEventId?: number }) => void | boolean,
     timeoutMs = 5000,
+    options: { newSessionDraftId?: string; isCurrent?: () => boolean } = {},
 ): Promise<boolean> {
     if (activeRecoveryId) finishBind(activeRecoveryId, false, false);
     const bindRequestId = crypto.randomUUID();
@@ -331,6 +348,8 @@ export function bindSessionAndWait(
         }, timeoutMs);
         pendingBinds.set(bindRequestId, {
             sessionId,
+            newSessionDraftId: options.newSessionDraftId,
+            isCurrent: options.isCurrent,
             bindingEpoch,
             restoreAccepted: false,
             resolve,
@@ -364,6 +383,7 @@ function finishBind(bindRequestId: string, restored: boolean, replayQueued: bool
     clearTimeout(pending.timer);
     pendingBinds.delete(bindRequestId);
     if (activeRecoveryId === bindRequestId) activeRecoveryId = null;
+    notifySessionBinding();
     pending.resolve(restored);
     if (replayQueued) pending.queued.forEach(message => dispatch(message));
 }
@@ -424,6 +444,23 @@ export function resetSequence(): void {
 // ==================== 事件分发表 — 覆盖全部 25 种消息 ====================
 
 const handlers: Record<string, (data: any) => void> = {
+    'assistant_segment_complete': d => {
+        if (!isRootRuntimeEvent(d.eventContext)) return;
+        const message = d.message ?? {
+            type: 'assistant', uuid: d.messageId, timestamp: d.ts,
+            content: d.content, usage: d.usage ?? EMPTY_USAGE, stopReason: d.stopReason ?? '',
+        };
+        if (message.type !== 'assistant' || !message.uuid || !Array.isArray(message.content)) return;
+        useMessageStore.getState().finalizeAssistantSegment(message, runtimePartitionKey(d.eventContext));
+    },
+    'system_message': d => {
+        if (!isRootRuntimeEvent(d.eventContext) || d.message?.type !== 'system' || !d.message.uuid || typeof d.message.content !== 'string') return;
+        useMessageStore.getState().addMessage(d.message);
+    },
+    'task_boundary': d => {
+        if (!isRootRuntimeEvent(d.eventContext)) return;
+        useMessageStore.getState().addMessage({type: 'system', uuid: d.message_id ?? d.messageId ?? d.eventContext.eventId, timestamp: d.ts, content: '', subtype: 'task_boundary', metadata: {task_id: d.task_id ?? d.taskId, title: d.title, seq: d.seq, turn_index: d.turn_index ?? d.turnIndex}});
+    },
     'protocol_error': (d: { code: string; supportedVersion: number; bindRequestId?: string; bindingEpoch?: number }) => {
         const pending = d.bindRequestId
             ? pendingBinds.get(d.bindRequestId)
@@ -481,9 +518,22 @@ const handlers: Record<string, (data: any) => void> = {
     },
     'tool_result':        (d) => {
         if (!isRootRuntimeEvent(d.eventContext)) return;
+        let result = d.result ?? { content: d.content ?? '', isError: d.isError ?? false };
+        const presentation = result.metadata?.hookPresentation;
+        if (presentation && typeof presentation === 'object' && !Array.isArray(presentation)
+                && 'text' in presentation && typeof presentation.text === 'string'
+                && d.eventContext.sessionId && d.eventContext.runId
+                && useSessionStore.getState().sessionId === d.eventContext.sessionId) {
+            useToolPresentationStore.getState().record(d.eventContext.sessionId, d.eventContext.runId, d.toolUseId, presentation.text);
+        }
+        if (result.metadata && 'hookPresentation' in result.metadata) {
+            const metadata = { ...result.metadata };
+            delete metadata.hookPresentation;
+            result = { ...result, metadata };
+        }
         useMessageStore.getState().completeToolCall(
             d.toolUseId,
-            d.result ?? { content: d.content ?? '', isError: d.isError ?? false },
+            result,
             runtimePartitionKey(d.eventContext),
         );
     },
@@ -517,6 +567,7 @@ const handlers: Record<string, (data: any) => void> = {
             uuid: d.requestId,
             timestamp: d.appliedAt,
             content: [{ type: 'text', text: d.text }],
+            meta: { steering: true },
         } as Message);
         useNotificationStore.getState().addNotification({
             key,
@@ -748,7 +799,7 @@ const handlers: Record<string, (data: any) => void> = {
             timeout: 6000,
         });
     },
-    'permission_mode_changed':  (d: { mode: string }) => {
+    'permission_mode_changed':  (d: { mode: string; requestId?: string }) => {
         // 后端枚举为大写，前端使用小写稳定值。
         const normalizedMode = d.mode.toLowerCase();
         if (!isPermissionMode(normalizedMode)) {
@@ -756,7 +807,7 @@ const handlers: Record<string, (data: any) => void> = {
             return;
         }
         // 服务端确认是唯一的主动切换提交点。
-        usePermissionStore.getState().setPermissionMode(normalizedMode);
+        usePermissionStore.getState().setPermissionMode(normalizedMode, d.requestId);
         // 通知用户权限模式已变更
         useNotificationStore.getState().addNotification({
             key: 'permission-mode-changed',
@@ -767,6 +818,21 @@ const handlers: Record<string, (data: any) => void> = {
     },
     // === 新增: 命令结果/文件回退完成 (2 种) ===
     'command_result':     (d: { command: string; resultType: 'text' | 'jsx' | 'prompt'; output?: string; data?: Record<string, unknown> }) => {
+        if (d.resultType === 'jsx' && d.data && openCommandPanel(d.data)) return;
+        if (d.resultType === 'jsx' && d.data?.component === 'SessionExecutionPreferences' && typeof d.data.sessionId === 'string') {
+            void useExecutionPreferencesStore.getState().load(d.data.sessionId);
+            useMessageStore.getState().addMessage({ type: 'system', uuid: generateUUID(), timestamp: Date.now(), subtype: 'command_result', content: `/${d.command}: ${String(d.data.message ?? '会话执行设置已更新')}` });
+            return;
+        }
+        if (d.resultType === 'jsx' && d.data?.component === 'KeybindingsEditor') {
+            useDialogStore.getState().openDialog('keybindings');
+            return;
+        }
+        if (d.resultType === 'jsx' && d.data?.component === 'EditorPreferences') {
+            void useEditorPreferencesStore.getState().load();
+            useMessageStore.getState().addMessage({ type: 'system', uuid: generateUUID(), timestamp: Date.now(), subtype: 'command_result', content: `/${d.command}: ${String(d.data.message ?? '编辑器设置已更新')}` });
+            return;
+        }
         if (d.resultType === 'jsx' && d.data) {
             // JSX 类型: 创建带 metadata 的 system Message
             useMessageStore.getState().addMessage({
@@ -1011,6 +1077,9 @@ function handleMessageComplete(
         // A late completion from a session the user has already left must never
         // overwrite or reload the newly selected session.
         if (hasCommittedMessages && !sessionMatches) return;
+        if (hasCommittedMessages && currentSessionId && context.runId) {
+            useToolPresentationStore.getState().bindCommitted(currentSessionId, context.runId, data.committedMessages ?? []);
+        }
         const reconciled = hasCommittedMessages && sessionMatches
             ? useMessageStore.getState().reconcileCommittedRun(
                 data.replaceAfterMessageId ?? null,
@@ -1070,21 +1139,36 @@ function recoverAuthoritativeSession(sessionId: string | null): void {
 
 /** API 错误 — messageStore + sessionStore */
 function handleError(
-    data: { code: string; message: string; retryable: boolean },
+    data: { code?: string; message: string; retryable?: boolean; requestId?: string; errorCode?: string; httpStatus?: number },
     context: RuntimeEventContext,
 ): void {
     // Child failures are surfaced by agent_failed/task_update. Projecting the
     // same error here would insert a global system message into the root chat.
     if (!isRootRuntimeEvent(context)) return;
+    if (data.requestId) {
+        const permission = usePermissionStore.getState();
+        if (permission.pendingModeChange?.requestId === data.requestId) permission.clearModeChange();
+        useNotificationStore.getState().addNotification({ key: data.requestId, level: 'error', message: data.message });
+        return;
+    }
+    if (data.code === 'COMMAND_ERROR' || data.code === 'COMMAND_NOT_FOUND') {
+        useMessageStore.getState().addMessage({ type: 'system', uuid: generateUUID(), timestamp: Date.now(), subtype: 'command_result', content: `命令执行失败：${data.message}`, errorCode: data.code, retryable: false });
+        return;
+    }
+    if (data.errorCode) {
+        useNotificationStore.getState().addNotification({ key: `provider-error-${data.errorCode}`, level: 'error', message: data.message, timeout: 0 });
+    }
+    useMessageStore.getState().failAllRunningToolCalls(data.message);
+    useMessageStore.getState().finalizeAssistantSegment();
     useMessageStore.getState().addMessage({
         type: 'system',
         uuid: generateUUID(),
         timestamp: Date.now(),
         content: data.message,
-        subtype: 'error',
-        errorCode: data.code,
+        subtype: data.errorCode ? 'provider_error' : 'error',
+        errorCode: data.errorCode ?? data.code,
         retryable: data.retryable,
-        metadata: {
+        metadata: data.errorCode ? { httpStatus: data.httpStatus } : {
             sourceTaskId: context.sourceTaskId,
             sourceRunId: context.sourceRunId,
         },
@@ -1141,6 +1225,7 @@ function handleSessionRestore(data: {
         model: string;
         permissionMode: string;
         status: 'idle' | 'interrupted';
+        purpose?: 'chat' | 'mcp';
     };
     runSnapshot?: RuntimeRunSnapshot | null;
     taskTree?: RuntimeTaskSnapshot[];
@@ -1158,6 +1243,10 @@ function handleSessionRestore(data: {
     const pending = pendingBinds.get(data.bindRequestId);
     if (!pending || pending.sessionId !== data.metadata.sessionId
             || pending.bindingEpoch !== data.bindingEpoch) return;
+    if (pending.isCurrent && !pending.isCurrent()) {
+        finishBind(data.bindRequestId, false, false);
+        return;
+    }
     if (data.protocolVersion !== WS_PROTOCOL_VERSION) {
         console.error('[Protocol] Rejected session snapshot from unsupported WS version:',
             data.protocolVersion);
@@ -1186,6 +1275,7 @@ function handleSessionRestore(data: {
 
     // 2. 这个 matching restore 是 Session 投影的唯一提交点。
     // 所有 session-scoped Store 先无条件清空，再用快照替换；空快照也是权威值。
+    useToolPresentationStore.getState().activate(data.metadata.sessionId, true);
     usePermissionStore.getState().clearPermissions();
     useAppUiStore.setState({ elicitationDialog: null });
     useTaskStore.getState().replaceTasks((data.taskTree ?? []).map(projectRestoredTask));
@@ -1246,9 +1336,24 @@ function handleSessionRestore(data: {
         );
     }
 
+    // Transfer only the draft captured by this exact new-session bind. Do this
+    // before changing Session state so mounted and deferred composers agree.
+    if (pending.newSessionDraftId) {
+        const transferred = usePromptDraftStore.getState().migrateFallbackTo(
+            data.metadata.sessionId, pending.newSessionDraftId,
+        );
+        if (!transferred) {
+            useNotificationStore.getState().addNotification({
+                key: `prompt-draft-transfer:${pending.newSessionDraftId}:${data.metadata.sessionId}`,
+                level: 'warning',
+                message: '草稿未自动转移，首页与当前会话中的现有草稿均已保留。可返回首页继续编辑。',
+                timeout: 8000,
+            });
+        }
+    }
     // 4. 恢复会话元数据
     useSessionStore.getState().resumeSession(data.metadata.sessionId);
-    useSessionStore.getState().setModel(data.metadata.model);
+    useSessionStore.setState({ model: data.metadata.model, purpose: data.metadata.purpose === 'mcp' ? 'mcp' : 'chat' });
     usePermissionStore.getState().setPermissionMode(restoredPermissionMode);
     // session_restored 是服务端 bind-session 的确认；只有收到它才记为已绑定。
     markSessionBound(data.metadata.sessionId);

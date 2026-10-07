@@ -1,20 +1,75 @@
 {
   "version": 2,
   "databaseCount": 1,
-  "tableCount": 45,
+  "tableCount": 67,
   "tables": [
-    "sessions", "messages", "config", "project_config", "file_snapshots", "tasks",
-    "project_context", "activities", "anomaly_events", "run_envelopes", "run_event_log",
-    "evidence_bundles", "evidence_items", "regression_scripts", "agent_checkpoints",
-    "artifact_manifests", "artifact_entries", "interaction_requests",
-    "websocket_session_binding", "permission_grants", "run_workbench_bindings",
-    "run_acceptance_criteria", "memories", "projects", "auth_tokens",
-    "task_dependencies", "task_budget_reservations", "task_result_blobs", "task_results",
-    "task_result_receipts", "task_inbox_messages", "tool_invocations",
-    "tool_result_postprocessing", "research_captures", "research_sources",
-    "research_findings", "research_conflicts", "research_open_questions",
-    "research_requirement_coverage", "execution_resources", "llm_calls",
-    "evidence_verdict_events", "cron_jobs", "cron_occurrences", "zk_schema_metadata"
+    "zk_schema_metadata",
+    "sessions",
+    "messages",
+    "session_forks",
+    "session_fork_snapshots",
+    "session_merges",
+    "session_merge_sources",
+    "session_merge_units",
+    "session_merge_attempts",
+    "session_merge_assets",
+    "session_handoff_catalog",
+    "session_handoff_chunks",
+    "session_merge_locks",
+    "config",
+    "project_config",
+    "file_snapshots",
+    "tasks",
+    "project_context",
+    "activities",
+    "anomaly_events",
+    "run_envelopes",
+    "run_event_log",
+    "run_event_retention",
+    "task_dependencies",
+    "task_budget_reservations",
+    "task_result_blobs",
+    "task_results",
+    "task_result_receipts",
+    "task_inbox_messages",
+    "tool_invocations",
+    "tool_result_postprocessing",
+    "research_captures",
+    "research_sources",
+    "research_findings",
+    "research_conflicts",
+    "research_open_questions",
+    "research_requirement_coverage",
+    "execution_resources",
+    "llm_calls",
+    "evidence_bundles",
+    "evidence_items",
+    "evidence_verdict_events",
+    "regression_scripts",
+    "agent_checkpoints",
+    "artifact_manifests",
+    "artifact_terminal_checks",
+    "artifact_entries",
+    "interaction_requests",
+    "websocket_session_binding",
+    "permission_grants",
+    "run_workbench_bindings",
+    "run_acceptance_criteria",
+    "memories",
+    "memory_scope_versions",
+    "skill_states",
+    "projects",
+    "auth_tokens",
+    "cron_jobs",
+    "cron_occurrences",
+    "managed_worktrees",
+    "team_definitions",
+    "team_work_items",
+    "team_broadcasts",
+    "team_run_closures",
+    "hook_result_presentations",
+    "query_requests",
+    "external_tool_requests"
   ],
   "rule": "A production table must have a repository, a production consumer, and a restart test before its feature is enabled.",
   "wp11VerifiedConsumers": {
@@ -27,6 +82,63 @@
       "repository": "zk_db::Db::{save_anomaly_event,resolve_anomaly_event,find_anomalies_by_swarm,find_unresolved_anomalies}",
       "consumer": "zk_server Swarm result collector",
       "restartTest": "anomaly::tests::anomaly_detection_resolution_survives_reopen"
+    }
+  },
+  "alignmentConsumers": {
+    "artifact_terminal_checks": {
+      "repository": "zk_db::artifact_terminal",
+      "consumer": "zk_server::artifact_integrity and maintenance",
+      "verification": "artifact_terminal::tests: terminal/CAS/immutable result, unresolved cleanup rejection, ephemeral expiry and real reopen all passed in /tmp/zk-db-alignment-all-targets3.txt"
+    },
+    "external_tool_requests": {
+      "repository": "zk_db::external_tool_request",
+      "consumer": "zk_engine external bound tool coordinator",
+      "verification": "external_tool_request integration4 passed: concurrent claims, postprocessing gate, real reopen with separate Hook presentation, ephemeral long service rejection and SQL owner mismatch"
+    },
+    "hook_result_presentations": {
+      "repository": "zk_db::hook_projection",
+      "consumer": "Engine POST Hook presentation and session history API",
+      "verification": "external_tool_request::reopening_preserves_unknown_operations_and_original_results_with_separate_hook_notes passed; original tool facts remain immutable"
+    },
+    "query_requests": {
+      "repository": "zk_db::query_request",
+      "consumer": "Query HTTP request admission/cancellation",
+      "verification": "query_request::tests::claims_survive_restart_and_early_cancel_fences_binding"
+    },
+    "run_event_retention": {
+      "repository": "zk_db::maintenance",
+      "consumer": "maintenance batches and Run/WS cursor validation",
+      "verification": "maintenance protected references and expired cursor regression"
+    },
+    "session_fork_snapshots": {
+      "repository": "zk_db::session_fork",
+      "consumer": "Query forkSession atomic sealed fork",
+      "verification": "session_fork::tests::sealed_fork_survives_database_reopen_without_recopying_source and other fork cases passed in /tmp/zk-db-alignment-all-targets3.txt"
+    },
+    "session_forks": {
+      "repository": "zk_db::session_fork",
+      "consumer": "Query forkSession idempotency",
+      "verification": "session_fork::tests::sealed_fork_survives_database_reopen_without_recopying_source and other fork cases passed in /tmp/zk-db-alignment-all-targets3.txt"
+    },
+    "team_broadcasts": {
+      "repository": "zk_db::team",
+      "consumer": "TaskRuntime native managed team workers and durable inbox",
+      "verification": "team::tests::broadcast_freezes_membership_and_restart_repairs_only_binding plus native team acceptance; complete final gate pending"
+    },
+    "team_definitions": {
+      "repository": "zk_db::team",
+      "consumer": "TaskRuntime native managed team workers and durable inbox",
+      "verification": "team::tests::broadcast_freezes_membership_and_restart_repairs_only_binding plus native team acceptance; complete final gate pending"
+    },
+    "team_run_closures": {
+      "repository": "zk_db::team",
+      "consumer": "TaskRuntime native managed team workers and durable inbox",
+      "verification": "team::tests::broadcast_freezes_membership_and_restart_repairs_only_binding plus native team acceptance; complete final gate pending"
+    },
+    "team_work_items": {
+      "repository": "zk_db::team",
+      "consumer": "TaskRuntime native managed team workers and durable inbox",
+      "verification": "team::tests::broadcast_freezes_membership_and_restart_repairs_only_binding plus native team acceptance; complete final gate pending"
     }
   }
 }

@@ -114,6 +114,7 @@ async fn seed_session(db: &zk_db::Db) -> String {
     db.append_message(
         &summary.id,
         NewMessage {
+            meta: None,
             role: MessageRole::User,
             content: vec![StoredBlock::Text {
                 text: "帮我看下报错".to_owned(),
@@ -143,6 +144,7 @@ async fn wait_for(what: &str, mut probe: impl FnMut() -> bool) {
 /// error 下行（critical 档代表）。
 fn error_msg(code: &str) -> zk_protocol::ServerMessage {
     zk_protocol::ServerMessage::Error {
+        request_id: None,
         code: code.to_owned(),
         message: "test".to_owned(),
         retryable: false,

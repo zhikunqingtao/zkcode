@@ -120,6 +120,13 @@ pub(crate) async fn send(request: UdsRequest<'_>) -> Result<UdsResponse, Transpo
     }
 }
 
+struct AbortDriver(tokio::task::JoinHandle<()>);
+impl Drop for AbortDriver {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// http1 握手 → 发请求 → 聚合响应体（超时由 [`send`] 在外层统一钳制）。
 async fn exchange(
     stream: UnixStream,
@@ -129,9 +136,9 @@ async fn exchange(
         .await
         .map_err(|_| TransportError::Http)?;
     // 连接驱动任务：随 sender drop 自然收尾（短连接，无池化）。
-    let driver = tokio::spawn(async move {
+    let driver = AbortDriver(tokio::spawn(async move {
         let _ = connection.await;
-    });
+    }));
 
     let mut builder = Request::builder()
         .method(request.method.clone())
@@ -150,7 +157,7 @@ async fn exchange(
         None => Full::new(Bytes::new()),
     };
     let Ok(http_request) = builder.body(body) else {
-        driver.abort();
+        driver.0.abort();
         return Err(TransportError::Request);
     };
 
@@ -179,7 +186,7 @@ async fn exchange(
     }
     .await;
     drop(sender);
-    driver.abort();
+    driver.0.abort();
     result
 }
 

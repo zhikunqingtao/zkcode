@@ -25,6 +25,14 @@ reqwest = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 bytes = { workspace = true }
+chrono = { workspace = true }
+base64 = { workspace = true }
+image = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+http-body-util = { workspace = true }
+native-tls = { workspace = true }
+tokio-native-tls = { workspace = true }
 # 可热替换的 Provider 代理层（ArcSwap 无锁原子读路径）。
 arc-swap = { workspace = true }
 uuid = { workspace = true }

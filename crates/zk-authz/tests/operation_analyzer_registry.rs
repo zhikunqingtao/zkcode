@@ -708,3 +708,40 @@ fn scratchpad_sensitive_symlink_aliases_remain_high_risk() {
         analyze(&registry, &read, &ordinary_input, &context, &subject).expect("analyze ordinary");
     assert_eq!(descriptor.risk, RiskClass::Safe);
 }
+
+#[test]
+fn declared_bash_outputs_are_authorized_resources_and_change_the_exact_operation_identity() {
+    let temp = TempRoot::new("declared-bash-authority");
+    let registry = registry(&safe_bash());
+    let tool = FakeTool::new("Bash");
+    let subject = subject("s", "root", "root", temp.path());
+    let context = ctx(&temp.path().to_string_lossy(), "s");
+    let input = json!({"command":"printf out > a.txt","declared_outputs":[{"path":"a.txt","operation":"created"}]});
+    let approved = analyze(&registry, &tool, &input, &context, &subject).unwrap();
+    assert_eq!(approved.resources.len(), 2);
+    assert_eq!(approved.resources[0].kind, "cwd");
+    assert!(
+        approved
+            .resources
+            .iter()
+            .any(|resource| resource.kind == "path"
+                && resource.value == "a.txt"
+                && !resource.outside_workspace)
+    );
+    assert!(approved.effects.contains(&EffectClass::WriteResource));
+    recheck(&registry, &tool, &approved, &input, &context, &subject).unwrap();
+    let changed = json!({"command":"printf out > a.txt","declared_outputs":[{"path":"b.txt","operation":"created"}]});
+    let changed_descriptor = analyze(&registry, &tool, &changed, &context, &subject).unwrap();
+    assert_ne!(approved.operation_hash, changed_descriptor.operation_hash);
+    assert!(recheck(&registry, &tool, &approved, &changed, &context, &subject).is_err());
+    let background = json!({"command":"printf out > a.txt","is_background":true,"declared_outputs":[{"path":"a.txt","operation":"created"}]});
+    assert_eq!(
+        analyze(&registry, &tool, &background, &context, &subject)
+            .unwrap_err()
+            .code,
+        "BASH_BACKGROUND_OUTPUTS_UNSUPPORTED"
+    );
+    let protected =
+        json!({"command":"true","declared_outputs":[{"path":"/dev/zero","operation":"modified"}]});
+    assert!(analyze(&registry, &tool, &protected, &context, &subject).is_err());
+}

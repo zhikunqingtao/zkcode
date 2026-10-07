@@ -32,6 +32,8 @@ const MAX_UPSTREAM_RESPONSE_BYTES: usize = 1024 * 1024;
 
 /// Audio bytes accepted by the speech service after multipart extraction.
 pub(crate) struct SpeechAudio {
+    /// Explicitly supplied by an opted-in client; absent by default.
+    pub(crate) context: Option<String>,
     pub(crate) bytes: bytes::Bytes,
     pub(crate) mime_type: String,
 }
@@ -72,6 +74,7 @@ struct CachedKeyRing {
 /// Production `DashScope` client. Credentials are resolved for every operation;
 /// the cached ring is rebuilt whenever a DB/environment CSV value changes.
 pub(crate) struct DashScopeSpeechService {
+    corrections: Vec<CorrectionRule>,
     client: reqwest::Client,
     credentials: Arc<dyn McpCredentialResolver>,
     key_ring: Mutex<Option<CachedKeyRing>>,
@@ -87,6 +90,7 @@ impl DashScopeSpeechService {
             .build()
             .expect("static DashScope HTTP client configuration is valid");
         Self {
+            corrections: parse_corrections(&std::env::var("ASR_CORRECTIONS").unwrap_or_else(|_| "zkcode:zk code,z k code;zhikuncode:zhi kun code,zkun code,智坤code,志鲲Code,智kuncode,zhi坤code".into())),
             client,
             credentials,
             key_ring: Mutex::new(None),
@@ -178,7 +182,7 @@ impl SpeechService for DashScopeSpeechService {
     fn recognize(&self, audio: SpeechAudio) -> BoxFuture<'_, Result<String, SpeechError>> {
         Box::pin(async move {
             validate_audio(&audio)?;
-            let body = asr_request_body(&audio);
+            let body = asr_request_body(&audio, &self.corrections);
             let endpoint = format!(
                 "{}/chat/completions",
                 DASHSCOPE_BASE_URL.trim_end_matches('/')
@@ -188,7 +192,7 @@ impl SpeechService for DashScopeSpeechService {
                 .pointer("/choices/0/message/content")
                 .and_then(Value::as_str)
                 .filter(|text| !text.trim().is_empty())
-                .map(str::to_owned)
+                .map(|text| apply_corrections(text, &self.corrections))
                 .ok_or(SpeechError::Upstream)
         })
     }
@@ -221,10 +225,10 @@ fn validate_audio(audio: &SpeechAudio) -> Result<(), SpeechError> {
     Ok(())
 }
 
-fn asr_request_body(audio: &SpeechAudio) -> Value {
+fn asr_request_body(audio: &SpeechAudio, rules: &[CorrectionRule]) -> Value {
     let encoded = base64::engine::general_purpose::STANDARD.encode(&audio.bytes);
     let data_uri = format!("data:{};base64,{encoded}", audio.mime_type);
-    json!({
+    let mut body = json!({
         "model": ASR_MODEL,
         "messages": [{
             "role": "user",
@@ -235,7 +239,121 @@ fn asr_request_body(audio: &SpeechAudio) -> Value {
         }],
         "stream": false,
         "asr_options": { "enable_itn": true }
-    })
+    });
+    let mut names = Vec::new();
+    for rule in rules {
+        if !names.contains(&rule.canonical.as_str()) {
+            names.push(rule.canonical.as_str());
+        }
+    }
+    let prefix = if names.is_empty() {
+        String::new()
+    } else {
+        format!("实体词表：{}", names.join("、"))
+    };
+    let context = audio
+        .context
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let system = match (prefix.is_empty(), context) {
+        (true, None) => None,
+        (true, Some(c)) => Some(c.to_owned()),
+        (false, None) => Some(prefix),
+        (false, Some(c)) => Some(format!("{prefix}\n\n{c}")),
+    };
+    if let Some(system) = system {
+        body["messages"]
+            .as_array_mut()
+            .expect("array literal")
+            .insert(0, json!({"role":"system","content":system}));
+    }
+    body
+}
+
+struct CorrectionRule {
+    canonical: String,
+    patterns: Vec<regex::Regex>,
+}
+
+fn variant_pattern(variant: &str) -> Option<regex::Regex> {
+    fn class(c: char) -> u8 {
+        if c.is_ascii_alphanumeric() {
+            1
+        } else if ('\u{4e00}'..='\u{9fff}').contains(&c) {
+            2
+        } else {
+            0
+        }
+    }
+    let mut tokens = Vec::new();
+    let mut token = String::new();
+    let mut previous = 0;
+    for c in variant.chars() {
+        if c.is_whitespace() || c == '-' {
+            if !token.is_empty() {
+                tokens.push(std::mem::take(&mut token));
+            }
+            previous = 0;
+            continue;
+        }
+        let current = class(c);
+        if previous != 0 && current != 0 && previous != current && !token.is_empty() {
+            tokens.push(std::mem::take(&mut token));
+        }
+        token.push(c);
+        previous = current;
+    }
+    if !token.is_empty() {
+        tokens.push(token);
+    }
+    if tokens.is_empty() {
+        return None;
+    }
+    regex::Regex::new(&format!(
+        "(?i:{})",
+        tokens
+            .iter()
+            .map(|t| regex::escape(t))
+            .collect::<Vec<_>>()
+            .join("[\\s\\-]*")
+    ))
+    .ok()
+}
+
+fn parse_corrections(config: &str) -> Vec<CorrectionRule> {
+    config
+        .split([';', '；'])
+        .filter_map(|entry| {
+            let (canonical, variants) = entry.split_once([':', '：'])?;
+            let canonical = canonical.trim();
+            if canonical.is_empty() {
+                return None;
+            }
+            let mut seen = std::collections::HashSet::new();
+            Some(CorrectionRule {
+                canonical: canonical.into(),
+                patterns: variants
+                    .split([',', '，'])
+                    .map(str::trim)
+                    .filter(|variant| seen.insert(*variant))
+                    .filter_map(variant_pattern)
+                    .collect(),
+            })
+        })
+        .collect()
+}
+
+fn apply_corrections(text: &str, rules: &[CorrectionRule]) -> String {
+    let mut corrected = text.to_owned();
+    for rule in rules {
+        for pattern in &rule.patterns {
+            corrected = pattern
+                .replace_all(&corrected, regex::NoExpand(&rule.canonical))
+                .into_owned();
+        }
+    }
+    corrected
 }
 
 fn tts_request_body(text: &str) -> Value {
@@ -300,11 +418,68 @@ mod tests {
     use super::*;
 
     #[test]
+    fn hotwords_handle_cjk_boundaries_literal_replacements_and_optional_context() {
+        let rules = parse_corrections(
+            "zkcode：z k code，智坤code；$term\\:special word;only-hotword:;ignored;empty: - ",
+        );
+        assert_eq!(
+            apply_corrections("智坤 Code和Z-K-CODE special-word", &rules),
+            "zkcode和zkcode $term\\"
+        );
+        assert_eq!(apply_corrections("abc", &rules), "abc");
+        let mut audio = SpeechAudio {
+            bytes: bytes::Bytes::from_static(b"a"),
+            mime_type: "audio/webm".into(),
+            context: None,
+        };
+        let body = asr_request_body(&audio, &rules);
+        assert_eq!(body["messages"][0]["role"], "system");
+        assert!(
+            !body["messages"][0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("对话上下文")
+        );
+        audio.context = Some("对话上下文".into());
+        let body = asr_request_body(&audio, &rules);
+        assert!(
+            body["messages"][0]["content"]
+                .as_str()
+                .unwrap()
+                .ends_with("对话上下文")
+        );
+        assert_eq!(
+            asr_request_body(
+                &SpeechAudio {
+                    context: None,
+                    ..audio
+                },
+                &[]
+            )["messages"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn hotword_variants_are_trimmed_and_deduplicated_in_order() {
+        let rules = parse_corrections("xy: x, x,y");
+        assert_eq!(rules[0].patterns.len(), 2);
+        assert_eq!(apply_corrections("x", &rules), "xxy");
+    }
+
+    #[test]
     fn asr_body_uses_audio_data_uri_and_itn() {
-        let body = asr_request_body(&SpeechAudio {
-            bytes: bytes::Bytes::from_static(b"abc"),
-            mime_type: "audio/webm".to_owned(),
-        });
+        let body = asr_request_body(
+            &SpeechAudio {
+                context: None,
+                bytes: bytes::Bytes::from_static(b"abc"),
+                mime_type: "audio/webm".to_owned(),
+            },
+            &[],
+        );
         assert_eq!(body["model"], ASR_MODEL);
         assert_eq!(body["stream"], false);
         assert_eq!(body["asr_options"]["enable_itn"], true);

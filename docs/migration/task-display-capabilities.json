@@ -1,0 +1,301 @@
+{
+  "sourceRange": "3e536438..053adf90",
+  "targetBaseline": "08cbdc45",
+  "scope": "Task advisory display output; preserve native cursor-reading TaskOutput and immutable execution facts",
+  "capabilities": [
+    {
+      "id": "task-advisory-output",
+      "capability": "Replace/clear parent-owned task display output during or after execution without altering terminal results, errors or costs",
+      "sourceCommit": "053adf90",
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/tool/task/TaskUpdateTool.java",
+        "backend/src/main/java/com/aicodeassistant/tool/task/TaskCoordinator.java"
+      ],
+      "implementation": [
+        "contracts/task-runtime-v4.json",
+        "crates/zk-db/migrations/V2__init_session_message.sql",
+        "crates/zk-db/src/task_runtime.rs",
+        "crates/zk-engine/src/task/runtime.rs",
+        "crates/zk-tools/src/task_tools.rs",
+        "crates/zk-server/src/engine_bridge.rs"
+      ],
+      "status": "implemented_named_native_regressions_passed",
+      "notes": "SQLite tasks.display_output is a distinct advisory field, exposed as optional displayOutput. Running progress is cleared when final execution result commits. Parent retains native root-session ownership and CONTROL admission; status/error remain forbidden input. UTF16 1048576-unit truncation matches source surrogate-safe behavior. Existing description/plan/reportedProgress functionality is preserved.",
+      "previousValidation": {
+        "status": "implemented_equivalent"
+      },
+      "validation": {
+        "status": "passed_named_native_regressions",
+        "tests": [
+          "task::runtime::tests::display_output_bound_preserves_utf16_limit_and_scalar_boundaries",
+          "task::runtime::tests::display_output_is_owned_and_mutable_after_terminal_without_rewriting_results",
+          "task_tools::tests::task_update_display_output_is_separate_and_rejects_terminal_field_mutation"
+        ],
+        "evidenceRef": "#currentExecutionEvidence/nativeWorkspace",
+        "clippyEvidenceRef": "#currentExecutionEvidence/strictClippy",
+        "limits": "Only listed native assertions are evidenced. Source Java/remote API execution is not implied. Formal dev lifecycle passed independently; release browser E2E covers only its four explicit cases. Product matrix records additional component/native coverage and remaining limits."
+      }
+    },
+    {
+      "id": "child-self-output",
+      "capability": "Child can report its own current Task display output in DONT_ASK, without gaining parent TaskUpdate powers",
+      "sourceCommit": "053adf90",
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/tool/task/TaskOutputTool.java",
+        "backend/src/main/java/com/aicodeassistant/tool/task/TaskCoordinator.java"
+      ],
+      "implementation": [
+        "crates/zk-tools/src/tool.rs",
+        "crates/zk-tools/src/registry.rs",
+        "crates/zk-tools/src/task_tools.rs",
+        "crates/zk-engine/src/agent/executor.rs",
+        "crates/zk-db/src/task_display.rs",
+        "crates/zk-server/src/authz.rs",
+        "crates/zk-authz/src/tool_facts.rs",
+        "crates/zk-authz/src/analyzer.rs",
+        "crates/zk-server/src/task_display_admission_tests.rs"
+      ],
+      "status": "implemented_named_native_regressions_passed",
+      "notes": "Source write capability is exposed through a restricted TaskUpdate child projection; native TaskOutput remains cursor-based reading. Child parameters accept only output plus optional self taskId; actual identity derives from persisted Run/session/currentRun/parent relationship, rechecked in the writer transaction. Existing child allowlist intersection and source registry revocation remain enforced. Source isError input is not copied: this advisory projection never changes execution error/status; caller must use runtime execution result. Terminal parent display edits remain allowed, while child tool calls still require valid live-run admission.",
+      "previousValidation": {
+        "status": "implemented_equivalent"
+      },
+      "validation": {
+        "status": "passed_named_native_regressions",
+        "tests": [
+          "task_display_admission_tests::dont_ask_admits_only_bound_child_output_and_backend_rechecks_the_same_identity",
+          "task_tools::tests::child_task_update_catalog_and_execution_allow_only_self_output",
+          "agent::executor::tests::task_update_is_visible_only_as_the_narrow_child_projection",
+          "registry::tests::child_projection_preserves_parent_filters_live_updates_and_original_revocation",
+          "source_has_no_execution_bypass"
+        ],
+        "evidenceRef": "#currentExecutionEvidence/nativeWorkspace",
+        "clippyEvidenceRef": "#currentExecutionEvidence/strictClippy",
+        "limits": "Only listed native assertions are evidenced. Source Java/remote API execution is not implied. Formal dev lifecycle passed independently; release browser E2E covers only its four explicit cases. Product matrix records additional component/native coverage and remaining limits."
+      }
+    },
+    {
+      "id": "display-output-ui",
+      "capability": "Display advisory task output separately from immutable execution status",
+      "sourceCommit": "053adf90",
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/tool/task/TaskState.java",
+        "backend/src/main/java/com/aicodeassistant/tool/task/TaskUpdateTool.java"
+      ],
+      "implementation": [
+        "frontend/src/types/generated/taskRuntimeV4.ts",
+        "frontend/src/types/index.ts",
+        "frontend/src/hooks/useSimpleWorkbenchData.ts",
+        "frontend/src/components/workbench/AgentRunTree.tsx",
+        "frontend/src/components/workbench/AgentRunTree.test.tsx"
+      ],
+      "status": "implemented_equivalent",
+      "notes": "Native workbench returns serialized RuntimeTaskRecord.displayOutput; AgentRunTree labels 展示备注（不改变执行结果）. Clearing note hides it without changing failure status. Native AgentRunTree consumption is an explicit Rust adaptation of the source task snapshot output, not an imported Java UI component.",
+      "validation": {
+        "status": "frontend_unit_passed",
+        "evidenceRef": "#currentExecutionEvidence/frontendUnit",
+        "focusedEvidence": {
+          "path": "/tmp/zk-task-display-final-ui-tests.txt",
+          "sha256": "3f0d19bab9f598d6510eaae7f77a5d2c2ea6072accf58a1b1c2a60931872e501"
+        },
+        "result": "3 focused files / 3 tests plus full 135 files / 1185 pass; advisory display clearing preserves failure status and main Run usage remains separate from subtree total.",
+        "limits": "The latest actual-backend four-case suite does not explicitly exercise advisory display editing; this UI evidence is focused/full frontend tests, not a task-display browser acceptance claim."
+      }
+    }
+  ],
+  "currentExecutionEvidence": {
+    "nativeWorkspace": {
+      "command": "ZK_RUN_GIT_TESTS=true CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --workspace --all-features --locked --no-fail-fast",
+      "status": "passed",
+      "result": "106 harness summaries; 2852 passed, 0 failed, 8 ignored. Ignored cases are not verified.",
+      "evidence": {
+        "path": "/tmp/zk-workspace-tests-resume7.txt",
+        "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7"
+      }
+    },
+    "strictClippy": {
+      "command": "CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo clippy --workspace --all-features --all-targets --locked -- -D warnings",
+      "status": "passed",
+      "evidence": {
+        "path": "/tmp/zk-workspace-clippy-resume10.txt",
+        "sha256": "d2c539975b17f1983e2c2f9465869204726adf8cf656244c3e35b4ca27489d0c"
+      }
+    },
+    "machineContracts": {
+      "command": "./scripts/parity/check-contracts.sh",
+      "status": "passed",
+      "evidence": {
+        "path": "/tmp/zk-release-contracts-resume7.log",
+        "sha256": "dd7dca9f28ae775b866302044d05a2c4700f78b16d8efd9ce8ec2ee7f9173de5"
+      },
+      "downstreamKinds": 60,
+      "databaseTables": 56,
+      "defaultTools": 34,
+      "compiledToolSchemaSha256": "315d341299f27dbe83a7e2ce808b994b72b9a701914e955920ddbf0abfd36e35"
+    },
+    "frontendUnit": {
+      "command": "cd frontend && npm test -- --run --reporter=verbose",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "135 files;1190 passed;16 unchanged baseline skips not counted as verified;141.86s",
+      "evidence": {
+        "path": "/tmp/zk-frontend-product-final-tests.txt",
+        "sha256": "2cfd332e58298aa51e36b6ad5b5d6504a7c68d970c88857208a579ab8e1ec819"
+      }
+    },
+    "latestBackendE2E": {
+      "command": "cd frontend && ZK_E2E_SERVER_BINARY=/Users/guoqingtao/Desktop/dev/code/zkcode/target/release/zk-server npm run test:e2e:production",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "4 passed in19.3s; actual release Rust binary, installed Chrome, fresh isolated SQLite and scripted local provider.",
+      "evidence": {
+        "path": "/tmp/zk-frontend-production-release-final.txt",
+        "sha256": "f72567c6cabc2dedae57f04c3b1d8ab2d96c76921a5dc49f15f8b4f880ed0e17"
+      },
+      "binaryEvidence": {
+        "path": "/Users/guoqingtao/Desktop/dev/code/zkcode/target/release/zk-server",
+        "sha256": "5c7985aba8e25b2356f343c401f21b72b191f3a6c99ef7b8e3a23198a8817491",
+        "version": "zk-server 0.1.0 (git 08cbdc45e12cc28f3f13aaafbd0b056b980dfb1a, built 1791332366, schema 2, ws 4)",
+        "sha256Before": "5c7985aba8e25b2356f343c401f21b72b191f3a6c99ef7b8e3a23198a8817491",
+        "sha256After": "5c7985aba8e25b2356f343c401f21b72b191f3a6c99ef7b8e3a23198a8817491"
+      },
+      "binaryHashBeforeEqualsAfter": true,
+      "cases": [
+        "real backend: upgraded diagram and math renderers display the assistant response",
+        "real backend: browser chat is durable before message_complete",
+        "real backend: settings, Skill management, and revisioned memory use native contracts",
+        "real backend: merge UI produces a charged, durable handoff and inherits primary permission"
+      ],
+      "limits": "These four browser cases do not cover every product scenario, external provider availability, source browser references, or source Java tests. Flat intermediate assistant-segment behavior has focused native-wire unit coverage; the plain chat E2E covers final completion and task boundary.",
+      "binaryIdentityRecord": {
+        "path": "/tmp/zk-frontend-release-binary-evidence.json",
+        "sha256": "51cda4f879900e2ea6f8890c72847f87eb7d576392ef7091158d47f15bd19e2c"
+      }
+    },
+    "previousDebugBackendE2E": {
+      "command": "cd frontend && ZK_E2E_SERVER_BINARY=/Users/guoqingtao/Desktop/dev/code/zkcode/target/debug/zk-server npm run test:e2e:production",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "4 passed in 21.3s using installed Chrome, fresh isolated SQLite, actual latest Rust server and scripted local provider.",
+      "evidence": {
+        "path": "/tmp/zk-frontend-production-latest.txt",
+        "sha256": "f83589d871f65cfa5e20186ca70ee81d14ff5d2f63b1edcf1b8a2e7f248aa4f5"
+      },
+      "binaryEvidence": {
+        "path": "/Users/guoqingtao/Desktop/dev/code/zkcode/target/debug/zk-server",
+        "sha256": "de3da835bd01a7a7fe3ecd6c6261af12d9b99a7690d0d47cd431332ecdd3c6d6",
+        "identityScope": "Historical executable used for /tmp/zk-frontend-production-latest.txt, recorded before/after execution; this path was rebuilt later. Never infer historical identity from the current file."
+      },
+      "binaryHashBeforeEqualsAfter": true,
+      "cases": [
+        "real backend: upgraded diagram and math renderers display the assistant response",
+        "real backend: browser chat is durable before message_complete",
+        "real backend: settings, Skill management, and revisioned memory use native contracts",
+        "real backend: merge UI produces a charged, durable handoff and inherits primary permission"
+      ],
+      "limits": "These four browser cases do not cover every product scenario, external provider availability, source browser references, or source Java tests. Flat intermediate assistant-segment behavior has focused native-wire unit coverage; the plain chat E2E covers final completion and task boundary.",
+      "identityCorrection": "Corrected documentation writer that accidentally hashed the later rebuilt debug path rather than the executable identity recorded during the run."
+    },
+    "formalDevLifecycle": {
+      "status": "passed",
+      "sync": {
+        "status": "passed",
+        "result": "exit0; supported local environment synced and debug binary built",
+        "evidence": {
+          "path": "/tmp/zk-dev-sync-online-latest.log",
+          "sha256": "55c5e8b42f9d845c601d6d3cf32545b23cd474cd007262256ab2fc1cba0d0948"
+        },
+        "command": "./dev sync --build"
+      },
+      "doctor": {
+        "status": "passed",
+        "result": "ok=true; every reported check is true",
+        "evidence": {
+          "path": "/tmp/zk-doctor-deep-final.json",
+          "sha256": "19b4b8cb97c26935d64ef0ceacebc8e00d77925a92a5b139f4ca0ed231dafa5a"
+        },
+        "command": "./dev doctor --deep --json"
+      }
+    },
+    "defaultWorkspace": {
+      "status": "passed",
+      "result": "106 harnesses;2852 passed,0 failed,8 ignored; ZK_RUN_GIT_TESTS=true",
+      "evidence": {
+        "path": "/tmp/zk-workspace-tests-default-final.txt",
+        "sha256": "c0c9fb73f284c8b10c830886ec5e4f416d92dad7a5ba20f1f0a704ed0752a567"
+      }
+    },
+    "engineNoDefaultFeatures": {
+      "status": "passed",
+      "result": "616 passed; optional image thumbnail feature disabled",
+      "evidence": {
+        "path": "/tmp/zk-engine-no-default-final.txt",
+        "sha256": "bdd59d268e7d6123198fa92c90b7df41a76811fc3b7e103c0aabf2ac9fb39eae"
+      }
+    },
+    "nativeJourney": {
+      "status": "passed",
+      "result": "1 passed; real Rust→UDS→Python→Chromium and HTTP managed previews/evidence/resource cleanup",
+      "evidence": {
+        "path": "/tmp/zk-verify-journey-native-final.txt",
+        "sha256": "d7a59ab06950e8b15d1b1dcb4b350f5f845c1f515dc651f2a1d573c0f55b1d07"
+      }
+    },
+    "previousFrontendUnit": {
+      "command": "cd frontend && npm run test:run",
+      "status": "passed",
+      "result": "135 files; 1185 passed, 16 skipped. Skips are not verified.",
+      "evidence": {
+        "path": "/tmp/zk-frontend-native-segment-full.txt",
+        "sha256": "72c0e93f5abb385473d216d15cc43b1e56f27eeefc0ca36138139f502bd1ae89"
+      }
+    }
+  },
+  "currentExecutionScope": "Named native assertions passed in the complete workspace run and strict Clippy passed. Formal dev sync/build and deep doctor passed. Release-binary browser E2E passed only its four explicit cases. Product acceptance is itemized in product-acceptance-matrix.json. Source Java permutations, paid remote services and the remaining baseline skipped frontend assertions are not claimed passed. Previous validation remains historical.",
+  "previousValidation": [
+    {
+      "command": "cargo test -p zk-tools task_tools --lib --locked",
+      "result": "13 passed; native TaskOutput cursor contract retained; parent output is independent of status/error; child schema only output+optional taskId and rejects extra fields or absent run identity",
+      "log": "/tmp/zk-task-display-child-tools.txt"
+    },
+    {
+      "command": "cargo test -p zk-tools registry --lib --locked",
+      "result": "13 passed; parent visibility cannot be widened by projection, replacements revoke child bindings and dynamic registrations remain live",
+      "log": "/tmp/zk-task-display-child-registry.txt"
+    },
+    {
+      "command": "cargo test -p zk-engine display_output --lib --locked",
+      "result": "2 passed; UTF16 bound, current-child ownership, root-session ownership, terminal result/hash/error/cost immutability, empty clear and stale run refusal",
+      "log": "/tmp/zk-task-display-child-engine.txt"
+    },
+    {
+      "command": "cargo test -p zk-engine agent::executor --lib --locked",
+      "result": "25 passed; child effective schema allows only narrow self display, full TaskUpdate remains globally denied and explicit allowlist still narrows",
+      "log": "/tmp/zk-task-display-child-catalog.txt"
+    },
+    {
+      "command": "cargo test -p zk-server task_display_admission_tests --lib --locked",
+      "result": "1 passed; real production registry+AuthzStack DONT_ASK permits only actual bound child output, denies mixed fields/sibling/root and full parent CONTROL; direct bypass execution denied; no approval requests created",
+      "log": "/tmp/zk-task-display-admission.txt"
+    },
+    {
+      "command": "python3 scripts/contracts/generate_task_runtime.py --check",
+      "result": "passed; generated Rust/TS optional displayOutput and TaskUpdate output input match canonical contract"
+    },
+    {
+      "command": "cd frontend && npm run test:run",
+      "result": "135 files / 1184 passed / 16 skipped; includes separate advisory display/failure and main-Run versus subtree usage",
+      "log": "/tmp/zk-frontend-tests-task-final.txt"
+    }
+  ],
+  "validation": {
+    "evidenceRefs": [
+      "#currentExecutionEvidence/nativeWorkspace",
+      "#currentExecutionEvidence/strictClippy"
+    ],
+    "status": "named_assertions_recorded_per_capability",
+    "latestBackendE2E": "release_binary_passed_four_explicit_cases",
+    "formalDevLifecycle": "passed"
+  },
+  "productAcceptanceMatrix": "docs/migration/product-acceptance-matrix.json"
+}

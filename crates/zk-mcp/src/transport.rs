@@ -38,8 +38,26 @@ pub type NotificationHandler = Arc<dyn Fn(Value) + Send + Sync>;
 /// 传输断开回调（对照 Java `McpSseTransport.setDisconnectCallback`）。
 pub type DisconnectCallback = Arc<dyn Fn() + Send + Sync>;
 
+/// Host-owned authorization for each HTTP request, including token rotation.
+/// It may replace the HTTP client to pin the validated destination's DNS result.
+pub trait RequestAuthorizer: Send + Sync {
+    /// Return the request with a current resource-bound credential, or fail before dispatch.
+    fn authorize(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> BoxFuture<'_, Result<reqwest::RequestBuilder, McpProtocolError>>;
+}
+
 /// MCP 传输层统一接口。
 pub trait McpTransport: Send + Sync {
+    /// Physical transports retain their cleanup owner until release is proved.
+    fn cleanup_confirmed(&self) -> bool {
+        true
+    }
+    /// Run-scoped transports reserve physical resources through a durable setup owner.
+    fn set_execution_context(&self, _context: zk_tools::ToolContext) {}
+    /// HTTP transports accept a dynamic OAuth decorator; other transports ignore it.
+    fn set_request_authorizer(&self, _authorizer: Arc<dyn RequestAuthorizer>) {}
     /// Reserve the next JSON-RPC request id for this transport/session.
     fn next_request_id(&self) -> RequestId;
 

@@ -24,7 +24,7 @@
 //!   （不等 → 403 `SESSION_CONTEXT_MISMATCH`）→ 服务层 `preview`（空 path →
 //!   400 `FILE_PATH_REQUIRED`；会话 404；绑定 409/403；解析 404/403；
 //!   415/413/409）。响应头：`Content-Type`（fallback 表）、`Content-Length`、
-//!   `Content-Disposition: inline; filename="<去引号名>"`、
+//!   ASCII fallback filename plus RFC5987 UTF-8 filename*、
 //!   `X-Content-Type-Options: nosniff`。
 //! - `reveal`：`@RequestBody`（缺/坏 → 400 `INVALID_REQUEST_BODY`）→
 //!   `X-Session-Id`（400 `MISSING_HEADER`）→ `requireMatchingSession`（403）→
@@ -224,10 +224,10 @@ pub(crate) async fn preview(
         let root = require_current_binding(&config, &working_dir)?;
         let canonical = resolve_within(&root, &raw_path)?;
         let target = preview_target(&canonical)?;
-        // 旧 `target.path().getFileName().toString().replace("\"", "")`。
+        // Use the filename only; the response encoder excludes controls and path separators.
         let safe_name = canonical
             .file_name()
-            .map(|name| name.to_string_lossy().replace('"', ""))
+            .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default();
         // 读取文件字节；IO 失败复刻旧 `preview` 的 409（元数据/读取不可用）。
         let bytes = std::fs::read(&target.path).map_err(|_| {
@@ -250,18 +250,21 @@ pub(crate) async fn preview(
         HeaderValue::from_str(&content_type).map_err(|_| ApiError::internal())?,
     );
     map.insert(header::CONTENT_LENGTH, HeaderValue::from(size));
-    // 文件名可能含非 ASCII（macOS）；`from_bytes` 接受 obs-text（latin1/UTF-8
-    // 字节），比 `from_str` 更贴近 Spring 原样写入的行为。
-    let disposition = format!("inline; filename=\"{safe_name}\"");
     map.insert(
         header::CONTENT_DISPOSITION,
-        HeaderValue::from_bytes(disposition.as_bytes()).map_err(|_| ApiError::internal())?,
+        HeaderValue::from_str(&inline_disposition(&safe_name)).map_err(|_| ApiError::internal())?,
     );
     map.insert(
         HeaderName::from_static("x-content-type-options"),
         HeaderValue::from_static("nosniff"),
     );
     Ok(response)
+}
+
+/// RFC5987 preserves native Unicode filenames without embedding non-ASCII,
+/// controls, quotes or path separators directly in an HTTP header.
+fn inline_disposition(name: &str) -> String {
+    super::attachment::content_disposition("inline", name)
 }
 
 /// `POST /api/sessions/{sessionId}/files/reveal`——原生文件管理器揭示（旧 `reveal`）。
@@ -328,6 +331,19 @@ pub(crate) async fn reveal(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preview_filename_is_ascii_safe_and_preserves_utf8() {
+        let header = inline_disposition("报告 \"x\"\r\n.pdf");
+        assert!(header.is_ascii());
+        assert!(HeaderValue::from_str(&header).is_ok());
+        assert!(!header.contains('\r') && !header.contains('\n'));
+        assert!(header.contains("filename*=UTF-8''%E6%8A%A5%E5%91%8A%20%22x%22.pdf"));
+        assert_eq!(
+            inline_disposition("\r\n"),
+            "inline; filename=\"file\"; filename*=UTF-8''file"
+        );
+    }
 
     #[test]
     fn local_file_picker_response_has_stable_metadata_shape() {

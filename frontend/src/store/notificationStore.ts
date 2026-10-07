@@ -18,6 +18,8 @@ export interface NotificationStoreState {
         message: string;
         priority?: NotificationPriority;
         timeout?: number;
+        /** §10.7-②：错误 Toast 的可执行重试动作（有则渲染"重试"主钮） */
+        onRetry?: () => void;
     }) => void;
     removeNotification: (key: string) => void;
     clearAll: () => void;
@@ -28,6 +30,8 @@ export const useNotificationStore = create<NotificationStoreState>()(
         notifications: [],
 
         addNotification: (config) => set(d => {
+            // key 是通知身份；替换后移到末尾，进入最新通知的可见窗口。
+            d.notifications = d.notifications.filter(n => n.key !== config.key);
             d.notifications.push({
                 key: config.key,
                 level: config.level,
@@ -35,6 +39,7 @@ export const useNotificationStore = create<NotificationStoreState>()(
                 priority: config.priority ?? 'normal',
                 timeout: config.timeout ?? 5000,
                 createdAt: Date.now(),
+                onRetry: config.onRetry,
             });
         }),
         removeNotification: (key) => set(d => {

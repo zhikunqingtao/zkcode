@@ -2,7 +2,7 @@
 //!
 //! 对照旧 `com.aicodeassistant.hook` 包。核心语义边界（详见各子模块偏离留痕）：
 //! 通知 / 展示 hook 仍是错误隔离的外部副作用；PRE transform / security hook
-//! 可以安全改写或拒绝工具输入。改写值始终被视为不可信，并在工具执行前重新经过
+//! 分别改写或拒绝工具输入。改写值始终被视为不可信，并在工具执行前重新经过
 //! [`crate::admission::ToolAdmission`] 的完整路径、命令和敏感数据检查。Security
 //! hook 的配置、执行或协议错误失败关闭。
 //!
@@ -13,6 +13,8 @@
 //!   [`HookContext`] 上下文。
 //! - [`http_executor`]：[`HttpHookExecutor`] HTTP 通道 + SSRF 防护（H-02）。
 
+pub mod admission;
+pub use admission::{HookAdmission, HookStartPermit};
 pub mod event;
 pub mod http_executor;
 pub mod registry;
@@ -21,4 +23,6 @@ pub mod service;
 pub use event::{HookConfig, HookEvent, HookRole};
 pub use http_executor::{HttpHookError, HttpHookExecutor, is_blocked_address};
 pub use registry::HookRegistry;
-pub use service::{HookContext, HookService, PreHookDecision};
+pub use service::{
+    ExternalHookPolicy, HookContext, HookService, PreHookDecision, StopHookDecision,
+};

@@ -31,22 +31,22 @@ export const McpToolProgressIndicator: React.FC<Props> = ({ progress, onCancel }
         : (progress.message || '执行中…');
 
     return (
-        <div className="flex items-center gap-2 p-2 bg-gray-50 dark:bg-gray-800 rounded-md text-sm">
+        <div className="flex items-center gap-2 p-2 bg-surface2 rounded-md text-sm">
             <div className="flex-1 min-w-0">
-                <div className="flex justify-between text-xs text-gray-500 mb-1">
+                <div className="flex justify-between text-[13px] text-t2 mb-1">
                     <span className="truncate" title={`${progress.serverName}:${progress.toolName}`}>
                         {progress.serverName}: {progress.toolName}
                     </span>
                     <span className="ml-2 flex-shrink-0">{statusLabel}</span>
                 </div>
-                <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-1.5">
+                <div className="w-full bg-sunken2 rounded-full h-1.5">
                     <div
-                        className="bg-blue-500 h-1.5 rounded-full transition-all duration-300"
+                        className="bg-accent2 h-1.5 rounded-full transition-[width] duration-slow"
                         style={{ width: `${Math.max(percentage, 5)}%` }}
                     />
                 </div>
                 {progress.message && percentage > 0 && (
-                    <div className="text-xs text-gray-400 mt-1 truncate" title={progress.message}>
+                    <div className="text-[13px] text-t2 mt-1 truncate" title={progress.message}>
                         {progress.message}
                     </div>
                 )}
@@ -54,7 +54,7 @@ export const McpToolProgressIndicator: React.FC<Props> = ({ progress, onCancel }
             <button
                 type="button"
                 onClick={() => onCancel(progress.progressToken)}
-                className="text-xs text-red-500 hover:text-red-700 px-2 py-1 rounded hover:bg-red-50 dark:hover:bg-red-900/20"
+                className="panel-control text-[13px] text-err hover:text-err px-2 py-1 rounded hover:bg-errsoft"
                 title="取消"
             >
                 取消

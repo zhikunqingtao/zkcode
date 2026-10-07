@@ -1,1495 +1,416 @@
-//! Swarm API 端点——Agent Swarms 多代理协作（对照旧 `SwarmController.java`，294L）。
-//!
-//! | Method | Path | Handler |
-//! |--------|------|---------|
-//! | GET | /api/swarm | `list_swarms` |
-//! | POST | /api/swarm | `create_swarm` |
-//! | POST | /api/swarm/{id}/dispatch | `dispatch_swarm` |
-//! | GET | /api/swarm/{id} | `get_swarm` |
-//! | DELETE | /api/swarm/{id} | `destroy_swarm` |
-//! | POST | /api/swarm/{id}/abort | `abort_swarm` |
-//! | POST | /api/swarm/{id}/shutdown | `shutdown_swarm` |
-//! | POST | /api/swarm/{id}/force-stop | `force_stop_swarm` |
-//! | POST | /api/swarm/{id}/worker/{workerId}/abort | `abort_worker` |
-//!
-//! 生产入口当前硬性失败关闭。`ZK_SWARM_ENABLED` 只表达部署意图，不代表
-//! 能力已经通过统一 `TaskRuntime` 门禁；即使配置和 `ENABLE_AGENT_SWARMS` 都开启，
-//! API 仍返回 `FEATURE_NOT_READY`，readiness 也会保持 `NOT_READY`。
-//!
-//! # 有意差异
-//!
-//! - Java 使用 `@RequestMapping("/api/swarm")` + 多个方法映射；本实现
-//!   在 `routes.rs` 中逐条注册（axum 惯用法）。
-//! - 全部端点只访问 `AppState.coordinator` 的单一生产实例；团队状态、Worker
-//!   状态、取消令牌和事件总线不再由 REST 另建副本。
-//! - Java 使用 `SwarmState` / `SwarmConfig` DTO；本实现使用
-//!   `serde_json::Value` 直接构造响应（Phase 1 简化）。
-//! - Java abort 端点含三层防御身份验证；本实现简化为 session 验证
-//!   （多层防御后续按需补全）。
-
-use axum::Json;
-use axum::extract::{Path as AxumPath, State};
-use serde_json::{Value, json};
-use sha2::Digest as _;
-use zk_db::SwarmRecord;
-use zk_engine::agent::PersistedChildExecution;
-use zk_engine::coordinator::AgentRequest as SwarmAgentRequest;
-use zk_engine::{
-    AgentRequest, AgentStatus, ChildExecutionContext, ChildTaskSubmission, IsolationMode,
-    WorkerStatus,
+//! Durable team API. `TaskRuntime` owns worker execution, cancellation and results.
+use crate::{error::ApiError, state::AppState};
+use axum::{
+    Json,
+    extract::{Path, State},
 };
+use serde_json::{Value, json};
 
-use crate::error::ApiError;
-use crate::state::AppState;
-
-/// teamName 白名单：字母/数字/下划线/中划线，长度 1-64。
-fn is_valid_team_name(name: &str) -> bool {
+fn ready(state: &AppState) -> Result<std::sync::Arc<crate::team_runtime::TeamRuntime>, ApiError> {
+    if !state.swarm_executable() {
+        return Err(ApiError::feature_not_ready(
+            "Swarm",
+            "the explicit team/Agent switches and the initialized durable runtime are available",
+        ));
+    }
+    if !state.feature_flags.is_enabled("ENABLE_AGENT_SWARMS") {
+        return Err(ApiError::not_found(
+            "FEATURE_DISABLED",
+            "Agent Swarms feature is disabled",
+        ));
+    }
+    state.team_runtime().ok_or_else(|| {
+        ApiError::feature_not_ready("Swarm", "the shared Agent executor is configured")
+    })
+}
+fn failure(_message: String) -> ApiError {
+    tracing::error!(
+        error_code = "TEAM_OPERATION_FAILED",
+        "team operation failed"
+    );
+    ApiError::validation_with_code(
+        "TEAM_OPERATION_FAILED",
+        "The team operation could not complete; inspect task diagnostics",
+    )
+}
+async fn team(state: &AppState, id: &str) -> Result<zk_db::TeamDefinition, ApiError> {
+    state
+        .db
+        .find_team(id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("SWARM_NOT_FOUND", "Team does not exist"))
+}
+fn name_valid(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
-
-/// `GET /api/swarm` — Coordinator 列表面；WP-11 完成前明确失败关闭。
-pub(crate) async fn list_swarms(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    ensure_swarm_ready(&state)?;
-    let mut swarms = state
-        .db
-        .list_swarms()
-        .await?
-        .into_iter()
-        .map(|record| durable_swarm_projection(&record))
-        .collect::<Vec<_>>();
-    for team in state.coordinator.list_swarms() {
-        swarms.retain(|value| value["swarmId"].as_str() != Some(team.team_id.as_str()));
-        swarms.push(swarm_projection(&state, &team));
-    }
-    Ok(Json(json!({ "swarms": swarms })))
+fn names(value: Option<&Value>) -> Result<Vec<String>, ApiError> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let values = value
+        .as_array()
+        .ok_or_else(|| ApiError::validation("Tool filters must be arrays"))?;
+    values
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .filter(|value| !value.is_empty() && value.len() < 128)
+                .map(str::to_owned)
+                .ok_or_else(|| ApiError::validation("Invalid tool name"))
+        })
+        .collect()
+}
+async fn stored_config(state: &AppState) -> Result<Value, ApiError> {
+    let value = state.db.get_config_value("user_config").await?;
+    value.map_or_else(
+        || Ok(json!({})),
+        |value| {
+            serde_json::from_str::<Value>(&value)
+                .map(|value| value["swarm"].clone())
+                .map_err(|_| ApiError::validation("Stored user configuration is invalid"))
+        },
+    )
+}
+fn bound(body: &Value, stored: &Value, key: &str, default: u64, max: u64) -> Result<u64, ApiError> {
+    let value = body.get(key).or_else(|| stored.get(key));
+    let number = value
+        .map_or(Some(default), Value::as_u64)
+        .filter(|value| (1..=max).contains(value))
+        .ok_or_else(|| ApiError::validation(format!("{key} must be between 1 and {max}")))?;
+    Ok(number)
 }
 
-/// `POST /api/swarm`——创建 Swarm。
-///
-/// Body: `{ "teamName": "...", "maxWorkers": 5, "sessionId": "..." }`
+pub(crate) async fn list_swarms(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let runtime = ready(&state)?;
+    let mut projections = Vec::new();
+    state.db.reconcile_team_queue(state.startup_epoch()).await?;
+    for team in state.db.list_teams().await? {
+        projections.push(runtime.projection(&team).await.map_err(failure)?);
+    }
+    Ok(Json(json!({"swarms":projections})))
+}
 pub(crate) async fn create_swarm(
     State(state): State<AppState>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
-    ensure_swarm_ready(&state)?;
-    if !state.feature_flags.is_enabled("ENABLE_AGENT_SWARMS") {
-        return Err(ApiError::not_found(
-            "FEATURE_DISABLED",
-            "Agent Swarms feature is disabled",
-        ));
+    let runtime = ready(&state)?;
+    let name = body["teamName"].as_str().unwrap_or("swarm-team");
+    if !name_valid(name) {
+        return Err(ApiError::validation("Invalid teamName"));
     }
-
-    let team_name = body
-        .get("teamName")
-        .and_then(|v| v.as_str())
-        .unwrap_or("swarm-team");
-    if !is_valid_team_name(team_name) {
-        return Err(ApiError::validation(
-            "Invalid teamName: must match ^[A-Za-z0-9_-]{1,64}$ (path traversal prevention)",
-        ));
-    }
-
-    let max_workers = body
-        .get("maxWorkers")
-        .and_then(serde_json::Value::as_u64)
-        .map_or(5, |v| usize::try_from(v).unwrap_or(5));
-    let session_id = body
-        .get("sessionId")
-        .and_then(|v| v.as_str())
-        .filter(|value| !value.is_empty())
+    let session_id = body["sessionId"]
+        .as_str()
         .ok_or_else(|| ApiError::validation("sessionId is required"))?;
-    let session = state
+    let _session = state
         .db
         .get_session(session_id)
         .await?
         .ok_or_else(|| ApiError::session_not_found(session_id))?;
-    if state.db.find_swarm(team_name).await?.is_some() {
-        return Err(ApiError::validation(format!(
-            "Swarm already exists: {team_name}"
-        )));
-    }
-    if let Some(snapshot) = body.get("projectContext") {
-        let working_dir_hash =
-            format!("{:x}", sha2::Sha256::digest(session.working_dir.as_bytes()));
-        let now = zk_db::time::format_rfc3339_micros(zk_db::time::now_millis());
-        state
-            .db
-            .save_project_context(&zk_db::ProjectContextRecord {
-                id: format!("project-context-{}", uuid::Uuid::new_v4()),
-                working_dir_hash,
-                snapshot: snapshot.clone(),
-                git_head_sha: None,
-                updated_at: now,
-            })
-            .await?;
-    }
-
-    let objective = body
-        .get("objective")
-        .and_then(Value::as_str)
-        .or_else(|| {
-            body.get("projectContext")
-                .and_then(|context| context.get("objective"))
-                .and_then(Value::as_str)
-        })
-        .unwrap_or("Coordinate the requested tasks safely");
-    match state.coordinator.create_swarm_with_objective(
-        team_name,
-        max_workers,
-        session_id,
-        objective,
-    ) {
-        Ok(info) => {
-            let record = SwarmRecord::created(team_name, session_id, max_workers);
-            if let Err(error) = state.db.save_swarm(&record).await {
-                state.coordinator.destroy_swarm(team_name);
-                return Err(error.into());
-            }
-            state.coordinator.publish_swarm_state(&info.team_id);
-            Ok(Json(json!({
-                "swarmId": &info.team_id,
-                "teamName": &info.team_id,
-                "phase": "Research",
-                "maxWorkers": max_workers
-            })))
-        }
-        Err(e) => Err(ApiError::validation(e)),
-    }
+    let stored = stored_config(&state).await?;
+    let config = worker_config(&state, &body, &stored)?;
+    let created = state.db.create_team(name, session_id, config).await?;
+    runtime.reset_created(name);
+    runtime.kick(name);
+    Ok(Json(runtime.projection(&created).await.map_err(failure)?))
 }
-
-/// `POST /api/swarm/{swarmId}/dispatch`——分发任务给 Workers。
-///
-/// Body: `{ "tasks": [{"prompt": "...", "agentType": "..."}] }`
-#[allow(clippy::too_many_lines)] // validation, durable binding, dispatch, and collector are one transaction boundary
-pub(crate) async fn dispatch_swarm(
-    State(state): State<AppState>,
-    AxumPath(swarm_id): AxumPath<String>,
-    Json(body): Json<Value>,
-) -> Result<Json<Value>, ApiError> {
-    ensure_swarm_ready(&state)?;
-    if !state.feature_flags.is_enabled("ENABLE_AGENT_SWARMS") {
-        return Err(ApiError::not_found(
-            "FEATURE_DISABLED",
-            "Agent Swarms feature is disabled",
+fn worker_config(state: &AppState, body: &Value, stored: &Value) -> Result<Value, ApiError> {
+    let backend = body
+        .get("backend")
+        .or_else(|| stored.get("backend"))
+        .and_then(Value::as_str)
+        .unwrap_or("IN_PROCESS");
+    if backend != "IN_PROCESS" {
+        return Err(ApiError::validation(
+            "Only IN_PROCESS team workers are supported",
         ));
     }
-
-    let team = state.coordinator.get_swarm(&swarm_id).ok_or_else(|| {
-        ApiError::not_found("SWARM_NOT_FOUND", &format!("Swarm not found: {swarm_id}"))
-    })?;
-
-    let task_values = body
-        .get("tasks")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-    if task_values.is_empty() || task_values.len() > team.worker_count {
-        return Err(ApiError::validation(format!(
-            "tasks must contain 1..={} items",
-            team.worker_count
-        )));
+    let isolation = body
+        .get("workerIsolation")
+        .or_else(|| stored.get("workerIsolation"))
+        .map_or(Ok("readOnly"), |value| {
+            value
+                .as_str()
+                .ok_or_else(|| ApiError::validation("workerIsolation must be a string"))
+        })?;
+    if !matches!(isolation, "readOnly" | "worktree") {
+        return Err(ApiError::validation(
+            "workerIsolation must be readOnly or worktree",
+        ));
     }
-    let run_id = body
-        .get("runId")
+    if isolation == "worktree"
+        && !(state.config.agent_write_enabled && state.config.worktree_enabled)
+    {
+        return Err(ApiError::feature_not_ready(
+            "Team worktree writes",
+            "both existing Agent write and Worktree configuration gates are enabled",
+        ));
+    }
+    let max_workers = bound(body, stored, "maxWorkers", 5, 20)?;
+    let queue_size = bound(body, stored, "taskQueueSize", 50, 200)?;
+    let allow = names(
+        body.get("workerToolAllowList")
+            .or_else(|| stored.get("workerToolAllowList")),
+    )?;
+    let deny = names(
+        body.get("workerToolDenyList")
+            .or_else(|| stored.get("workerToolDenyList")),
+    )?;
+    let tools = state.tools();
+    for tool in allow.iter().chain(&deny) {
+        if tools.get(tool).is_none() {
+            return Err(ApiError::validation(format!("Unknown tool: {tool}")));
+        }
+    }
+    let effective: Vec<String> = if allow.is_empty() {
+        zk_engine::agent::READ_ONLY_CHILD_TOOLS
+            .iter()
+            .chain(
+                zk_engine::agent::WRITE_CHILD_TOOLS
+                    .iter()
+                    .filter(|_| isolation == "worktree"),
+            )
+            .filter(|name| tools.get(name).is_some())
+            .map(|name| (*name).to_owned())
+            .collect()
+    } else {
+        allow.clone()
+    }
+    .into_iter()
+    .filter(|name| !deny.contains(name))
+    .collect();
+    if isolation == "readOnly"
+        && effective.iter().any(|name| {
+            zk_engine::agent::WRITE_CHILD_TOOLS.contains(&name.as_str())
+                || tools.get(name).is_some_and(|tool| {
+                    matches!(tool.child_access(), zk_tools::ChildToolAccess::WriteGated)
+                })
+        })
+    {
+        return Err(ApiError::validation(
+            "Write tools require explicit workerIsolation=worktree",
+        ));
+    }
+    let model = body
+        .get("workerModel")
+        .or_else(|| stored.get("workerModel"))
         .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
+        .filter(|value| !value.is_empty());
+    if model.is_some_and(|model| state.providers.load().model_owner(model).is_none()) {
+        return Err(ApiError::validation(
+            "workerModel must be a configured model",
+        ));
+    }
+    Ok(
+        json!({"backend":"IN_PROCESS","maxWorkers":max_workers,"taskQueueSize":queue_size,"workerModel":model,"workerIsolation":isolation,"workerToolAllowList":effective,"workerToolDenyList":deny}),
+    )
+}
+pub(crate) async fn get_swarm(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let runtime = ready(&state)?;
+    state.db.reconcile_team_queue(state.startup_epoch()).await?;
+    Ok(Json(
+        runtime
+            .projection(&team(&state, &id).await?)
+            .await
+            .map_err(failure)?,
+    ))
+}
+pub(crate) async fn dispatch_swarm(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let runtime = ready(&state)?;
+    let team = team(&state, &id).await?;
+    let run_id = body["runId"]
+        .as_str()
         .ok_or_else(|| ApiError::validation("runId is required"))?;
     let run = state
         .db
         .find_run_by_id(run_id)
         .await?
-        .ok_or_else(|| ApiError::not_found("RUN_NOT_FOUND", "Parent Run not found"))?;
-    if run.session_id != team.session_id {
-        return Err(ApiError::validation(
-            "runId does not belong to the Swarm session",
-        ));
-    }
-    if !matches!(
-        run.status.as_str(),
-        "queued" | "running" | "waitingInteraction"
-    ) {
-        return Err(ApiError::validation("Parent Run is already terminal"));
-    }
-    let session = state
-        .db
-        .get_session(&team.session_id)
-        .await?
-        .ok_or_else(|| ApiError::session_not_found(&team.session_id))?;
-    let Some(runtime) = state.agent_runtime() else {
-        return Err(ApiError::feature_not_ready(
-            "Swarm dispatch",
-            "ZK_AGENT_ENABLED and the shared production Agent runtime are enabled",
-        ));
-    };
-
-    let mut seen = std::collections::HashSet::new();
-    let mut requests = Vec::with_capacity(task_values.len());
-    for (index, task) in task_values.iter().enumerate() {
-        let prompt = task
-            .get("prompt")
-            .and_then(Value::as_str)
-            .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| ApiError::validation("each task requires a non-empty prompt"))?;
-        if prompt.len() > 32 * 1024 {
-            return Err(ApiError::validation("task prompt exceeds 32 KiB"));
+        .filter(|run| run.session_id == team.session_id)
+        .ok_or_else(|| {
+            ApiError::not_found("RUN_NOT_FOUND", "Run is not owned by the team session")
+        })?;
+    let tasks = body["tasks"]
+        .as_array()
+        .filter(|tasks| !tasks.is_empty() && tasks.len() <= 200)
+        .ok_or_else(|| ApiError::validation("tasks requires 1..=200 items"))?;
+    let mut payloads = Vec::new();
+    for task in tasks {
+        let prompt = task["prompt"]
+            .as_str()
+            .filter(|text| !text.trim().is_empty() && text.len() <= 32768)
+            .ok_or_else(|| ApiError::validation("Each task requires a prompt of at most 32 KiB"))?;
+        let model = task["model"]
+            .as_str()
+            .or_else(|| team.config["workerModel"].as_str())
+            .unwrap_or(&run.model);
+        if state.providers.load().model_owner(model).is_none() {
+            return Err(ApiError::validation("Task model must be configured"));
         }
-        let requested_worker = task
-            .get("workerId")
-            .and_then(Value::as_str)
-            .map_or_else(|| format!("worker-{}", index + 1), str::to_owned);
-        if !is_valid_team_name(&requested_worker) || !seen.insert(requested_worker.clone()) {
-            return Err(ApiError::validation(
-                "workerId must be unique and path-safe",
-            ));
+        let default_agent = if team.config["workerIsolation"] == "worktree" {
+            "general-purpose"
+        } else {
+            "explore"
+        };
+        let agent_type = task["agentType"].as_str().unwrap_or(default_agent);
+        if !matches!(
+            agent_type,
+            "explore" | "plan" | "guide" | "verification" | "general-purpose"
+        ) {
+            return Err(ApiError::validation("Unknown worker agentType"));
         }
-        // A worker is also its durable Task identity. Human labels remain input-only;
-        // runtime identities are always complete UUIDv4 values.
-        let worker_id = uuid::Uuid::new_v4().to_string();
-        let agent_type = task
-            .get("agentType")
-            .and_then(Value::as_str)
-            .unwrap_or("explore")
-            .to_owned();
-        let model = task
-            .get("model")
-            .and_then(Value::as_str)
-            .unwrap_or(&run.model)
-            .to_owned();
-        requests.push(SwarmAgentRequest {
-            agent_id: worker_id,
-            prompt: prompt.to_owned(),
-            agent_type: Some(agent_type),
-            model: Some(model),
-        });
+        payloads.push(json!({"prompt":prompt,"model":model,"agentType":agent_type}));
     }
-
-    state
-        .coordinator
-        .begin_dispatch(&swarm_id)
-        .map_err(ApiError::validation)?;
-    let mut durable = state
+    let generated = uuid::Uuid::new_v4().to_string();
+    let request_id = body["requestId"].as_str().unwrap_or(&generated);
+    let queued = state
         .db
-        .find_swarm(&swarm_id)
-        .await?
-        .ok_or_else(|| ApiError::not_found("SWARM_NOT_FOUND", "Swarm history not found"))?;
-    durable.phase = String::from("RUNNING");
-    durable.total_tasks = requests.len();
-    durable.active_workers = requests.len();
-    durable.completed_tasks = 0;
-    state.db.save_swarm(&durable).await?;
-    let dispatch_id = uuid::Uuid::new_v4().to_string();
-    let mut registered_workers: Vec<String> = Vec::new();
-    for (ordinal, request) in requests.iter().enumerate() {
-        let worker_cancel = state
-            .coordinator
-            .swarm_service()
-            .worker_cancel_token(&swarm_id, &request.agent_id);
-        let mut submission = ChildTaskSubmission::attached(
+        .enqueue_team_work(
+            &id,
             &team.session_id,
             &run.task_id,
             run_id,
-            &dispatch_id,
-            format!("Swarm worker {}", ordinal + 1),
-            &request.prompt,
-            request.model.as_deref().unwrap_or(&run.model),
-            &session.working_dir,
-        );
-        submission.ordinal =
-            i64::try_from(ordinal).map_err(|_| ApiError::validation("too many Swarm workers"))?;
-        if let Err(error) = runtime
-            .tasks
-            .register_external_task(&request.agent_id, submission, worker_cancel)
-            .await
-        {
-            for worker_id in &registered_workers {
-                let failure = Err("Swarm dispatch registration failed".to_owned());
-                let _ = runtime
-                    .tasks
-                    .finish_external_task(worker_id, &team.session_id, &failure)
-                    .await;
-            }
-            state.coordinator.finish_dispatch(&swarm_id, false);
-            state
-                .coordinator
-                .fail_workflow(&swarm_id, "Swarm task registration failed");
-            durable.phase = String::from("FAILED");
-            durable.active_workers = 0;
-            let _ = state.db.save_swarm(&durable).await;
-            return Err(ApiError::validation(error));
-        }
-        registered_workers.push(request.agent_id.clone());
-    }
-
-    let executor = runtime.executor.clone();
-    let task_service = runtime.tasks.clone();
-    let parent_session_id = team.session_id.clone();
-    let parent_run_id = run_id.to_owned();
-    let working_directory = std::path::PathBuf::from(session.working_dir);
-    let dispatch = state.coordinator.swarm_service().dispatch(
-        &swarm_id,
-        &team.session_id,
-        requests.clone(),
-        move |request, cancel| {
-            let executor = executor.clone();
-            let task_service = task_service.clone();
-            let parent_session_id = parent_session_id.clone();
-            let parent_run_id = parent_run_id.clone();
-            let working_directory = working_directory.clone();
-            async move {
-                let execution = task_service
-                    .mark_external_task_running(&request.agent_id, &parent_session_id)
-                    .await?;
-                let persisted = PersistedChildExecution::try_new(
-                    execution.task_id.clone(),
-                    execution.run_id.clone(),
-                    execution.transcript_session_id,
-                )?;
-                let child_request = AgentRequest::new(
-                    execution.task_id,
-                    request.prompt.clone(),
-                    request.agent_type,
-                    request.model,
-                    IsolationMode::None,
-                    true,
-                );
-                let context = ChildExecutionContext {
-                    parent_session_id: parent_session_id.clone(),
-                    parent_run_id,
-                    working_directory,
-                    tool_use_id: format!("swarm-{}", request.agent_id),
-                    allowed_tools: None,
-                    allow_write_tools: false,
-                    write_tool_allowlist: None,
-                    include_project_prompt: true,
-                };
-                let result = executor
-                    .execute_precreated_with_cancel(
-                        &child_request,
-                        &context,
-                        &persisted,
-                        execution.budget,
-                        cancel,
-                    )
-                    .await;
-                let outcome = match result.status {
-                    AgentStatus::Completed | AgentStatus::MaxTurns => {
-                        Ok(result.result.unwrap_or_default())
-                    }
-                    _ => Err(result.result.unwrap_or_else(|| "Worker failed".to_owned())),
-                };
-                task_service
-                    .finish_external_task(&request.agent_id, &parent_session_id, &outcome)
-                    .await?;
-                outcome
-            }
-        },
-    );
-    if let Err(error) = dispatch {
-        for worker_id in &registered_workers {
-            let failure = Err(format!("Swarm dispatch failed: {error}"));
-            let _ = runtime
-                .tasks
-                .finish_external_task(worker_id, &team.session_id, &failure)
-                .await;
-        }
-        state.coordinator.finish_dispatch(&swarm_id, false);
-        state.coordinator.fail_workflow(&swarm_id, &error);
-        durable.phase = String::from("FAILED");
-        durable.active_workers = 0;
-        let _ = state.db.save_swarm(&durable).await;
-        return Err(ApiError::validation(error));
-    }
-    let _ = state
-        .coordinator
-        .advance_workflow(&swarm_id, "Workers dispatched and executing");
-    state.coordinator.publish_swarm_state(&swarm_id);
-    let coordinator = state.coordinator.clone();
-    let anomaly_db = state.db.clone();
-    let swarm_db = state.db.clone();
-    let swarm_for_collect = swarm_id.clone();
-    tokio::spawn(async move {
-        let results = coordinator
-            .swarm_service()
-            .collect_results(&swarm_for_collect)
-            .await;
-        if matches!(
-            coordinator.swarm_phase(&swarm_for_collect),
-            Some(zk_engine::SwarmPhase::Aborting | zk_engine::SwarmPhase::Aborted)
-        ) {
-            coordinator.mark_aborted(&swarm_for_collect);
-        } else {
-            coordinator.finish_dispatch(
-                &swarm_for_collect,
-                results.failure_count == 0 && results.success_count > 0,
-            );
-        }
-        if let Ok(Some(mut durable)) = swarm_db.find_swarm(&swarm_for_collect).await {
-            durable.active_workers = 0;
-            durable.total_tasks = results.success_count + results.failure_count;
-            durable.completed_tasks = results.success_count;
-            durable.phase = String::from(match coordinator.swarm_phase(&swarm_for_collect) {
-                Some(zk_engine::SwarmPhase::Completed) => "COMPLETED",
-                Some(zk_engine::SwarmPhase::Aborted) => "ABORTED",
-                _ => "FAILED",
-            });
-            if let Err(error) = swarm_db.save_swarm(&durable).await {
-                tracing::error!(%error, "failed to persist terminal Swarm projection");
-            }
-        }
-        if results.failure_count == 0 && results.success_count > 0 {
-            let _ = coordinator.advance_workflow(
-                &swarm_for_collect,
-                "Worker outputs aggregated for verification",
-            );
-        } else if !matches!(
-            coordinator.swarm_phase(&swarm_for_collect),
-            Some(zk_engine::SwarmPhase::Aborted)
-        ) {
-            coordinator.fail_workflow(&swarm_for_collect, "One or more workers failed");
-        }
-        for worker in coordinator
-            .swarm_service()
-            .worker_states(&swarm_for_collect)
-            .into_iter()
-            .filter(|worker| worker.status == WorkerStatus::Failed)
-        {
-            let message = worker
-                .output
-                .clone()
-                .unwrap_or_else(|| "Worker failed without output".to_owned());
-            let rule_id = if message.to_ascii_lowercase().contains("cancel")
-                || message.to_ascii_lowercase().contains("abort")
-            {
-                "worker-cancelled"
-            } else {
-                "worker-failed"
-            };
-            let event = zk_db::AnomalyEventRecord {
-                id: format!("anomaly-{}", uuid::Uuid::new_v4()),
-                swarm_id: swarm_for_collect.clone(),
-                worker_id: worker.worker_id,
-                rule_id: rule_id.to_owned(),
-                severity: if rule_id == "worker-cancelled" {
-                    "warning".to_owned()
-                } else {
-                    "error".to_owned()
-                },
-                message: message.clone(),
-                detected_at: zk_db::time::now_millis(),
-                resolved_at: None,
-                resolution: None,
-                context_snapshot: Some(json!({
-                    "phase": coordinator
-                        .swarm_phase(&swarm_for_collect)
-                        .map_or("INTERRUPTED", zk_engine::SwarmPhase::as_str),
-                    "output": message
-                })),
-            };
-            if let Err(error) = anomaly_db.save_anomaly_event(&event).await {
-                tracing::error!(%error, "failed to persist Swarm anomaly");
-            }
-        }
-        coordinator.publish_swarm_state(&swarm_for_collect);
-    });
-
-    Ok(Json(json!({
-        "swarmId": swarm_id,
-        "teamName": team.team_id,
-        "dispatched": requests.len(),
-        "workerIds": requests.into_iter().map(|request| request.agent_id).collect::<Vec<_>>(),
-        "status": "running"
-    })))
-}
-
-/// `GET /api/swarm/{swarmId}`——查询 Swarm 状态。
-pub(crate) async fn get_swarm(
-    State(state): State<AppState>,
-    AxumPath(swarm_id): AxumPath<String>,
-) -> Result<Json<Value>, ApiError> {
-    ensure_swarm_ready(&state)?;
-    if !state.feature_flags.is_enabled("ENABLE_AGENT_SWARMS") {
-        return Err(ApiError::not_found(
-            "FEATURE_DISABLED",
-            "Agent Swarms feature is disabled",
-        ));
-    }
-
-    let team = state.coordinator.get_swarm(&swarm_id).ok_or_else(|| {
-        ApiError::not_found("SWARM_NOT_FOUND", &format!("Swarm not found: {swarm_id}"))
-    });
-    if let Ok(team) = team {
-        return Ok(Json(swarm_projection(&state, &team)));
-    }
-    let record = state.db.find_swarm(&swarm_id).await?.ok_or_else(|| {
-        ApiError::not_found("SWARM_NOT_FOUND", &format!("Swarm not found: {swarm_id}"))
-    })?;
-    Ok(Json(durable_swarm_projection(&record)))
-}
-
-/// `DELETE /api/swarm/{swarmId}`——销毁 Swarm。
-pub(crate) async fn destroy_swarm(
-    State(state): State<AppState>,
-    AxumPath(swarm_id): AxumPath<String>,
-) -> Result<Json<Value>, ApiError> {
-    ensure_swarm_ready(&state)?;
-    let durable_exists = state.db.find_swarm(&swarm_id).await?.is_some();
-    if !state.feature_flags.is_enabled("ENABLE_AGENT_SWARMS") {
-        return Err(ApiError::not_found(
-            "FEATURE_DISABLED",
-            "Agent Swarms feature is disabled",
-        ));
-    }
-
-    let running_workers = state
-        .coordinator
-        .swarm_service()
-        .worker_states(&swarm_id)
-        .into_iter()
-        .filter(|worker| worker.status == WorkerStatus::Running)
-        .map(|worker| worker.worker_id)
-        .collect::<Vec<_>>();
-    if state.coordinator.swarm_service().has_pending(&swarm_id) {
-        let _ = state
-            .coordinator
-            .swarm_service()
-            .force_stop_swarm(&swarm_id)
-            .await;
-        fail_worker_tasks(&state, &swarm_id, &running_workers, "Swarm destroyed").await;
-    }
-    state.coordinator.mark_aborted(&swarm_id);
-    state.coordinator.publish_swarm_state(&swarm_id);
-    let destroyed = state.coordinator.destroy_swarm(&swarm_id);
-    let durable_deleted = state.db.delete_swarm(&swarm_id).await?;
-    if !destroyed && !durable_exists && !durable_deleted {
-        return Err(ApiError::not_found(
-            "SWARM_NOT_FOUND",
-            &format!("Swarm not found: {swarm_id}"),
-        ));
-    }
-
-    Ok(Json(json!({
-        "status": "destroyed",
-        "swarmId": swarm_id
-    })))
-}
-
-/// `POST /api/swarm/{swarmId}/abort`——中止 Swarm。
-pub(crate) async fn abort_swarm(
-    State(state): State<AppState>,
-    AxumPath(swarm_id): AxumPath<String>,
-    Json(body): Json<Value>,
-) -> Result<Json<Value>, ApiError> {
-    ensure_swarm_ready(&state)?;
-    if !state.feature_flags.is_enabled("ENABLE_AGENT_SWARMS") {
-        return Err(ApiError::not_found(
-            "FEATURE_DISABLED",
-            "Agent Swarms feature is disabled",
-        ));
-    }
-
-    let _team = state.coordinator.get_swarm(&swarm_id).ok_or_else(|| {
-        ApiError::not_found("SWARM_NOT_FOUND", &format!("Swarm not found: {swarm_id}"))
-    })?;
-
-    let reason = body
-        .get("reason")
-        .and_then(|v| v.as_str())
-        .unwrap_or("no reason");
-
-    if !state.coordinator.begin_abort(&swarm_id) {
-        return Err(ApiError::validation("Swarm is already terminal"));
-    }
-    let running_workers = state
-        .coordinator
-        .swarm_service()
-        .worker_states(&swarm_id)
-        .into_iter()
-        .filter(|worker| worker.status == WorkerStatus::Running)
-        .map(|worker| worker.worker_id)
-        .collect::<Vec<_>>();
-    fail_worker_tasks(&state, &swarm_id, &running_workers, "Swarm aborted").await;
-    let pending = state.coordinator.swarm_service().has_pending(&swarm_id);
-    if !pending {
-        state.coordinator.mark_aborted(&swarm_id);
-    }
-    if let Some(mut durable) = state.db.find_swarm(&swarm_id).await? {
-        durable.phase = String::from(if pending { "ABORTING" } else { "ABORTED" });
-        if !pending {
-            durable.active_workers = 0;
-        }
-        state.db.save_swarm(&durable).await?;
-    }
-    state.coordinator.publish_swarm_state(&swarm_id);
-
-    Ok(Json(json!({
-        "swarmId": swarm_id,
-        "status": if pending { "aborting" } else { "aborted" },
-        "reason": reason
-    })))
-}
-
-/// `POST /api/swarm/{swarmId}/shutdown` — WP-11 兼容入口。
-pub(crate) async fn shutdown_swarm(
-    State(state): State<AppState>,
-    AxumPath(swarm_id): AxumPath<String>,
-) -> Result<Json<Value>, ApiError> {
-    ensure_swarm_ready(&state)?;
-    if !state.coordinator.swarm_service().shutdown_swarm(&swarm_id) {
-        return Err(ApiError::not_found(
-            "SWARM_NOT_FOUND",
-            &format!("Swarm not found: {swarm_id}"),
-        ));
-    }
-    if let Some(mut durable) = state.db.find_swarm(&swarm_id).await? {
-        durable.phase = String::from("SHUTTING_DOWN");
-        state.db.save_swarm(&durable).await?;
-    }
-    state.coordinator.publish_swarm_state(&swarm_id);
+            request_id,
+            payloads,
+        )
+        .await?;
+    runtime.kick(&id);
     Ok(Json(
-        json!({"swarmId": swarm_id, "status": "shutting_down"}),
+        json!({"swarmId":id,"requestId":request_id,"dispatched":queued.len(),"status":"queued","queueIds":queued.into_iter().map(|item|item.id).collect::<Vec<_>>()}),
     ))
 }
-
-/// `POST /api/swarm/{swarmId}/force-stop` — WP-11 兼容入口。
+async fn stop(state: &AppState, id: &str, shutdown: bool) -> Result<Json<Value>, ApiError> {
+    let runtime = ready(state)?;
+    let team = team(state, id).await?;
+    runtime.stop_intake(id, shutdown);
+    runtime.kick(id);
+    let saved = state.db.stop_team(id, shutdown).await;
+    let mut pending = false;
+    // Signal every discoverable owned task even when closing intake failed to persist.
+    if !shutdown {
+        for item in state.db.team_work_items(id).await? {
+            if let Some(task) = item.task_id
+                && let Err(error) = state
+                    .task_runtime
+                    .cancel_owned(&team.session_id, &task, "Team stopped")
+                    .await
+            {
+                pending = true;
+                tracing::error!(
+                    error_type = std::any::type_name_of_val(&error),
+                    "team cancellation pending durable reconciliation"
+                );
+            }
+        }
+    }
+    runtime.kick(id);
+    saved?;
+    if pending {
+        return Err(ApiError {
+            status: axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            code: "TEAM_CANCELLATION_PENDING".into(),
+            message: "Local stop was requested; durable cancellation is still being reconciled"
+                .into(),
+        });
+    }
+    Ok(Json(
+        json!({"swarmId":id,"status":if shutdown{"shutting_down"}else{"aborting"}}),
+    ))
+}
+pub(crate) async fn abort_swarm(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(_body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    stop(&state, &id, false).await
+}
 pub(crate) async fn force_stop_swarm(
     State(state): State<AppState>,
-    AxumPath(swarm_id): AxumPath<String>,
+    Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    ensure_swarm_ready(&state)?;
-    let running_workers = state
-        .coordinator
-        .swarm_service()
-        .worker_states(&swarm_id)
-        .into_iter()
-        .filter(|worker| worker.status == WorkerStatus::Running)
-        .map(|worker| worker.worker_id)
-        .collect::<Vec<_>>();
-    if !state
-        .coordinator
-        .swarm_service()
-        .force_stop_swarm(&swarm_id)
-        .await
-    {
-        return Err(ApiError::not_found(
-            "SWARM_NOT_FOUND",
-            &format!("Swarm not found: {swarm_id}"),
-        ));
-    }
-    fail_worker_tasks(&state, &swarm_id, &running_workers, "Swarm force-stopped").await;
-    state.coordinator.mark_aborted(&swarm_id);
-    if let Some(mut durable) = state.db.find_swarm(&swarm_id).await? {
-        durable.phase = String::from("ABORTED");
-        durable.active_workers = 0;
-        state.db.save_swarm(&durable).await?;
-    }
-    state.coordinator.publish_swarm_state(&swarm_id);
-    Ok(Json(json!({"swarmId": swarm_id, "status": "aborted"})))
+    stop(&state, &id, false).await
 }
-
-/// `POST /api/swarm/{swarmId}/worker/{workerId}/abort` — WP-11 兼容入口。
+pub(crate) async fn shutdown_swarm(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    stop(&state, &id, true).await
+}
+pub(crate) async fn destroy_swarm(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let _ = stop(&state, &id, false).await?;
+    let runtime = ready(&state)?;
+    let projection = runtime
+        .projection(&team(&state, &id).await?)
+        .await
+        .map_err(failure)?;
+    if projection["activeWorkers"].as_u64().unwrap_or(1) > 0 {
+        return Err(ApiError {
+            status: axum::http::StatusCode::CONFLICT,
+            code: "TEAM_CLEANUP_PENDING".into(),
+            message: "Workers are stopping; retry after durable cleanup".into(),
+        });
+    }
+    state.db.delete_team_if_quiescent(&id).await?;
+    Ok(Json(json!({"swarmId":id,"status":"destroyed"})))
+}
 pub(crate) async fn abort_worker(
     State(state): State<AppState>,
-    AxumPath((swarm_id, worker_id)): AxumPath<(String, String)>,
+    Path((id, worker)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiError> {
-    ensure_swarm_ready(&state)?;
-    if state.coordinator.get_swarm(&swarm_id).is_none() {
-        return Err(ApiError::not_found(
-            "SWARM_NOT_FOUND",
-            &format!("Swarm not found: {swarm_id}"),
-        ));
-    }
+    ready(&state)?;
+    let team = team(&state, &id).await?;
     if !state
-        .coordinator
-        .swarm_service()
-        .cancel_worker(&swarm_id, &worker_id)
+        .db
+        .team_work_items(&id)
+        .await?
+        .iter()
+        .any(|item| item.task_id.as_deref() == Some(&worker))
     {
         return Err(ApiError::not_found(
             "WORKER_NOT_FOUND",
-            &format!("Worker not found: {worker_id}"),
+            "Worker is not owned by this team",
         ));
     }
-    fail_worker_tasks(
-        &state,
-        &swarm_id,
-        std::slice::from_ref(&worker_id),
-        "Worker aborted",
-    )
-    .await;
-    if let Some(mut durable) = state.db.find_swarm(&swarm_id).await? {
-        durable.active_workers = durable.active_workers.saturating_sub(1);
-        state.db.save_swarm(&durable).await?;
-    }
-    state.coordinator.publish_swarm_state(&swarm_id);
-    Ok(Json(json!({
-        "swarmId": swarm_id,
-        "workerId": worker_id,
-        "status": "aborting"
-    })))
+    state
+        .task_runtime
+        .cancel_owned(&team.session_id, &worker, "Team worker stopped")
+        .await
+        .map_err(|e| failure(e.to_string()))?;
+    Ok(Json(
+        json!({"swarmId":id,"workerId":worker,"status":"aborting"}),
+    ))
 }
-
-fn swarm_projection(state: &AppState, team: &zk_engine::TeamInfo) -> Value {
-    let workers = state
-        .coordinator
-        .swarm_service()
-        .worker_states(&team.team_id);
-    let active_workers = workers
-        .iter()
-        .filter(|worker| worker.status == WorkerStatus::Running)
-        .count();
-    let completed_tasks = workers
-        .iter()
-        .filter(|worker| worker.status == WorkerStatus::Completed)
-        .count();
-    json!({
-        "swarmId": team.team_id,
-        "teamName": team.team_id,
-        "phase": state.coordinator.swarm_phase(&team.team_id)
-            .map_or("INTERRUPTED", zk_engine::SwarmPhase::as_str),
-        "maxWorkers": team.worker_count,
-        "sessionId": team.session_id,
-        "activeWorkers": active_workers,
-        "totalWorkers": workers.len(),
-        "completedTasks": completed_tasks,
-        "totalTasks": workers.len()
-    })
-}
-
-fn durable_swarm_projection(record: &SwarmRecord) -> Value {
-    json!({
-        "swarmId": record.swarm_id,
-        "teamName": record.swarm_id,
-        "phase": record.phase,
-        "maxWorkers": record.max_workers,
-        "sessionId": record.session_id,
-        "activeWorkers": record.active_workers,
-        "totalWorkers": record.total_tasks,
-        "completedTasks": record.completed_tasks,
-        "totalTasks": record.total_tasks
-    })
-}
-
-async fn fail_worker_tasks(state: &AppState, swarm_id: &str, workers: &[String], reason: &str) {
-    if workers.is_empty() {
-        return;
-    }
-    let Some(team) = state.coordinator.get_swarm(swarm_id) else {
-        return;
-    };
-    let Some(runtime) = state.agent_runtime() else {
-        return;
-    };
-    for worker_id in workers {
-        if let Err(error) = runtime
-            .tasks
-            .cancel_external_task(worker_id, &team.session_id, reason)
-            .await
-        {
-            tracing::error!(worker_id, %error, "failed to cancel durable Swarm task");
-        }
-    }
-}
-
-fn ensure_swarm_ready(state: &AppState) -> Result<(), ApiError> {
-    if state.swarm_executable() {
-        Ok(())
-    } else {
-        Err(ApiError::feature_not_ready(
-            "Swarm",
-            "the legacy process-local coordinator is removed and TaskRuntime result, receipt, cancellation, budget, recovery, event, and verification gates pass",
-        ))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    use std::net::SocketAddr;
-    use std::sync::Arc;
-
-    use axum::body::{Body, to_bytes};
-    use axum::extract::ConnectInfo;
-    use axum::http::{Method, Request, StatusCode, header};
-    use futures::future::BoxFuture;
-    use tower::ServiceExt;
-    use zk_engine::{
-        AgentConcurrencyController, AgentTimeoutConfig, MessageSink, SubAgentEngineFactory,
-        SubAgentExecutor, SystemGitCommandRunner, TaskRuntime, WorktreeManager,
-    };
-
-    struct StubFactory;
-
-    impl SubAgentEngineFactory for StubFactory {
-        fn create_and_run(
-            &self,
-            _agent_id: &str,
-            _session_id: &str,
-            _context: &ChildExecutionContext,
-            _model: &str,
-            _system_prompt: &str,
-            user_prompt: &str,
-            _work_dir: &str,
-            _mailbox: tokio::sync::mpsc::UnboundedReceiver<zk_engine::AgentMailboxMessage>,
-            cancel: tokio_util::sync::CancellationToken,
-            _max_turns: u32,
-        ) -> std::pin::Pin<
-            Box<
-                dyn std::future::Future<Output = (Option<String>, Option<String>, bool)>
-                    + Send
-                    + '_,
-            >,
-        > {
-            let output = format!("done: {user_prompt}");
-            let delayed = user_prompt.contains("wait");
-            let delay = if user_prompt.contains("force-wait") {
-                std::time::Duration::from_secs(5)
-            } else {
-                std::time::Duration::from_millis(80)
-            };
-            Box::pin(async move {
-                if delayed {
-                    tokio::select! {
-                        () = cancel.cancelled() => {
-                            return (Some("cancelled".to_owned()), None, false);
-                        }
-                        () = tokio::time::sleep(delay) => {}
-                    }
-                }
-                (Some("end_turn".to_owned()), Some(output), false)
-            })
-        }
-    }
-
-    struct NoopSink;
-
-    impl MessageSink for NoopSink {
-        fn push<'a>(
-            &'a self,
-            _session_id: &'a str,
-            _message: zk_protocol::ServerMessage,
-        ) -> BoxFuture<'a, ()> {
-            Box::pin(async {})
-        }
-    }
-
-    fn router_request(method: Method, path: &str, body: Option<Value>) -> Request<Body> {
-        let peer: SocketAddr = "127.0.0.1:51717".parse().expect("loopback peer");
-        let mut builder = Request::builder()
-            .method(method)
-            .uri(path)
-            .extension(ConnectInfo(peer));
-        if body.is_some() {
-            builder = builder.header(header::CONTENT_TYPE, "application/json");
-        }
-        builder
-            .body(Body::from(
-                body.map_or_else(String::new, |value| value.to_string()),
-            ))
-            .expect("request")
-    }
-
-    async fn router_json(router: &axum::Router, request: Request<Body>) -> (StatusCode, Value) {
-        let response = router.clone().oneshot(request).await.expect("router call");
-        let status = response.status();
-        let bytes = to_bytes(response.into_body(), 1024 * 1024)
-            .await
-            .expect("response body");
-        let value = serde_json::from_slice(&bytes).expect("JSON response");
-        (status, value)
-    }
-
-    #[test]
-    fn team_name_validation() {
-        assert!(is_valid_team_name("my-team_123"));
-        assert!(is_valid_team_name("a"));
-        assert!(!is_valid_team_name(""));
-        assert!(!is_valid_team_name("../etc"));
-        assert!(!is_valid_team_name("has space"));
-        assert!(!is_valid_team_name(&"a".repeat(65)));
-    }
-
-    #[tokio::test]
-    async fn configured_swarm_with_assembled_agent_runtime_still_fails_closed() {
-        let mut config = crate::config::Config::test_config();
-        config.swarm_enabled = true;
-        config.agent_enabled = true;
-        let db = zk_db::Db::open_in_memory().expect("database");
-        let state = AppState::new(db.clone(), config);
-        let executor = Arc::new(SubAgentExecutor::new(
-            Arc::new(AgentConcurrencyController::default()),
-            Arc::new(StubFactory),
-            WorktreeManager::for_repo(
-                std::env::current_dir().expect("current directory"),
-                Arc::new(SystemGitCommandRunner),
-            )
-            .expect("canonical test root"),
-            AgentTimeoutConfig::default(),
-        ));
-        state.set_agent_runtime(Arc::new(crate::engine_bridge::AgentRuntime {
-            executor,
-            tasks: Arc::new(TaskRuntime::new(db, Arc::new(NoopSink))),
-        }));
-
-        assert!(state.agent_runtime().is_some());
-        assert!(!state.swarm_executable());
-        let router = crate::routes::build_router(state);
-        let (status, body) =
-            router_json(&router, router_request(Method::GET, "/api/swarm", None)).await;
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(body["code"], "FEATURE_NOT_READY");
-    }
-
-    #[tokio::test]
-    #[ignore = "legacy Swarm coordinator is retained only as a future adapter test until the unified runtime gate passes"]
-    #[allow(clippy::too_many_lines)] // full real Router lifecycle assertion
-    async fn real_router_exposes_closed_gate_and_shared_swarm_state() {
-        let closed_state = AppState::for_tests();
-        let closed_router = crate::routes::build_router(closed_state);
-        let (status, body) = router_json(
-            &closed_router,
-            router_request(Method::GET, "/api/swarm", None),
-        )
-        .await;
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(body["code"], "FEATURE_NOT_READY");
-
-        let mut config = crate::config::Config::test_config();
-        config.swarm_enabled = true;
-        config.agent_enabled = true;
-        let db = zk_db::Db::open_in_memory().expect("database");
-        let session = db
-            .create_session("test-model", &config.workspace_default_root)
-            .await
-            .expect("session");
-        db.start_run(
-            "router-root-run",
-            &session.id,
-            None,
-            Some("query"),
-            "test-model",
-        )
-        .await
-        .expect("root run");
-        let state = AppState::new(db.clone(), config);
-        let executor = Arc::new(SubAgentExecutor::new(
-            Arc::new(AgentConcurrencyController::default()),
-            Arc::new(StubFactory),
-            WorktreeManager::for_repo(
-                std::env::current_dir().expect("current directory"),
-                Arc::new(SystemGitCommandRunner),
-            )
-            .expect("canonical test root"),
-            AgentTimeoutConfig::default(),
-        ));
-        state.set_agent_runtime(Arc::new(crate::engine_bridge::AgentRuntime {
-            executor,
-            tasks: Arc::new(TaskRuntime::new(db, Arc::new(NoopSink))),
-        }));
-        let router = crate::routes::build_router(state.clone());
-        let (status, created) = router_json(
-            &router,
-            router_request(
-                Method::POST,
-                "/api/swarm",
-                Some(json!({
-                    "teamName": "router-swarm",
-                    "maxWorkers": 2,
-                    "sessionId": session.id,
-                    "objective": "short Router lifecycle"
-                })),
-            ),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{created}");
-        assert_eq!(created["swarmId"], "router-swarm");
-
-        let (status, listed) =
-            router_json(&router, router_request(Method::GET, "/api/swarm", None)).await;
-        assert_eq!(status, StatusCode::OK, "{listed}");
-        assert_eq!(listed["swarms"][0]["swarmId"], "router-swarm");
-
-        let (status, found) = router_json(
-            &router,
-            router_request(Method::GET, "/api/swarm/router-swarm", None),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{found}");
-        assert_eq!(found["phase"], "CREATED");
-        assert_eq!(found["maxWorkers"], 2);
-
-        let (status, dispatched) = router_json(
-            &router,
-            router_request(
-                Method::POST,
-                "/api/swarm/router-swarm/dispatch",
-                Some(json!({
-                    "runId": "router-root-run",
-                    "tasks": [
-                        {"workerId": "reader-a", "prompt": "read alpha"},
-                        {"workerId": "reader-b", "prompt": "read beta"}
-                    ]
-                })),
-            ),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{dispatched}");
-        assert_eq!(dispatched["dispatched"], 2);
-        assert!(
-            dispatched["workerIds"]
-                .as_array()
-                .expect("worker ids")
-                .iter()
-                .all(|id| uuid::Uuid::parse_str(id.as_str().expect("worker UUID")).is_ok())
-        );
-
-        for _ in 0..30 {
-            let (status, found) = router_json(
-                &router,
-                router_request(Method::GET, "/api/swarm/router-swarm", None),
-            )
-            .await;
-            assert_eq!(status, StatusCode::OK, "{found}");
-            if found["phase"] == "COMPLETED" {
-                assert_eq!(found["totalWorkers"], 2);
-                assert_eq!(found["completedTasks"], 2);
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        assert_eq!(
-            state.coordinator.swarm_phase("router-swarm"),
-            Some(zk_engine::SwarmPhase::Completed),
-            "Router Swarm did not reach a real aggregate terminal state"
-        );
-
-        let (status, created) = router_json(
-            &router,
-            router_request(
-                Method::POST,
-                "/api/swarm",
-                Some(json!({
-                    "teamName": "router-force-stop",
-                    "maxWorkers": 1,
-                    "sessionId": session.id
-                })),
-            ),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{created}");
-        let (status, dispatched) = router_json(
-            &router,
-            router_request(
-                Method::POST,
-                "/api/swarm/router-force-stop/dispatch",
-                Some(json!({
-                    "runId": "router-root-run",
-                    "tasks": [{"workerId": "slow", "prompt": "force-wait until cancelled"}]
-                })),
-            ),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{dispatched}");
-        let stopped_task_id = dispatched["workerIds"][0]
-            .as_str()
-            .expect("durable worker UUID")
-            .to_owned();
-        let (status, stopped) = router_json(
-            &router,
-            router_request(
-                Method::POST,
-                "/api/swarm/router-force-stop/force-stop",
-                None,
-            ),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{stopped}");
-        assert_eq!(stopped["status"], "aborted");
-        assert!(
-            !state
-                .coordinator
-                .swarm_service()
-                .has_pending("router-force-stop")
-        );
-        assert_eq!(
-            state.coordinator.swarm_phase("router-force-stop"),
-            Some(zk_engine::SwarmPhase::Aborted)
-        );
-        let task = state
-            .db
-            .find_runtime_task_by_id(&stopped_task_id)
-            .await
-            .expect("task lookup")
-            .expect("durable force-stop task");
-        assert_eq!(task.status, zk_db::TaskStatus::Partial);
-        assert_eq!(task.cleanup_status, zk_db::CleanupStatus::Unconfirmed);
-        let result = state
-            .db
-            .read_task_result(&stopped_task_id, None, 0, zk_db::INLINE_RESULT_LIMIT)
-            .await
-            .expect("result lookup")
-            .expect("immutable force-stop result");
-        assert_eq!(result.result.status, zk_db::ResultStatus::Partial);
-        assert_eq!(
-            result.result.error_code.as_deref(),
-            Some("CLEANUP_UNCONFIRMED")
-        );
-    }
-
-    #[tokio::test]
-    #[ignore = "legacy Swarm coordinator is retained only as a future adapter test until the unified runtime gate passes"]
-    #[allow(clippy::too_many_lines)] // dispatch, cancellation, persistence and anomaly assertions
-    async fn two_read_only_workers_dispatch_through_shared_runtime_and_persist_tasks() {
-        let mut config = crate::config::Config::test_config();
-        config.swarm_enabled = true;
-        config.agent_enabled = true;
-        config.agent_write_enabled = false;
-        let db = zk_db::Db::open_in_memory().expect("database");
-        let state = AppState::new(db.clone(), config);
-        let executor = Arc::new(SubAgentExecutor::new(
-            Arc::new(AgentConcurrencyController::default()),
-            Arc::new(StubFactory),
-            WorktreeManager::for_repo(
-                std::env::current_dir().expect("current directory"),
-                Arc::new(SystemGitCommandRunner),
-            )
-            .expect("canonical test root"),
-            AgentTimeoutConfig::default(),
-        ));
-        let tasks = Arc::new(TaskRuntime::new(db.clone(), Arc::new(NoopSink)));
-        state.set_agent_runtime(Arc::new(crate::engine_bridge::AgentRuntime {
-            executor,
-            tasks,
-        }));
-        let mut coordinator_events = state.coordinator.event_bus().subscribe();
-        let session = db
-            .create_session("test-model", &state.config.workspace_default_root)
-            .await
-            .expect("session");
-        db.start_run("root-run", &session.id, None, Some("query"), "test-model")
-            .await
-            .expect("root run");
-
-        let _ = create_swarm(
-            State(state.clone()),
-            Json(json!({
-                "teamName": "short-swarm",
-                "maxWorkers": 2,
-                "sessionId": session.id,
-                "projectContext": {"objective": "short read-only verification"}
-            })),
-        )
-        .await
-        .expect("create swarm");
-        let context_hash = format!(
-            "{:x}",
-            sha2::Sha256::digest(state.config.workspace_default_root.as_bytes())
-        );
-        let context = db
-            .find_project_context(&context_hash)
-            .await
-            .expect("read project context")
-            .expect("project context persisted");
-        assert_eq!(
-            context.snapshot["objective"],
-            "short read-only verification"
-        );
-        let Json(response) = dispatch_swarm(
-            State(state.clone()),
-            AxumPath("short-swarm".to_owned()),
-            Json(json!({
-                "runId": "root-run",
-                "tasks": [
-                    {"workerId": "reader-a", "prompt": "read alpha"},
-                    {"workerId": "reader-b", "prompt": "read beta"}
-                ]
-            })),
-        )
-        .await
-        .expect("dispatch swarm");
-        assert_eq!(response["dispatched"], 2);
-        let worker_ids = response["workerIds"]
-            .as_array()
-            .expect("worker ids")
-            .iter()
-            .map(|value| value.as_str().expect("worker UUID").to_owned())
-            .collect::<Vec<_>>();
-        assert!(worker_ids.iter().all(|id| {
-            uuid::Uuid::parse_str(id)
-                .is_ok_and(|value| value.get_version() == Some(uuid::Version::Random))
-        }));
-
-        let mut completed = false;
-        for _ in 0..50 {
-            let records = db
-                .find_task_tree_owned(&session.id)
-                .await
-                .expect("read tasks");
-            let workers = records
-                .iter()
-                .filter(|task| worker_ids.contains(&task.id))
-                .collect::<Vec<_>>();
-            if workers.len() == 2
-                && workers
-                    .iter()
-                    .all(|task| task.status == zk_db::TaskStatus::Succeeded)
-            {
-                for worker in workers {
-                    let result = db
-                        .read_task_result(&worker.id, None, 0, zk_db::INLINE_RESULT_LIMIT)
-                        .await
-                        .expect("read immutable result")
-                        .expect("worker result");
-                    assert_eq!(result.result.status, zk_db::ResultStatus::Complete);
-                    assert!(result.content.starts_with("done:"));
-                }
-                assert_eq!(
-                    state.coordinator.swarm_phase("short-swarm"),
-                    Some(zk_engine::SwarmPhase::Completed)
-                );
-                completed = true;
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        assert!(
-            completed,
-            "Swarm tasks did not reach durable terminal state"
-        );
-        // Durable worker completion becomes queryable before its asynchronous
-        // observability projection is guaranteed to reach this subscriber.
-        // Wait for the projection instead of racing it with a one-shot drain.
-        let mut workflow_events = Vec::new();
-        let event_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
-        while workflow_events.len() < 5 && tokio::time::Instant::now() < event_deadline {
-            let remaining = event_deadline.saturating_duration_since(tokio::time::Instant::now());
-            match tokio::time::timeout(remaining, coordinator_events.recv()).await {
-                Ok(Ok(zk_engine::CoordinatorEvent::WorkflowPhaseUpdate {
-                    phase_name,
-                    status,
-                    ..
-                })) => workflow_events.push((phase_name, status)),
-                Ok(Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {}
-                Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) | Err(_) => break,
-            }
-        }
-        assert_eq!(
-            workflow_events,
-            [
-                ("Research".to_owned(), "RUNNING".to_owned()),
-                ("Synthesis".to_owned(), "RUNNING".to_owned()),
-                ("Implementation".to_owned(), "RUNNING".to_owned()),
-                ("Verification".to_owned(), "RUNNING".to_owned()),
-                ("Verification".to_owned(), "COMPLETED".to_owned()),
-            ]
-        );
-
-        let _ = create_swarm(
-            State(state.clone()),
-            Json(json!({
-                "teamName": "abort-swarm",
-                "maxWorkers": 2,
-                "sessionId": session.id
-            })),
-        )
-        .await
-        .expect("create abort swarm");
-        let Json(abort_response) = dispatch_swarm(
-            State(state.clone()),
-            AxumPath("abort-swarm".to_owned()),
-            Json(json!({
-                "runId": "root-run",
-                "tasks": [
-                    {"workerId": "reader-a", "prompt": "wait alpha"},
-                    {"workerId": "reader-b", "prompt": "wait beta"}
-                ]
-            })),
-        )
-        .await
-        .expect("dispatch abort swarm");
-        let aborted_id = abort_response["workerIds"][0]
-            .as_str()
-            .expect("aborted worker UUID")
-            .to_owned();
-        let sibling_id = abort_response["workerIds"][1]
-            .as_str()
-            .expect("sibling worker UUID")
-            .to_owned();
-        let _ = abort_worker(
-            State(state.clone()),
-            AxumPath(("abort-swarm".to_owned(), aborted_id.clone())),
-        )
-        .await
-        .expect("abort target worker");
-
-        for _ in 0..50 {
-            let aborted = db
-                .find_runtime_task_by_id(&aborted_id)
-                .await
-                .expect("read aborted task");
-            let sibling = db
-                .find_runtime_task_by_id(&sibling_id)
-                .await
-                .expect("read sibling task");
-            if aborted.is_some_and(|task| task.status == zk_db::TaskStatus::Partial)
-                && sibling.is_some_and(|task| task.status == zk_db::TaskStatus::Succeeded)
-            {
-                let anomalies = db
-                    .find_anomalies_by_swarm("abort-swarm")
-                    .await
-                    .expect("read anomalies");
-                if state.coordinator.swarm_phase("abort-swarm")
-                    == Some(zk_engine::SwarmPhase::Failed)
-                    && anomalies.iter().any(|event| {
-                        event.worker_id == aborted_id && event.rule_id == "worker-cancelled"
-                    })
-                {
-                    return;
-                }
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        panic!("target worker abort did not preserve sibling completion");
-    }
-
-    #[tokio::test]
-    #[allow(clippy::too_many_lines)] // Keeps the restart transaction and all invariants in one fixture.
-    async fn restart_interrupts_task_run_and_durable_swarm_without_rescheduling() {
-        let directory =
-            std::env::temp_dir().join(format!("zkcode-swarm-restart-{}", uuid::Uuid::new_v4()));
-        let path = directory.join("data.db");
-        let db = zk_db::Db::open(&path).expect("database");
-        let session = db
-            .create_session("test-model", "/tmp/zkcode-swarm-restart")
-            .await
-            .expect("session");
-        let root_run_id = uuid::Uuid::new_v4().to_string();
-        db.start_root_run_with_budget(
-            &root_run_id,
-            &session.id,
-            Some("query"),
-            "test-model",
-            &zk_db::TaskBudgetLimits {
-                token_limit: Some(10_000),
-                cost_limit_nanos_usd: Some(10_000_000_000),
-                deadline_at_ms: Some(zk_db::time::now_millis() + 60_000),
-            },
-        )
-        .await
-        .expect("budgeted root run");
-        let worker_task_id = uuid::Uuid::new_v4().to_string();
-        let worker_run_id = uuid::Uuid::new_v4().to_string();
-        let worker_session_id = uuid::Uuid::new_v4().to_string();
-        let created = db
-            .create_task_with_run(&zk_db::CreateTaskWithRun {
-                task_id: worker_task_id.clone(),
-                run_id: worker_run_id.clone(),
-                root_session_id: session.id.clone(),
-                transcript_session_id: worker_session_id,
-                parent_task_id: Some(root_run_id.clone()),
-                parent_run_id: Some(root_run_id.clone()),
-                creator_tool_use_id: Some(uuid::Uuid::new_v4().to_string()),
-                ordinal: 0,
-                description: "active worker".to_owned(),
-                prompt: Some("wait for restart".to_owned()),
-                task_type: "agent".to_owned(),
-                model: "test-model".to_owned(),
-                working_dir: "/tmp/zkcode-swarm-restart".to_owned(),
-                execution_config_json: r#"{"isolation":"readOnly","lifecycle":"attached"}"#
-                    .to_owned(),
-                startup_epoch: 1,
-            })
-            .await
-            .expect("durable worker");
-        assert_eq!(
-            db.claim_task_run_cas(&worker_task_id, &worker_run_id, created.task.version)
-                .await
-                .expect("claim worker"),
-            zk_db::CasOutcome::Applied
-        );
-        db.save_anomaly_event(&zk_db::AnomalyEventRecord {
-            id: uuid::Uuid::new_v4().to_string(),
-            swarm_id: "restart-swarm".to_owned(),
-            worker_id: worker_task_id.clone(),
-            rule_id: "worker-stalled".to_owned(),
-            severity: "warning".to_owned(),
-            message: "worker was active before restart".to_owned(),
-            detected_at: 1,
-            resolved_at: None,
-            resolution: None,
-            context_snapshot: None,
-        })
-        .await
-        .expect("anomaly");
-        let mut config = crate::config::Config::test_config();
-        config.swarm_enabled = true;
-        let state = AppState::new(db.clone(), config.clone());
-        state
-            .coordinator
-            .create_swarm("restart-swarm", 1, &session.id)
-            .expect("active swarm");
-        let mut swarm = zk_db::SwarmRecord::created("restart-swarm", &session.id, 1);
-        swarm.phase = String::from("RUNNING");
-        swarm.total_tasks = 1;
-        swarm.active_workers = 1;
-        db.save_swarm(&swarm).await.expect("durable swarm");
-        drop(state);
-        drop(db);
-
-        let reopened = zk_db::Db::open(&path).expect("reopen database");
-        let reconciliation = reopened.reconcile_runtime_after_restart().await.unwrap();
-        assert_eq!(reconciliation.tasks_needing_attention, 2);
-        assert_eq!(reconciliation.runs_interrupted, 2);
-        assert_eq!(reopened.interrupt_active_swarms().await.unwrap(), 1);
-        assert_eq!(
-            reopened.reconcile_runtime_after_restart().await.unwrap(),
-            zk_db::RestartReconciliationReport::default()
-        );
-        let restarted = AppState::new(reopened.clone(), config);
-        // Scheduling is intentionally not resumed; only its SQLite history is restored.
-        assert!(restarted.coordinator.list_swarms().is_empty());
-        let recovered_swarm = reopened.find_swarm("restart-swarm").await.unwrap().unwrap();
-        assert_eq!(recovered_swarm.phase, "INTERRUPTED");
-        assert_eq!(recovered_swarm.active_workers, 0);
-        assert_eq!(
-            reopened
-                .find_runtime_task_by_id(&worker_task_id)
-                .await
-                .unwrap()
-                .unwrap()
-                .status,
-            zk_db::TaskStatus::NeedsAttention
-        );
-        assert_eq!(
-            reopened
-                .find_run_by_id(&worker_run_id)
-                .await
-                .unwrap()
-                .unwrap()
-                .status,
-            "interrupted"
-        );
-        assert!(
-            reopened
-                .read_task_result(&worker_task_id, None, 0, zk_db::INLINE_RESULT_LIMIT)
-                .await
-                .unwrap()
-                .is_none(),
-            "restart convergence must not fabricate a worker result"
-        );
-        assert_eq!(
-            reopened
-                .find_anomalies_by_swarm("restart-swarm")
-                .await
-                .unwrap()
-                .len(),
-            1
-        );
-        drop(restarted);
-        drop(reopened);
-        let _ = std::fs::remove_dir_all(directory);
-    }
+pub(crate) async fn broadcast(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    ready(&state)?;
+    let team = team(&state, &id).await?;
+    let request = body["requestId"]
+        .as_str()
+        .ok_or_else(|| ApiError::validation("requestId is required"))?;
+    let content = body["message"]
+        .as_str()
+        .ok_or_else(|| ApiError::validation("message is required"))?;
+    let receivers = state
+        .db
+        .broadcast_team(&id, &team.session_id, request, content)
+        .await?;
+    Ok(Json(
+        json!({"swarmId":id,"requestId":request,"receiverTaskIds":receivers,"status":"queued"}),
+    ))
 }

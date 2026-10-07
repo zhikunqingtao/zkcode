@@ -220,6 +220,8 @@ pub struct FinalBudgetResult {
     pub api_messages: Vec<Value>,
     /// 最终 payload 中仍然保留的图片指纹集合（跨轮回传给注入器做去重）。
     pub retained_image_hashes: HashSet<String>,
+    /// Stable source identities, retained even when thumbnail bytes change.
+    pub retained_source_image_hashes: HashSet<String>,
     /// 最终估算 token。
     pub estimated_tokens: u32,
     /// 输入预算。
@@ -504,7 +506,7 @@ fn phase1(messages: &[ChatMessage], input_budget: i64, text_token_ratio: f64) ->
         );
         return GuardResult {
             messages: cleaned,
-            trimmed: true,
+            trimmed: tokens_after_first_pass < tokens_before,
             tokens_before,
             tokens_after: tokens_after_first_pass,
         };
@@ -522,7 +524,7 @@ fn phase1(messages: &[ChatMessage], input_budget: i64, text_token_ratio: f64) ->
     );
     GuardResult {
         messages: cleaned,
-        trimmed: true,
+        trimmed: tokens_after_second_pass < tokens_before,
         tokens_before,
         tokens_after: tokens_after_second_pass,
     }
@@ -537,7 +539,9 @@ fn deep_clean_base64(messages: &[ChatMessage], protect_tail_count: usize) -> Vec
         .iter()
         .enumerate()
         .map(|(index, message)| {
-            if index >= protect_from {
+            if index >= protect_from
+                || matches!(message.role, zk_llm::Role::User | zk_llm::Role::System)
+            {
                 message.clone()
             } else {
                 clean_message_base64(message)
@@ -641,6 +645,236 @@ fn pre_cascade_input_budget(model: &str) -> i64 {
     let context_window = super::context_window_for(model);
     let buffer = super::saturating_tokens(f64::from(context_window) * INPUT_BUDGET_BUFFER_RATIO);
     i64::from(context_window) - i64::from(buffer)
+}
+
+/// Only the Run's original attachment is mandatory. Older images are projected
+/// newest-first with visible omission notices; `SQLite` records remain unchanged.
+#[cfg(feature = "image-budget")]
+fn omit_excess_history_images(request: &mut zk_llm::ChatRequest) -> Result<(), String> {
+    let Some(current_id) = request.current_user_message_id.as_deref() else {
+        return Ok(());
+    };
+    let mandatory = |message: &ChatMessage| {
+        message
+            .metadata
+            .as_ref()
+            .and_then(|meta| meta["sourceMessageId"].as_str())
+            == Some(current_id)
+    };
+    let caps = zk_llm::capabilities_for(&request.model);
+    let base64_only = request.model == "kimi-k3"
+        || caps.image_input_mode == zk_llm::models::ImageInputMode::Base64Only;
+    let max_images = usize::try_from(if base64_only {
+        caps.max_images.min(8)
+    } else {
+        caps.max_images
+    })
+    .unwrap_or(8);
+    let mut text = request.messages.clone();
+    for message in &mut text {
+        message.images.clear();
+    }
+    let budget = u64::from(
+        super::request_history_budget(request)
+            .saturating_sub(super::estimate_tokens(&text, &request.model)),
+    );
+    let image_cost = |image: &zk_llm::ImageSource| {
+        image
+            .data
+            .as_deref()
+            .map_or(Ok(1024), zk_llm::payload_guard::inline_image_tokens)
+    };
+    let mut count = 0;
+    let mut used: u64 = 0;
+    for image in request
+        .messages
+        .iter()
+        .filter(|message| mandatory(message))
+        .flat_map(|message| &message.images)
+    {
+        count += 1;
+        used = used.saturating_add(
+            image_cost(image).map_err(|error| format!("IMAGE_INPUT_INVALID: {error}"))?,
+        );
+    }
+    if count > max_images {
+        return Err("IMAGE_COUNT_EXCEEDED: current request attachments exceed model limits".into());
+    }
+    if used > budget {
+        return Err(
+            "IMAGE_BUDGET_EXCEEDED: current request attachments exceed model limits".into(),
+        );
+    }
+    for message in request
+        .messages
+        .iter_mut()
+        .rev()
+        .filter(|message| !mandatory(message))
+    {
+        let before = message.images.len();
+        let mut retained = Vec::new();
+        let mut image_index = 0;
+        message.images.retain(|image| {
+            let index = image_index;
+            image_index += 1;
+            let Ok(cost) = image_cost(image) else {
+                return false;
+            };
+            if count >= max_images || used.saturating_add(cost) > budget {
+                return false;
+            }
+            count += 1;
+            used = used.saturating_add(cost);
+            retained.push(index);
+            true
+        });
+        if message.images.len() < before {
+            if let Some(digests) = message
+                .metadata
+                .as_mut()
+                .and_then(|meta| meta.get_mut("imageSourceDigests"))
+                .and_then(Value::as_array_mut)
+            {
+                *digests = retained
+                    .iter()
+                    .filter_map(|index| digests.get(*index).cloned())
+                    .collect();
+            }
+            message.content.push_str("\n[Historical image omitted for this request: image input or context limit. Original attachment remains in the conversation.]");
+        }
+    }
+    Ok(())
+}
+
+/// Enforce the actual provider-bound request budget after context normalization.
+/// User images are mandatory. Only non-user images carrying explicit transient
+/// provenance may be reduced; the durable transcript is never rewritten here.
+#[cfg(feature = "image-budget")]
+///
+/// # Errors
+/// Returns an error when mandatory content cannot fit or budget/image validation fails.
+#[expect(
+    clippy::too_many_lines,
+    reason = "Projection and inverse projection share source identities without modifying durable user content."
+)]
+pub async fn enforce_request(request: &mut zk_llm::ChatRequest) -> Result<(), String> {
+    omit_excess_history_images(request)?;
+    if request
+        .messages
+        .iter()
+        .all(|message| message.images.is_empty())
+    {
+        return Ok(());
+    }
+    let ratio = super::token_char_ratio(&request.model);
+    let context_window = i64::from(super::context_window_for(&request.model));
+    let overhead_chars = request.system_text().map_or(0, |text| text.chars().count())
+        + request
+            .tools
+            .iter()
+            .map(|tool| {
+                tool.name.chars().count()
+                    + tool.description.chars().count()
+                    + tool.parameters.to_string().chars().count()
+            })
+            .sum::<usize>();
+    let overhead = super::saturating_tokens(
+        f64::from(u32::try_from(overhead_chars).unwrap_or(u32::MAX)) / ratio,
+    );
+    let budget = context_window
+        .saturating_sub(i64::from(request.max_tokens))
+        .saturating_sub(context_window / 20)
+        .saturating_sub(i64::from(overhead));
+    let mut identities = std::collections::HashMap::new();
+    let mut degradable = HashSet::new();
+    let payload = request.messages.iter().enumerate().map(|(mi, message)| {
+        let mut blocks = vec![serde_json::json!({"type":"text","text":message.content})];
+        for call in &message.tool_calls {
+            blocks.push(serde_json::json!({"type":"tool_use","id":call.id,"name":call.name,"input":call.arguments}));
+        }
+        if let Some(state) = &message.provider_state {
+            blocks.push(serde_json::json!({"type":"provider_state","state":state}));
+        }
+        for (ii, image) in message.images.iter().enumerate() {
+            let block = serde_json::json!({"type":"image","source":{"type":"base64","media_type":image.media_type,"data":image.data,"url":image.url}});
+            if let Some(hash) = image_block_hash(&block) {
+                let trusted_transient = message.metadata.as_ref().and_then(|value|value.get("syntheticToolImages")).and_then(Value::as_bool)==Some(true);
+                let source = if trusted_transient {message.metadata.as_ref().and_then(|value|value.get("imageSourceDigests")).and_then(Value::as_array).and_then(|values|values.get(ii)).and_then(Value::as_str).map(|digest|format!("source:{digest}"))}else{None}.unwrap_or_else(||format!("message:{mi}:image:{ii}"));
+                identities.insert(source.clone(), hash);
+                if trusted_transient && message.metadata.as_ref().and_then(|value| value.get("transientImages")).and_then(Value::as_bool) == Some(true) {
+                    degradable.insert(source);
+                }
+            }
+            blocks.push(block);
+        }
+        serde_json::json!({"content":blocks})
+    }).collect::<Vec<_>>();
+    let result = enforce_phase2_with_identities(payload, budget, identities, degradable, ratio)
+        .await
+        .map_err(|error| format!("IMAGE_BUDGET_INVALID: {error}"))?;
+    if !result.fits_budget {
+        return Err(
+            "IMAGE_BUDGET_EXCEEDED: mandatory text/images exceed the model input budget".to_owned(),
+        );
+    }
+    for (message, payload) in request.messages.iter_mut().zip(result.api_messages) {
+        if let Some(metadata) = message.metadata.as_mut().and_then(Value::as_object_mut)
+            && metadata.get("syntheticToolImages").and_then(Value::as_bool) == Some(true)
+        {
+            let retained = metadata
+                .get("imageSourceDigests")
+                .and_then(Value::as_array)
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter(|value| {
+                            value.as_str().is_some_and(|digest| {
+                                result
+                                    .retained_source_image_hashes
+                                    .contains(&format!("source:{digest}"))
+                            })
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            metadata.insert("imageSourceDigests".into(), Value::Array(retained));
+            metadata.insert("transientImages".into(), Value::Bool(false));
+        }
+        let blocks = content_blocks(&payload);
+        message.images = blocks
+            .iter()
+            .filter(|block| is_image_block(block))
+            .map(|block| {
+                let source = &block["source"];
+                zk_llm::ImageSource {
+                    media_type: source["media_type"]
+                        .as_str()
+                        .unwrap_or("image/jpeg")
+                        .to_owned(),
+                    data: source["data"].as_str().map(str::to_owned),
+                    url: source["url"].as_str().map(str::to_owned),
+                }
+            })
+            .collect();
+        for block in blocks
+            .iter()
+            .skip(1)
+            .filter(|block| block["type"] == "text")
+        {
+            if let Some(text) = block["text"].as_str() {
+                message.content.push('\n');
+                message.content.push_str(text);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "image-budget"))]
+/// Preserve requests when the optional image budget feature is disabled.
+pub async fn enforce_request(_request: &mut zk_llm::ChatRequest) -> Result<(), String> {
+    Ok(())
 }
 
 // ==================== 图片指纹（旧 hashImageBlock / collectImageHashes） ====================
@@ -863,7 +1097,10 @@ fn estimate_api_block_tokens(block: &Value, text_token_ratio: f64) -> u32 {
             .filter(|source| source.is_object())
             .and_then(|source| source.get(SOURCE_DATA_KEY))
             .and_then(Value::as_str)
-            .map_or(0, |data| one_to_one_tokens(char_count(data))),
+            .map_or(0, |data| {
+                u32::try_from(zk_llm::payload_guard::inline_image_tokens(data).unwrap_or(u64::MAX))
+                    .unwrap_or(u32::MAX)
+            }),
         // 工具结果：Base64 走 1:1，否则按比率。
         Some(BLOCK_TYPE_TOOL_RESULT) => block
             .get(MESSAGE_CONTENT_KEY)
@@ -1070,20 +1307,85 @@ pub async fn enforce_phase2_with_ratio(
     transient_image_hashes: HashSet<String>,
     text_token_ratio: f64,
 ) -> Result<FinalBudgetResult, ImageBudgetError> {
+    let source_to_payload = transient_image_hashes
+        .iter()
+        .map(|hash| (hash.clone(), hash.clone()))
+        .collect();
+    enforce_phase2_with_identities(
+        api_messages,
+        input_budget,
+        source_to_payload,
+        transient_image_hashes,
+        text_token_ratio,
+    )
+    .await
+}
+
+/// Apply media reduction while retaining source identity after transcoding.
+/// Payloads shared with any mandatory source are protected as a whole.
+///
+/// # Errors
+/// Returns invalid-ratio or blocking-task errors from the media budget guard.
+#[cfg(feature = "image-budget")]
+#[expect(
+    clippy::implicit_hasher,
+    reason = "Source identity collections are owned snapshots created together by the request projector."
+)]
+pub async fn enforce_phase2_with_identities(
+    api_messages: Vec<Value>,
+    input_budget: i64,
+    source_to_payload: std::collections::HashMap<String, String>,
+    degradable_sources: HashSet<String>,
+    text_token_ratio: f64,
+) -> Result<FinalBudgetResult, ImageBudgetError> {
     validate_ratio(text_token_ratio)?;
     tokio::task::spawn_blocking(move || {
-        phase2(
-            api_messages,
+        let mut identity: std::collections::HashMap<String, HashSet<String>> =
+            std::collections::HashMap::new();
+        for (source, payload) in source_to_payload {
+            identity.entry(payload).or_default().insert(source);
+        }
+        let degradable = identity
+            .iter()
+            .filter(|(_, sources)| {
+                sources
+                    .iter()
+                    .all(|source| degradable_sources.contains(source))
+            })
+            .map(|(payload, _)| payload.clone())
+            .collect();
+        let mut result = phase2(
+            api_messages.clone(),
             input_budget,
-            &transient_image_hashes,
+            &degradable,
             text_token_ratio,
-        )
+        );
+        // The thumbnail transform preserves message/block positions, including
+        // omissions. Register provenance at that transform, never by reverse hash
+        // guessing: several sources may have identical thumbnail bytes.
+        if result.reduction_summary == SUMMARY_STRATEGY_THUMBNAIL {
+            let originals = api_messages.iter().flat_map(content_blocks);
+            let resized = result.api_messages.iter().flat_map(content_blocks);
+            for (old, new) in originals.zip(resized) {
+                if let (Some(old_hash), Some(new_hash)) =
+                    (image_block_hash(old), image_block_hash(new))
+                    && let Some(sources) = identity.get(&old_hash).cloned()
+                {
+                    identity.entry(new_hash).or_default().extend(sources);
+                }
+            }
+        }
+        result.retained_source_image_hashes = result
+            .retained_image_hashes
+            .iter()
+            .filter_map(|payload| identity.get(payload))
+            .flatten()
+            .cloned()
+            .collect();
+        result
     })
     .await
-    .map_err(|error| {
-        tracing::error!(%error, "Phase2 梯度降级的阻塞任务异常终止");
-        ImageBudgetError::ThumbnailTaskFailed
-    })
+    .map_err(|_| ImageBudgetError::ThumbnailTaskFailed)
 }
 
 /// Phase 2 内部实现（同步、比率已校验；由 `spawn_blocking` 承载）。
@@ -1103,6 +1405,7 @@ fn phase2(
         let retained_image_hashes = collect_image_hashes(&api_messages);
         return FinalBudgetResult {
             api_messages,
+            retained_source_image_hashes: retained_image_hashes.clone(),
             retained_image_hashes,
             estimated_tokens: estimated,
             input_budget,
@@ -1142,6 +1445,7 @@ fn phase2(
         tracing::error!(estimated, input_budget, "Phase2 所有降级策略执行后仍超限");
     }
     FinalBudgetResult {
+        retained_source_image_hashes: HashSet::new(),
         retained_image_hashes: collect_image_hashes(&current),
         api_messages: current,
         estimated_tokens: estimated,
@@ -1164,6 +1468,7 @@ fn settled(
         return None;
     }
     Some(FinalBudgetResult {
+        retained_source_image_hashes: HashSet::new(),
         retained_image_hashes: collect_image_hashes(&api_messages),
         api_messages,
         estimated_tokens: estimated,
@@ -1370,9 +1675,9 @@ mod tests {
     /// 四条消息：两张整段 Base64 图 + 两段普通文本（尾部保护的观测点）。
     fn phase1_history() -> Vec<ChatMessage> {
         vec![
-            ChatMessage::user(jpeg_payload(30_000)),
+            ChatMessage::assistant(jpeg_payload(30_000)),
             ChatMessage::user("中间的普通文本"),
-            ChatMessage::user(jpeg_payload(30_000)),
+            ChatMessage::assistant(jpeg_payload(30_000)),
             ChatMessage::user("最后一条请求"),
         ]
     }
@@ -1414,7 +1719,7 @@ mod tests {
     }
 
     #[test]
-    fn phase1_never_touches_system_messages() {
+    fn phase1_never_touches_system_or_original_user_messages() {
         let system = ChatMessage::system(jpeg_payload(30_000));
         let messages = vec![
             system.clone(),
@@ -1423,9 +1728,9 @@ mod tests {
             ChatMessage::user("最后一条"),
         ];
         let result = enforce_phase1(&messages, 10);
-        assert!(result.trimmed);
+        assert!(!result.trimmed);
         assert_eq!(result.messages[0], system);
-        assert_eq!(result.messages[1].content, PLACEHOLDER_30K);
+        assert_eq!(result.messages, messages);
     }
 
     #[test]
@@ -1437,7 +1742,7 @@ mod tests {
         ];
         // 预算 0 强制进入清理流程：无 Base64 时正文一字不改。
         let result = enforce_phase1(&messages, 0);
-        assert!(result.trimmed);
+        assert!(!result.trimmed);
         assert_eq!(result.messages, messages);
         assert_eq!(result.tokens_after, result.tokens_before);
     }
@@ -1448,7 +1753,7 @@ mod tests {
             "先看这张 data:image/png;base64,{} 再回答我的问题",
             "A".repeat(5_000)
         );
-        let messages = vec![ChatMessage::user(content), ChatMessage::user("追问")];
+        let messages = vec![ChatMessage::assistant(content), ChatMessage::user("追问")];
         let result = enforce_phase1(&messages, 0);
         // 旧 `ImageBlock` 是独立内容块：命中的整段 data URI（含 MIME 头）被占位
         // 替换，字符数按载荷长度上报——扫描口径与 `recovery::strip_data_uris` 同源。
@@ -1516,7 +1821,7 @@ mod tests {
     #[test]
     fn apply_cleans_history_base64_over_the_cascade_budget() {
         let mut messages = vec![
-            ChatMessage::user(jpeg_payload(30_000)),
+            ChatMessage::assistant(jpeg_payload(30_000)),
             ChatMessage::user("这是什么"),
             ChatMessage::user("再看一次"),
         ];
@@ -1836,6 +2141,117 @@ mod tests {
         assert!(
             observed > 0,
             "spawn_blocking 未生效：Phase2 期间异步运行时被阻塞（心跳 {observed} 次）"
+        );
+    }
+    #[cfg(feature = "image-budget")]
+    #[tokio::test]
+    async fn source_identity_survives_thumbnail_and_shared_mandatory_payload_is_protected() {
+        let block = image_block(&STANDARD.encode(png_fixture(800, 700)));
+        let hash = image_block_hash(&block).unwrap();
+        let messages = vec![json!({"role":"user","content":[block.clone()]})];
+        let thumbnail = vec![json!({"role":"user","content":[thumbnail_of(&block)]})];
+        let budget = i64::from(estimate_api_tokens(&thumbnail, TEXT_TOKEN_RATIO));
+        assert!(estimate_api_tokens(&messages, TEXT_TOKEN_RATIO) > u32::try_from(budget).unwrap());
+        let sources = std::collections::HashMap::from([
+            ("source-a".into(), hash.clone()),
+            ("source-b".into(), hash.clone()),
+        ]);
+        let degradable = HashSet::from(["source-a".into(), "source-b".into()]);
+        let result = super::enforce_phase2_with_identities(
+            messages.clone(),
+            budget,
+            sources.clone(),
+            degradable,
+            TEXT_TOKEN_RATIO,
+        )
+        .await
+        .unwrap();
+        assert!(result.fits_budget);
+        assert_eq!(
+            result.retained_source_image_hashes,
+            HashSet::from(["source-a".into(), "source-b".into()])
+        );
+        assert!(!result.retained_image_hashes.contains(&hash));
+        let protected = super::enforce_phase2_with_identities(
+            messages.clone(),
+            budget,
+            sources,
+            HashSet::from(["source-a".into()]),
+            TEXT_TOKEN_RATIO,
+        )
+        .await
+        .unwrap();
+        assert!(!protected.fits_budget);
+        assert_eq!(protected.api_messages, messages);
+        assert_eq!(protected.retained_source_image_hashes.len(), 2);
+    }
+    #[cfg(feature = "image-budget")]
+    #[tokio::test]
+    async fn actual_request_budget_keeps_user_images_and_reduces_only_trusted_injections() {
+        let data = STANDARD.encode(png_fixture(800, 700));
+        let image = zk_llm::ImageSource {
+            media_type: "image/png".into(),
+            data: Some(data.clone()),
+            url: None,
+        };
+        let mut request = zk_llm::ChatRequest::new("qwen3.7-plus").with_message(
+            ChatMessage::user_with_images("mandatory original text", vec![image.clone()]),
+        );
+        request.max_tokens = super::super::context_window_for(&request.model);
+        let original = request.messages.clone();
+        assert!(
+            super::enforce_request(&mut request)
+                .await
+                .unwrap_err()
+                .contains("IMAGE_BUDGET_EXCEEDED")
+        );
+        assert_eq!(request.messages, original);
+        let digest = super::image_block_hash(&image_block(&data)).unwrap();
+        request.messages=vec![ChatMessage::user_with_images("tool image",vec![image]).with_metadata(Some(json!({"syntheticToolImages":true,"transientImages":true,"imageSourceDigests":[digest.clone()]})))];
+        let window = super::super::context_window_for(&request.model);
+        request.max_tokens = window - window / 20 - 1000;
+        super::enforce_request(&mut request).await.unwrap();
+        let meta = request.messages[0].metadata.as_ref().unwrap();
+        assert_eq!(meta["transientImages"], false);
+        assert!(
+            request.messages[0].images.is_empty() || meta["imageSourceDigests"] == json!([digest])
+        );
+    }
+
+    #[cfg(feature = "image-budget")]
+    #[tokio::test]
+    async fn request_copy_prioritizes_run_original_images_over_newer_steering_and_history() {
+        let image = zk_llm::ImageSource {
+            media_type: "image/png".into(),
+            data: Some(STANDARD.encode(png_fixture(8, 8))),
+            url: None,
+        };
+        let history = ChatMessage::user_with_images("old original", vec![image.clone(); 8])
+            .with_metadata(Some(json!({"sourceMessageId":"history"})));
+        let current = ChatMessage::user_with_images("current original", vec![image.clone(); 8])
+            .with_metadata(Some(json!({"sourceMessageId":"current"})));
+        let mut request = zk_llm::ChatRequest::new("kimi-k3");
+        request.current_user_message_id = Some("current".into());
+        request.messages = vec![
+            history.clone(),
+            current.clone(),
+            ChatMessage::user("steering"),
+        ];
+        super::enforce_request(&mut request).await.unwrap();
+        assert_eq!(request.messages[1], current);
+        assert!(request.messages[0].images.is_empty());
+        assert!(
+            request.messages[0]
+                .content
+                .contains("Historical image omitted")
+        );
+        assert_eq!(history.images.len(), 8, "durable source is not modified");
+        request.messages[1].images.push(image);
+        assert!(
+            super::enforce_request(&mut request)
+                .await
+                .unwrap_err()
+                .contains("current request attachments")
         );
     }
 }

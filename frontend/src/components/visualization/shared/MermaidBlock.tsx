@@ -12,6 +12,7 @@ import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import { Copy, Check, Download, AlertTriangle } from 'lucide-react';
 import { useConfigStore } from '@/store/configStore';
 import { initMermaid, renderMermaid } from '@/utils/mermaid-config';
+import { resolveTheme } from '@/styles/design-tokens';
 
 interface MermaidBlockProps {
     code: string;
@@ -43,17 +44,21 @@ const MermaidBlock: React.FC<MermaidBlockProps> = ({ code }) => {
     const [svg, setSvg] = useState<string | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [copied, setCopied] = useState(false);
-    const [showButtons, setShowButtons] = useState(false);
 
     // Cache: code+theme → svg
     const cacheRef = useRef<Map<string, string>>(new Map());
 
     const theme = useConfigStore(s => s.theme);
-    const isDark = useMemo(() => {
-        return theme.mode === 'dark' ||
-            theme.mode === 'glass' ||
-            (theme.mode === 'system' && typeof window !== 'undefined' && window.matchMedia('(prefers-color-scheme: dark)').matches);
-    }, [theme.mode]);
+    // Glass diagrams use the light palette for a stable reading surface.
+    const effectiveTheme = useMemo(() => resolveTheme(theme.mode), [theme.mode]);
+    const accentColor = theme.accentColor;
+
+    const diagramWidth = useMemo(() => {
+        if (!svg) return undefined;
+        const element = new DOMParser().parseFromString(svg, 'image/svg+xml').documentElement;
+        const width = Number(element.getAttribute('viewBox')?.trim().split(/[\s,]+/)[2]);
+        return Number.isFinite(width) && width > 0 ? `${width}px` : undefined;
+    }, [svg]);
 
     const incomplete = useMemo(() => looksIncomplete(code), [code]);
 
@@ -64,7 +69,7 @@ const MermaidBlock: React.FC<MermaidBlockProps> = ({ code }) => {
             return;
         }
 
-        const cacheKey = `${isDark ? 'd' : 'l'}:${code}`;
+        const cacheKey = `${effectiveTheme === 'dark' ? 'd' : 'l'}:${accentColor ?? ''}:${code}`;
         const cached = cacheRef.current.get(cacheKey);
         if (cached) {
             setSvg(cached);
@@ -77,7 +82,7 @@ const MermaidBlock: React.FC<MermaidBlockProps> = ({ code }) => {
 
         (async () => {
             try {
-                initMermaid(isDark);
+                initMermaid(effectiveTheme, accentColor);
                 const result = await renderMermaid(id, code);
                 if (!cancelled) {
                     cacheRef.current.set(cacheKey, result.svg);
@@ -96,7 +101,7 @@ const MermaidBlock: React.FC<MermaidBlockProps> = ({ code }) => {
         })();
 
         return () => { cancelled = true; };
-    }, [code, isDark, incomplete]);
+    }, [code, effectiveTheme, accentColor, incomplete]);
 
     const handleCopySvg = useCallback(async () => {
         if (!svg) return;
@@ -107,8 +112,8 @@ const MermaidBlock: React.FC<MermaidBlockProps> = ({ code }) => {
 
     const handleDownloadPng = useCallback(async () => {
         if (!svg) return;
-        const svgBlob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' });
-        const url = URL.createObjectURL(svgBlob);
+        // Inline SVG images keep HTML labels exportable in Chrome's canvas.
+        const url = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
         const img = new Image();
         img.onload = () => {
             const scale = 2; // retina
@@ -125,7 +130,6 @@ const MermaidBlock: React.FC<MermaidBlockProps> = ({ code }) => {
             a.href = pngUrl;
             a.download = 'mermaid-diagram.png';
             a.click();
-            URL.revokeObjectURL(url);
         };
         img.src = url;
     }, [svg]);
@@ -133,9 +137,9 @@ const MermaidBlock: React.FC<MermaidBlockProps> = ({ code }) => {
     // --- Loading state (streaming incomplete) ---
     if (incomplete) {
         return (
-            <div className="rounded-lg border border-[var(--border)] bg-[var(--bg-secondary)] p-6 flex items-center justify-center gap-2">
-                <div className="w-4 h-4 rounded-full bg-blue-400 animate-pulse" />
-                <span className="text-sm text-[var(--text-secondary)]">Mermaid 图表加载中…</span>
+            <div className="rounded-[14px] border border-[var(--v2-border-hairline)] bg-[var(--v2-bg-sunken)] p-6 flex items-center justify-center gap-2">
+                <div className="w-4 h-4 rounded-full bg-accent2 animate-pulse" />
+                <span className="mermaid-loading-label text-sm text-[var(--v2-text-2)]">Mermaid 图表加载中…</span>
             </div>
         );
     }
@@ -143,12 +147,12 @@ const MermaidBlock: React.FC<MermaidBlockProps> = ({ code }) => {
     // --- Error state ---
     if (error) {
         return (
-            <div className="rounded-lg border border-red-500/50 bg-red-500/5 overflow-hidden">
-                <div className="flex items-center gap-2 px-4 py-2 bg-red-500/10 border-b border-red-500/30 text-xs text-red-400">
-                    <AlertTriangle size={14} />
+            <div className="rounded-[14px] border border-[color:color-mix(in_srgb,var(--v2-err)_50%,transparent)] bg-errsoft overflow-hidden">
+                <div className="mermaid-error-heading flex items-center gap-2 px-4 py-2 bg-errsoft border-b border-[color:color-mix(in_srgb,var(--v2-err)_30%,transparent)] text-[13px] text-err">
+                    <AlertTriangle size={18} />
                     <span>Mermaid 渲染失败: {error}</span>
                 </div>
-                <pre className="p-4 text-sm text-[var(--text-primary)] overflow-x-auto whitespace-pre font-mono">
+                <pre className="mermaid-error-source p-4 panel-code text-[var(--v2-text-1)] overflow-x-auto whitespace-pre font-mono">
                     {code}
                 </pre>
             </div>
@@ -160,34 +164,36 @@ const MermaidBlock: React.FC<MermaidBlockProps> = ({ code }) => {
         return (
             <div
                 data-testid="mermaid-block"
-                className="relative rounded-lg border border-[var(--border)] bg-[var(--bg-secondary)] overflow-hidden group"
-                onMouseEnter={() => setShowButtons(true)}
-                onMouseLeave={() => setShowButtons(false)}
+                className="relative rounded-[14px] border border-[var(--v2-border-hairline)] bg-[var(--v2-bg-sunken)] overflow-hidden group"
             >
                 {/* Export buttons */}
                 <div
-                    className={`absolute top-2 right-2 flex gap-1 z-10 transition-opacity ${showButtons ? 'opacity-100' : 'opacity-0'}`}
+                    className="flex justify-end gap-1 p-2 border-b border-border-hairline"
                 >
                     <button
                         onClick={handleCopySvg}
-                        className="p-1.5 rounded-md bg-[var(--bg-primary)]/80 border border-[var(--border)] hover:bg-[var(--bg-hover)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors backdrop-blur-sm"
+                        className="mermaid-export-button panel-control p-1.5 rounded-md bg-[var(--v2-bg-surface)]/80 border border-[var(--v2-border-hairline)] hover:bg-[var(--v2-bg-hover)] text-[var(--v2-text-2)] hover:text-[var(--v2-text-1)] transition-colors backdrop-blur-xs"
                         title="复制 SVG"
                     >
-                        {copied ? <Check size={14} /> : <Copy size={14} />}
+                        {copied ? <Check size={18} /> : <Copy size={18} />}
                     </button>
                     <button
                         onClick={handleDownloadPng}
-                        className="p-1.5 rounded-md bg-[var(--bg-primary)]/80 border border-[var(--border)] hover:bg-[var(--bg-hover)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors backdrop-blur-sm"
+                        className="mermaid-export-button panel-control p-1.5 rounded-md bg-[var(--v2-bg-surface)]/80 border border-[var(--v2-border-hairline)] hover:bg-[var(--v2-bg-hover)] text-[var(--v2-text-2)] hover:text-[var(--v2-text-1)] transition-colors backdrop-blur-xs"
                         title="下载 PNG"
                     >
-                        <Download size={14} />
+                        <Download size={18} />
                     </button>
                 </div>
 
                 {/* SVG container */}
                 <div
                     ref={containerRef}
-                    className="p-4 flex justify-center overflow-x-auto [&>svg]:max-w-full"
+                    role="region"
+                    aria-label="Mermaid 图表，可横向滚动"
+                    tabIndex={0}
+                    className="p-4 overflow-x-auto [&>svg]:mx-auto [&>svg]:min-w-[var(--mermaid-width)]"
+                    style={{ '--mermaid-width': diagramWidth } as React.CSSProperties}
                     dangerouslySetInnerHTML={{ __html: svg }}
                 />
             </div>
@@ -196,8 +202,8 @@ const MermaidBlock: React.FC<MermaidBlockProps> = ({ code }) => {
 
     // --- Initial render / loading ---
     return (
-        <div className="rounded-lg border border-[var(--border)] bg-[var(--bg-secondary)] p-6 flex items-center justify-center">
-            <div className="w-4 h-4 rounded-full bg-blue-400 animate-pulse" />
+        <div className="rounded-[14px] border border-[var(--v2-border-hairline)] bg-[var(--v2-bg-sunken)] p-6 flex items-center justify-center">
+            <div className="w-4 h-4 rounded-full bg-accent2 animate-pulse" />
         </div>
     );
 };

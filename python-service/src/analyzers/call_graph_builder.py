@@ -188,6 +188,7 @@ class CallGraphBuilder:
                 line_range=(func["line_start"], func["line_end"]),
                 language="python", confidence="high",
             ))
+            self.graph.nodes[node_id]["routes"] = func.get("routes", [])
 
         # 注册类节点
         for cls in visitor.classes:
@@ -474,6 +475,22 @@ class _PythonCallGraphVisitor(_CSTVisitorBase):  # type: ignore[misc]
         self._current_class: Optional[str] = None
         self._current_function: Optional[str] = None
         self._positions: Optional[dict] = None       # PositionProvider resolve 结果
+        self._router_prefixes = {"router": "", "app": ""}
+
+    def visit_Assign(self, node) -> None:
+        import libcst as cst
+        if not isinstance(node.value, cst.Call):
+            return
+        constructor = self._node_to_str(node.value.func).split(".")[-1]
+        if constructor not in {"APIRouter", "FastAPI", "Flask", "Blueprint"}:
+            return
+        prefix = ""
+        for argument in node.value.args:
+            if argument.keyword and argument.keyword.value in {"prefix", "url_prefix"} and isinstance(argument.value, cst.SimpleString):
+                prefix = argument.value.evaluated_value
+        for target in node.targets:
+            if isinstance(target.target, cst.Name):
+                self._router_prefixes[target.target.value] = prefix
 
     def _init_visitor(self):
         """延迟导入 libcst"""
@@ -521,15 +538,32 @@ class _PythonCallGraphVisitor(_CSTVisitorBase):  # type: ignore[misc]
         pos = self._get_position_from_metadata(node)
         qualified = f"{self._current_class}.{func_name}" if self._current_class else func_name
 
-        # 检测 FastAPI 路由装饰器
+        # Keep statically known routes; never execute project expressions.
+        routes = []
         node_type = "function"
         for deco in node.decorators:
-            deco_str = self._node_to_str(deco.decorator)
-            if any(p in deco_str for p in ("router.get", "router.post", "router.put",
-                                           "router.delete", "router.patch", "app.get",
-                                           "app.post", "app.put", "app.delete")):
-                node_type = "api"
-                break
+            call = deco.decorator
+            if not isinstance(call, cst.Call) or not isinstance(call.func, cst.Attribute):
+                continue
+            owner = self._node_to_str(call.func.value)
+            if owner not in self._router_prefixes:
+                continue
+            method = call.func.attr.value.lower()
+            if method not in {"get", "post", "put", "delete", "patch", "options", "head", "route", "api_route"}:
+                continue
+            node_type = "api"
+            path = None
+            methods = [method.upper()] if method not in {"route", "api_route"} else ["GET"]
+            for arg in call.args:
+                keyword = arg.keyword.value if arg.keyword else None
+                if (keyword == "path" or keyword is None and path is None) and isinstance(arg.value, cst.SimpleString):
+                    path = arg.value.evaluated_value
+                if keyword == "methods" and isinstance(arg.value, (cst.List, cst.Tuple)):
+                    methods = [element.value.evaluated_value.upper() for element in arg.value.elements
+                               if element and isinstance(element.value, cst.SimpleString)]
+            if isinstance(path, str) and path.startswith("/"):
+                path = self._router_prefixes[owner].rstrip("/") + path
+                routes.extend({"http_method": method, "path": path} for method in methods)
 
         self.functions.append({
             "name": func_name,
@@ -537,6 +571,7 @@ class _PythonCallGraphVisitor(_CSTVisitorBase):  # type: ignore[misc]
             "line_start": pos[0],
             "line_end": pos[1],
             "node_type": node_type,
+            "routes": routes,
         })
         prev = self._current_function
         self._current_function = qualified

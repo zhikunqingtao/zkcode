@@ -1,16 +1,8 @@
-//! `Bash` 工具——在会话工作目录执行 shell 命令（直通模式）。
+//! Native Bash: authorization-bound cwd, supervised process groups and explicit artifacts.
 //!
-//! 对照旧 `tool/impl/BashTool.java`（只读权威规格）：工具名 `Bash`、入参
-//! `command` / `timeout`（毫秒）/ `description`、默认 120 000 ms、上限
-//! 600 000 ms、`bash -c` 执行、输出预览上限 30 000 字符、stdout/stderr
-//! 合并规则（`stdout + (stderr 空 ? "" : (stdout 空 ? "" : "\n") + stderr)`）、
-//! 失败文本前缀 `"Exit code: N\n"`、超时退出码 137。
-//!
-//! **直通模式**（本阶段范围界定）：旧 `BashTool` 前置四层安全解析
-//! （`BashCommandParser` → 命令白/黑名单 → 路径鉴权 → 注入检测）与权限
-//! 询问链路属子阶段 2.4 / 2.5，本阶段**不做任何命令内容检查**，命令原样
-//! 交给 [`crate::process::run_shell`]；2.4 落地后在 [`BashTool::run`] 的
-//! 入口处接安全裁决，届时本注释一并更新（留痕 docs/compatibility.md §4）。
+//! Foreground commands retain persistent session cwd; temporary sessions use a
+//! RAM scope and an anonymous control socket. A host adapter maps background
+//! requests to attached Shell Tasks. Command recovery is diagnostic only.
 
 pub mod ast;
 pub mod blacklist;
@@ -25,6 +17,7 @@ pub mod security;
 pub mod sed_validator;
 pub mod shell_state;
 
+use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::sync::LazyLock;
 use std::time::Duration;
@@ -41,6 +34,12 @@ use self::blacklist::{BlockLevel, CommandBlacklistService};
 use self::classifier::BashCommandClassifier;
 use self::security::BashSecurityAnalyzer;
 use self::shell_state::ShellStateManager;
+mod background;
+mod declared_outputs;
+pub use declared_outputs::DeclaredOutputReceipt;
+mod memory_state;
+mod recovery;
+pub use background::{BackgroundBashTool, BackgroundShellPort};
 
 /// 共享安全解析器（旧 `BashTool` 由 Spring 注入单例 `BashSecurityAnalyzer`）。
 static BASH_SECURITY: LazyLock<BashSecurityAnalyzer> = LazyLock::new(BashSecurityAnalyzer::new);
@@ -73,6 +72,15 @@ const OUTPUT_TRUNCATED: &str = "\n[Output truncated]";
 #[derive(Clone, Copy, Debug, Default)]
 pub struct BashTool;
 
+impl BashTool {
+    /// Add the production `TaskRuntime` adapter without changing ordinary Bash callers.
+    pub fn with_background_backend(
+        port: std::sync::Arc<dyn BackgroundShellPort>,
+    ) -> BackgroundBashTool {
+        BackgroundBashTool::new(port)
+    }
+}
+
 impl Tool for BashTool {
     fn name(&self) -> &'static str {
         "Bash"
@@ -90,8 +98,10 @@ impl Tool for BashTool {
                 "command": { "type": "string", "description": "The shell command to execute." },
                 "timeout": {
                     "type": "integer",
-                    "description": "Timeout in milliseconds (default 120000, max 600000)."
+                    "description": "Timeout in milliseconds. Explicit values take precedence; otherwise build/install use 300000, tests use 600000 and other commands retain at least 120000. Max 600000, further bounded by the owning task deadline."
                 },
+                "declared_outputs": {"type":"array","maxItems":32,"description":"Foreground-only file effects frozen before execution and sealed afterward. Paths are relative to the actual shell cwd; no undeclared effect becomes an artifact.","items":{"type":"object","properties":{"path":{"type":"string"},"operation":{"type":"string","enum":["created","modified","deleted"]},"requiredValidatorId":{"type":"string"}},"required":["path","operation"]}},
+                "is_background": {"type":"boolean", "description":"Create an attached managed shell task; use TaskOutput/TaskStop for output and cancellation."},
                 "description": {
                     "type": "string",
                     "description": "Short human-readable description of what the command does."
@@ -112,6 +122,12 @@ impl Tool for BashTool {
     /// argv[0]，全为 search/read/list（或整条命令过 `isReadOnlyCommand` 二次
     /// 判定）→ 整体只读；解析失败 / too-complex → 降级到正则分类器。
     fn is_read_only(&self, input: &serde_json::Value) -> bool {
+        if input
+            .get("declared_outputs")
+            .is_some_and(|value| value.as_array().is_none_or(|items| !items.is_empty()))
+        {
+            return false;
+        }
         let command = input.get("command").and_then(serde_json::Value::as_str);
         if let ParseForSecurityResult::Simple { commands } =
             BASH_SECURITY.parse_for_security(command)
@@ -142,23 +158,53 @@ impl Tool for BashTool {
         level == BlockLevel::HighRiskAsk || level == BlockLevel::AbsoluteDeny
     }
 
+    fn produces_declared_artifacts(&self) -> bool {
+        true
+    }
+
     fn execute(&self, input: serde_json::Value, ctx: ToolContext) -> BoxFuture<'_, ToolOutput> {
         Box::pin(async move { run(input, ctx).await })
     }
 }
 
+/// Preserve the Rust default floor while activating the existing source classifier.
+pub(super) fn resolve_timeout(input: &serde_json::Value, command: &str) -> u64 {
+    u64::try_from(optional_usize(input, "timeout").unwrap_or(0))
+        .ok()
+        .filter(|value| *value > 0)
+        .unwrap_or_else(|| {
+            BASH_CLASSIFIER
+                .classify_for_timeout(Some(command))
+                .recommended_timeout_ms()
+                .max(BASH_DEFAULT_TIMEOUT_MS)
+        })
+        .min(BASH_MAX_TIMEOUT_MS)
+}
+
 /// 执行主体（入参校验 → 绝对禁止最终防线 → Shell 状态包装 → 受控执行 →
 /// 输出合并 / 截断 → 结果组装）。
 async fn run(input: serde_json::Value, ctx: ToolContext) -> ToolOutput {
+    if input
+        .get("is_background")
+        .is_some_and(|value| !value.is_boolean())
+    {
+        return failure("BASH_BACKGROUND_INVALID", "is_background must be a boolean");
+    }
+    if input
+        .get("is_background")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        return failure(
+            "BASH_BACKGROUND_UNAVAILABLE",
+            "Managed background tasks are unavailable in this execution scope",
+        );
+    }
     let command = match required_str(&input, "command") {
         Ok(value) => value.to_owned(),
         Err(output) => return output,
     };
-    let timeout_ms = u64::try_from(optional_usize(&input, "timeout").unwrap_or(0))
-        .ok()
-        .filter(|value| *value > 0)
-        .unwrap_or(BASH_DEFAULT_TIMEOUT_MS)
-        .min(BASH_MAX_TIMEOUT_MS);
+    let timeout_ms = resolve_timeout(&input, &command);
     // 旧 `BashTool.java:337-341`：绝对禁止命令最终防线（纵深防御）——即使权限
     // 管线被绕过，ABSOLUTE_DENY 在此仍不可通行（硬安全不变量）。
     let block = BASH_BLACKLIST.check_command(&command);
@@ -167,6 +213,9 @@ async fn run(input: serde_json::Value, ctx: ToolContext) -> ToolOutput {
             "COMMAND_ABSOLUTELY_DENIED",
             block.reason.unwrap_or_default(),
         );
+    }
+    if ctx.is_ephemeral() {
+        return run_memory(&input, &command, timeout_ms, &ctx).await;
     }
     LazyLock::force(&SHELL_STATE);
     // 旧 `BashTool.java:344-346`：Shell 状态包装 + 跨调用 CWD 解析。
@@ -178,6 +227,16 @@ async fn run(input: serde_json::Value, ctx: ToolContext) -> ToolOutput {
         &session_id,
         &ctx.working_dir().to_string_lossy(),
     ));
+    if !authorized_cwd_matches(&ctx, &working_dir) {
+        return failure(
+            "BASH_WORKING_DIRECTORY_CHANGED",
+            "Shell cwd changed after authorization; authorize the command again",
+        );
+    }
+    let declared = match declared_outputs::freeze(&input, &working_dir, ctx.working_dir()) {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
     let outcome = run_shell(
         &wrapped,
         &working_dir,
@@ -188,13 +247,80 @@ async fn run(input: serde_json::Value, ctx: ToolContext) -> ToolOutput {
     match outcome {
         Ok(outcome) => {
             // 旧 `BashTool.java:408`：非超时路径确认本次 CWD 状态已更新。
-            if !outcome.timed_out {
+            if !outcome.timed_out && outcome.termination_confirmed {
                 ShellStateManager::update_state_from_snapshot(&session_id);
             }
-            finish(&outcome, timeout_ms)
+            declared_outputs::seal(declared, finish(&outcome, timeout_ms))
         }
         Err(error) => failure("BASH_SPAWN_FAILED", format!("{command}: {error}")),
     }
+}
+
+async fn run_memory(
+    input: &serde_json::Value,
+    command: &str,
+    timeout_ms: u64,
+    ctx: &ToolContext,
+) -> ToolOutput {
+    let state = match memory_state::acquire(ctx) {
+        Ok(state) => state,
+        Err(code) => return failure(code, "Temporary shell scope is not active"),
+    };
+    // Do not silently execute a queued command against a cwd changed by another
+    // call after authorization. The caller can retry and obtain fresh facts.
+    let Ok(_serial) = state.serial.try_lock() else {
+        return failure(
+            "SHELL_COMMAND_ALREADY_RUNNING",
+            "Another command owns this session shell state",
+        );
+    };
+    let cwd = match state.cwd() {
+        Ok(cwd) => cwd,
+        Err(code) => {
+            return failure(
+                code,
+                "Shell cwd is unavailable; explicitly reset the working directory",
+            );
+        }
+    };
+    if !authorized_cwd_matches(ctx, &cwd) {
+        return failure(
+            "BASH_WORKING_DIRECTORY_CHANGED",
+            "Shell cwd changed after authorization; authorize the command again",
+        );
+    }
+    let declared = match declared_outputs::freeze(input, &cwd, ctx.working_dir()) {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    match crate::process::run_shell_memory(command, &cwd, Duration::from_millis(timeout_ms), ctx)
+        .await
+    {
+        Ok((outcome, cwd)) => {
+            let updated = state.update(cwd);
+            let mut output = finish(&outcome, timeout_ms);
+            if let Err(code) = updated {
+                output.is_error = true;
+                let _ = write!(
+                    output.content,
+                    "\n{code}: final working directory was not confirmed; reset it before another command. Command effects must not be retried automatically."
+                );
+                if let Some(metadata) = output.metadata.as_mut() {
+                    metadata["structuredResult"]["retryability"] = json!("NEVER");
+                    metadata["structuredResult"]["shellStateConfirmed"] = json!(false);
+                }
+            }
+            declared_outputs::seal(declared, output)
+        }
+        Err(error) => failure("BASH_SPAWN_FAILED", error.to_string()),
+    }
+}
+
+fn authorized_cwd_matches(ctx: &ToolContext, cwd: &std::path::Path) -> bool {
+    ctx.authorized_shell_cwd().is_none_or(|authorized| {
+        cwd.canonicalize()
+            .is_ok_and(|current| current == authorized)
+    })
 }
 
 /// 结果组装（合并规则 + 30 000 字符预览 + `Exit code:` 前缀）。
@@ -204,14 +330,18 @@ fn finish(outcome: &ProcessOutcome, timeout_ms: u64) -> ToolOutput {
     if char_truncated || outcome.truncated {
         body.push_str(OUTPUT_TRUNCATED);
     }
-    let content = if outcome.timed_out {
+    let content = if !outcome.termination_confirmed {
+        format!(
+            "PROCESS_TERMINATION_UNCONFIRMED: command effects are unknown; inspect before retrying\n{body}"
+        )
+    } else if outcome.timed_out {
         format!("Command timed out after {timeout_ms} ms\nExit code: {TIMEOUT_EXIT_CODE}\n{body}")
     } else if outcome.exit_code == 0 {
         body
     } else {
         format!("Exit code: {}\n{body}", outcome.exit_code)
     };
-    let mut output = if outcome.exit_code == 0 {
+    let mut output = if outcome.exit_code == 0 && outcome.termination_confirmed {
         ToolOutput::ok(content)
     } else {
         ToolOutput::error(content)
@@ -219,11 +349,24 @@ fn finish(outcome: &ProcessOutcome, timeout_ms: u64) -> ToolOutput {
     output.metadata = Some(json!({
         "structuredResult": {
             "exitCode": outcome.exit_code,
+            "terminationConfirmed": outcome.termination_confirmed,
+            "retryability": if outcome.termination_confirmed { "unspecified" } else { "NEVER" },
+            "effectState": if outcome.termination_confirmed { "confirmed" } else { "UNKNOWN" },
             "timedOut": outcome.timed_out,
             "cancelled": outcome.cancelled,
             "truncated": char_truncated || outcome.truncated,
         }
     }));
+    if output.is_error
+        && let Some(metadata) = output.metadata.as_mut()
+    {
+        let recovery = recovery::classify(outcome);
+        metadata["failure_category"] = json!(recovery.category);
+        metadata["failure_suggestion"] = json!(recovery.suggestion);
+        metadata["structuredResult"]["code"] = json!(recovery.code);
+        metadata["structuredResult"]["retryability"] = json!("NEVER");
+        metadata["structuredResult"]["effectState"] = json!("UNKNOWN");
+    }
     output
 }
 
@@ -248,6 +391,144 @@ mod tests {
     fn ctx() -> ToolContext {
         let (tx, _rx) = mpsc::unbounded_channel();
         ToolContext::new(CancellationToken::new(), tx).with_working_dir(std::env::temp_dir())
+    }
+
+    #[tokio::test]
+    async fn temporary_shell_has_ram_cwd_literal_commands_and_no_snapshot_files() {
+        let root = std::env::temp_dir().join(format!("zk-memory-shell-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("child 空格")).unwrap();
+        let root = root.canonicalize().unwrap();
+        let session = uuid::Uuid::new_v4().to_string();
+        let guard = memory_state::fixture_scope(&session, &root);
+        let context = ctx()
+            .with_session_id(&session)
+            .with_working_dir(&root)
+            .with_ephemeral_content(true);
+        let cwd_file = ShellStateManager::cwd_tracking_path(&session);
+        let first = BashTool.execute(json!({"command": "cd 'child 空格'; printf '%s' 'literal $(touch unexpected)'; printf err >&2; exit 7"}), context.clone()).await;
+        assert!(first.is_error);
+        assert_eq!(
+            first.content,
+            "Exit code: 7\nliteral $(touch unexpected)\nerr"
+        );
+        assert!(!root.join("child 空格/unexpected").exists());
+        assert_eq!(
+            ShellStateManager::resolve_working_directory(&session, root.to_str().unwrap()),
+            root.join("child 空格").to_str().unwrap()
+        );
+        let stale = BashTool.execute(json!({"command":"touch must-not-run", "authorized_shell_cwd":root.join("child 空格")}),
+            context.clone().with_authorized_shell_cwd(&root)).await;
+        assert!(stale.is_error && stale.content.contains("BASH_WORKING_DIRECTORY_CHANGED"));
+        assert!(!root.join("child 空格/must-not-run").exists());
+        let second = BashTool
+            .execute(
+                json!({"command": "pwd -P; printf 'authorized file' > result.txt"}),
+                context.clone(),
+            )
+            .await;
+        assert!(!second.is_error, "{}", second.content);
+        assert_eq!(
+            second.content,
+            format!("{}\n", root.join("child 空格").display())
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("child 空格/result.txt")).unwrap(),
+            "authorized file"
+        );
+        assert!(!cwd_file.exists());
+        if let Ok(entries) = std::fs::read_dir(ShellStateManager::state_directory()) {
+            assert!(
+                !entries
+                    .flatten()
+                    .any(|entry| entry.file_name().to_string_lossy().starts_with(&session))
+            );
+        }
+        drop(guard);
+        let closed = BashTool
+            .execute(json!({"command": "touch must-not-run"}), context)
+            .await;
+        assert!(closed.is_error && closed.content.contains("SHELL_MEMORY_SCOPE_REQUIRED"));
+        assert!(!root.join("must-not-run").exists());
+        assert!(root.join("child 空格/result.txt").is_file());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn temporary_shell_missing_cwd_is_explicit_and_reset_stays_in_memory() {
+        let root =
+            std::env::temp_dir().join(format!("zk-memory-shell-reset-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let session = uuid::Uuid::new_v4().to_string();
+        let _guard = memory_state::fixture_scope(&session, &root);
+        let context = ctx()
+            .with_session_id(&session)
+            .with_working_dir(&root)
+            .with_ephemeral_content(true);
+        let first = BashTool
+            .execute(
+                json!({"command": "trap - EXIT; printf done"}),
+                context.clone(),
+            )
+            .await;
+        assert!(first.is_error && first.content.starts_with("done\nSHELL_CWD_UNCONFIRMED"));
+        let denied = BashTool
+            .execute(json!({"command": "touch must-not-run"}), context.clone())
+            .await;
+        assert!(denied.is_error && !root.join("must-not-run").exists());
+        ShellStateManager::reset_cwd(&session, root.to_str().unwrap());
+        let valid = BashTool
+            .execute(json!({"command": "printf ready"}), context)
+            .await;
+        assert!(!valid.is_error, "{}", valid.content);
+        assert_eq!(valid.content, "ready");
+        assert!(!ShellStateManager::cwd_tracking_path(&session).exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn timeout_recommendations_preserve_explicit_values_and_the_existing_default_floor() {
+        for (command, expected) in [
+            ("cat file", 120_000),
+            ("cargo build", 300_000),
+            ("npm install", 300_000),
+            ("cargo test", 600_000),
+        ] {
+            assert_eq!(resolve_timeout(&json!({}), command), expected);
+            assert_eq!(resolve_timeout(&json!({"timeout":7000}), command), 7000);
+            assert_eq!(
+                resolve_timeout(&json!({"timeout":900_000}), command),
+                600_000
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_suggestions_classify_facts_without_retrying_or_confusing_signals_with_timeouts()
+     {
+        for (command, code, category) in [
+            (
+                "printf 'no space left on device' >&2; exit 1",
+                "BASH_DISK_FULL",
+                "NEEDS_HUMAN",
+            ),
+            (
+                "printf 'connection refused' >&2; exit 1",
+                "BASH_NETWORK_ERROR",
+                "RETRYABLE",
+            ),
+            ("exit 143", "BASH_SIGNAL_TERMINATED", "NON_RETRYABLE"),
+            ("exit 127", "BASH_COMMAND_NOT_FOUND", "NON_RETRYABLE"),
+        ] {
+            let output = BashTool.execute(json!({"command":command}), ctx()).await;
+            assert!(output.is_error);
+            let meta = output.metadata.unwrap();
+            assert_eq!(meta["failure_category"], category);
+            assert_eq!(meta["structuredResult"]["code"], code);
+            assert_eq!(meta["structuredResult"]["retryability"], "NEVER");
+            assert_eq!(meta["structuredResult"]["effectState"], "UNKNOWN");
+            assert!(meta["failure_suggestion"].as_str().unwrap().len() > 10);
+        }
     }
 
     #[tokio::test]
@@ -327,5 +608,25 @@ mod tests {
         assert_eq!(merge("", "b\n"), "b\n");
         assert_eq!(merge("a\n", "b\n"), "a\n\nb\n");
         assert_eq!(merge("", ""), "");
+    }
+    #[test]
+    fn unconfirmed_scope_is_never_a_success_or_retryable_result() {
+        let outcome = crate::process::ProcessOutcome {
+            stdout: "partial evidence".into(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+            cancelled: false,
+            truncated: false,
+            termination_confirmed: false,
+        };
+        let output = super::finish(&outcome, 1000);
+        assert!(output.is_error);
+        assert!(output.content.contains("PROCESS_TERMINATION_UNCONFIRMED"));
+        assert!(output.content.contains("partial evidence"));
+        let result = &output.metadata.unwrap()["structuredResult"];
+        assert_eq!(result["terminationConfirmed"], false);
+        assert_eq!(result["retryability"], "NEVER");
+        assert_eq!(result["effectState"], "UNKNOWN");
     }
 }

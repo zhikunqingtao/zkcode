@@ -18,6 +18,7 @@ const MAX_SYSTEM_CHARS: usize = 64 * 1024;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CheckpointReason {
     RunStarted,
+    SteeringApplied,
     ContextCompacted,
     ContextRecovered,
     ToolSubmitted,
@@ -31,6 +32,7 @@ impl CheckpointReason {
     const fn as_str(self) -> &'static str {
         match self {
             Self::RunStarted => "runStarted",
+            Self::SteeringApplied => "steeringApplied",
             Self::ContextCompacted => "contextCompacted",
             Self::ContextRecovered => "contextRecovered",
             Self::ToolSubmitted => "toolSubmitted",
@@ -135,6 +137,7 @@ impl ContextCheckpointState {
             "truncated": truncated,
             "model": request.model,
             "maxTokens": request.max_tokens,
+            "currentUserMessageId": request.current_user_message_id,
             "thinking": format!("{:?}", request.thinking),
             "systemPrompt": system_prompt,
             "messages": messages,
@@ -164,6 +167,7 @@ fn checkpoint_messages(messages: &[ChatMessage]) -> (Vec<Value>, bool, bool) {
     let mut truncated = skipped > 0;
     let values = selected
         .iter()
+        .filter(|message| !crate::context::handoff::is_projection(message))
         .map(|message| {
             let (content, content_truncated) =
                 redact_and_bound(&message.content, MAX_MESSAGE_CHARS);
@@ -175,6 +179,12 @@ fn checkpoint_messages(messages: &[ChatMessage]) -> (Vec<Value>, bool, bool) {
                         let (value, was_truncated) = redact_and_bound(thinking, MAX_MESSAGE_CHARS);
                         (Some(value), was_truncated)
                     });
+            let state_too_large = message.provider_state.as_ref().is_some_and(|state| {
+                serde_json::to_string(state)
+                    .map_or(true, |text| text.chars().count() > MAX_MESSAGE_CHARS)
+            });
+            restorable &= !state_too_large;
+            truncated |= state_too_large;
             let has_images = !message.images.is_empty();
             restorable &= !content_truncated && !thinking_truncated && !has_images;
             truncated |= content_truncated || thinking_truncated;
@@ -206,8 +216,10 @@ fn checkpoint_messages(messages: &[ChatMessage]) -> (Vec<Value>, bool, bool) {
                 .collect::<Vec<_>>();
             json!({
                 "role": message.role.as_str(),
+                "metadata": message.metadata,
                 "content": content,
                 "thinking": thinking,
+                "providerState": if state_too_large {None} else {message.provider_state.as_ref()},
                 "toolCalls": tool_calls,
                 "toolCallId": message.tool_call_id,
                 "images": images,
@@ -281,6 +293,13 @@ pub(crate) fn restore_checkpoint_messages(checkpoint: &Value) -> Result<Vec<Chat
                 })
                 .collect::<Result<Vec<_>, String>>()?;
             Ok(ChatMessage {
+                metadata: value.get("metadata").filter(|v| !v.is_null()).cloned(),
+                provider_state: value
+                    .get("providerState")
+                    .filter(|state| !state.is_null())
+                    .map(|state| serde_json::from_value(state.clone()))
+                    .transpose()
+                    .map_err(|_| "invalid provider state in checkpoint".to_owned())?,
                 role,
                 content,
                 images: Vec::new(),
@@ -340,6 +359,17 @@ fn redact_and_bound(value: &str, max_chars: usize) -> (String, bool) {
 mod tests {
     use super::*;
     use zk_llm::{ImageSource, ToolCallRequest};
+
+    #[test]
+    fn transient_handoff_is_reloaded_from_sealed_binding_not_checkpointed() {
+        let reference = ChatMessage::user("historical secret")
+            .with_metadata(Some(serde_json::json!({"historicalHandoff":true})));
+        let (records, restorable, truncated) =
+            checkpoint_messages(&[reference, ChatMessage::user("current request")]);
+        assert!(restorable && !truncated);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0]["content"], "current request");
+    }
 
     #[test]
     fn typed_checkpoint_redacts_secrets_and_marks_images_non_restorable() {

@@ -80,6 +80,20 @@ const elicitationInteraction = (sessionId: string, suffix: string) => ({
 });
 
 describe('transport-scoped bind recovery', () => {
+    it('accepts the service purpose only from the matching bind acknowledgment and clears it on the next chat bind', async () => {
+        vi.stubGlobal('fetch', vi.fn(async () => response([])));
+        for (const purpose of ['mcp', 'chat'] as const) {
+            const id = `purpose-${purpose}`;
+            let payload!: { sessionId: string; protocolVersion: number; bindRequestId: string; bindingEpoch: number };
+            const bound = bindSessionAndWait(id, value => { payload = value; });
+            dispatch({ ...runtimeEnvelope(), type: 'session_restored', bindRequestId: payload.bindRequestId,
+                protocolVersion: 4, bindingEpoch: payload.bindingEpoch, messages: [],
+                metadata: { sessionId: id, model: 'model', permissionMode: 'DEFAULT', status: 'idle', purpose } });
+            expect(await bound).toBe(true);
+            expect(useSessionStore.getState().purpose).toBe(purpose);
+            expect(usePermissionStore.getState().permissionMode).toBe('default');
+        }
+    });
     beforeEach(() => {
         sendToServerMock.mockClear();
         sendToServerMock.mockReturnValue(true);

@@ -114,6 +114,8 @@ pub(crate) enum ApiMessage {
     /// 用户消息（`type:"user"`）。
     #[serde(rename = "user")]
     User {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        meta: Option<serde_json::Value>,
         /// 消息 ID（旧 `uuid`）。
         uuid: String,
         /// 创建时刻（RFC 3339，旧 `timestamp`）。
@@ -147,6 +149,10 @@ pub(crate) enum ApiMessage {
     /// 系统消息（`type:"system"`）。
     #[serde(rename = "system")]
     System {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subtype: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metadata: Option<serde_json::Value>,
         /// 消息 ID。
         uuid: String,
         /// 创建时刻（RFC 3339）。

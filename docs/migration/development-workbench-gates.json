@@ -1,0 +1,595 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-07T13:24:22.025553+00:00",
+  "status": "passed",
+  "scope": "Remove the simple workbench; development is the only UI. No history migration/compatibility layer, backend or database changes, dependency changes, commit or push.",
+  "sourceSha256": "284039bfcafa7757d4cf94b3c8955fa27646a42c4a8d163930377301cef5527b",
+  "changedPaths": [
+    "README.md",
+    "frontend/e2e/analysis-backend.spec.ts",
+    "frontend/e2e/developer-workbench.spec.ts",
+    "frontend/e2e/home-welcome.spec.ts",
+    "frontend/e2e/memory-points.spec.ts",
+    "frontend/e2e/mobile-keyboard.spec.ts",
+    "frontend/e2e/production-backend.spec.ts",
+    "frontend/e2e/simple-workbench.spec.ts",
+    "frontend/e2e/skill-management.spec.ts",
+    "frontend/playwright.config.ts",
+    "frontend/src/App.review-command.test.tsx",
+    "frontend/src/App.tsx",
+    "frontend/src/components/input/PromptInput.test.tsx",
+    "frontend/src/components/input/PromptInput/MobileComposerNavigation.tsx",
+    "frontend/src/components/input/PromptInput/MobilePromptBar.tsx",
+    "frontend/src/components/input/PromptInput/PromptComposerChips.tsx",
+    "frontend/src/components/input/PromptInput/PromptTextarea.test.tsx",
+    "frontend/src/components/input/PromptInput/PromptTextarea.tsx",
+    "frontend/src/components/input/PromptInput/index.tsx",
+    "frontend/src/components/layout/Header.test.tsx",
+    "frontend/src/components/layout/Header.tsx",
+    "frontend/src/components/layout/Sidebar.desktop.test.tsx",
+    "frontend/src/components/layout/Sidebar.drafts.test.tsx",
+    "frontend/src/components/layout/Sidebar.mobile.test.tsx",
+    "frontend/src/components/layout/Sidebar.tsx",
+    "frontend/src/components/layout/StatusBar.tsx",
+    "frontend/src/components/message/MessageList.test.tsx",
+    "frontend/src/components/message/MessageList.tsx",
+    "frontend/src/components/workbench/AcceptanceCriteriaView.test.tsx",
+    "frontend/src/components/workbench/AcceptanceCriteriaView.tsx",
+    "frontend/src/components/workbench/AgentRunTree.test.tsx",
+    "frontend/src/components/workbench/AgentRunTree.tsx",
+    "frontend/src/components/workbench/DeliverablesSummary.test.tsx",
+    "frontend/src/components/workbench/DeliverablesSummary.tsx",
+    "frontend/src/components/workbench/FilePreviewDialog.test.tsx",
+    "frontend/src/components/workbench/FilePreviewDialog.tsx",
+    "frontend/src/components/workbench/PendingActionsSummary.test.tsx",
+    "frontend/src/components/workbench/PendingActionsSummary.tsx",
+    "frontend/src/components/workbench/ResearchQualitySummary.test.tsx",
+    "frontend/src/components/workbench/ResearchQualitySummary.tsx",
+    "frontend/src/components/workbench/ResultActivityList.tsx",
+    "frontend/src/components/workbench/SimpleWorkbench.test.tsx",
+    "frontend/src/components/workbench/SimpleWorkbench.tsx",
+    "frontend/src/components/workbench/StructuredResultCard.tsx",
+    "frontend/src/components/workbench/TaskMilestoneStrip.test.tsx",
+    "frontend/src/components/workbench/TaskMilestoneStrip.tsx",
+    "frontend/src/components/workbench/TaskOverviewCard.test.tsx",
+    "frontend/src/components/workbench/TaskOverviewCard.tsx",
+    "frontend/src/components/workbench/UsageStatCard.tsx",
+    "frontend/src/components/workbench/WorkbenchViewSwitch.tsx",
+    "frontend/src/hooks/useSimpleWorkbenchData.test.tsx",
+    "frontend/src/hooks/useSimpleWorkbenchData.ts",
+    "frontend/src/store/messageNavigationStore.test.ts",
+    "frontend/src/store/messageNavigationStore.ts",
+    "frontend/src/store/workbenchViewStore.test.ts",
+    "frontend/src/store/workbenchViewStore.ts",
+    "frontend/src/styles/ink-havoc.css",
+    "frontend/src/styles/interface-refinements.css",
+    "frontend/src/utils/simpleActivityProjection.test.ts",
+    "frontend/src/utils/simpleActivityProjection.ts",
+    "frontend/src/utils/workbenchFeature.test.ts",
+    "frontend/src/utils/workbenchFeature.ts",
+    "frontend/tests/browser/theme-fixture.tsx",
+    "frontend/tests/browser/theme-regression.mjs"
+  ],
+  "sourceVerification": {
+    "productionUnchangedDuringFinalChecks": true,
+    "postFreezeChanges": [],
+    "backendAndPythonByteIdenticalToPriorFullGate": true,
+    "documentationOnlyOutsideFrontend": [
+      "README.md"
+    ]
+  },
+  "artifact": {
+    "path": "/Users/guoqingtao/Desktop/dev/code/zkcode/target/release/zk-server",
+    "bytes": 37773888,
+    "sha256": "3ff461b276879e19fb9898b639af54c9cd979f2db5ce64cd3741d073e4bf476e",
+    "version": "zk-server 0.1.0 (git 08cbdc45e12cc28f3f13aaafbd0b056b980dfb1a, built 1791332366, schema 2, ws 4)"
+  },
+  "gates": [
+    {
+      "id": "frontend-lint",
+      "command": "cd frontend && npm run lint -- --max-warnings 0",
+      "cwd": "/Users/guoqingtao/Desktop/dev/code/zkcode",
+      "startedAt": "2026-10-07T13:20:31.393457+00:00",
+      "finishedAt": "2026-10-07T13:20:35.289248+00:00",
+      "durationSeconds": 3.896,
+      "exitCode": 0,
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/开发工作台唯一模式/zk-development-lint-final2.txt",
+        "sha256": "ec02760ad003c4a67c9c303350a0b8ab4b04ca8167ee05867107bde310299c1f"
+      }
+    },
+    {
+      "id": "frontend-tests",
+      "command": "cd frontend && npm run test:run",
+      "cwd": "/Users/guoqingtao/Desktop/dev/code/zkcode",
+      "startedAt": "2026-10-07T13:20:35.335195+00:00",
+      "finishedAt": "2026-10-07T13:22:37.498678+00:00",
+      "durationSeconds": 122.163,
+      "exitCode": 0,
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/开发工作台唯一模式/zk-development-tests-final2.txt",
+        "sha256": "a77186919330fa9d24e5fdceacd087b541854b7bdce7ef24c1cdd05abba38d9a"
+      }
+    },
+    {
+      "id": "frontend-build",
+      "command": "cd frontend && npm run build",
+      "cwd": "/Users/guoqingtao/Desktop/dev/code/zkcode",
+      "startedAt": "2026-10-07T13:22:37.620679+00:00",
+      "finishedAt": "2026-10-07T13:23:02.905933+00:00",
+      "durationSeconds": 25.285,
+      "exitCode": 0,
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/开发工作台唯一模式/zk-development-build-final2.txt",
+        "sha256": "198f58c85e83160bed2661c751408c93b748c17d8d2d022cdc3a2227aa123cc0"
+      }
+    },
+    {
+      "id": "theme-browser",
+      "command": "cd frontend && npm run test:theme-regression",
+      "cwd": "/Users/guoqingtao/Desktop/dev/code/zkcode",
+      "startedAt": "2026-10-07T13:06:03.128675+00:00",
+      "finishedAt": "2026-10-07T13:06:54.455742+00:00",
+      "durationSeconds": 51.327,
+      "exitCode": 0,
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/开发工作台唯一模式/zk-development-theme.txt",
+        "sha256": "b1ffcb6e6700b837a9c9c5a7b452b628df7c51d7cfabb325a95f9ebe4c52411c"
+      }
+    },
+    {
+      "id": "jelly-browser",
+      "command": "cd frontend && npm run test:jelly-regression",
+      "cwd": "/Users/guoqingtao/Desktop/dev/code/zkcode",
+      "startedAt": "2026-10-07T13:06:54.543725+00:00",
+      "finishedAt": "2026-10-07T13:07:51.872875+00:00",
+      "durationSeconds": 57.329,
+      "exitCode": 0,
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/开发工作台唯一模式/zk-development-jelly.txt",
+        "sha256": "0f3f5e13033729148a98c05e331562f7811337abdc593f9d59c43e47caf43ca2"
+      }
+    },
+    {
+      "id": "frontend-real-rust-e2e-production",
+      "command": "npm run test:e2e:production",
+      "cwd": "/Users/guoqingtao/Desktop/dev/code/zkcode/frontend",
+      "startedAt": "2026-10-07T13:23:03.011841+00:00",
+      "finishedAt": "2026-10-07T13:23:26.011784+00:00",
+      "durationSeconds": 23.0,
+      "exitCode": 0,
+      "environmentPolicy": "Explicit PATH/HOME/TMPDIR/locale/user/shell allowlist; fixed isolated test port bases and exact release path. No inherited provider credentials.",
+      "artifactBeforeSha256": "3ff461b276879e19fb9898b639af54c9cd979f2db5ce64cd3741d073e4bf476e",
+      "artifactAfterSha256": "3ff461b276879e19fb9898b639af54c9cd979f2db5ce64cd3741d073e4bf476e",
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/开发工作台唯一模式/zk-development-final2-e2e-production.txt",
+        "sha256": "8f8d9c83b603fa54f7f5f043641c1a9b2c80f3f51c5159e302fe37179c6bab58"
+      }
+    },
+    {
+      "id": "frontend-real-rust-e2e-analysis",
+      "command": "npm run test:e2e:analysis",
+      "cwd": "/Users/guoqingtao/Desktop/dev/code/zkcode/frontend",
+      "startedAt": "2026-10-07T13:23:26.012904+00:00",
+      "finishedAt": "2026-10-07T13:23:54.075760+00:00",
+      "durationSeconds": 28.063,
+      "exitCode": 0,
+      "environmentPolicy": "Explicit PATH/HOME/TMPDIR/locale/user/shell allowlist; fixed isolated test port bases and exact release path. No inherited provider credentials.",
+      "artifactBeforeSha256": "3ff461b276879e19fb9898b639af54c9cd979f2db5ce64cd3741d073e4bf476e",
+      "artifactAfterSha256": "3ff461b276879e19fb9898b639af54c9cd979f2db5ce64cd3741d073e4bf476e",
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/开发工作台唯一模式/zk-development-final2-e2e-analysis.txt",
+        "sha256": "043132e2e709cf5f88687466be967dcac1e1bf9d3458204b5b53ee87c4066125"
+      }
+    },
+    {
+      "id": "developer-ui-browser",
+      "command": "cd frontend && npx playwright test --config /tmp/zk-development-only.playwright.config.mjs",
+      "cwd": "/Users/guoqingtao/Desktop/dev/code/zkcode",
+      "startedAt": "2026-10-07T13:12:53.745818+00:00",
+      "finishedAt": "2026-10-07T13:13:04.068468+00:00",
+      "durationSeconds": 10.322,
+      "exitCode": 0,
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/开发工作台唯一模式/zk-development-ui-browser-final3.txt",
+        "sha256": "529ff9471d28b50da86dcc433ff9ddfbf9f5c6bab8ede11c387b32629308b360"
+      }
+    },
+    {
+      "id": "home-navigation-browser",
+      "command": "cd frontend && npx playwright test --config /tmp/zk-development-home.playwright.config.mjs",
+      "cwd": "/Users/guoqingtao/Desktop/dev/code/zkcode",
+      "startedAt": "2026-10-07T13:20:29.788596+00:00",
+      "finishedAt": "2026-10-07T13:21:01.045068+00:00",
+      "durationSeconds": 31.256,
+      "exitCode": 0,
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/开发工作台唯一模式/zk-development-home-browser-final2.txt",
+        "sha256": "326f02b726369d5974e6a6cf8f3880c35ed2c33d0460bafe866b86b30c75f62b"
+      }
+    }
+  ],
+  "attempts": [
+    {
+      "id": "frontend-lint",
+      "command": "cd frontend && npm run lint -- --max-warnings 0",
+      "cwd": "/Users/guoqingtao/Desktop/dev/code/zkcode",
+      "startedAt": "2026-10-07T13:03:37.975063+00:00",
+      "finishedAt": "2026-10-07T13:03:41.473819+00:00",
+      "durationSeconds": 3.499,
+      "exitCode": 0,
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/开发工作台唯一模式/zk-development-lint.txt",
+        "sha256": "ec02760ad003c4a67c9c303350a0b8ab4b04ca8167ee05867107bde310299c1f"
+      }
+    },
+    {
+      "id": "frontend-tests",
+      "command": "cd frontend && npm run test:run",
+      "cwd": "/Users/guoqingtao/Desktop/dev/code/zkcode",
+      "startedAt": "2026-10-07T13:03:41.516528+00:00",
+      "finishedAt": "2026-10-07T13:05:42.887607+00:00",
+      "durationSeconds": 121.37,
+      "exitCode": 0,
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/开发工作台唯一模式/zk-development-tests.txt",
+        "sha256": "d8c46c18403b0da7c501c7f6845f8befb0e514d09034484405c22e735bb434ab"
+      }
+    },
+    {
+      "id": "frontend-build",
+      "command": "cd frontend && npm run build",
+      "cwd": "/Users/guoqingtao/Desktop/dev/code/zkcode",
+      "startedAt": "2026-10-07T13:05:42.967101+00:00",
+      "finishedAt": "2026-10-07T13:06:03.065944+00:00",
+      "durationSeconds": 20.098,
+      "exitCode": 0,
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/开发工作台唯一模式/zk-development-build.txt",
+        "sha256": "bf27a861c0dfc0a7c8be13e6ae0cea0a54456515e55fa7db55f05bbb13fe2af8"
+      }
+    },
+    {
+      "id": "theme-browser",
+      "command": "cd frontend && npm run test:theme-regression",
+      "cwd": "/Users/guoqingtao/Desktop/dev/code/zkcode",
+      "startedAt": "2026-10-07T13:06:03.128675+00:00",
+      "finishedAt": "2026-10-07T13:06:54.455742+00:00",
+      "durationSeconds": 51.327,
+      "exitCode": 0,
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/开发工作台唯一模式/zk-development-theme.txt",
+        "sha256": "b1ffcb6e6700b837a9c9c5a7b452b628df7c51d7cfabb325a95f9ebe4c52411c"
+      }
+    },
+    {
+      "id": "jelly-browser",
+      "command": "cd frontend && npm run test:jelly-regression",
+      "cwd": "/Users/guoqingtao/Desktop/dev/code/zkcode",
+      "startedAt": "2026-10-07T13:06:54.543725+00:00",
+      "finishedAt": "2026-10-07T13:07:51.872875+00:00",
+      "durationSeconds": 57.329,
+      "exitCode": 0,
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/开发工作台唯一模式/zk-development-jelly.txt",
+        "sha256": "0f3f5e13033729148a98c05e331562f7811337abdc593f9d59c43e47caf43ca2"
+      }
+    },
+    {
+      "id": "frontend-real-rust-e2e-production",
+      "command": "npm run test:e2e:production",
+      "cwd": "/Users/guoqingtao/Desktop/dev/code/zkcode/frontend",
+      "startedAt": "2026-10-07T13:07:52.025260+00:00",
+      "finishedAt": "2026-10-07T13:08:14.103972+00:00",
+      "durationSeconds": 22.078,
+      "exitCode": 0,
+      "environmentPolicy": "Explicit PATH/HOME/TMPDIR/locale/user/shell allowlist; fixed isolated test port bases and exact release path. No inherited provider credentials.",
+      "artifactBeforeSha256": "3ff461b276879e19fb9898b639af54c9cd979f2db5ce64cd3741d073e4bf476e",
+      "artifactAfterSha256": "3ff461b276879e19fb9898b639af54c9cd979f2db5ce64cd3741d073e4bf476e",
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/开发工作台唯一模式/zk-development-e2e-production-final.txt",
+        "sha256": "22d351192c580d7e6f02c0bfc7e7514faf89d3b2d0ac173c05929f73fc2b3b2d"
+      }
+    },
+    {
+      "id": "frontend-real-rust-e2e-analysis",
+      "command": "npm run test:e2e:analysis",
+      "cwd": "/Users/guoqingtao/Desktop/dev/code/zkcode/frontend",
+      "startedAt": "2026-10-07T13:08:14.104996+00:00",
+      "finishedAt": "2026-10-07T13:08:32.859942+00:00",
+      "durationSeconds": 18.755,
+      "exitCode": 0,
+      "environmentPolicy": "Explicit PATH/HOME/TMPDIR/locale/user/shell allowlist; fixed isolated test port bases and exact release path. No inherited provider credentials.",
+      "artifactBeforeSha256": "3ff461b276879e19fb9898b639af54c9cd979f2db5ce64cd3741d073e4bf476e",
+      "artifactAfterSha256": "3ff461b276879e19fb9898b639af54c9cd979f2db5ce64cd3741d073e4bf476e",
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/开发工作台唯一模式/zk-development-e2e-analysis-final.txt",
+        "sha256": "f4278dc2c8a729728f889ad05e3880273a30813fb346f255f1554ff29336dcae"
+      }
+    },
+    {
+      "id": "developer-ui-browser",
+      "command": "cd frontend && npx playwright test --config /tmp/zk-development-only.playwright.config.mjs",
+      "cwd": "/Users/guoqingtao/Desktop/dev/code/zkcode",
+      "startedAt": "2026-10-07T13:08:22.278892+00:00",
+      "finishedAt": "2026-10-07T13:09:01.570562+00:00",
+      "durationSeconds": 39.291,
+      "exitCode": 1,
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/开发工作台唯一模式/zk-development-ui-browser.txt",
+        "sha256": "9d75ca0c8b3d502f0954f108a4069a47d3ee2db3f0e48e8fdb6d41076446316f"
+      }
+    },
+    {
+      "id": "developer-ui-browser",
+      "command": "cd frontend && npx playwright test --config /tmp/zk-development-only.playwright.config.mjs",
+      "cwd": "/Users/guoqingtao/Desktop/dev/code/zkcode",
+      "startedAt": "2026-10-07T13:09:39.263000+00:00",
+      "finishedAt": "2026-10-07T13:10:44.925102+00:00",
+      "durationSeconds": 65.662,
+      "exitCode": 1,
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/开发工作台唯一模式/zk-development-ui-browser-final.txt",
+        "sha256": "d45c7a7ff976c3eaa0a769f579cf6ba519d82a496e8250367106bf7035fb35e1"
+      }
+    },
+    {
+      "id": "frontend-lint",
+      "command": "cd frontend && npm run lint -- --max-warnings 0",
+      "cwd": "/Users/guoqingtao/Desktop/dev/code/zkcode",
+      "startedAt": "2026-10-07T13:11:36.849429+00:00",
+      "finishedAt": "2026-10-07T13:11:40.888599+00:00",
+      "durationSeconds": 4.039,
+      "exitCode": 0,
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/开发工作台唯一模式/zk-development-lint-final.txt",
+        "sha256": "ec02760ad003c4a67c9c303350a0b8ab4b04ca8167ee05867107bde310299c1f"
+      }
+    },
+    {
+      "id": "developer-ui-browser",
+      "command": "cd frontend && npx playwright test --config /tmp/zk-development-only.playwright.config.mjs",
+      "cwd": "/Users/guoqingtao/Desktop/dev/code/zkcode",
+      "startedAt": "2026-10-07T13:11:15.269451+00:00",
+      "finishedAt": "2026-10-07T13:12:24.251054+00:00",
+      "durationSeconds": 68.981,
+      "exitCode": 1,
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/开发工作台唯一模式/zk-development-ui-browser-final2.txt",
+        "sha256": "03125644daa63b1dbe30eac7b1244b209d98a04c05c1132883b3c9d016501f02"
+      }
+    },
+    {
+      "id": "developer-ui-browser",
+      "command": "cd frontend && npx playwright test --config /tmp/zk-development-only.playwright.config.mjs",
+      "cwd": "/Users/guoqingtao/Desktop/dev/code/zkcode",
+      "startedAt": "2026-10-07T13:12:53.745818+00:00",
+      "finishedAt": "2026-10-07T13:13:04.068468+00:00",
+      "durationSeconds": 10.322,
+      "exitCode": 0,
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/开发工作台唯一模式/zk-development-ui-browser-final3.txt",
+        "sha256": "529ff9471d28b50da86dcc433ff9ddfbf9f5c6bab8ede11c387b32629308b360"
+      }
+    },
+    {
+      "id": "frontend-tests",
+      "command": "cd frontend && npm run test:run",
+      "cwd": "/Users/guoqingtao/Desktop/dev/code/zkcode",
+      "startedAt": "2026-10-07T13:11:40.952191+00:00",
+      "finishedAt": "2026-10-07T13:13:44.738890+00:00",
+      "durationSeconds": 123.786,
+      "exitCode": 0,
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/开发工作台唯一模式/zk-development-tests-final.txt",
+        "sha256": "a4de5318a06fbcd0a374e7e2dea1e8f1bce1fc01e7dde4b201b49a5c5ac33332"
+      }
+    },
+    {
+      "id": "frontend-build",
+      "command": "cd frontend && npm run build",
+      "cwd": "/Users/guoqingtao/Desktop/dev/code/zkcode",
+      "startedAt": "2026-10-07T13:13:44.803679+00:00",
+      "finishedAt": "2026-10-07T13:14:05.839075+00:00",
+      "durationSeconds": 21.035,
+      "exitCode": 0,
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/开发工作台唯一模式/zk-development-build-final.txt",
+        "sha256": "775c5eb4e9f3940f297a826661d2c0f264c016d041fb6dd2164eb671acdfab3e"
+      }
+    },
+    {
+      "id": "frontend-real-rust-e2e-production",
+      "command": "npm run test:e2e:production",
+      "cwd": "/Users/guoqingtao/Desktop/dev/code/zkcode/frontend",
+      "startedAt": "2026-10-07T13:14:05.951004+00:00",
+      "finishedAt": "2026-10-07T13:14:34.592313+00:00",
+      "durationSeconds": 28.641,
+      "exitCode": 0,
+      "environmentPolicy": "Explicit PATH/HOME/TMPDIR/locale/user/shell allowlist; fixed isolated test port bases and exact release path. No inherited provider credentials.",
+      "artifactBeforeSha256": "3ff461b276879e19fb9898b639af54c9cd979f2db5ce64cd3741d073e4bf476e",
+      "artifactAfterSha256": "3ff461b276879e19fb9898b639af54c9cd979f2db5ce64cd3741d073e4bf476e",
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/开发工作台唯一模式/zk-development-final-e2e-production.txt",
+        "sha256": "78c6f0837151dcc55f3623f1dd95d165e309813714590e69d201a90ecb5a2acc"
+      }
+    },
+    {
+      "id": "frontend-real-rust-e2e-analysis",
+      "command": "npm run test:e2e:analysis",
+      "cwd": "/Users/guoqingtao/Desktop/dev/code/zkcode/frontend",
+      "startedAt": "2026-10-07T13:14:34.593901+00:00",
+      "finishedAt": "2026-10-07T13:14:55.876458+00:00",
+      "durationSeconds": 21.282,
+      "exitCode": 0,
+      "environmentPolicy": "Explicit PATH/HOME/TMPDIR/locale/user/shell allowlist; fixed isolated test port bases and exact release path. No inherited provider credentials.",
+      "artifactBeforeSha256": "3ff461b276879e19fb9898b639af54c9cd979f2db5ce64cd3741d073e4bf476e",
+      "artifactAfterSha256": "3ff461b276879e19fb9898b639af54c9cd979f2db5ce64cd3741d073e4bf476e",
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/开发工作台唯一模式/zk-development-final-e2e-analysis.txt",
+        "sha256": "2d1a0cbac27091270ed2039a2e1cc6bfe4aa61a011490734bd8da1b49b2402d7"
+      }
+    },
+    {
+      "id": "home-navigation-browser",
+      "command": "cd frontend && npx playwright test --config /tmp/zk-development-home.playwright.config.mjs",
+      "cwd": "/Users/guoqingtao/Desktop/dev/code/zkcode",
+      "startedAt": "2026-10-07T13:17:31.347003+00:00",
+      "finishedAt": "2026-10-07T13:17:59.255657+00:00",
+      "durationSeconds": 27.908,
+      "exitCode": 1,
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/开发工作台唯一模式/zk-development-home-browser.txt",
+        "sha256": "658ae26985d8c644264c37ce40b3ce9bbaf29cecc531dfb91d10a00deaedbd3c"
+      }
+    },
+    {
+      "id": "home-navigation-browser",
+      "command": "cd frontend && npx playwright test --config /tmp/zk-development-home.playwright.config.mjs",
+      "cwd": "/Users/guoqingtao/Desktop/dev/code/zkcode",
+      "startedAt": "2026-10-07T13:18:38.229938+00:00",
+      "finishedAt": "2026-10-07T13:19:42.380015+00:00",
+      "durationSeconds": 64.15,
+      "exitCode": 1,
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/开发工作台唯一模式/zk-development-home-browser-final.txt",
+        "sha256": "371c9d769466f61bc006fdf7724f266ecf1b8e80eb4105d720610990fb52d5dd"
+      }
+    },
+    {
+      "id": "frontend-lint",
+      "command": "cd frontend && npm run lint -- --max-warnings 0",
+      "cwd": "/Users/guoqingtao/Desktop/dev/code/zkcode",
+      "startedAt": "2026-10-07T13:20:31.393457+00:00",
+      "finishedAt": "2026-10-07T13:20:35.289248+00:00",
+      "durationSeconds": 3.896,
+      "exitCode": 0,
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/开发工作台唯一模式/zk-development-lint-final2.txt",
+        "sha256": "ec02760ad003c4a67c9c303350a0b8ab4b04ca8167ee05867107bde310299c1f"
+      }
+    },
+    {
+      "id": "home-navigation-browser",
+      "command": "cd frontend && npx playwright test --config /tmp/zk-development-home.playwright.config.mjs",
+      "cwd": "/Users/guoqingtao/Desktop/dev/code/zkcode",
+      "startedAt": "2026-10-07T13:20:29.788596+00:00",
+      "finishedAt": "2026-10-07T13:21:01.045068+00:00",
+      "durationSeconds": 31.256,
+      "exitCode": 0,
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/开发工作台唯一模式/zk-development-home-browser-final2.txt",
+        "sha256": "326f02b726369d5974e6a6cf8f3880c35ed2c33d0460bafe866b86b30c75f62b"
+      }
+    },
+    {
+      "id": "frontend-tests",
+      "command": "cd frontend && npm run test:run",
+      "cwd": "/Users/guoqingtao/Desktop/dev/code/zkcode",
+      "startedAt": "2026-10-07T13:20:35.335195+00:00",
+      "finishedAt": "2026-10-07T13:22:37.498678+00:00",
+      "durationSeconds": 122.163,
+      "exitCode": 0,
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/开发工作台唯一模式/zk-development-tests-final2.txt",
+        "sha256": "a77186919330fa9d24e5fdceacd087b541854b7bdce7ef24c1cdd05abba38d9a"
+      }
+    },
+    {
+      "id": "frontend-build",
+      "command": "cd frontend && npm run build",
+      "cwd": "/Users/guoqingtao/Desktop/dev/code/zkcode",
+      "startedAt": "2026-10-07T13:22:37.620679+00:00",
+      "finishedAt": "2026-10-07T13:23:02.905933+00:00",
+      "durationSeconds": 25.285,
+      "exitCode": 0,
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/开发工作台唯一模式/zk-development-build-final2.txt",
+        "sha256": "198f58c85e83160bed2661c751408c93b748c17d8d2d022cdc3a2227aa123cc0"
+      }
+    },
+    {
+      "id": "frontend-real-rust-e2e-production",
+      "command": "npm run test:e2e:production",
+      "cwd": "/Users/guoqingtao/Desktop/dev/code/zkcode/frontend",
+      "startedAt": "2026-10-07T13:23:03.011841+00:00",
+      "finishedAt": "2026-10-07T13:23:26.011784+00:00",
+      "durationSeconds": 23.0,
+      "exitCode": 0,
+      "environmentPolicy": "Explicit PATH/HOME/TMPDIR/locale/user/shell allowlist; fixed isolated test port bases and exact release path. No inherited provider credentials.",
+      "artifactBeforeSha256": "3ff461b276879e19fb9898b639af54c9cd979f2db5ce64cd3741d073e4bf476e",
+      "artifactAfterSha256": "3ff461b276879e19fb9898b639af54c9cd979f2db5ce64cd3741d073e4bf476e",
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/开发工作台唯一模式/zk-development-final2-e2e-production.txt",
+        "sha256": "8f8d9c83b603fa54f7f5f043641c1a9b2c80f3f51c5159e302fe37179c6bab58"
+      }
+    },
+    {
+      "id": "frontend-real-rust-e2e-analysis",
+      "command": "npm run test:e2e:analysis",
+      "cwd": "/Users/guoqingtao/Desktop/dev/code/zkcode/frontend",
+      "startedAt": "2026-10-07T13:23:26.012904+00:00",
+      "finishedAt": "2026-10-07T13:23:54.075760+00:00",
+      "durationSeconds": 28.063,
+      "exitCode": 0,
+      "environmentPolicy": "Explicit PATH/HOME/TMPDIR/locale/user/shell allowlist; fixed isolated test port bases and exact release path. No inherited provider credentials.",
+      "artifactBeforeSha256": "3ff461b276879e19fb9898b639af54c9cd979f2db5ce64cd3741d073e4bf476e",
+      "artifactAfterSha256": "3ff461b276879e19fb9898b639af54c9cd979f2db5ce64cd3741d073e4bf476e",
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/开发工作台唯一模式/zk-development-final2-e2e-analysis.txt",
+        "sha256": "043132e2e709cf5f88687466be967dcac1e1bf9d3458204b5b53ee87c4066125"
+      }
+    }
+  ],
+  "additionalEvidence": [
+    {
+      "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/开发工作台唯一模式/zk-development-source-before.json",
+      "sha256": "9aa284b0e39bc2b8a5cc67bd77c110b79d6817d4cecc2299d49790463808a577"
+    },
+    {
+      "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/开发工作台唯一模式/zk-development-source-final-before.json",
+      "sha256": "c64850792697086618cee0df0ff6fffdc147919fe566bee3ef8bc52384c8acf4"
+    },
+    {
+      "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/开发工作台唯一模式/zk-development-source-final2-before.json",
+      "sha256": "a721557b9eacc59cb99bf6e60aa2f07fd681d56d06d9c987ef1930e0cc908fc5"
+    },
+    {
+      "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/开发工作台唯一模式/zk-development-source-after.json",
+      "sha256": "d1eedd3057cafd6e2eb6d37f4c954897c2c7a3dc5fa2ceaa4eb67ce993056d1c"
+    },
+    {
+      "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/开发工作台唯一模式/zk-development-e2e-artifact-evidence.json",
+      "sha256": "1ee89019ff5cefe68ae3c1215afba6b1bfec51a48b1ca4d7b1e12ade79adaafb"
+    },
+    {
+      "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/开发工作台唯一模式/zk-development-gate-executions.jsonl",
+      "sha256": "98d8d83f588c194f9216ad2305f77361f404f069fb60e167958c7fe98786eb86"
+    },
+    {
+      "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/开发工作台唯一模式/zk-developer-workbench-focused.txt",
+      "sha256": "46698da690daa87d82302213234129f5a0e69a0c225779ae5f530dcbae3d6060"
+    },
+    {
+      "path": "/Users/guoqingtao/Desktop/国庆节出去玩/zkcode-提交前严格审查证据-2026-10-07/开发工作台唯一模式/zk-development-only.playwright.config.mjs",
+      "sha256": "07dafed8d6141e6e6a7756d305694395f84b60d1f995c236e196f6ea3be775d0"
+    }
+  ],
+  "counts": {
+    "frontendFiles": 145,
+    "frontendTests": 1289,
+    "realRustBrowserE2e": 9,
+    "isolatedDeveloperUiE2e": 2,
+    "homeNavigationE2e": 8,
+    "themeScenarios": 20,
+    "themeAssertions": 12688,
+    "jellyScenarios": 42
+  },
+  "limits": [
+    "This is a frontend-only verification scope. Cargo/Python/Office/dependency full suites were not rerun; their source and dependency inputs did not change.",
+    "The two developer-layout browser tests use API/WebSocket fixtures; the separate nine product/analysis tests use a real Rust release and isolated SQLite/Python UDS.",
+    "Early developer-layout fixture failures are retained: API glob intercepted Vite source modules; mobile exact accessible name omitted its suffix; forced disconnect notification blocked the mobile control. Fixtures now isolate API and idle WS correctly without force clicks or weakened assertions.",
+    "A real mobile/tablet home-navigation omission exposed by the updated browser test was repaired and fully retested; it is not classified as a fixture-only failure.",
+    "Existing build chunk-size advisory and Node NO_COLOR/FORCE_COLOR diagnostics remain. No paid provider call."
+  ]
+}

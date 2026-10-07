@@ -254,6 +254,8 @@ mod tests {
 
     fn task_snapshot(status: &str) -> TaskSnapshot {
         TaskSnapshot {
+            task_type: "agent".into(),
+            lifecycle: "attached".into(),
             task_id: "550e8400-e29b-41d4-a716-446655440000".into(),
             session_id: "internal-session".into(),
             parent_task_id: Some("root-task".into()),
@@ -262,6 +264,7 @@ mod tests {
             reason: None,
             description: Some("agent test".into()),
             output: None,
+            display_output: None,
             error: None,
             result_version: Some(1),
             partial: false,

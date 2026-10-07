@@ -6,6 +6,7 @@ HTTP API 验证路由 — POST /journey/run
 """
 
 import copy
+import asyncio
 import json
 import logging
 import re
@@ -15,10 +16,12 @@ import uuid
 from typing import Dict, Any
 
 import httpx
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException, Request
 from jsonpath_ng import parse as jsonpath_parse
 
 from services.journey_models import JourneyRunRequest, JourneyRunResponse, StepResultModel
+
+from services.content_privacy import ephemeral_request
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -26,10 +29,54 @@ router = APIRouter()
 # ─── 边界防护常量 ───
 MAX_STEPS = 500
 MAX_CONTEXT_SIZE_BYTES = 50 * 1024 * 1024  # 50MB
+_pending_http_cleanup: set[asyncio.Task] = set()
+
+
+def _http_cleanup_finished(task):
+    _pending_http_cleanup.discard(task)
+    if not task.cancelled():
+        task.exception()
 
 
 @router.post("/journey/run")
-async def http_journey_run(request: JourneyRunRequest) -> JourneyRunResponse:
+@ephemeral_request
+async def http_journey_run(request: JourneyRunRequest, http_request: Request = None) -> JourneyRunResponse:
+    """Bound a journey by its caller deadline and close HTTP I/O on disconnect."""
+    remaining = 120.0
+    if request.deadline_epoch_ms is not None:
+        remaining = min(remaining, request.deadline_epoch_ms / 1000 - time.time())
+    if remaining <= 0:
+        raise HTTPException(status_code=504, detail="JOURNEY_DEADLINE_EXCEEDED")
+    stopped = asyncio.Event()
+    async def watch_disconnect():
+        while not stopped.is_set():
+            if await http_request.is_disconnected():
+                return
+            if stopped.is_set():
+                return
+            await asyncio.sleep(0.25)
+    execution = asyncio.create_task(_http_journey_run(request))
+    disconnected = asyncio.create_task(watch_disconnect()) if http_request is not None else None
+    watched = {execution, disconnected} if disconnected is not None else {execution}
+    try:
+        done, _ = await asyncio.wait(watched, timeout=remaining, return_when=asyncio.FIRST_COMPLETED)
+        if execution in done:
+            return await execution
+        if disconnected is not None and disconnected in done:
+            disconnected.result()
+            raise HTTPException(status_code=499, detail="JOURNEY_CLIENT_DISCONNECTED")
+        raise HTTPException(status_code=504, detail="JOURNEY_DEADLINE_EXCEEDED")
+    finally:
+        stopped.set()
+        for task in watched:
+            _pending_http_cleanup.add(task)
+            task.add_done_callback(_http_cleanup_finished)
+            if not task.done():
+                task.cancel()
+        await asyncio.wait(watched, timeout=6.0)
+
+
+async def _http_journey_run(request: JourneyRunRequest) -> JourneyRunResponse:
     """
     执行 HTTP API 验证 — 逐步执行 HTTP DSL steps，首个失败即停止
 
@@ -341,7 +388,7 @@ def _resolve_variables(step: dict, context_vars: dict) -> dict:
             def replacer(m):
                 var_name = m.group(1)
                 value = context_vars.get(var_name, m.group(0))
-                logger.debug(f"Variable substitution: ${var_name} → {value}")
+                # Substitution values can contain credentials or temporary content.
                 return str(value)
             return re.sub(r'\$\{(\w+)\}', replacer, obj)
         elif isinstance(obj, dict):

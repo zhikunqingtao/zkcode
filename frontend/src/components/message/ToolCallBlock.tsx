@@ -7,73 +7,171 @@
  * - Input: 工具输入参数 (JSON, 可折叠)
  * - Result: 工具执行结果 (按工具类型选择渲染器)
  * - Progress: 执行中的进度指示
+ *
+ * §7.2 工具卡（Demo-B 精华）：折叠态一行（图标 + 名称 600 + 文件 chip
+ * (mono sunken) + 状态）；Edit 类带 +n/−n diff chip（ok/err soft 底）；
+ * 运行中 spin；完成 ✓ ok；耗时 tabular-nums；展开态进 Card 配方
+ * （surface + hairline + rounded-panel + shadow-e2）。
  */
 
 import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import {
     ChevronRight, Wrench, Loader2,
-    CheckCircle2, XCircle, ShieldAlert,
+    Check, XCircle, ShieldAlert,
 } from 'lucide-react';
+import { structuredResultSchema, parseExternalResourceResult, parseEditDiffResult } from '@/utils/structuredToolResult';
 import type { ToolCallState } from '@/types';
 import CodeBlock from './CodeBlock';
 import { TerminalRenderer } from './renderers/TerminalRenderer';
-import { DiffRenderer } from './renderers/DiffRenderer';
+import { DiffRenderer, diffStats } from './renderers/DiffRenderer';
 import { SearchResultRenderer } from './renderers/SearchResultRenderer';
 import { FileListRenderer } from './renderers/FileListRenderer';
 import ExternalResourceRenderer from './renderers/ExternalResourceRenderer';
 import ToolProgressBar from '../visualization/shared/ToolProgressBar';
 import MiniLogViewer from '../visualization/shared/MiniLogViewer';
-import { parseExternalResourceResult, structuredResultSchema } from '@/utils/structuredToolResult';
+import { useSessionStore } from '@/store/sessionStore';
+import { selectToolPresentation, useToolPresentationStore } from '@/store/toolPresentationStore';
 
 interface ToolCallBlockProps {
     toolUseId: string;
     toolCall: ToolCallState;
+    /**
+     * 受控展开态：传入后以传入值为准（受控优先）；
+     * 未传入时按状态决定默认展开（running/pending 展开，完成态折叠）。
+     */
+    expanded?: boolean;
 }
 
-const STATUS_CONFIG = {
-    preparing:         { icon: Loader2, color: 'text-cyan-400',   label: 'Preparing', spin: true  },
-    pending:           { icon: Loader2, color: 'text-gray-400',   label: 'Pending',   spin: false },
-    running:           { icon: Loader2, color: 'text-blue-400',   label: 'Running',   spin: true  },
-    completed:         { icon: CheckCircle2, color: 'text-green-400', label: 'Completed', spin: false },
-    error:             { icon: XCircle, color: 'text-red-400',    label: 'Error',     spin: false },
-    permission_needed: { icon: ShieldAlert, color: 'text-yellow-400', label: 'Permission', spin: false },
+/** 状态 → 图标/颜色/文案（导出供 turn/ToolRunBlock 的 L2 行复用同一套语义） */
+export const STATUS_CONFIG = {
+    preparing: {icon: Loader2, color: 'text-t3', label: 'Preparing', spin: true},
+    pending:           { icon: Loader2, color: 'text-t3',      label: 'Pending',    spin: false },
+    running:           { icon: Loader2, color: 'text-accent2-ink', label: 'Running',    spin: true  },
+    completed:         { icon: Check,   color: 'text-ok',      label: 'Completed',  spin: false },
+    error:             { icon: XCircle, color: 'text-err',     label: 'Error',      spin: false },
+    permission_needed: { icon: ShieldAlert, color: 'text-warn', label: 'Permission', spin: false },
 } as const;
 
-const ToolCallBlock: React.FC<ToolCallBlockProps> = ({ toolUseId, toolCall }) => {
+/** Edit 类工具名（带 +n/−n diff chip） */
+const EDIT_TOOL_NAMES = new Set(['FileEditTool', 'FileEdit', 'Edit', 'MultiEdit', 'FileWriteTool', 'FileWrite', 'Write', 'NotebookEdit']);
+
+/** 工具耗时格式化（ms → 342ms / 12s / 3m 5s / 1h 2m）；导出供 ToolRunBlock 复用 */
+export function formatToolDuration(ms: number): string {
+    if (ms < 1000) return `${ms}ms`;
+    const totalSeconds = Math.floor(ms / 1000);
+    if (totalSeconds < 60) return `${totalSeconds}s`;
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    if (minutes < 60) return `${minutes}m ${seconds}s`;
+    const hours = Math.floor(minutes / 60);
+    return `${hours}h ${minutes % 60}m`;
+}
+
+/** 从工具输入提取主目标（文件路径 / 命令 / pattern，header chip 数据源） */
+export function extractPrimaryTarget(input: unknown): { target: string; isPath: boolean } | null {
+    if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
+    const record = input as Record<string, unknown>;
+    const pathCandidate = record.file_path ?? record.path ?? record.notebook_path;
+    if (typeof pathCandidate === 'string' && pathCandidate.length > 0) {
+        return { target: pathCandidate, isPath: true };
+    }
+    const other = record.command ?? record.pattern;
+    if (typeof other === 'string' && other.length > 0) {
+        return { target: other, isPath: false };
+    }
+    return null;
+}
+
+/** Edit 仅统计完整的实际结果；其他写入工具保留原有输入摘要。 */
+function computeDiffStats(toolCall: ToolCallState): { added: number; removed: number } | null {
+    if (!EDIT_TOOL_NAMES.has(toolCall.toolName)) return null;
+    if (toolCall.toolName === 'Edit') {
+        if (!toolCall.result || toolCall.result.isError) return null;
+        const actual = parseEditDiffResult(toolCall.result.metadata);
+        return actual?.diff && !actual.truncated ? diffStats(actual.diff) : null;
+    }
+    const input = toolCall.input;
+    if (input && typeof input === 'object' && !Array.isArray(input)) {
+        const record = input as Record<string, unknown>;
+        if (typeof record.old_string === 'string' && typeof record.new_string === 'string') {
+            return {
+                added: countLines(record.new_string),
+                removed: countLines(record.old_string),
+            };
+        }
+        if (Array.isArray(record.edits)) {
+            let added = 0;
+            let removed = 0;
+            for (const edit of record.edits as Record<string, unknown>[]) {
+                if (typeof edit?.new_string === 'string') added += countLines(edit.new_string);
+                if (typeof edit?.old_string === 'string') removed += countLines(edit.old_string);
+            }
+            if (added > 0 || removed > 0) return { added, removed };
+        }
+        if (typeof record.content === 'string' && (toolCall.toolName.includes('Write') || toolCall.toolName === 'FileWriteTool')) {
+            return { added: countLines(record.content), removed: 0 };
+        }
+    }
+    const content = toolCall.result?.content;
+    if (content && /^[+-]{1}(?![+-])/m.test(content)) {
+        let added = 0;
+        let removed = 0;
+        for (const line of content.split('\n')) {
+            if (line.startsWith('+') && !line.startsWith('+++')) added++;
+            else if (line.startsWith('-') && !line.startsWith('---')) removed++;
+        }
+        if (added > 0 || removed > 0) return { added, removed };
+    }
+    return null;
+}
+
+function countLines(text: string): number {
+    return text.length === 0 ? 0 : text.split('\n').length;
+}
+
+/** 文本/Markdown 类结果默认展示行数（Terminal / Diff 渲染分支自带折叠逻辑，不在此限） */
+const RESULT_PREVIEW_LINES = 30;
+
+const ToolCallBlock: React.FC<ToolCallBlockProps> = ({ toolUseId, toolCall, expanded: expandedProp }) => {
+    const sessionId = useSessionStore(state => state.sessionId);
+    const partition = toolCall.runtimePartitionKey;
+    const runId = partition?.startsWith('run:') ? partition.slice(4)
+        : partition?.startsWith('sourceRun:') ? partition.slice(10) : undefined;
+    const projectedText = useToolPresentationStore(state => selectToolPresentation(state, sessionId, toolCall.toolUseId ?? toolUseId, runId, toolCall.presentationMessageId));
+    const projectionError = useToolPresentationStore(state => state.sessionId === sessionId ? state.error : null);
+    const projectionRevision = useToolPresentationStore(state => state.revision);
+    // 主折叠开关：running/pending 默认展开，完成态默认折叠（折叠后为一行）；
+    // 调用方显式传入 expanded 时受控优先
+    const [internalExpanded, setInternalExpanded] = useState(
+        () => toolCall.status === 'running' || toolCall.status === 'pending',
+    );
+    const expanded = expandedProp ?? internalExpanded;
     const [inputExpanded, setInputExpanded] = useState(false);
-    // Tool output is diagnostics, not the primary conversation. Keeping it
-    // collapsed prevents Agent receipts and large search payloads from
-    // dominating a completed chat while preserving one-click access.
+    // 结果区默认折叠，避免长结果默认刷屏
     const [resultExpanded, setResultExpanded] = useState(false);
 
     const statusCfg = STATUS_CONFIG[toolCall.status];
     const StatusIcon = statusCfg.icon;
 
+    const toggleExpanded = useCallback(() => setInternalExpanded(prev => !prev), []);
     const toggleInput = useCallback(() => setInputExpanded(prev => !prev), []);
     const toggleResult = useCallback(() => setResultExpanded(prev => !prev), []);
 
     const [now, setNow] = useState(() => Date.now());
     useEffect(() => {
-        if (toolCall.status !== 'running') return;
+        if (toolCall.status !== 'running' || !Number.isFinite(toolCall.startTime) || toolCall.startTime <= 0) return;
         setNow(Date.now());
         const timer = window.setInterval(() => setNow(Date.now()), 1000);
         return () => window.clearInterval(timer);
-    }, [toolCall.status]);
+    }, [toolCall.status, toolCall.startTime]);
 
     const effectiveDuration = toolCall.status === 'running'
-        ? Math.max(0, now - toolCall.startTime)
+        ? (Number.isFinite(toolCall.startTime) && toolCall.startTime > 0 ? Math.max(0, now - toolCall.startTime) : undefined)
         : toolCall.duration;
 
     const formattedDuration = useMemo(() => {
         if (effectiveDuration == null) return null;
-        if (effectiveDuration < 1000) return `${effectiveDuration}ms`;
-        const totalSeconds = Math.floor(effectiveDuration / 1000);
-        if (totalSeconds < 60) return `${totalSeconds}s`;
-        const minutes = Math.floor(totalSeconds / 60);
-        const seconds = totalSeconds % 60;
-        if (minutes < 60) return `${minutes}m ${seconds}s`;
-        const hours = Math.floor(minutes / 60);
-        return `${hours}h ${minutes % 60}m`;
+        return formatToolDuration(effectiveDuration);
     }, [effectiveDuration]);
 
     const inputStr = useMemo(() => {
@@ -84,93 +182,154 @@ const ToolCallBlock: React.FC<ToolCallBlockProps> = ({ toolUseId, toolCall }) =>
         }
     }, [toolCall.input]);
 
+    const primaryTarget = useMemo(() => extractPrimaryTarget(toolCall.input), [toolCall.input]);
+    const diffStats = useMemo(() => computeDiffStats(toolCall), [toolCall]);
+    const presentation = toolCall.result?.metadata?.hookPresentation;
+    const hookText = projectedText || (presentation && typeof presentation === 'object' && !Array.isArray(presentation)
+        && 'text' in presentation && typeof presentation.text === 'string'
+        ? presentation.text : '');
+    useEffect(() => {
+        if (expanded && sessionId) void useToolPresentationStore.getState().load(sessionId);
+    }, [expanded, sessionId, projectionRevision]);
+
     return (
         <div
-            className="tool-call-block my-2 rounded-lg border border-gray-700 bg-gray-900/50 overflow-hidden"
+            className={`tool-call-block my-2 overflow-hidden border border-hairline transition-surface duration-fast
+                ${expanded
+                    ? 'rounded-[14px] bg-surfacev2 shadow-e2'
+                    : 'rounded-[14px] bg-surface2 hover:border-[var(--v2-border-strong)]'}`}
             data-tool-use-id={toolUseId}
         >
-            {/* Header */}
-            <div className="flex items-center gap-2 px-3 py-2 bg-gray-800/50">
-                <Wrench size={14} className="text-gray-500" />
-                <span className="font-medium text-sm text-gray-200">
+            {/* Header — 折叠态一行：图标 + 名称(600) + 文件 chip + diff chip + 状态 + 耗时 */}
+            <button
+                type="button"
+                onClick={toggleExpanded}
+                aria-expanded={expanded}
+                className="panel-control flex w-full items-center gap-2 px-3 py-2 text-left transition-colors duration-fast hover:bg-hover2"
+            >
+                <ChevronRight
+                    size={13}
+                    className={`shrink-0 text-t4 transition-transform duration-base ${expanded ? 'rotate-90' : ''}`}
+                />
+                <Wrench size={14} className="shrink-0 text-t3" />
+                <span className="min-w-[3rem] max-w-[40%] font-semibold text-sm text-t1 truncate">
                     {toolCall.toolName}
                 </span>
-                <StatusIcon
-                    size={14}
-                    className={`${statusCfg.color} ${statusCfg.spin ? 'animate-spin' : ''}`}
-                />
-                <span className={`text-xs ${statusCfg.color}`}>
-                    {statusCfg.label}
-                </span>
-                {formattedDuration && (
-                    <span className="ml-auto text-xs text-gray-500">
-                        {formattedDuration}
+                {primaryTarget && (
+                    <span
+                        className="min-w-0 max-w-[40%] truncate rounded-md bg-sunken2 px-2 py-0.5 font-mono text-[13px] text-t2"
+                        // 路径类目标省略号前置（保留文件名可见），命令/pattern 省略号后置
+                        style={primaryTarget.isPath ? { direction: 'rtl', textAlign: 'left' } : undefined}
+                        title={primaryTarget.target}
+                    >
+                        {primaryTarget.target}
                     </span>
                 )}
-            </div>
-
-            {/* Progress */}
-            {toolCall.progress && toolCall.status === 'running' && (
-                <div className="px-3 py-2 border-t border-gray-700/50">
-                    <ToolProgressBar
-                        progress={toolCall.progress}
-                        startTime={toolCall.startTime}
-                    />
-                    {toolCall.progressHistory && toolCall.progressHistory.length > 1 && (
-                        <MiniLogViewer
-                            logs={toolCall.progressHistory}
-                            defaultCollapsed={true}
-                        />
-                    )}
-                </div>
-            )}
-
-            {/* Input (collapsible) */}
-            <div className="border-t border-gray-700/50">
-                <button
-                    onClick={toggleInput}
-                    className="flex items-center gap-1.5 w-full px-3 py-1.5 text-xs text-gray-500 hover:text-gray-300 transition-colors"
-                >
-                    <ChevronRight
-                        size={12}
-                        className={`transition-transform duration-200 ${inputExpanded ? 'rotate-90' : ''}`}
-                    />
-                    Input
-                </button>
-                {inputExpanded && (
-                    <div className="px-3 pb-2">
-                        <CodeBlock code={inputStr} language="json" showLineNumbers={false} maxHeight={200} />
-                    </div>
+                {diffStats && diffStats.added > 0 && (
+                    <span className="shrink-0 rounded-sm bg-oksoft px-1.5 py-0.5 text-[13px] font-medium tabular-nums text-ok">
+                        +{diffStats.added}
+                    </span>
                 )}
-            </div>
+                {diffStats && diffStats.removed > 0 && (
+                    <span className="shrink-0 rounded-sm bg-errsoft px-1.5 py-0.5 text-[13px] font-medium tabular-nums text-err">
+                        −{diffStats.removed}
+                    </span>
+                )}
+                <span className="ml-auto flex shrink-0 items-center gap-1.5">
+                    <StatusIcon
+                        size={14}
+                        className={`${statusCfg.color} ${statusCfg.spin ? 'animate-spin' : ''}`}
+                    />
+                    <span className={`text-[13px] ${statusCfg.color}`}>
+                        {statusCfg.label}
+                    </span>
+                    {formattedDuration && (
+                        <span className="text-[13px] tabular-nums text-t4">
+                            {formattedDuration}
+                        </span>
+                    )}
+                </span>
+            </button>
 
-            {/* Result */}
-            {toolCall.result && (
-                <div className="border-t border-gray-700/50">
-                    <button
-                        onClick={toggleResult}
-                        className="flex items-center gap-1.5 w-full px-3 py-1.5 text-xs text-gray-500 hover:text-gray-300 transition-colors"
-                    >
-                        <ChevronRight
-                            size={12}
-                            className={`transition-transform duration-200 ${resultExpanded ? 'rotate-90' : ''}`}
-                        />
-                        Result
-                        {toolCall.result.isError && (
-                            <span className="text-red-400 ml-1">(error)</span>
-                        )}
-                    </button>
-                    {resultExpanded && (
-                        <div className="px-3 pb-3">
-                            <ToolResultRenderer
-                                toolName={toolCall.toolName}
-                                content={toolCall.result.content}
-                                isError={toolCall.result.isError}
-                                metadata={toolCall.result.metadata}
+            {expanded && (
+                <>
+                    {/* Progress */}
+                    {toolCall.progress && toolCall.status === 'running' && (
+                        <div className="px-3 py-2 border-t border-hairline">
+                            <ToolProgressBar
+                                progress={toolCall.progress}
+                                startTime={toolCall.startTime}
                             />
+                            {toolCall.progressHistory && toolCall.progressHistory.length > 1 && (
+                                <MiniLogViewer
+                                    logs={toolCall.progressHistory}
+                                    defaultCollapsed={true}
+                                />
+                            )}
                         </div>
                     )}
-                </div>
+
+                    {/* Input (collapsible) */}
+                    <div className="border-t border-hairline">
+                        <button
+                            onClick={toggleInput}
+                            className="panel-control flex items-center gap-1.5 w-full px-3 py-1.5 text-[13px] text-t4 hover:text-t2 transition-colors"
+                        >
+                            <ChevronRight
+                                size={12}
+                                className={`transition-transform duration-base ${inputExpanded ? 'rotate-90' : ''}`}
+                            />
+                            Input
+                        </button>
+                        {inputExpanded && (
+                            <div className="px-3 pb-2">
+                                <CodeBlock code={inputStr} language="json" showLineNumbers={false} maxHeight={200} />
+                            </div>
+                        )}
+                    </div>
+
+                    {projectionError && <div className="border-t border-hairline px-3 py-2 text-[13px] text-warn" role="status">
+                        {projectionError}
+                        <button type="button" className="ml-2 underline" onClick={() => { if (sessionId) void useToolPresentationStore.getState().load(sessionId); }}>重试</button>
+                    </div>}
+                    {hookText.trim() && (
+                        <aside aria-label="Hook 展示备注" className="border-t border-hairline px-3 py-2 text-[13px] text-t3">
+                            <p className="mb-1 font-medium">Hook 展示备注</p>
+                            <p className="mb-1 text-t4">此备注不改变工具执行状态；原始结果可在 Result 中查看。</p>
+                            <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words font-mono">{hookText.slice(0, 32_768)}</pre>
+                            {hookText.length > 32_768 && <p className="mt-1 text-t4">展示备注过长，已截断。</p>}
+                        </aside>
+                    )}
+
+                    {/* Result */}
+                    {toolCall.result && (
+                        <div className="border-t border-hairline">
+                            <button
+                                onClick={toggleResult}
+                                className="panel-control flex items-center gap-1.5 w-full px-3 py-1.5 text-[13px] text-t4 hover:text-t2 transition-colors"
+                            >
+                                <ChevronRight
+                                    size={12}
+                                    className={`transition-transform duration-base ${resultExpanded ? 'rotate-90' : ''}`}
+                                />
+                                Result
+                                {toolCall.result.isError && (
+                                    <span className="text-err ml-1">(error)</span>
+                                )}
+                            </button>
+                            {resultExpanded && (
+                                <div className="px-3 pb-3">
+                                    {<ToolResultRenderer
+                                        toolName={toolCall.toolName}
+                                        content={toolCall.result.content}
+                                        isError={toolCall.result.isError}
+                                        metadata={toolCall.result.metadata}
+                                    />}
+                                </div>
+                            )}
+                        </div>
+                    )}
+                </>
             )}
         </div>
     );
@@ -208,14 +367,42 @@ const ToolResultRenderer: React.FC<ToolResultRendererProps> = ({
     isError,
     metadata,
 }) => {
+    // 文本/Markdown 类结果（非 TerminalRenderer、非 DiffRenderer 分支）超过
+    // RESULT_PREVIEW_LINES 行时默认截断，可展开全部 / 再收起
+    const [showFullResult, setShowFullResult] = useState(false);
+    const resultLineCount = useMemo(() => (content ? countLines(content) : 0), [content]);
+    const shouldTruncate = resultLineCount > RESULT_PREVIEW_LINES;
+    const displayContent = shouldTruncate && !showFullResult
+        ? content.split('\n').slice(0, RESULT_PREVIEW_LINES).join('\n')
+        : content;
+    const toggleShowFull = useCallback(() => setShowFullResult(prev => !prev), []);
+
+    const truncateToggle = shouldTruncate ? (
+        <button
+            type="button"
+            onClick={toggleShowFull}
+            className="panel-control mt-1.5 flex items-center gap-1 text-[13px] text-t4 hover:text-t2 transition-colors"
+        >
+            <ChevronRight
+                size={12}
+                className={`transition-transform duration-base ${showFullResult ? 'rotate-90' : ''}`}
+            />
+            {showFullResult ? '收起' : `展开全部（共 ${resultLineCount} 行）`}
+        </button>
+    ) : null;
+
+
     if (isError) {
         return (
-            <div className="rounded border border-red-700/50 bg-red-900/20 px-3 py-2 text-sm text-red-300">
-                <div className="flex items-center gap-1.5 mb-1 font-medium text-red-400">
-                    <XCircle size={14} />
-                    Error
+            <div>
+                <div className="rounded-[10px] border border-err bg-errsoft px-3 py-2 text-sm text-err font-mono text-[13px] leading-[1.65]">
+                    <div className="flex items-center gap-1.5 mb-1 font-medium">
+                        <XCircle size={14} />
+                        Error
+                    </div>
+                    <pre className="whitespace-pre-wrap text-[13px]">{displayContent}</pre>
                 </div>
-                <pre className="whitespace-pre-wrap text-xs">{content}</pre>
+                {truncateToggle}
             </div>
         );
     }
@@ -229,7 +416,7 @@ const ToolResultRenderer: React.FC<ToolResultRendererProps> = ({
 
     if (!content?.trim()) {
         return (
-            <div className="text-xs text-gray-500 italic">No output</div>
+            <div className="text-[13px] text-t4 italic">No output</div>
         );
     }
 
@@ -238,18 +425,47 @@ const ToolResultRenderer: React.FC<ToolResultRendererProps> = ({
         case 'BashTool':
         case 'Bash':
             return <TerminalRenderer content={content} isError={isError} />;
+        case 'Edit': {
+            const actual = parseEditDiffResult(metadata);
+            return (
+                <div>
+                    <CodeBlock code={displayContent} language="text" showLineNumbers={false} maxHeight={180} />
+                    {truncateToggle}
+                    {actual?.diff ? (
+                        <DiffRenderer content={actual.diff} filePath={actual.filePath} truncated={actual.truncated} />
+                    ) : (
+                        <p className="mt-1.5 text-[13px] text-t4">此记录未提供差异预览。</p>
+                    )}
+                </div>
+            );
+        }
         case 'FileEditTool':
         case 'FileEdit':
             return <DiffRenderer content={content} />;
         case 'GrepTool':
         case 'Grep':
-            return <SearchResultRenderer content={content} />;
+            return (
+                <div>
+                    <SearchResultRenderer content={displayContent} />
+                    {truncateToggle}
+                </div>
+            );
         case 'GlobTool':
         case 'Glob':
-            return <FileListRenderer content={content} />;
+            return (
+                <div>
+                    <FileListRenderer content={displayContent} />
+                    {truncateToggle}
+                </div>
+            );
         default: {
             const lang = getResultLanguage(toolName);
-            return <CodeBlock code={content} language={lang} showLineNumbers={false} maxHeight={400} />;
+            return (
+                <div>
+                    <CodeBlock code={displayContent} language={lang} showLineNumbers={false} maxHeight={400} />
+                    {truncateToggle}
+                </div>
+            );
         }
     }
 };

@@ -64,7 +64,7 @@ impl ExpectedOldState {
     pub fn sha256(hex: &str) -> Self {
         if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             tracing::warn!(
-                hash = hex,
+                code = "EXPECTED_HASH_FORMAT_INVALID",
                 "expected old hash is not 64 hexadecimal characters"
             );
         }
@@ -406,7 +406,7 @@ fn sync_directory_best_effort(directory: &Path) {
     match std::fs::File::open(directory).and_then(|handle| handle.sync_all()) {
         Ok(()) => {}
         Err(error) => {
-            tracing::debug!(dir = %directory.display(), %error, "directory fsync unavailable");
+            tracing::debug!(code="DIRECTORY_FSYNC_UNAVAILABLE", error_kind=?error.kind(), "directory fsync unavailable");
         }
     }
 }
@@ -416,7 +416,7 @@ async fn remove_quietly(path: &Path) {
     if let Err(error) = tokio::fs::remove_file(path).await
         && error.kind() != std::io::ErrorKind::NotFound
     {
-        tracing::warn!(path = %path.display(), %error, "failed to cleanup atomic-write temp file");
+        tracing::warn!(code="ATOMIC_TEMP_CLEANUP_FAILED", error_kind=?error.kind(), "failed to cleanup atomic-write temp file");
     }
 }
 

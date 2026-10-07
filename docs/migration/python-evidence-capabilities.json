@@ -1,0 +1,578 @@
+{
+  "sourceBaseline": "3e536438ccc1d7b500416c90e92ee08783f5ee41",
+  "sourceTarget": "053adf9071dc1996aa1ebfa30c0a23d587ffad5c",
+  "rustBaseline": "08cbdc4",
+  "capabilities": [
+    {
+      "id": "python-browser-lifecycle-and-disconnect",
+      "status": "equivalent",
+      "sourceCommits": [
+        "0db4b049",
+        "ffabaec2",
+        "e2f2f024"
+      ],
+      "sourcePaths": [
+        "python-service/src/main.py",
+        "python-service/src/services/browser_service.py",
+        "python-service/src/routers/browser.py",
+        "python-service/src/routers/journey.py",
+        "python-service/tests/test_browser_resource_container.py",
+        "python-service/tests/test_browser_service_lifecycle.py",
+        "python-service/tests/test_journey_http_lifecycle.py",
+        "python-service/tests/test_journey_lifecycle.py"
+      ],
+      "implementationPaths": [
+        "python-service/src/main.py",
+        "python-service/src/services/browser_service.py",
+        "python-service/src/routers/browser.py",
+        "python-service/src/routers/journey.py",
+        "python-service/tests/test_browser_resource_native.py",
+        "crates/zk-server/src/python/uds.rs"
+      ],
+      "validation": [
+        {
+          "command": "python-service/.venv/bin/python -m pytest -q python-service/tests",
+          "result": "279 passed, 9 upstream dependency warnings",
+          "scope": "unit, ASGI and actual native Chromium lifecycle tests"
+        }
+      ],
+      "preserved": [
+        "UDS transport",
+        "Chromium sandbox flags",
+        "HTTP(S)-only navigation",
+        "existing global JavaScript error collection",
+        "67 native success/failure/cancellation/restart scenarios replace Linux /proc gate"
+      ]
+    },
+    {
+      "id": "truthful-browser-click-type-and-screenshots",
+      "status": "equivalent",
+      "sourceCommits": [
+        "e2f2f024"
+      ],
+      "sourcePaths": [
+        "python-service/src/routers/journey.py",
+        "python-service/src/services/browser_service.py",
+        "python-service/src/services/journey_models.py",
+        "python-service/tests/test_browser_interaction_truth.py",
+        "python-service/tests/test_journey_evidence_metadata.py"
+      ],
+      "implementationPaths": [
+        "python-service/src/routers/journey.py",
+        "python-service/src/services/browser_service.py",
+        "python-service/src/services/journey_models.py",
+        "python-service/tests/test_browser_interaction_truth.py",
+        "python-service/tests/test_journey_evidence_metadata.py"
+      ],
+      "validation": [
+        {
+          "command": "python-service/.venv/bin/python -m pytest -q python-service/tests",
+          "result": "279 passed, 9 upstream dependency warnings",
+          "scope": "unit, ASGI and actual native Chromium lifecycle tests"
+        }
+      ],
+      "preserved": [
+        "no JavaScript replay fallback after a failed real click",
+        "screenshot_error/method/warning survive post-step failures"
+      ]
+    },
+    {
+      "id": "verifyjourney-dsl-http-owned-preview-and-evidence",
+      "status": "equivalent",
+      "sourceCommits": [
+        "1d76bb77",
+        "0db4b049",
+        "ffabaec2",
+        "e28c7b66",
+        "e2f2f024"
+      ],
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/verify/BrowserVerifier.java",
+        "backend/src/main/java/com/aicodeassistant/verify/HttpApiVerifier.java",
+        "python-service/src/routers/http_api.py",
+        "backend/src/main/java/com/aicodeassistant/tool/verify/VerifyJourneyTool.java",
+        "backend/src/main/java/com/aicodeassistant/verify/DevServerLauncher.java",
+        "backend/src/main/java/com/aicodeassistant/verify/JourneyRequest.java",
+        "backend/src/main/java/com/aicodeassistant/verify/JourneyResponse.java",
+        "backend/src/main/java/com/aicodeassistant/verify/JourneyResult.java",
+        "backend/src/main/java/com/aicodeassistant/verify/JourneyStepValidator.java",
+        "backend/src/main/java/com/aicodeassistant/verify/StepResult.java"
+      ],
+      "implementationPaths": [
+        "crates/zk-server/src/python/tools/verify_journey.rs",
+        "crates/zk-server/src/python/tools/journey_resources.rs",
+        "python-service/src/routers/http_api.py"
+      ],
+      "validation": [
+        {
+          "command": "cargo test -q -p zk-server --lib python::tools::",
+          "result": "29 passed; includes bounded receipt, fifty-step, failed snapshot ownership metadata checks",
+          "scope": "unit plus actual local preview process/port cleanup"
+        },
+        {
+          "command": "python-service/.venv/bin/python -m pytest -q python-service/tests",
+          "result": "279 passed, 9 upstream dependency warnings",
+          "scope": "unit, ASGI and actual native Chromium lifecycle tests"
+        },
+        {
+          "command": "cargo test -q -p zk-server --test verify_journey_native -- --ignored",
+          "result": "1 passed in5.11s",
+          "scope": "actual Rust UDS Python Chromium plus native managed preview, real click, per-step JPEG evidence, trace/HAR/video blobs, browser and processGroup Released proof, actual local HTTP request/assertions"
+        },
+        {
+          "result": "Explicit native integration completed with exit 0: 1 passed, 0 failed, 0 ignored in 6.42s after the formal runtime synchronization.",
+          "scope": "Actual Rust → UDS → Python → Chromium and managed HTTP preview; immutable screenshot/trace/HAR/video evidence and owned resource release. This separate run executes the native test ignored by ordinary workspace test invocations.",
+          "evidence": {
+            "path": "/tmp/zk-verify-journey-native-final.txt",
+            "sha256": "d7a59ab06950e8b15d1b1dcb4b350f5f845c1f515dc651f2a1d573c0f55b1d07"
+          }
+        }
+      ],
+      "preserved": [
+        "legacy steps/mode/record-object and new journey/verification_mode/boolean-record",
+        "HTTP_API available independently of browser capability (root integration)",
+        "unique browser resource ownership and processGroup preview ownership",
+        "existing V4 release proof semantics",
+        "per-image 5MiB / screenshot total 20MiB; recording per-blob 10MiB / total20MiB",
+        "failure semantic snapshot is bounded and filtered",
+        "bounded 50-item receipt; large step metadata and claims bounded; semantic snapshot stored as JSON blob to avoid owner-field confusion"
+      ],
+      "sourcePathAudit": "Reviewed Java tool, DSL validator, DTO fields and launcher lifecycle. Browser IDs are invocation-owned, method/warning/screenshot_error retained, cancellation and preview lifecycle tracked by native resource leases. Publication staging/static snapshot paths intentionally excluded; ordinary owned local preview retained. Native implementation does not run an unsolicited npm install."
+    },
+    {
+      "id": "evidence-preview-and-content-integrity",
+      "status": "equivalent",
+      "sourceCommits": [
+        "e28c7b66",
+        "e2f2f024"
+      ],
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/verify/EvidenceController.java",
+        "backend/src/main/java/com/aicodeassistant/verify/EvidenceBundle.java",
+        "backend/src/main/java/com/aicodeassistant/verify/EvidenceStore.java",
+        "backend/src/main/java/com/aicodeassistant/verify/ScreenshotFormat.java"
+      ],
+      "implementationPaths": [
+        "crates/zk-server/src/api/evidence.rs",
+        "crates/zk-server/tests/evidence_api.rs"
+      ],
+      "validation": [
+        {
+          "command": "cargo test -q -p zk-server --test evidence_api",
+          "result": "4 passed",
+          "scope": "local automated"
+        }
+      ],
+      "preserved": [
+        "X-Session-Id authorization",
+        "content SHA256 verified on reads",
+        "no-clobber atomic publication and no symlink overwrite",
+        "only PNG/JPEG preview=true inline; normal blobs remain attachment"
+      ],
+      "sourcePathAudit": "EvidenceStore metadata uses native immutable transaction with plain INSERT, full UUIDs, secure atomic content-addressed blob writes. Preview accepts validated PNG/JPEG only, image dimension/byte budgets retained. Metadata/provenance write-gate tests in zk-db cover the native store."
+    },
+    {
+      "id": "attachment-safe-filenames-exact-uuid-atomic-save",
+      "status": "equivalent",
+      "sourceCommits": [
+        "9438ee8f"
+      ],
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/controller/AttachmentController.java"
+      ],
+      "implementationPaths": [
+        "crates/zk-server/src/api/attachment.rs"
+      ],
+      "validation": [
+        {
+          "command": "cargo test -q -p zk-server --lib api::attachment::",
+          "result": "2 passed",
+          "scope": "local automated"
+        }
+      ],
+      "preserved": [
+        "native local attachments and UUID download API",
+        "safe filename normalization for slash/backslash/control chars",
+        "exact canonical UUID match, no prefix collision",
+        "create_new0600 temp + hard-link no replacement"
+      ]
+    },
+    {
+      "id": "python-cli-permission-and-errors",
+      "status": "equivalent",
+      "sourceCommits": [
+        "0d4039ac"
+      ],
+      "sourcePaths": [
+        "python-service/cli/main.py",
+        "python-service/cli/client.py",
+        "python-service/tests/test_cli_permission_modes.py"
+      ],
+      "implementationPaths": [
+        "python-service/cli/main.py",
+        "python-service/cli/client.py"
+      ],
+      "validation": [
+        {
+          "command": "python-service/.venv/bin/python -m pytest -q python-service/tests",
+          "result": "279 passed, 9 upstream dependency warnings",
+          "scope": "unit, ASGI and actual native Chromium lifecycle tests"
+        }
+      ],
+      "preserved": [
+        "zkcode CLI name",
+        "token and maxBudget behavior",
+        "new server sessions DONT_ASK; omitted resume mode inherits session (root server integration)",
+        "HTTP409 explained; SSE error body consumed"
+      ]
+    },
+    {
+      "id": "native-full-document-toolchain",
+      "status": "equivalent",
+      "sourceCommits": [
+        "e28c7b66",
+        "72f7aa60"
+      ],
+      "sourcePaths": [
+        "tools/office-regression/",
+        "docker/"
+      ],
+      "implementationPaths": [
+        "configuration/dev-toolchain.toml",
+        "scripts/dev/documents.sh",
+        "scripts/dev/document-tools.py",
+        "scripts/dev/ocr-models.py",
+        "scripts/dev/sync.sh",
+        "scripts/dev/inspect.py",
+        "scripts/macos-toolchain-env.sh",
+        ".github/workflows/ci.yml"
+      ],
+      "validation": [
+        {
+          "command": "formal dev_sync_documents function from scripts/dev/documents.sh",
+          "result": "passed all12 capability checks",
+          "scope": "actual Homebrew/formal official model installation"
+        },
+        {
+          "command": "python-service/.venv/bin/python -m unittest discover -s scripts/dev/tests -q",
+          "result": "82 passed",
+          "scope": "local automated"
+        }
+      ],
+      "preserved": [
+        "healthy existing LibreOffice retained",
+        "official tessdata_fast4.1.0 chi_sim and chi_tra with pinnedSHA256",
+        "existing healthy OCR models preserved; digest mismatch never replaces files",
+        "full Office/PDF/media/OCR/CJK tools enabled by default",
+        "broken already-installed executable is repaired only when smoke check fails"
+      ]
+    },
+    {
+      "id": "native-office-regression-and-nonfinite-xlsx",
+      "status": "equivalent",
+      "sourceCommits": [
+        "e28c7b66",
+        "4a457a9e",
+        "72f7aa60"
+      ],
+      "sourcePaths": [
+        "tools/office-regression/"
+      ],
+      "implementationPaths": [
+        "tools/office-regression/native_runner.py",
+        "tools/office-regression/tests",
+        "tools/office-regression/scripts/office_struct_check.py",
+        ".github/workflows/ci.yml",
+        "crates/zk-tools/tests/office_toolchain.rs"
+      ],
+      "validation": [
+        {
+          "command": "./dev test office",
+          "result": "41 passed in20.57s; evidence /var/folders/g_/cgkxr_w91xg7tx8n84hjt9zm0000gn/T/zkcode-office-45eb21ro",
+          "scope": "actual XLSX/DOCX/PPTX generation, LibreOffice PDF conversion, PDF extraction, real Chromium HTML scenarios"
+        },
+        {
+          "command": "cargo test -q -p zk-tools --test office_toolchain",
+          "result": "1passed actualBash→OSprocess→Python fixturegeneration pluspositive0/negative2 XLSX check",
+          "scope": "native actualprocess, no skip",
+          "evidence": "/tmp/zk-office-bash-tests.log"
+        }
+      ],
+      "preserved": [
+        "NaN/Infinity/-Infinity rejected; numeric strings remain compatible",
+        "isolated out-of-repo output directories and exact failure exit",
+        "tool/font/browser paths, versions and SHA256 in evidence",
+        "Headless Shell145.0.7632.6 sha256 a46b3b1e63163fa2d2437fb6ae967cb5a73b50050bca32f1964e6129b6228244"
+      ]
+    },
+    {
+      "id": "public-publication",
+      "status": "excluded",
+      "reason": "OSS/Meoo/flyai public upload/publication excluded by user; no publication snapshot binding"
+    },
+    {
+      "id": "linux-container-deployment",
+      "status": "excluded",
+      "reason": "Apple Silicon macOS native tooling replaces Docker/Linux deployment; historical evaluation material excluded"
+    },
+    {
+      "id": "native-environment-and-ci-policy",
+      "status": "equivalent",
+      "sourceCommits": [
+        "72f7aa60",
+        "7d14cfc5",
+        "09c88ebd"
+      ],
+      "sourcePaths": [
+        ".github/workflows/office-regression.yml",
+        ".github/workflows/ci.yml",
+        ".github/workflows/security.yml"
+      ],
+      "implementationPaths": [
+        ".github/workflows/ci.yml",
+        "configuration/dev-toolchain.toml",
+        "scripts/dev/documents.sh",
+        "scripts/dev/document-tools.py",
+        "scripts/setup-macos.sh",
+        "scripts/setup-python-macos.sh",
+        "scripts/parity/scan-release-secrets.sh"
+      ],
+      "validation": [
+        {
+          "command": "./dev doctor --deep --json",
+          "result": "Actual Office/PDF/media/OCR/CJK, pip consistency and both locked sets, npm tree/lock/build, cargo metadata, and actual Chromium launch/page/close pass; overall exit1 due stale local build fingerprints and dead prior PID files while shared implementation remains in progress",
+          "scope": "native local environment"
+        }
+      ],
+      "preserved": [
+        "One default complete macOS dependency setup through existing dev/bootstrap/sync/doctor",
+        "No Docker, Linux deployment, Meoo or flyai installation",
+        "Upstream pinned Linux Trivy image scan replaced by existing native cargo-deny and release-candidate gitleaks gates without weakening failures"
+      ]
+    },
+    {
+      "id": "sidecar-owned-group-and-stable-journey-refusals",
+      "status": "equivalent",
+      "sourceCommits": [
+        "0db4b049",
+        "ffabaec2"
+      ],
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/service/PythonProcessManager.java",
+        "backend/src/main/java/com/aicodeassistant/service/PythonCapabilityAwareClient.java"
+      ],
+      "implementationPaths": [
+        "crates/zk-server/src/python/sidecar.rs",
+        "crates/zk-server/src/python/client.rs",
+        "crates/zk-server/tests/python_sidecar.rs"
+      ],
+      "validation": [
+        {
+          "command": "cargo test -q -p zk-server --lib python::",
+          "result": "53 passed, including actual orphan group kill after leader reap and retention when group identity is missing",
+          "scope": "unit and native processes"
+        },
+        {
+          "command": "cargo test -q -p zk-server --test python_sidecar journey_refusals_are_stable_and_side_effects_are_not_retried",
+          "result": "1 passed;7 stable refusal codes and untrusted diagnostic each cause exactly1 physical request over UDS",
+          "scope": "actual Unix socket transport fixture"
+        },
+        {
+          "command": "cargo test -q -p zk-server --test verify_journey_native -- --ignored",
+          "result": "1 passed in5.09s after lifecycle/refusal changes",
+          "scope": "actual Python Chromium browser plus local HTTP"
+        }
+      ],
+      "preserved": [
+        "Captured PGID survives Child::id becoming None after parent reaping",
+        "No restart or owner removal until both parent and group are absent; unconfirmed cleanup keeps owner/Failed",
+        "Graceful uvicorn first permits browser shutdown; group kill only after grace or parent exit",
+        "Only allowlisted lifecycle errors surfaced; arbitrary service response diagnostics remain private; no journey retry"
+      ]
+    },
+    {
+      "id": "browser-failure-interaction-facts",
+      "status": "equivalent",
+      "sourceCommits": [
+        "e2f2f024"
+      ],
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/tool/impl/WebBrowserTool.java"
+      ],
+      "implementationPaths": [
+        "crates/zk-server/src/python/tools/web_browser.rs"
+      ],
+      "validation": [
+        {
+          "command": "cargo test -q -p zk-server --lib python::",
+          "result": "53 passed including error method/warning allowlist and bounds",
+          "scope": "unit/native"
+        }
+      ],
+      "preserved": [
+        "Click/type failure remains failure with NEVER/UNKNOWN and only bounded method/warning",
+        "No screenshot/base64/arbitrary data leakage through error metadata",
+        "Schema no longer promises nonexistent JavaScript click fallback"
+      ]
+    },
+    {
+      "id": "local-preview-rfc5987-filenames",
+      "status": "equivalent",
+      "sourceCommits": [
+        "9438ee8f"
+      ],
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/controller/FileController.java",
+        "backend/src/main/java/com/aicodeassistant/util/ContentDispositionEncoder.java"
+      ],
+      "implementationPaths": [
+        "crates/zk-server/src/api/file.rs"
+      ],
+      "validation": [
+        {
+          "command": "cargo test -q -p zk-server --lib api::file::tests",
+          "result": "2 passed",
+          "scope": "header Unicode/control injection and metadata tests"
+        }
+      ],
+      "preserved": [
+        "inline preview retained with session header/workspace boundary/nosniff",
+        "ASCII quoted fallback plus RFC5987 filename* preserves Chinese without CRLF/raw quote injection"
+      ]
+    },
+    {
+      "id": "token-estimator-warmup",
+      "status": "equivalent",
+      "sourceCommits": [
+        "801aa6d0"
+      ],
+      "sourcePaths": [
+        "python-service/tests/test_token_estimation.py"
+      ],
+      "implementationPaths": [
+        "python-service/tests/test_token_estimation.py"
+      ],
+      "validation": [
+        {
+          "command": "python-service/.venv/bin/python -m pytest -q python-service/tests/test_token_estimation.py",
+          "result": "4 passed in1.81s",
+          "scope": "local ASGI tokenizer endpoints"
+        }
+      ],
+      "preserved": [
+        "Timing excludes first tokenizer encoder load; actual endpoint result remains asserted"
+      ]
+    },
+    {
+      "id": "native-env-summary-and-speech-forwarding",
+      "status": "equivalent",
+      "sourceCommits": [
+        "156cde14",
+        "8ed651a1",
+        "c266876a",
+        "f8466b4f",
+        "18df3325"
+      ],
+      "sourcePaths": [
+        ".env.example",
+        "Dockerfile",
+        "backend/src/main/resources/application.yml"
+      ],
+      "implementationPaths": [
+        "scripts/dev/exec-env.py",
+        "scripts/dev/tests/test_exec_env.py",
+        "configuration/dev-toolchain.toml"
+      ],
+      "validation": [
+        {
+          "command": "python-service/.venv/bin/python -m unittest discover -s scripts/dev/tests -q",
+          "result": "84 passed in16.464s, including actual .env.example parsing with no ignored supported keys",
+          "scope": "native launcher/env parser/toolchain/OCR unit gates"
+        }
+      ],
+      "preserved": [
+        "Formal dev child process receives LLM_COMPACT_* and ASR_CORRECTIONS as literal data; no shell evaluation, unrelated keys remain filtered",
+        "Docker new full dependency packages mapped to existing Xcode/Homebrew Python/Node plus full native document chain; macOS system zip retained",
+        "Linux apt/glibc image stages and npmCOPY symlink fix are deployment-specific exclusions; no Meoo/flyai installed"
+      ]
+    },
+    {
+      "id": "attachment-durable-name-and-safe-download-header",
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/controller/AttachmentController.java",
+        "backend/src/main/java/com/aicodeassistant/util/ContentDispositionEncoder.java"
+      ],
+      "implementationPaths": [
+        "crates/zk-server/src/api/attachment.rs",
+        "crates/zk-server/src/api/file.rs",
+        "crates/zk-server/src/api/evidence.rs"
+      ],
+      "status": "implemented_verified_local",
+      "notes": "Original sanitized basename is atomically stored in versioned UUID metadata for restart-safe downloads; mismatched/corrupt metadata safely falls back. Full UUID candidates only,409 on ambiguity,O_NOFOLLOW regular payload boundedread,metadata-root containment. Unicode RFC5987 plus ASCII fallback,control/Bidi removal,200UTF8byte limit preserving safeOfficeextensions. Retain no public upload. Real gaps found by source assertion audit rather than treating tests as filename associations.",
+      "validation": [
+        {
+          "command": "cargo test -q -p zk-server --lib api::attachment::tests",
+          "result": "6passed",
+          "evidence": "/tmp/zk-attachment-final-tests.log"
+        },
+        {
+          "command": "cargo test -q -p zk-server --test evidence_api",
+          "result": "4passed with completePNGfixture and safe downloadheaders",
+          "evidence": "/tmp/zk-evidence-final-tests.log"
+        },
+        {
+          "command": "ZK_RUN_GIT_TESTS=true cargo test --workspace --all-features --locked --no-fail-fast",
+          "result": "Full workspace exit0 includes current native API/unit and evidence-integrity regressions. Separate real-browser VerifyJourney explicit final rerun remains recorded independently.",
+          "evidence": {
+            "path": "/tmp/zk-workspace-tests-resume7.txt",
+            "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7"
+          }
+        }
+      ]
+    },
+    {
+      "id": "screenshot-metadata-trailer-and-blob-cleanup-truth",
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/verify/ScreenshotFormat.java",
+        "backend/src/main/java/com/aicodeassistant/verify/EvidenceStore.java"
+      ],
+      "implementationPaths": [
+        "crates/zk-server/src/api/evidence.rs",
+        "crates/zk-llm/src/payload_guard.rs",
+        "crates/zk-server/src/python/tools/verify_journey.rs"
+      ],
+      "status": "implemented_verified_local",
+      "notes": "PNG/JPEGpreview/archive require validboundedheader metadata and completeIEND/EOF, without optionalPNGmetadata decompression; reject forged signature-only payloads. Blobpublication uses atomic hardlink; temporary cleanupfailure must reportfailure afterpublishedlink and must not replaceprimarypublicationfailure. No silent cleanupsuccess. Native stronger scopedauth/digestcheck preserved.",
+      "validation": [
+        {
+          "command": "cargo test -q -p zk-server --lib screenshot_format_tests",
+          "result": "2passed including cleanupfailure composition and malformedPNGmetadata/header/trailer",
+          "evidence": "/tmp/zk-screenshot-final-tests.log"
+        },
+        {
+          "command": "ZK_RUN_GIT_TESTS=true cargo test --workspace --all-features --locked --no-fail-fast",
+          "result": "Full workspace exit0 includes current native API/unit and evidence-integrity regressions. Separate real-browser VerifyJourney explicit final rerun remains recorded independently.",
+          "evidence": {
+            "path": "/tmp/zk-workspace-tests-resume7.txt",
+            "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7"
+          }
+        }
+      ]
+    }
+  ],
+  "pendingValidation": [],
+  "installationNotes": [
+    "Homebrew tesseract-lang whole-language bottle repeatedly failed network download and was not counted as installed; the official pinned Chinese models were installed through the formal script instead.",
+    "LibreOffice cask large download failed twice; existing healthy LibreOfficeDev26.8.0.0.alpha0 was retained and used by all actual document gates."
+  ],
+  "externalApiValidation": "No external credentialed API has been claimed as tested.",
+  "rebuiltEnvironmentValidation": {
+    "command": "cd python-service && .venv/bin/python -m pytest --cov=src --cov-fail-under=70",
+    "exitCode": 0,
+    "result": "279 passed, 9 warnings; statement/branch-aware coverage76.49%>=70%;42.94s after formal locked environment rebuild.",
+    "evidence": {
+      "path": "/tmp/zk-python-rebuilt-coverage.log",
+      "sha256": "3b9e59340a99131ed30efaaa8aea828884059b61d96d3746fe8308f520d12bd0"
+    }
+  }
+}

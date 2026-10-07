@@ -13,10 +13,10 @@
 //!
 //! Java record 上的 `@JsonProperty("tool_use_id")` / `("is_error")` 等 `snake_case`
 //! 注解只作用于 REST / 存储通道；**WS 通道**经 `convertContentBlocksForWs` 显式
-//! 重映射为前端 camelCase（`toolUseId` / `isError`），且丢弃
-//! `SystemMessage.type`（`SystemMessageType`）、`ImageBlock.width/height`、
-//! `UserMessage.toolUseResult/sourceToolAssistantUUID`。本 crate 是 WS 协议契约层，
-//! 因此**按 WS 线上形状建模**（camelCase 字段、丢弃字段不建模），丢弃清单在此留痕。
+//! 重映射为前端 camelCase（`toolUseId` / `isError`）。当前 V4 保留持久消息的
+//! `meta`、系统 `subtype` 与 `metadata`，用于恢复、边界和图片提示；这些字段
+//! 不授予权限。图片尺寸及 `UserMessage.toolUseResult/sourceToolAssistantUUID`
+//! 仍不属于 WS 内容块；私有 provider 状态和工具图片重放数据由投影层隐藏。
 //!
 //! # Message 的 tag 字段名
 //!
@@ -30,14 +30,16 @@ use serde::{Deserialize, Serialize};
 ///
 /// `timestamp` 为 epoch 毫秒（Java `Instant` 经 `toEpochMilli()` 落 WS）。
 /// `Message::User` 不含 Java record 的 `toolUseResult` / `sourceToolAssistantUUID`
-/// （WS 转换层丢弃，见模块文档）；`Message::System` 不含 `SystemMessageType`
-/// （同上，前端以 `subtype` 自行合成，不属下行协议）。
+/// （WS 转换层丢弃，见模块文档）；系统类型通过持久化 `subtype` 下行。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Message {
     /// 用户消息（Java `Message.UserMessage`）。
     #[serde(rename_all = "camelCase")]
     User {
+        /// Persisted client metadata (for example steering); grants no authority.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        meta: Option<serde_json::Value>,
         /// 消息 UUID。
         uuid: String,
         /// epoch 毫秒时间戳。
@@ -61,9 +63,15 @@ pub enum Message {
         #[serde(skip_serializing_if = "Option::is_none")]
         usage: Option<Usage>,
     },
-    /// 系统消息（Java `Message.SystemMessage`；WS 形状仅保留 content）。
+    /// 系统消息，含持久化的显示类型与元数据。
     #[serde(rename_all = "camelCase")]
     System {
+        /// Persisted system message subtype.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subtype: Option<String>,
+        /// Business display metadata, never new authorization.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metadata: Option<serde_json::Value>,
         /// 消息 UUID。
         uuid: String,
         /// epoch 毫秒时间戳。
@@ -383,5 +391,27 @@ mod tests {
         );
         assert_eq!(u.total_tokens(), 0);
         assert_eq!(Usage::default() + Usage::default(), Usage::default());
+    }
+}
+
+/// Server-derived session use; client metadata cannot select this value.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionPurpose {
+    /// Ordinary conversation, including temporary conversations.
+    #[default]
+    Chat,
+    /// Dedicated externally controlled MCP session; local review remains available.
+    Mcp,
+}
+
+impl SessionPurpose {
+    /// Stable REST and WebSocket spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Chat => "chat",
+            Self::Mcp => "mcp",
+        }
     }
 }

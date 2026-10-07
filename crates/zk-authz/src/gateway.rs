@@ -196,6 +196,11 @@ impl ToolExecutionGateway {
         let allowed = allowed.clone();
         let context = context.clone();
         let tool_use_id = context.tool_use_id.clone();
+        let admission_event = if allowed.descriptor.analyzer_id == "hook-v1" {
+            "hook_admitted"
+        } else {
+            "tool_started"
+        };
         // 旧源 L58-64：runs.executeBoundedWrite(...)。zk-db 的单 writer Mutex +
         // busy_timeout=5s 等价于旧 executeWriteBounded 的 5s 上限（偏离 GW-03）。
         //
@@ -214,13 +219,23 @@ impl ToolExecutionGateway {
                 {
                     return Ok(Err(GatewayError::Admission(rejected)));
                 }
-                runs.append_event_in_current_write(
-                    &tx,
-                    &run_id,
-                    "tool_started",
-                    tool_use_id.as_deref(),
-                    &event,
-                );
+                if admission_event == "hook_admitted" {
+                    runs.append_required_event_in_current_write(
+                        &tx,
+                        &run_id,
+                        admission_event,
+                        tool_use_id.as_deref(),
+                        &event,
+                    )?;
+                } else {
+                    runs.append_event_in_current_write(
+                        &tx,
+                        &run_id,
+                        admission_event,
+                        tool_use_id.as_deref(),
+                        &event,
+                    );
+                }
                 tx.commit()?;
                 Ok(Ok(()))
             })

@@ -1,18 +1,12 @@
-//! `/plan [on|off]`——切换 Plan Mode 规划模式（Batch 7）。
-//!
-//! 语义来源（旧仓库只读）：`PlanCommand.java`（62L）。
+//! `/plan [on|off]`——显示或隐藏规划面板，不改变会话权限。
 //!
 //! 用法：
-//! - `/plan on [planName]` — 进入规划模式；
-//! - `/plan off` — 退出规划模式；
-//! - `/plan` — 切换当前模式。
-//!
-//! # 有意差异
-//!
-//! - Java 侧经 `WebSocketController.sendPlanUpdate` 推送 WS 事件；
-//!   Rust 侧命令返回 `CommandResult` 文本，WS 推送由分发层统一处理。
+//! - `/plan on [planName]` — 显示规划面板；
+//! - `/plan off` — 隐藏规划面板；
+//! - `/plan [planName]` — 显示规划面板。
 
 use futures::future::BoxFuture;
+use zk_protocol::ServerMessage;
 
 use crate::command::context::CommandContext;
 use crate::command::traits::{Command, CommandResult, CommandType};
@@ -26,7 +20,7 @@ impl Command for PlanCommand {
     }
 
     fn description(&self) -> &'static str {
-        "Toggle Plan Mode for step-by-step task planning"
+        "Show or hide the planning UI panel; session permissions are unchanged"
     }
 
     fn command_type(&self) -> CommandType {
@@ -36,32 +30,43 @@ impl Command for PlanCommand {
     fn execute<'a>(
         &'a self,
         args: &'a str,
-        _ctx: &'a CommandContext,
+        ctx: &'a CommandContext,
     ) -> BoxFuture<'a, CommandResult> {
         Box::pin(async move {
             let trimmed = args.trim();
 
-            if trimmed.starts_with("on") {
-                let plan_name = trimmed.strip_prefix("on").unwrap_or("").trim();
-                let name = if plan_name.is_empty() {
-                    "New Plan"
-                } else {
-                    plan_name
-                };
-                CommandResult::text(format!("Plan Mode enabled: {name}"))
-            } else if trimmed == "off" {
-                CommandResult::text("Plan Mode disabled")
+            let name = plan_name(trimmed);
+            let output = if trimmed == "off" {
+                "Planning panel closed. Session permissions are unchanged.".to_owned()
+            } else if trimmed.split_whitespace().next() == Some("on") {
+                format!("Planning panel opened: {name}. Session permissions are unchanged.")
             } else {
-                // toggle
-                let name = if trimmed.is_empty() {
-                    "New Plan"
-                } else {
-                    trimmed
-                };
-                CommandResult::text(format!("Plan Mode toggled: {name}"))
-            }
+                "Planning panel opened. Session permissions are unchanged.".to_owned()
+            };
+            let open = trimmed != "off";
+            ctx.state
+                .hub
+                .push(
+                    &ctx.session_id,
+                    ServerMessage::PlanUpdate {
+                        is_plan_mode: open,
+                        plan_name: open.then(|| name.to_owned()),
+                        plan_overview: open.then(String::new),
+                    },
+                )
+                .await;
+            CommandResult::text(output)
         })
     }
+}
+
+fn plan_name(args: &str) -> &str {
+    let name = if args.split_whitespace().next() == Some("on") {
+        args[2..].trim()
+    } else {
+        args
+    };
+    if name.is_empty() { "New Plan" } else { name }
 }
 
 #[cfg(test)]
@@ -80,24 +85,46 @@ mod tests {
     #[tokio::test]
     async fn plan_on_returns_enabled_text() {
         let result = run("on My Plan").await;
-        assert_eq!(result, CommandResult::text("Plan Mode enabled: My Plan"));
+        assert_eq!(
+            result,
+            CommandResult::text(
+                "Planning panel opened: My Plan. Session permissions are unchanged."
+            )
+        );
     }
 
     #[tokio::test]
     async fn plan_on_without_name_uses_default() {
         let result = run("on").await;
-        assert_eq!(result, CommandResult::text("Plan Mode enabled: New Plan"));
+        assert_eq!(
+            result,
+            CommandResult::text(
+                "Planning panel opened: New Plan. Session permissions are unchanged."
+            )
+        );
     }
 
     #[tokio::test]
     async fn plan_off_returns_disabled_text() {
         let result = run("off").await;
-        assert_eq!(result, CommandResult::text("Plan Mode disabled"));
+        assert_eq!(
+            result,
+            CommandResult::text("Planning panel closed. Session permissions are unchanged.")
+        );
     }
 
     #[tokio::test]
-    async fn plan_no_args_toggles() {
+    async fn plan_no_args_opens_panel() {
         let result = run("").await;
-        assert_eq!(result, CommandResult::text("Plan Mode toggled: New Plan"));
+        assert_eq!(
+            result,
+            CommandResult::text("Planning panel opened. Session permissions are unchanged.")
+        );
+    }
+
+    #[test]
+    fn names_starting_with_on_are_not_truncated() {
+        assert_eq!(super::plan_name("onboarding"), "onboarding");
+        assert_eq!(super::plan_name("on\tNamed plan"), "Named plan");
     }
 }

@@ -1,24 +1,10 @@
-//! `/git-commit [message]`——AI 辅助 Git 提交（Batch 8A）。
-//!
-//! 语义来源（旧仓库只读）：`GitCommitCommand.java`（75L），守卫与 Git 执行
-//! 复用 [`super::git_review`] 里的旧 `GitCommandGuard` / `GitService.execGit`
-//! 等价物。
-//!
-//! 用法：
-//! - `/git-commit` — 提交预览（JSX：状态 / 暂存差异 / 变更文件清单）；
-//! - `/git-commit <message>` — 以该消息提交**已暂存**的变更。
-//!
-//! # 有意差异
-//!
-//! - 命令名取 `git-commit`（旧 `getName()` 为 `commit`），旧名注册为别名，
-//!   理由同 [`super::git_review`]。
-//! - **不自动 `git add -A`**：旧实现只 `commit -m`，暂存区由用户自己决定。
-//!   替用户全量暂存会把无关脏文件卷进提交（且提交后难以拆分），故照抄旧行为
-//!   ——无暂存内容时 `git commit` 自身非零退出，落到旧的失败文案。
+//! `/git-commit [message]` (alias `/commit`) acts only on the existing index.
+//! Preview uses complete NUL-delimited staged names. Uncertain commit outcomes
+//! require checking Git state before a user decides whether to retry.
 
 use futures::future::BoxFuture;
 
-use super::git_review::{require_repository_root, run_git, truncate};
+use super::git_review::{require_repository_root, run_git, run_git_raw, truncate};
 use crate::command::context::CommandContext;
 use crate::command::traits::{Command, CommandResult, CommandType};
 
@@ -58,34 +44,58 @@ impl Command for GitCommitCommand {
             }
             let work_dir = ctx.working_dir.as_str();
 
-            // 旧 L40-43：`status --porcelain` 为空即无可提交内容（`text` 非 `error`）。
-            let status = run_git(work_dir, &["status", "--porcelain"])
-                .await
-                .unwrap_or_default();
-            if status.trim().is_empty() {
-                return CommandResult::text("没有可提交的变更");
+            let Some(status) = run_git(work_dir, &["status", "--porcelain"]).await else {
+                return CommandResult::error("读取 Git 状态失败，请检查仓库后重试。");
+            };
+            let Some(names) = run_git_raw(
+                work_dir,
+                &[
+                    "diff",
+                    "--cached",
+                    "--ignore-submodules=none",
+                    "--name-only",
+                    "-z",
+                ],
+            )
+            .await
+            else {
+                return CommandResult::error("读取暂存文件列表失败，请检查仓库后重试。");
+            };
+            let Some(changed_files) = staged_files(&names) else {
+                return CommandResult::error("暂存文件列表不完整，未执行提交；请稍后重试。");
+            };
+            if changed_files.is_empty() {
+                let Some(merge_head) =
+                    run_git(work_dir, &["rev-parse", "--git-path", "MERGE_HEAD"])
+                        .await
+                        .filter(|path| !path.is_empty())
+                else {
+                    return CommandResult::error("读取 Git 合并状态失败，请检查仓库后重试。");
+                };
+                if !std::path::Path::new(work_dir).join(merge_head).is_file() {
+                    return CommandResult::text("没有已暂存的变更；请先暂存需要提交的文件。");
+                }
             }
-
-            // 旧 L45-51：带消息 → 直接提交；`execGit` 回 null（非零退出 / 超时）
-            // 即失败文案（钩子拒绝、无暂存内容均落此分支）。
-            let message = args.trim();
-            if !message.is_empty() {
-                return match run_git(work_dir, &["commit", "-m", message]).await {
+            if !args.trim().is_empty() {
+                return match run_git(work_dir, &["commit", "-m", args]).await {
                     Some(output) if !output.trim().is_empty() => {
                         CommandResult::text(format!("✅ 已提交:\n{output}"))
                     }
-                    _ => CommandResult::error("git commit 失败，请检查 Git 输出或本地钩子。"),
+                    _ => CommandResult::error(
+                        "提交结果不确定：可能未生效，也可能已成功。请先核对 git log / git status，再决定是否重试；若被提交钩子拒绝，请先修复钩子。",
+                    ),
                 };
             }
-
-            // 旧 L53-68：无消息 → 预览（键名与 `action` 逐字）。
-            let staged_diff = run_git(work_dir, &["diff", "--cached", "--stat"])
-                .await
-                .unwrap_or_default();
-            let detailed_diff = run_git(work_dir, &["diff", "--cached"])
-                .await
-                .unwrap_or_default();
-            let changed_files = changed_files(&status);
+            let staged_diff = run_git(
+                work_dir,
+                &["diff", "--cached", "--ignore-submodules=none", "--stat"],
+            )
+            .await;
+            let detailed_diff =
+                run_git(work_dir, &["diff", "--cached", "--ignore-submodules=none"]).await;
+            let (Some(staged_diff), Some(detailed_diff)) = (staged_diff, detailed_diff) else {
+                return CommandResult::error("读取暂存差异失败，未完成预览；请检查仓库后重试。");
+            };
             CommandResult::jsx(serde_json::json!({
                 "action": "gitCommitPreview",
                 "status": status,
@@ -98,17 +108,14 @@ impl Command for GitCommitCommand {
     }
 }
 
-/// 从 `status --porcelain` 提取变更文件名（旧 L56-59：长度 > 3 的行取
-/// `substring(3).trim()`，即跳过两位状态码与分隔空格）。
-fn changed_files(status: &str) -> Vec<String> {
-    status
-        .split('\n')
-        .filter(|line| line.len() > 3)
-        // 状态码与分隔符恒为 ASCII，故第 3 字节必是字符边界；`get` 兜掉理论
-        // 上的非边界输入（旧 `substring` 在 UTF-16 上不会失败）。
-        .filter_map(|line| line.get(3..))
-        .map(|path| path.trim().to_owned())
-        .collect()
+/// Reject incomplete output instead of inventing a partial staged-file list.
+fn staged_files(names: &str) -> Option<Vec<String>> {
+    if names.is_empty() {
+        return Some(Vec::new());
+    }
+    let complete = names.strip_suffix('\0')?;
+    let files = complete.split('\0').map(str::to_owned).collect::<Vec<_>>();
+    files.iter().all(|file| !file.is_empty()).then_some(files)
 }
 
 #[cfg(test)]
@@ -175,7 +182,10 @@ mod tests {
         let (dir, work_dir) = seed_repository("clean");
         let result = run("", &work_dir).await;
         let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(result, CommandResult::text("没有可提交的变更"));
+        assert_eq!(
+            result,
+            CommandResult::text("没有已暂存的变更；请先暂存需要提交的文件。")
+        );
     }
 
     /// 无消息 → `gitCommitPreview` JSX（六键齐全，文件清单剥掉状态码）。
@@ -249,14 +259,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(
             result,
-            CommandResult::error("git commit 失败，请检查 Git 输出或本地钩子。")
+            CommandResult::text("没有已暂存的变更；请先暂存需要提交的文件。")
         );
     }
 
-    /// 状态行解析：短行丢弃、状态码剥离、路径去空白。
     #[test]
-    fn changed_files_strips_the_status_prefix() {
-        let files = super::changed_files(" M src/a.rs\n?? b.txt\nXY\n A  spaced.txt");
-        assert_eq!(files, ["src/a.rs", "b.txt", "spaced.txt"]);
+    fn staged_names_preserve_whitespace_and_reject_incomplete_protocol() {
+        assert_eq!(
+            super::staged_files(" leading\nname \0next\0"),
+            Some(vec![" leading\nname ".into(), "next".into()])
+        );
+        assert_eq!(super::staged_files("partial"), None);
+        assert_eq!(super::staged_files("good\0partial"), None);
+        assert_eq!(super::staged_files("good\0\0"), None);
+        assert_eq!(super::staged_files(""), Some(Vec::new()));
     }
 }

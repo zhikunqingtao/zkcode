@@ -43,7 +43,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
-use std::sync::{Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -76,6 +76,7 @@ pub struct StreamableHttpTransport {
     base_url: String,
     client: reqwest::Client,
     headers: BTreeMap<String, String>,
+    request_authorizer: RwLock<Option<Arc<dyn crate::transport::RequestAuthorizer>>>,
     request_id: AtomicI64,
     connected: AtomicBool,
     session_id: RwLock<Option<String>>,
@@ -117,6 +118,7 @@ impl StreamableHttpTransport {
             base_url: base_url.strip_suffix('/').unwrap_or(base_url).to_owned(),
             client,
             headers,
+            request_authorizer: RwLock::new(None),
             request_id: AtomicI64::new(1),
             connected: AtomicBool::new(false),
             session_id: RwLock::new(None),
@@ -152,22 +154,34 @@ impl StreamableHttpTransport {
     }
 
     /// 附加自定义 headers 与会话头。
-    fn decorate(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    async fn decorate(
+        &self,
+        builder: reqwest::RequestBuilder,
+    ) -> Result<reqwest::RequestBuilder, McpProtocolError> {
         let builder = self.headers.iter().fold(builder, |builder, (name, value)| {
             builder.header(name, value)
         });
-        match self.session_id() {
+        let builder = match self.session_id() {
             Some(session) => builder.header(SESSION_HEADER, session),
             None => builder,
+        };
+        let authorizer = read_lock(&self.request_authorizer).clone();
+        match authorizer {
+            Some(authorizer) => authorizer.authorize(builder).await,
+            None => Ok(builder),
         }
     }
 
-    fn post(&self, payload: &impl Serialize) -> Result<reqwest::RequestBuilder, McpProtocolError> {
+    async fn post(
+        &self,
+        payload: &impl Serialize,
+    ) -> Result<reqwest::RequestBuilder, McpProtocolError> {
         let json = serde_json::to_string(payload).map_err(|error| {
             McpProtocolError::wrapped(format!("Failed to serialize JSON-RPC payload: {error}"))
         })?;
         Ok(self
             .decorate(self.client.post(&self.base_url))
+            .await?
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .header(
                 reqwest::header::ACCEPT,
@@ -186,7 +200,7 @@ impl StreamableHttpTransport {
     ) -> Result<Option<Value>, McpProtocolError> {
         let expected_id = request_id.as_key();
         let request = JsonRpcRequest::new(request_id, method, params);
-        let builder = self.post(&request)?;
+        let builder = self.post(&request).await?;
         match tokio::time::timeout(timeout, self.exchange(builder, &expected_id)).await {
             Ok(outcome) => outcome,
             Err(_) => Err(McpProtocolError::timeout(format!(
@@ -263,10 +277,11 @@ impl StreamableHttpTransport {
     }
 
     /// 启动 GET 通知流（模块级偏离 4）。服务端不支持时静默退出。
-    fn start_notification_stream(&self) {
-        let builder = self
-            .decorate(self.client.get(&self.base_url))
-            .header(reqwest::header::ACCEPT, "text/event-stream");
+    async fn start_notification_stream(&self) {
+        let Ok(builder) = self.decorate(self.client.get(&self.base_url)).await else {
+            return;
+        };
+        let builder = builder.header(reqwest::header::ACCEPT, "text/event-stream");
         let handle = tokio::spawn(notification_stream(
             builder,
             self.notification_handler(),
@@ -384,6 +399,9 @@ async fn notification_stream(
 }
 
 impl McpTransport for StreamableHttpTransport {
+    fn set_request_authorizer(&self, authorizer: Arc<dyn crate::transport::RequestAuthorizer>) {
+        *write_lock(&self.request_authorizer) = Some(authorizer);
+    }
     fn next_request_id(&self) -> RequestId {
         RequestId::Number(self.request_id.fetch_add(1, Ordering::Relaxed))
     }
@@ -420,7 +438,7 @@ impl McpTransport for StreamableHttpTransport {
                 "MCP Streamable HTTP connected"
             );
             self.send_notification(METHOD_INITIALIZED, None).await;
-            self.start_notification_stream();
+            self.start_notification_stream().await;
             Ok(())
         })
     }
@@ -450,7 +468,7 @@ impl McpTransport for StreamableHttpTransport {
     ) -> BoxFuture<'a, ()> {
         Box::pin(async move {
             let notification = JsonRpcNotification::new(method, params);
-            let builder = match self.post(&notification) {
+            let builder = match self.post(&notification).await {
                 Ok(builder) => builder,
                 Err(error) => {
                     tracing::warn!(method, %error, "Failed to send MCP HTTP notification");
@@ -476,7 +494,7 @@ impl McpTransport for StreamableHttpTransport {
     fn send_response(&self, id: RequestId, result: Value) -> BoxFuture<'_, ()> {
         Box::pin(async move {
             let response = JsonRpcResponse::success(id.clone(), result);
-            let builder = match self.post(&response) {
+            let builder = match self.post(&response).await {
                 Ok(builder) => builder,
                 Err(error) => {
                     tracing::warn!(request_id = %id, %error, "Failed to send MCP HTTP response");
@@ -505,7 +523,7 @@ impl McpTransport for StreamableHttpTransport {
                 return false;
             }
             let notification = JsonRpcNotification::new(METHOD_PING, None);
-            let Ok(builder) = self.post(&notification) else {
+            let Ok(builder) = self.post(&notification).await else {
                 return false;
             };
             matches!(
@@ -541,9 +559,11 @@ impl McpTransport for StreamableHttpTransport {
             {
                 let session = self.session_id();
                 if let Some(session) = session.as_deref() {
-                    let request = self
-                        .decorate(self.client.delete(&self.base_url))
-                        .header(SESSION_HEADER, session);
+                    let Ok(request) = self.decorate(self.client.delete(&self.base_url)).await
+                    else {
+                        return;
+                    };
+                    let request = request.header(SESSION_HEADER, session);
                     if let Err(error) = request.send().await {
                         tracing::debug!(%error, "Failed to send MCP session close");
                     }

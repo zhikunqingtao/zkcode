@@ -3,7 +3,7 @@
  *
  * 对齐 zkcode 差异化升级方案 v1.5 §4.5 C（升级项 C.4 前端接入）+ 修订版混合分发。
  *
- * 路由：MessageItem.renderMessage → case 'visualization' → 本组件
+ * 路由：renderMessageContent → case 'visualization' → 本组件
  * 数据源：后端 VisualizationPayloadBuilder 推送的 { type: 'visualization', viewType, props }
  *
  * 设计（修订版）：
@@ -23,7 +23,7 @@ import { useAppUiStore } from '@/store/appUiStore';
 import { useChangeImpactStore } from '@/store/changeImpactStore';
 import { useCodePathStore } from '@/store/codePathStore';
 import { useComplexityStore } from '@/store/complexityStore';
-import { useApiContractStore } from '@/store/apiContractStore';
+import { useSequenceViewStore } from '@/store/sequenceViewStore';
 import type { SchemaObject } from '@/store/apiContractStore';
 
 // 复用现有 shared/backend 可视化组件（懒加载）
@@ -46,8 +46,8 @@ const VisualizationMessage: React.FC<VisualizationMessageProps> = ({ message }) 
 
     return (
         <div className="px-4 py-2 my-1">
-            <div className="rounded-lg border border-[var(--border)] bg-[var(--bg-secondary)]/30 overflow-hidden">
-                <div className="px-3 py-1.5 bg-[var(--bg-secondary)] border-b border-[var(--border)] text-xs text-[var(--text-secondary)] font-mono flex items-center gap-2">
+            <div className="rounded-[14px] border border-[var(--v2-border-hairline)] bg-[var(--v2-bg-sunken)]/30 overflow-hidden">
+                <div className="px-3 py-1.5 bg-[var(--v2-bg-sunken)] border-b border-[var(--v2-border-hairline)] text-[13px] text-[var(--v2-text-2)] font-mono flex items-center gap-2">
                     <span className="opacity-60">visualization</span>
                     <span className="opacity-40">·</span>
                     <span>{viewType}</span>
@@ -66,6 +66,7 @@ function renderByViewType(
     props: Record<string, unknown>,
 ): React.ReactNode {
     const vt = (viewType || '').toLowerCase();
+    if (props.intentOnly === true) return <IntentSuggestion viewType={vt} props={props} />;
 
     switch (vt) {
         // ========== 直渲染类：接受 props 的组件 ==========
@@ -99,7 +100,7 @@ function renderByViewType(
             return (
                 <HintCard
                     title="变更影响链路"
-                    description="已识别变更影响，可在影响分析面板查看完整链路"
+                    description="可在影响分析面板确认文件和范围后分析链路"
                     targetTab="impact"
                     viewType={vt}
                     props={props}
@@ -110,7 +111,7 @@ function renderByViewType(
             return (
                 <HintCard
                     title="代码路径追踪"
-                    description="已识别调用链入口，可在代码路径面板交互式追踪"
+                    description="可在代码路径面板确认入口后追踪调用链"
                     targetTab="code-path"
                     viewType={vt}
                     props={props}
@@ -144,7 +145,7 @@ function renderByViewType(
             const content = pickString(props, 'content');
             if (!content.trim()) return <EmptyHint what="文本内容" />;
             return (
-                <pre className="whitespace-pre-wrap text-sm text-[var(--text-primary)] font-mono">
+                <pre className="whitespace-pre-wrap text-sm text-[var(--v2-text-1)] font-mono">
                     {content}
                 </pre>
             );
@@ -156,7 +157,7 @@ function renderByViewType(
         default:
             return (
                 <div>
-                    <div className="flex items-center gap-1.5 text-xs text-amber-500 dark:text-amber-400 mb-2">
+                    <div className="flex items-center gap-1.5 text-[13px] text-warn dark:text-warn mb-2">
                         <AlertTriangle size={12} />
                         <span>未识别的 viewType &quot;{viewType}&quot;，降级为 JSON 视图</span>
                     </div>
@@ -164,6 +165,32 @@ function renderByViewType(
                 </div>
             );
     }
+}
+
+/** Classifier output is a navigation suggestion, never analysis data or renderable code. */
+function IntentSuggestion({ viewType, props }: { viewType: string; props: Record<string, unknown> }) {
+    const destinations: Record<string, string> = {
+        'git-timeline': 'git', 'mermaid': 'diagram', 'change-impact-graph': 'impact',
+        'code-path-tracer': 'code-path', 'code-complexity-treemap': 'complexity', 'api-sequence-diagram': 'sequence',
+    };
+    const target = destinations[viewType];
+    const open = () => {
+        if (!target) return;
+        // Only explicit navigation can seed existing form hints; no fetch or analysis starts here.
+        if (viewType === 'change-impact-graph') useChangeImpactStore.getState().applyVisualizationHint(props);
+        if (viewType === 'code-path-tracer') useCodePathStore.getState().applyVisualizationHint(props);
+        if (viewType === 'code-complexity-treemap') useComplexityStore.getState().applyVisualizationHint(props);
+        if (viewType === 'api-sequence-diagram') useSequenceViewStore.getState().applyVisualizationHint(props);
+        useAppUiStore.getState().requestVisualizationTab(target);
+        useAppUiStore.getState().setMobileNavTab(target);
+    };
+    return <div className="space-y-2 text-sm text-t2">
+        <p>可视化建议，尚未执行分析。</p>
+        {typeof props.reason === 'string' && <p>{props.reason.slice(0, 300)}</p>}
+        <p className="text-xs">建议不能作为查询结果或验证证据；在对应面板确认范围后再执行。</p>
+        {target ? <button type="button" className="panel-control rounded border border-hairline px-3 py-2" onClick={open}>打开对应面板</button>
+            : <p>暂无对应交互入口；请先取得实际数据后再生成视图。</p>}
+    </div>;
 }
 
 /** 从 props 中按顺序取第一个非空字符串字段。 */
@@ -191,7 +218,7 @@ const HintCard: React.FC<HintCardProps> = ({ title, description, targetTab, view
     const applyChangeImpactHint = useChangeImpactStore((s) => s.applyVisualizationHint);
     const applyCodePathHint = useCodePathStore((s) => s.applyVisualizationHint);
     const applyComplexityHint = useComplexityStore((s) => s.applyVisualizationHint);
-    const applyApiContractHint = useApiContractStore((s) => s.applyVisualizationHint);
+    const applySequenceHint = useSequenceViewStore((s) => s.applyVisualizationHint);
 
     const handleOpen = useCallback(() => {
         // 1) 写入对应 store hint（4 个自治组件各自消费）
@@ -206,11 +233,12 @@ const HintCard: React.FC<HintCardProps> = ({ title, description, targetTab, view
                 applyComplexityHint(props);
                 break;
             case 'api-sequence-diagram':
-                applyApiContractHint(props);
+                applySequenceHint(props);
                 break;
         }
         // 2) 请求 Sidebar 切到对应 tab
         requestVisualizationTab(targetTab);
+        useAppUiStore.getState().setMobileNavTab(targetTab);
     }, [
         viewType,
         props,
@@ -218,19 +246,19 @@ const HintCard: React.FC<HintCardProps> = ({ title, description, targetTab, view
         applyChangeImpactHint,
         applyCodePathHint,
         applyComplexityHint,
-        applyApiContractHint,
+        applySequenceHint,
         requestVisualizationTab,
     ]);
 
     const summary = summarizeProps(props);
 
     return (
-        <div className="flex items-start gap-3 p-2 rounded border border-[var(--border)] bg-[var(--bg-primary)]/60">
+        <div className="flex items-start gap-3 p-2 rounded-sm border border-[var(--v2-border-hairline)] bg-[var(--v2-bg-surface)]/60">
             <div className="flex-1 min-w-0">
-                <div className="text-sm font-medium text-[var(--text-primary)]">{title}</div>
-                <div className="text-xs text-[var(--text-secondary)] mt-0.5">{description}</div>
+                <div className="text-sm font-medium text-[var(--v2-text-1)]">{title}</div>
+                <div className="text-[13px] text-[var(--v2-text-2)] mt-0.5">{description}</div>
                 {summary && (
-                    <div className="text-[11px] text-[var(--text-muted)] mt-1 font-mono truncate">
+                    <div className="text-[13px] text-[var(--v2-text-2)] mt-1 font-mono truncate">
                         {summary}
                     </div>
                 )}
@@ -238,7 +266,7 @@ const HintCard: React.FC<HintCardProps> = ({ title, description, targetTab, view
             <button
                 type="button"
                 onClick={handleOpen}
-                className="flex items-center gap-1 text-xs px-2 py-1 rounded bg-blue-500/15 hover:bg-blue-500/25 text-blue-600 dark:text-blue-400 border border-blue-500/30 transition-colors flex-shrink-0"
+                className="panel-control flex items-center gap-1 text-[13px] px-2 py-1 rounded-sm bg-accent2-soft hover:bg-accent2-soft text-accent2-ink border border-accent2 transition-colors shrink-0"
             >
                 <ExternalLink size={12} />
                 <span>在可视化面板查看</span>
@@ -267,13 +295,13 @@ const JsonView: React.FC<{ props: Record<string, unknown> }> = ({ props }) => {
     const keys = Object.keys(props);
     if (keys.length === 1 && keys[0] === 'content' && typeof props.content === 'string') {
         return (
-            <pre className="whitespace-pre-wrap text-sm text-[var(--text-primary)] font-mono">
+            <pre className="whitespace-pre-wrap text-sm text-[var(--v2-text-1)] font-mono">
                 {props.content}
             </pre>
         );
     }
     return (
-        <pre className="text-xs text-[var(--text-secondary)] font-mono overflow-x-auto whitespace-pre">
+        <pre className="text-[13px] text-[var(--v2-text-2)] font-mono overflow-x-auto whitespace-pre">
             {safeStringify(props)}
         </pre>
     );
@@ -289,12 +317,12 @@ function safeStringify(value: unknown): string {
 
 const LoadingSkeleton: React.FC = () => (
     <div className="flex items-center justify-center py-6">
-        <div className="w-4 h-4 rounded-full bg-blue-400 animate-pulse" />
+        <div className="w-4 h-4 rounded-full bg-accent2 animate-pulse" />
     </div>
 );
 
 const EmptyHint: React.FC<{ what: string }> = ({ what }) => (
-    <div className="text-xs text-[var(--text-muted)] italic">（空 {what}）</div>
+    <div className="text-[13px] text-[var(--v2-text-2)] italic">（空 {what}）</div>
 );
 
 export default React.memo(VisualizationMessage);

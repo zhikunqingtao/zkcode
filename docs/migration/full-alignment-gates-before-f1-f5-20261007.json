@@ -1,0 +1,1239 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-07T10:32:22.480928+00:00",
+  "sourceTarget": "053adf9071dc1996aa1ebfa30c0a23d587ffad5c",
+  "rustBaseline": "08cbdc45e12cc28f3f13aaafbd0b056b980dfb1a",
+  "overallStatus": "passed",
+  "scope": "Current full-alignment local release gates on the recorded uncommitted source fingerprint. Evidence applies to its specific source/artifact; history is preserved. One explicitly authorized real DeepSeek release Query was executed and ledger-checked; all other paid provider tests remain unrun. No Git commit/push/PR.",
+  "gates": [
+    {
+      "id": "machine-contracts",
+      "status": "passed",
+      "result": "Corrected-source V4/REST/WS/schema and public credential fixture checks passed.",
+      "priorAttempts": [
+        {
+          "status": "passed",
+          "command": "./scripts/parity/check-contracts.sh",
+          "evidence": {
+            "path": "/tmp/zk-alignment-contracts-final.txt",
+            "sha256": "dd7dca9f28ae775b866302044d05a2c4700f78b16d8efd9ce8ec2ee7f9173de5"
+          },
+          "result": "V4/REST/WS/schema and public credential fixture check passed before new complexity/Git endpoints; requires final rerun."
+        },
+        {
+          "status": "passed",
+          "result": "Frozen-tree V4/REST/WS/schema and public credential fixture checks passed, including the final complexity/Git endpoints.",
+          "exitCode": 0,
+          "command": "./scripts/parity/check-contracts.sh",
+          "evidence": {
+            "path": "/tmp/zk-alignment-contracts-final3.txt",
+            "sha256": "dd7dca9f28ae775b866302044d05a2c4700f78b16d8efd9ce8ec2ee7f9173de5"
+          }
+        }
+      ],
+      "exitCode": 0,
+      "command": "./scripts/parity/check-contracts.sh",
+      "evidence": {
+        "path": "/tmp/zk-alignment-thinking-contracts-final.txt",
+        "sha256": "dd7dca9f28ae775b866302044d05a2c4700f78b16d8efd9ce8ec2ee7f9173de5"
+      }
+    },
+    {
+      "id": "python-full",
+      "status": "passed",
+      "cwd": "python-service",
+      "result": "335 passed, 9 dependency/deprecation warnings; coverage 75.83%, above the 70% floor.",
+      "priorAttempts": [
+        {
+          "status": "passed",
+          "command": ".venv/bin/python -m pytest --cov=src --cov-fail-under=70",
+          "cwd": "python-service",
+          "evidence": {
+            "path": "/tmp/zk-python-alignment-full.txt",
+            "sha256": "36ccd201925bd3fe3c5584115ecd94c9f6f229cb142b09b53f3c6acf02fb427e"
+          },
+          "result": "332 passed, 9 warnings in 43.05s; coverage 75.79%."
+        }
+      ],
+      "exitCode": 0,
+      "command": ".venv/bin/python -m pytest --cov=src --cov-fail-under=70",
+      "evidence": {
+        "path": "/tmp/zk-python-alignment-final-coverage.txt",
+        "sha256": "c36a07d7903e2ce700bbca684922e0081e01e62d1493faeb860e13be9ffc00ca"
+      }
+    },
+    {
+      "id": "dev-bootstrap-tests",
+      "status": "passed",
+      "command": "python-service/.venv/bin/python -m unittest discover -s scripts/dev/tests -v",
+      "evidence": {
+        "path": "/tmp/zk-dev-alignment-tests-py311.txt",
+        "sha256": "591db59e93062fe659482562388ee236b0add36b81b3454973c89017a115775b"
+      },
+      "result": "87 passed with supported Python 3.11 in 17.773s.",
+      "priorAttempts": [
+        {
+          "status": "failed",
+          "command": "python3 -m unittest discover -s scripts/dev/tests -v",
+          "result": "Shell python3 resolved to unsupported Xcode Python 3.9; 4 import/runtime errors. Re-ran with configured 3.11 without changing assertions.",
+          "evidence": {
+            "path": "/tmp/zk-dev-alignment-tests.txt",
+            "sha256": "87460669cb7082954f70fe858ad81dcb961353a18ff6d84aa8beac824639e604"
+          }
+        }
+      ]
+    },
+    {
+      "id": "cargo-fmt",
+      "status": "passed",
+      "result": "Final corrected-source format check passed.",
+      "priorAttempts": [
+        {
+          "status": "passed",
+          "result": "Format check passed at the earlier freeze; later test/entry edits require final check.",
+          "evidence": {
+            "path": "/tmp/zk-alignment-fmt-final.txt",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          }
+        },
+        {
+          "status": "passed",
+          "result": "Final frozen-source format check passed.",
+          "exitCode": 0,
+          "command": "cargo fmt --all -- --check",
+          "evidence": {
+            "path": "/tmp/zk-alignment-fmt-final.txt",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "sourceSnapshotNote": "Passed before correcting DeepSeek explicit thinking=disabled handling. Retained as historical source/artifact evidence, not final validation of the correction."
+        },
+        {
+          "status": "passed",
+          "result": "Thinking-control correction frozen-source format check passed.",
+          "command": "cargo fmt --all -- --check",
+          "exitCode": 0,
+          "evidence": {
+            "path": "/tmp/zk-alignment-thinking-fmt.txt",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          }
+        }
+      ],
+      "command": "cargo fmt --all -- --check",
+      "exitCode": 0,
+      "evidence": {
+        "path": "/tmp/zk-alignment-thinking-fmt-final.txt",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "id": "cargo-clippy-all",
+      "status": "passed",
+      "result": "Final corrected-source strict workspace/all-targets/all-features -D warnings passed in 1.93s.",
+      "priorAttempts": [
+        {
+          "status": "passed",
+          "result": "Strict workspace/all-targets/all-features -D warnings passed after Hook admission and REPL typed port fixes, 37.50s.",
+          "command": "CARGO_INCREMENTAL=0 cargo clippy --workspace --all-targets --all-features --keep-going --locked --offline -- -D warnings",
+          "evidence": {
+            "path": "/tmp/zk-alignment-clippy-final.txt",
+            "sha256": "52736bd0b5c510f9f733e3dba74734160257eb6c53b992c0c5774311006fa8da"
+          }
+        },
+        {
+          "status": "passed",
+          "result": "Final frozen-source strict workspace/all-targets/all-features -D warnings passed in 21.39s.",
+          "exitCode": 0,
+          "command": "CARGO_INCREMENTAL=0 cargo clippy --workspace --all-targets --all-features --keep-going --locked --offline -- -D warnings",
+          "evidence": {
+            "path": "/tmp/zk-alignment-clippy-final4.txt",
+            "sha256": "8c78a6cb8c4dad5a388de0bee810a2412abcabeb71b94ca219807c182ab3cd49"
+          },
+          "sourceSnapshotNote": "Passed before correcting DeepSeek explicit thinking=disabled handling. Retained as historical source/artifact evidence, not final validation of the correction."
+        },
+        {
+          "status": "passed",
+          "result": "Thinking-control correction strict workspace/all-targets/all-features -D warnings passed in 26.15s.",
+          "command": "CARGO_INCREMENTAL=0 cargo clippy --workspace --all-targets --all-features --keep-going --locked --offline -- -D warnings",
+          "exitCode": 0,
+          "evidence": {
+            "path": "/tmp/zk-alignment-thinking-clippy.txt",
+            "sha256": "effb85bad3d4dcc35efd92ceeef9d2006adfd2c84fd61535daea1061bdcb4160"
+          }
+        }
+      ],
+      "command": "CARGO_INCREMENTAL=0 cargo clippy --workspace --all-targets --all-features --keep-going --locked --offline -- -D warnings",
+      "exitCode": 0,
+      "evidence": {
+        "path": "/tmp/zk-alignment-thinking-clippy-final.txt",
+        "sha256": "2792530b7b1a1f84d2b6c263c980b0e8fc7240d1dbd0a8703b65e893b1cabd78"
+      }
+    },
+    {
+      "id": "cargo-workspace-tests",
+      "status": "passed",
+      "result": "Final thinking-corrected frozen source: 145 independent harnesses, 3143 passed, 0 failed, 9 ignored. Raw log contains 146 result lines / 3144 passed because one native process test reexecutes itself; excluded from independent totals. Four native ignored cases were passed separately; five historical paid-credential test cases remain unrun.",
+      "priorAttempts": [
+        {
+          "status": "failed",
+          "evidence": {
+            "path": "/tmp/zk-alignment-workspace-tests-first.txt",
+            "sha256": "c2fa640ada392ef0e994af50dba2f767ea3c227707e85f95f47488e0c0ad6704"
+          },
+          "result": "14 target failures. Includes production unknown-usage gate, durable timeout classification and REPL executor architecture problems, plus outdated/invalid fixtures. Follow-up fixes retain or strengthen assertions."
+        },
+        {
+          "status": "failed",
+          "evidence": {
+            "path": "/tmp/zk-alignment-workspace-tests-second.txt",
+            "sha256": "5ecaca36733dda8609d0116f0eb26fec997d46f4c395a40681fa4e7bef1ec9c3"
+          },
+          "result": "Second attempt: 6 target failures. Four MCP capability cases completed; fifth was stopped while waiting for a missing real local permission decision in its fixture. Remaining failures: Hook cancel fixture never applied, tracing capture concurrency, guarded Bash fixture, true partial checkpoint-envelope recovery defect, Query fixture expecting interactive WS delivery without a WS client. Assertions preserved; latest fixes require rerun."
+        },
+        {
+          "status": "passed",
+          "result": "Final frozen-source run exited 0: 145 independent harnesses, 3138 passed, 0 failed, 9 ignored. Raw log has 146 result lines / 3139 passed because one native process test reexecutes itself; that nested result is included in its outer 394-test tools harness and is not counted twice. Four native ignored cases were explicitly passed separately; five remote paid-credential test cases remain unrun.",
+          "exitCode": 0,
+          "command": "CARGO_INCREMENTAL=0 ZK_RUN_GIT_TESTS=true cargo test --workspace --locked --offline --no-fail-fast",
+          "counts": {
+            "harnesses": 145,
+            "passed": 3138,
+            "failed": 0,
+            "ignored": 9,
+            "rawResultLines": 146,
+            "rawPassedSum": 3139,
+            "excludedNestedReexecutionPassed": 1
+          },
+          "ignoredDisposition": {
+            "separatelyPassed": [
+              "native-keychain: 1",
+              "native-lsp: 1 covering five languages",
+              "native-browser: 2"
+            ],
+            "notRun": [
+              "dashscope_live",
+              "dashscope_token_plan_live",
+              "deepseek_live",
+              "moonshot_kimi_live",
+              "mcp_search::tests::dashscope_web_search_live"
+            ]
+          },
+          "evidence": {
+            "path": "/tmp/zk-alignment-workspace-tests-final.txt",
+            "sha256": "d7e0c4cc106318b9d13f2b82b5730d6211d3bc4d052372327130028c96c8dc98"
+          },
+          "sourceSnapshotNote": "Passed before correcting DeepSeek explicit thinking=disabled handling. Retained as historical source/artifact evidence, not final validation of the correction."
+        },
+        {
+          "status": "failed",
+          "result": "First thinking-correction workspace attempt has 2 real wire fixture failures (7 of 9 wire cases passed). Unknown/old model identifiers correctly use conservative context 8192; fixture output default 8192 left zero input budget. Only the two fixtures now set max_tokens=512; production guard/pricing/capabilities unchanged. Entire attempt is failed, regardless of remaining passing harnesses.",
+          "exitCode": 101,
+          "evidence": {
+            "path": "/tmp/zk-alignment-thinking-workspace.txt",
+            "sha256": "292f1ff1cb35a3d1f791075d9bba836a901f7452d82bce3e69b004c535a469ae"
+          }
+        }
+      ],
+      "command": "CARGO_INCREMENTAL=0 ZK_RUN_GIT_TESTS=true cargo test --workspace --locked --offline --no-fail-fast",
+      "ignoredDisposition": {
+        "separatelyPassed": [
+          "native-keychain: 1",
+          "native-lsp: 1 covering five languages",
+          "native-browser: 2"
+        ],
+        "notRun": [
+          "dashscope_live",
+          "dashscope_token_plan_live",
+          "deepseek_live",
+          "moonshot_kimi_live",
+          "mcp_search::tests::dashscope_web_search_live"
+        ]
+      },
+      "exitCode": 0,
+      "evidence": {
+        "path": "/tmp/zk-alignment-thinking-workspace-final.txt",
+        "sha256": "e65109d7113495aded4bfe36014dfc575a2717160d8c99776a6a792d7deed7eb"
+      },
+      "counts": {
+        "harnesses": 145,
+        "passed": 3143,
+        "failed": 0,
+        "ignored": 9,
+        "rawResultLines": 146,
+        "rawPassedSum": 3144,
+        "excludedNestedReexecutionPassed": 1
+      }
+    },
+    {
+      "id": "cargo-engine-no-default",
+      "status": "passed",
+      "result": "Thinking-corrected source, optional image-budget feature disabled: 16 harnesses, 696 passed, 0 failed, 0 ignored.",
+      "command": "CARGO_INCREMENTAL=0 ZK_RUN_GIT_TESTS=true cargo test -p zk-engine --no-default-features --locked --offline --no-fail-fast",
+      "priorAttempts": [
+        {
+          "status": "passed",
+          "result": "16 harnesses;696 passed,zero failed/ignored including actual typed-checkpoint partial recovery, parent Hook fencing and isolated privacy log capture.",
+          "command": "CARGO_INCREMENTAL=0 ZK_RUN_GIT_TESTS=true cargo test -p zk-engine --no-default-features --locked --offline --no-fail-fast",
+          "evidence": {
+            "path": "/tmp/zk-alignment-engine-no-default-current.txt",
+            "sha256": "1be8ba3d7ec3ecf5bacf0af21c92166cb7e86a6eb7d212e4178c77f70908831f"
+          },
+          "sourceSnapshotNote": "Passed before correcting DeepSeek explicit thinking=disabled handling. Retained as historical source/artifact evidence, not final validation of the correction."
+        }
+      ],
+      "exitCode": 0,
+      "evidence": {
+        "path": "/tmp/zk-alignment-thinking-engine-no-default.txt",
+        "sha256": "f845d33b649b9dee312887244c22db0efba8a0b6f6c5b68a334ba1b83f3039d4"
+      },
+      "counts": {
+        "harnesses": 16,
+        "passed": 696,
+        "failed": 0,
+        "ignored": 0
+      }
+    },
+    {
+      "id": "cargo-release-build",
+      "status": "passed",
+      "result": "Thinking-corrected frozen-source release build passed in 5m56s. Artifact reports zk-server 0.1.0, git 08cbdc45, schema 2, WS 4.",
+      "command": "CARGO_INCREMENTAL=0 cargo build --workspace --release --locked --offline",
+      "priorAttempts": [
+        {
+          "status": "passed",
+          "result": "Frozen-source workspace release build passed in 6m41s. Artifact reports zk-server 0.1.0, git 08cbdc45, schema 2, WS 4.",
+          "exitCode": 0,
+          "command": "CARGO_INCREMENTAL=0 cargo build --workspace --release --locked --offline",
+          "evidence": {
+            "path": "/tmp/zk-alignment-release-build-final.txt",
+            "sha256": "5bf454a0d6859880887b33afddcb95e2bd4e15462e7ce06d14d321e5e27bbd4d"
+          },
+          "artifact": {
+            "path": "/Users/guoqingtao/Desktop/dev/code/zkcode/target/release/zk-server",
+            "sha256": "822adfed182e047c0cc31ac4b9e1c41a14d474f19d249f331f27aa83a92a6315",
+            "version": "0.1.0",
+            "git": "08cbdc45",
+            "schemaVersion": 2,
+            "wsVersion": 4
+          },
+          "sourceSnapshotNote": "Passed before correcting DeepSeek explicit thinking=disabled handling. Retained as historical source/artifact evidence, not final validation of the correction."
+        }
+      ],
+      "exitCode": 0,
+      "evidence": {
+        "path": "/tmp/zk-alignment-thinking-release-final.txt",
+        "sha256": "e911e2b37d8acfa4a76ac6c0dac331c87e115e533ba88d05d0941a48950dd697"
+      },
+      "artifact": {
+        "path": "/Users/guoqingtao/Desktop/dev/code/zkcode/target/release/zk-server",
+        "sha256": "cca0d0a64e2ab3bad9bf95fdc22fcb02f278d89c8b9e78286d4c0960a89e3251",
+        "version": "0.1.0",
+        "git": "08cbdc45",
+        "schemaVersion": 2,
+        "wsVersion": 4
+      }
+    },
+    {
+      "id": "compiled-tool-golden",
+      "status": "passed",
+      "result": "Compiled base tool schema golden assertion passed in the final workspace run; expected SHA-256 9cf070a498aea955528188ea7b15fa1fd77a706ca30cb975b3d5d316c770a95c.",
+      "exitCode": 0,
+      "selectedTests": [
+        "zk_server::engine_bridge::tests::base_tool_schema_sha256_is_stable"
+      ],
+      "evidence": {
+        "path": "/tmp/zk-alignment-workspace-tests-final.txt",
+        "sha256": "d7e0c4cc106318b9d13f2b82b5730d6211d3bc4d052372327130028c96c8dc98"
+      }
+    },
+    {
+      "id": "frontend-final-lint",
+      "status": "passed",
+      "result": "Frozen frontend tree passed ESLint with zero warnings.",
+      "cwd": "frontend",
+      "priorAttempts": [
+        {
+          "status": "passed",
+          "result": "Passed with zero warnings on final browser replay/DAG production tree; added Coordinator tests separately linted.",
+          "command": "npm run lint",
+          "cwd": "frontend",
+          "evidence": {
+            "path": "/tmp/zk-browser-dag-lint.txt",
+            "sha256": "2c0e646c20e8af9892a4f4b8e822f617828f16c93327420881ad2995ddf9d1fc"
+          },
+          "additionalEvidence": [
+            {
+              "path": "/tmp/zk-coordinator-final-lint.txt",
+              "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            }
+          ]
+        }
+      ],
+      "exitCode": 0,
+      "command": "npm run lint",
+      "evidence": {
+        "path": "/tmp/zk-frontend-alignment-frozen-lint.txt",
+        "sha256": "b60802a2486a38abed82876ac6a1e311e4fc7c1c79b586671b867ae4dab4a448"
+      }
+    },
+    {
+      "id": "frontend-final-tests",
+      "status": "passed",
+      "result": "Frozen frontend tree: 156 files, 1295 passed, 0 skipped in 241.48s. Before/after source identity matches across 502 files.",
+      "cwd": "frontend",
+      "priorAttempts": [
+        {
+          "status": "in_progress",
+          "result": "Full run on pre-final complexity/Git/visualization tree:155 files,1282 passed,zero skipped in237.02s. New UI entry changes afterward require applicable reruns.",
+          "command": "npm run test:run",
+          "cwd": "frontend",
+          "evidence": {
+            "path": "/tmp/zk-frontend-final-no-placeholders-tests.txt",
+            "sha256": "a43d89b7e39326f0e1b537dc10488ae211084befa9daaabc8fcac72680d2f88b"
+          },
+          "additionalEvidence": [
+            {
+              "path": "/tmp/zk-coordinator-final-tests.txt",
+              "sha256": "dedcd04c7e7c6c1570bd2f658ee503f144fd1d388e545620ad43849ca5f5cccf"
+            }
+          ]
+        }
+      ],
+      "exitCode": 0,
+      "command": "npm run test:run",
+      "counts": {
+        "files": 156,
+        "passed": 1295,
+        "skipped": 0
+      },
+      "additionalEvidence": [
+        {
+          "path": "/tmp/zk-frontend-alignment-frozen-evidence.json",
+          "sha256": "0ec29fad52d64fb46c351611915cd78215129496305c968a0a84d0fc65e04015"
+        }
+      ],
+      "sourceSha256": "a3bb63bff6ef933a0648f2bc2299abe34aecaf18d42a63b8e66be55f94cea71c",
+      "evidence": {
+        "path": "/tmp/zk-frontend-alignment-frozen-unit.txt",
+        "sha256": "6a9465fb91646482334658d565bb6e43781a22aa7dd2700a8a012f3e91681f83"
+      }
+    },
+    {
+      "id": "frontend-final-build",
+      "status": "passed",
+      "result": "Frozen frontend TypeScript/Vite build passed in 13.34s; existing large-chunk advisory remains.",
+      "cwd": "frontend",
+      "priorAttempts": [
+        {
+          "status": "passed",
+          "result": "TypeScript and Vite passed in 21.89s on final browser replay/DAG production tree; existing large-chunk advisory remains.",
+          "command": "npm run build",
+          "cwd": "frontend",
+          "evidence": {
+            "path": "/tmp/zk-browser-replay-final-build.txt",
+            "sha256": "97702289b9048df7b45d2a21cbfde9e5168352725d8183ee90f6540ab4ef1116"
+          }
+        }
+      ],
+      "exitCode": 0,
+      "command": "npm run build",
+      "evidence": {
+        "path": "/tmp/zk-frontend-alignment-frozen-build.txt",
+        "sha256": "e9f23082510ab2f44fbf79672b75ba3bcfd998156bada6648dd6f59e2033f937"
+      }
+    },
+    {
+      "id": "frontend-real-rust-e2e",
+      "status": "passed",
+      "result": "Thinking-corrected release: production E2E 6 passed in 29.1s and analysis E2E 3 passed in 30.6s, both exit 0. Actual Chrome, isolated SQLite and scripted loopback provider; analysis traverses Rust/Python/native Git. Binary before/after SHA unchanged. No fixture or production changes during this run; this is not paid-provider validation.",
+      "priorAttempts": [
+        {
+          "status": "failed",
+          "exitCode": 1,
+          "result": "First final-release production E2E: 5 passed, 1 failed. Fixture requested low reasoning from Qwen, which correctly does not support that capability; preserving unsupported-model validation while adapting the positive fixture. No overall E2E pass claimed.",
+          "evidence": {
+            "path": "/tmp/zk-alignment-release-production-e2e.txt",
+            "sha256": "a9332765b6f3d81abf170f2346a1cefc5fff7121a838a14d8125b8b4de020e01"
+          },
+          "artifactSha256": "822adfed182e047c0cc31ac4b9e1c41a14d474f19d249f331f27aa83a92a6315"
+        },
+        {
+          "status": "passed",
+          "result": "Final frozen-release artifact: production E2E 6 passed in 24.8s and analysis E2E 3 passed in 58.0s, both exit 0. Actual Chrome, isolated SQLite and scripted loopback provider; analysis traverses Rust and Python. Binary before/after SHA is unchanged. Three fixture-only changes retained negative Qwen reasoning-capability validation and strengthened positive DeepSeek wire assertions; production source stayed frozen. No paid provider request is claimed by these E2E tests.",
+          "additionalEvidence": [
+            {
+              "path": "/tmp/zk-alignment-release-analysis-e2e.txt",
+              "sha256": "470364627f8867e43dbbd0fa59b74217c10928963ea86d26ce275e68e6fe65af"
+            },
+            {
+              "path": "/tmp/zk-final-browser-binary-evidence.json",
+              "sha256": "656242641f317f53380cf59f5120786b761a515e4ebdbff2608eb1d63f2e6b7a"
+            },
+            {
+              "path": "/tmp/zk-production-fixture-final-lint-applied.txt",
+              "sha256": "5587c8f555658fb2f13496e8deb55b352750690766b156728fd5c5cba93002e3",
+              "result": "Changed E2E fixture lint with applied ESLint configuration: exit 0, zero warnings."
+            }
+          ],
+          "artifactSha256": "822adfed182e047c0cc31ac4b9e1c41a14d474f19d249f331f27aa83a92a6315",
+          "exitCode": 0,
+          "evidence": {
+            "path": "/tmp/zk-alignment-release-production-e2e-final.txt",
+            "sha256": "ce95505eec2f4b4dc8ba5918e93a016b03b73cd7ca3e70afdb93fc2c1ad150ba"
+          },
+          "counts": {
+            "productionPassed": 6,
+            "analysisPassed": 3,
+            "failed": 0
+          },
+          "sourceSnapshotNote": "Passed before correcting DeepSeek explicit thinking=disabled handling. Retained as historical source/artifact evidence, not final validation of the correction."
+        }
+      ],
+      "exitCode": 0,
+      "evidence": {
+        "path": "/tmp/zk-post-adapter-production-e2e.txt",
+        "sha256": "cfbe74f16458554432cc4b94cd39d982c7a8ff41883c79b6733baa8920fdad7f"
+      },
+      "additionalEvidence": [
+        {
+          "path": "/tmp/zk-post-adapter-analysis-e2e.txt",
+          "sha256": "b52821d6e8d9eecbe3336bf29100912a0e8af0cfb43a4ac9a1dbe45eccd7728e"
+        },
+        {
+          "path": "/tmp/zk-post-adapter-browser-binary-evidence.json",
+          "sha256": "41581313da138da5828a8e96c5dd56bb3b274a6e9ba79bc0ad99f57941eb88e6"
+        }
+      ],
+      "artifactSha256": "cca0d0a64e2ab3bad9bf95fdc22fcb02f278d89c8b9e78286d4c0960a89e3251",
+      "counts": {
+        "productionPassed": 6,
+        "analysisPassed": 3,
+        "failed": 0
+      }
+    },
+    {
+      "id": "theme-browser-regression",
+      "status": "passed",
+      "result": "Frozen dist: 20 theme scenarios / 12728 assertions and 42 Jelly scenarios passed with Chrome 154.0.8037.98; no business API requests. Browser shutdown and source freeze were verified.",
+      "priorAttempts": [
+        {
+          "status": "passed",
+          "result": "20 theme scenarios / 12728 assertions passed; Jelly 42 scenarios also exited successfully. Chrome 154.0.8037.98; both browser identity and explicit harness shutdown verified.",
+          "evidence": {
+            "path": "/tmp/zk-alignment-final-theme2.txt",
+            "sha256": "f087a3dcd17f3642e89790806966eb39ee052868ada0af15c0a365d21b9ac9b6"
+          },
+          "additionalEvidence": [
+            {
+              "path": "/tmp/zk-alignment-final-jelly3.txt",
+              "sha256": "0f3f5e13033729148a98c05e331562f7811337abdc593f9d59c43e47caf43ca2"
+            }
+          ]
+        }
+      ],
+      "exitCode": 0,
+      "additionalEvidence": [
+        {
+          "path": "/tmp/zk-frontend-alignment-frozen-jelly.txt",
+          "sha256": "0f3f5e13033729148a98c05e331562f7811337abdc593f9d59c43e47caf43ca2"
+        },
+        {
+          "path": "/tmp/zk-frontend-alignment-frozen-evidence.json",
+          "sha256": "0ec29fad52d64fb46c351611915cd78215129496305c968a0a84d0fc65e04015"
+        }
+      ],
+      "evidence": {
+        "path": "/tmp/zk-frontend-alignment-frozen-theme.txt",
+        "sha256": "f087a3dcd17f3642e89790806966eb39ee052868ada0af15c0a365d21b9ac9b6"
+      }
+    },
+    {
+      "id": "npm-audit",
+      "status": "passed",
+      "result": "Official registry audit: 0 vulnerabilities.",
+      "command": "./scripts/parity/npm-audit.sh",
+      "evidence": {
+        "path": "/tmp/zk-npm-alignment-audit.txt",
+        "sha256": "6d8c5c8f3d7684adb070417bd608d01ae90aa3dc26a65af03ffda4955f38d9a3"
+      }
+    },
+    {
+      "id": "cargo-deny",
+      "status": "passed",
+      "result": "advisories, bans, licenses and sources passed. MIT-0 packaged license verified and explicitly allowed; duplicate transitive versions remain warnings under existing policy.",
+      "evidence": {
+        "path": "/tmp/zk-alignment-cargo-deny-final.txt",
+        "sha256": "065e43f402ae34ce8cd56214071005290ea89c6810f4e3f4c7d8117a1a408bc9"
+      },
+      "priorAttempts": [
+        {
+          "status": "failed",
+          "result": "First attempt: advisories/bans/sources passed, missing explicit MIT-0 allowance for borrow-or-share 0.2.4 (JSON Schema transitive dependency). Packaged license checked against SPDX; allowlist updated, rerun pending.",
+          "evidence": {
+            "path": "/tmp/zk-alignment-cargo-deny.txt",
+            "sha256": "1fcfabe6fee1344b8cb12b611c8c1a4ec194d983e22e437b17e0eaa5eba67dd6"
+          }
+        }
+      ],
+      "command": "CARGO_INCREMENTAL=0 cargo deny check"
+    },
+    {
+      "id": "secret-scan",
+      "status": "passed",
+      "result": "Final thinking-corrected source scan: 22.64 MB in 3.12s, no credential leaks; exit 0.",
+      "command": "./scripts/parity/scan-release-secrets.sh",
+      "priorAttempts": [
+        {
+          "status": "passed",
+          "result": "22.47 MB scanned, no leaks; final scan needed after remaining source changes.",
+          "command": "./scripts/parity/scan-release-secrets.sh",
+          "evidence": {
+            "path": "/tmp/zk-alignment-secret-scan-final.txt",
+            "sha256": "b08d13bbaf84444db1bfaa4377ad0c66473d313620bd8b966f7ff005d6685d15"
+          }
+        },
+        {
+          "status": "passed",
+          "result": "Final frozen-source scan: 22.58 MB, no credential leaks; exited 0 in 4.31s.",
+          "command": "./scripts/parity/scan-release-secrets.sh",
+          "exitCode": 0,
+          "evidence": {
+            "path": "/tmp/zk-alignment-secret-scan-final2.txt",
+            "sha256": "07c23eda2915d77b3235ebd6816069eada921c5ac866178d9a3d5d730e547e9f"
+          },
+          "sourceSnapshotNote": "Passed before correcting DeepSeek explicit thinking=disabled handling. Retained as historical source/artifact evidence, not final validation of the correction."
+        }
+      ],
+      "exitCode": 0,
+      "evidence": {
+        "path": "/tmp/zk-alignment-thinking-secrets-final.txt",
+        "sha256": "cbe2f75868e7dc34082fdfce392aecd31a73cd8536e4095ffc3956f2dd0e329e"
+      }
+    },
+    {
+      "id": "install-doctor",
+      "status": "passed",
+      "result": "Thinking-corrected source official dev synchronization/build and deep doctor exited 0. Debug artifact rebuilt in 1m11s; all 37 checks ok=true, deep=true, overall ok=true.",
+      "command": "./dev sync --build && ./dev doctor --deep --json",
+      "priorAttempts": [
+        {
+          "status": "in_progress",
+          "result": "Actual private LSP, document tools, OCR/CJK, headless browser, runtime locks passed; Rust source fingerprint stale during active edits. Rebuild through dev and re-run after final source freeze.",
+          "command": "./dev doctor --deep --json",
+          "evidence": {
+            "path": "/tmp/zk-alignment-doctor-final.json",
+            "sha256": "37fbedeec369a39957bab471b7b79ecbf06125e1b6dc933200f851ffd19e46ab"
+          }
+        },
+        {
+          "status": "passed",
+          "result": "Official synchronization and deep doctor exited 0: 37 checks, all ok=true, deep=true. Locked npm ci reported 582 packages / zero vulnerabilities; Python/browser were unchanged; source-matched debug build completed in 53.36s.",
+          "command": "./dev sync --build && ./dev doctor --deep --json",
+          "evidence": {
+            "path": "/tmp/zk-alignment-doctor-final.json",
+            "sha256": "053663b0e57926d1cb40cbdf89d7fb3d84acce6c0eb5f5320457ad55b4123a90"
+          },
+          "exitCode": 0,
+          "additionalEvidence": [
+            {
+              "path": "/tmp/zk-alignment-dev-sync-final.txt",
+              "sha256": "0c97a6c9597749104cdad29ff98bbf2ecb5ce6e6a1be54196475e909950361e5"
+            }
+          ],
+          "sourceSnapshotNote": "Passed before correcting DeepSeek explicit thinking=disabled handling. Retained as historical source/artifact evidence, not final validation of the correction."
+        }
+      ],
+      "exitCode": 0,
+      "evidence": {
+        "path": "/tmp/zk-alignment-thinking-doctor-final.json",
+        "sha256": "053663b0e57926d1cb40cbdf89d7fb3d84acce6c0eb5f5320457ad55b4123a90"
+      },
+      "additionalEvidence": [
+        {
+          "path": "/tmp/zk-alignment-thinking-dev-sync-final.txt",
+          "sha256": "8c5ad06e1fd828d1f8c09b68d6e2b5a57f4b9658a217169769569c5648ea3455"
+        }
+      ]
+    },
+    {
+      "id": "python-dependency-check",
+      "status": "passed",
+      "result": "No broken requirements found.",
+      "command": "python-service/.venv/bin/python -m pip check",
+      "evidence": {
+        "path": "/tmp/zk-python-alignment-deps.txt",
+        "sha256": "9261363b733079a641c2e4cc9bc46ffa1d8336945a87f807b6cf68847dbc9b09"
+      }
+    },
+    {
+      "id": "native-lsp",
+      "status": "passed",
+      "result": "Five real private language servers semantic requests and owned cleanup passed in20.13s; toolchain identities printed.",
+      "evidence": {
+        "path": "/tmp/zk-alignment-lsp-native-current.txt",
+        "sha256": "d7b7600d16807989d7d9c8aec6bd6581b9ee97aae7718737d5d600f9057558b6"
+      }
+    },
+    {
+      "id": "native-office",
+      "status": "passed",
+      "result": "41 native tests passed; exact installed LibreOfficeDev alpha, PDF/media/OCR/CJK/browser identity recorded (no stable LibreOffice claim).",
+      "command": "./dev test office",
+      "evidence": {
+        "path": "/tmp/zk-office-alignment-final.txt",
+        "sha256": "47fccceab6923f728bddb5bede4869b4a8f585b8f21b3fc5dc65cb4b82166d40"
+      },
+      "identity": {
+        "path": "/var/folders/g_/cgkxr_w91xg7tx8n84hjt9zm0000gn/T/zkcode-office-zs0ua3iq/run-identity.json",
+        "sha256": "416fc21714516deb2f33920bc897545e92d071d908384cc242e019c82e1ff62d"
+      }
+    },
+    {
+      "id": "native-browser",
+      "status": "passed",
+      "result": "Explicit native run: ordinary and temporary Journey/WebBrowser 2 passed in 4.93s, including real repeated JavaScript, RAM screenshot, wrong-Run rejection and owned cleanup. Parent remains active.",
+      "priorAttempts": [
+        {
+          "status": "passed",
+          "result": "Native ordinary/temporary Journey+WebBrowser 2 passed including real repeated JavaScript, RAM screenshot, wrong-Run rejection and actual owned cleanup; parent remains active.",
+          "evidence": {
+            "path": "/tmp/zk-mcp-candidates-repl-browser-final.txt",
+            "sha256": "78ee644c40b94580e2f8d7fffa1103f716670cce035343e627999a45b7654228"
+          }
+        }
+      ],
+      "exitCode": 0,
+      "command": "CARGO_INCREMENTAL=0 cargo test -p zk-server --test verify_journey_native --locked --offline -- --ignored --nocapture",
+      "evidence": {
+        "path": "/tmp/zk-alignment-browser-native-current.txt",
+        "sha256": "bd2d163c0cb4f44225a557d89034b189149bb9382a349c945bc36b6484cce97a"
+      }
+    },
+    {
+      "id": "query-cli-privacy",
+      "status": "passed",
+      "result": "Final workspace: Query SSE 11, production runtime 9, Bash cwd 1 and Query MCP scope 1 passed. Actual DEFAULT waiting creates no REPL task/process; two Query turns preserve 42→43 and enforce deletion/merge/stop ownership.",
+      "priorAttempts": [
+        {
+          "status": "passed",
+          "result": "Latest Query SSE11, production runtime9, Bash cwd1 and MCP external5 all passed. Query negative confirms durable permission waiting creates no REPL task/process; ordinary two-Query42→43, deletion/merge gate and stop also passed. Full workspace still required.",
+          "evidence": {
+            "path": "/tmp/zk-alignment-server-focused-current2.txt",
+            "sha256": "1d10085fd7b5ae9c97fff981720cd23dfa516f7d4f4a1573031ccc38aa114136"
+          }
+        }
+      ],
+      "exitCode": 0,
+      "selectedTests": [
+        "query_stream: 11",
+        "production_runtime_roundtrip: 9",
+        "bash_cwd_binding: 1",
+        "query_mcp_scope: 1"
+      ],
+      "evidence": {
+        "path": "/tmp/zk-alignment-workspace-tests-final.txt",
+        "sha256": "d7e0c4cc106318b9d13f2b82b5730d6211d3bc4d052372327130028c96c8dc98"
+      }
+    },
+    {
+      "id": "mcp-external-capability",
+      "status": "passed",
+      "result": "Final workspace: external capabilities 5, context 2, STDIO 2, reverse MCP 3, MCP service REST 19 and WS 6 passed. Includes real local dispatch/ACK permission for sensitive Hook configuration Write, command/network ceiling and immutable POST facts.",
+      "priorAttempts": [
+        {
+          "status": "passed",
+          "result": "All5 actual capability tests passed, including sensitive Hook configuration Write through real local dispatch/ACK/decision, PRE command/network ceiling and immutable POST effects.",
+          "evidence": {
+            "path": "/tmp/zk-alignment-server-focused-current2.txt",
+            "sha256": "1d10085fd7b5ae9c97fff981720cd23dfa516f7d4f4a1573031ccc38aa114136"
+          }
+        }
+      ],
+      "exitCode": 0,
+      "selectedTests": [
+        "mcp_external_capabilities: 5",
+        "mcp_context: 2",
+        "mcp_stdio: 2",
+        "mcp_reverse: 3",
+        "mcp_api: 19",
+        "mcp_ws: 6"
+      ],
+      "evidence": {
+        "path": "/tmp/zk-alignment-workspace-tests-final.txt",
+        "sha256": "d7e0c4cc106318b9d13f2b82b5730d6211d3bc4d052372327130028c96c8dc98"
+      }
+    },
+    {
+      "id": "team-native",
+      "status": "passed",
+      "result": "All eight real team runtime tests passed: durable serial child engines, broadcast once, saved policy, stop/queued-work cancellation, parent finalization waiting, parent tool ceiling, write gate rejection and managed Worktree delivery without implicit commit.",
+      "exitCode": 0,
+      "selectedTests": [
+        "zk_server::team_runtime::tests: 8"
+      ],
+      "evidence": {
+        "path": "/tmp/zk-alignment-workspace-tests-final.txt",
+        "sha256": "d7e0c4cc106318b9d13f2b82b5730d6211d3bc4d052372327130028c96c8dc98"
+      }
+    },
+    {
+      "id": "repl-service",
+      "status": "passed",
+      "result": "Final workspace: real Python/Node/Ruby scope 3, persistent service ownership/cleanup retry 2, service REST 1, plus real two-Query 42→43 and DEFAULT denial cases passed. Ordinary state survives root completion; stop participates in delete/merge gating.",
+      "priorAttempts": [
+        {
+          "status": "passed",
+          "result": "Three real interpreter tests, two service cleanup/retry tests, and actual two Query 42→43/stop/deletion/merge gating passed; combined final gate still required.",
+          "evidence": {
+            "path": "/tmp/zk-repl-service-final.txt",
+            "sha256": "c0cae12e02aaddcb14cd9b0dc3eaab70be937ef8d8d968d0982d5074e97e22a0"
+          },
+          "additionalEvidence": [
+            {
+              "path": "/tmp/zk-repl-scope-final.txt",
+              "sha256": "bb17804c8de6b99cd5367a908fb4688c49fba24a671d56289529f9f225dee52b"
+            },
+            {
+              "path": "/tmp/zk-server-alignment-combined3.txt",
+              "sha256": "7e6cf035e2b1e24e3efb650152473b6a4a50aeea6152974a5fe4b71ec6e811e3"
+            }
+          ]
+        }
+      ],
+      "exitCode": 0,
+      "selectedTests": [
+        "repl_scope: 3",
+        "zk_server::repl_service::tests: 2",
+        "repl_service_api: 1",
+        "query_stream::ordinary_query_repl_state_survives_root_completion_and_blocks_delete_merge_until_stopped",
+        "query_stream::default_permission_repl_waits_for_approval_and_cancel_never_starts_service"
+      ],
+      "evidence": {
+        "path": "/tmp/zk-alignment-workspace-tests-final.txt",
+        "sha256": "d7e0c4cc106318b9d13f2b82b5730d6211d3bc4d052372327130028c96c8dc98"
+      }
+    },
+    {
+      "id": "artifact-terminal",
+      "status": "passed",
+      "result": "Final workspace: terminal observer 1, artifact REST 3 and DB terminal/CAS/reopen/cleanup gating 4 passed. Integrity projection does not execute artifacts or repeat external effects.",
+      "priorAttempts": [
+        {
+          "status": "passed",
+          "result": "Native server terminal observer 1 passed; artifact REST 3 passed. DB terminal/CAS/reopen/cleanup gating 4 passed in sqlite-all-targets. Later source changes require applicable rerun.",
+          "evidence": {
+            "path": "/tmp/zk-server-alignment-combined3.txt",
+            "sha256": "7e6cf035e2b1e24e3efb650152473b6a4a50aeea6152974a5fe4b71ec6e811e3"
+          }
+        }
+      ],
+      "exitCode": 0,
+      "selectedTests": [
+        "artifact_terminal: 1",
+        "artifact_api: 3",
+        "zk_db::artifact_terminal::tests: 4"
+      ],
+      "evidence": {
+        "path": "/tmp/zk-alignment-workspace-tests-final.txt",
+        "sha256": "d7e0c4cc106318b9d13f2b82b5730d6211d3bc4d052372327130028c96c8dc98"
+      }
+    },
+    {
+      "id": "change-impact-native",
+      "status": "passed",
+      "result": "Thinking-corrected release analysis E2E 3 passed in 30.6s via actual React → Rust → Python UDS and native Git; before/after binary SHA unchanged. Graphs remain advisory, not verification evidence.",
+      "priorAttempts": [
+        {
+          "status": "passed",
+          "result": "Actual React → Rust → Python UDS browser E2E 2 passed; server binary before/after SHA256 a11f71dbd3efbc5a601e3386fd4275b2c7d7877b187c09b77ad32005862fddc0. Code analysis API 4 passed separately. Advisory graph is not test verification.",
+          "evidence": {
+            "path": "/tmp/zk-analysis-browser-final3.txt",
+            "sha256": "01dcb8933c472e220876029101847a8918417f33d6cec38ec31d46a5c8f0585b"
+          }
+        },
+        {
+          "status": "passed",
+          "result": "Final-release analysis E2E: 3 passed in 58.0s, actual React → Rust → Python UDS including change-impact advisory, complexity and Git workspace flow. Backend binary identity unchanged. Graphs are advisory, not verification evidence; final workspace code_analysis_api 5 also passed.",
+          "evidence": {
+            "path": "/tmp/zk-alignment-release-analysis-e2e.txt",
+            "sha256": "470364627f8867e43dbbd0fa59b74217c10928963ea86d26ce275e68e6fe65af"
+          },
+          "exitCode": 0,
+          "additionalEvidence": [
+            {
+              "path": "/tmp/zk-final-browser-binary-evidence.json",
+              "sha256": "656242641f317f53380cf59f5120786b761a515e4ebdbff2608eb1d63f2e6b7a"
+            }
+          ],
+          "artifactSha256": "822adfed182e047c0cc31ac4b9e1c41a14d474f19d249f331f27aa83a92a6315",
+          "sourceSnapshotNote": "Passed before correcting DeepSeek explicit thinking=disabled handling. Retained as historical source/artifact evidence, not final validation of the correction."
+        }
+      ],
+      "exitCode": 0,
+      "evidence": {
+        "path": "/tmp/zk-post-adapter-analysis-e2e.txt",
+        "sha256": "b52821d6e8d9eecbe3336bf29100912a0e8af0cfb43a4ac9a1dbe45eccd7728e"
+      },
+      "additionalEvidence": [
+        {
+          "path": "/tmp/zk-post-adapter-browser-binary-evidence.json",
+          "sha256": "41581313da138da5828a8e96c5dd56bb3b274a6e9ba79bc0ad99f57941eb88e6"
+        }
+      ],
+      "artifactSha256": "cca0d0a64e2ab3bad9bf95fdc22fcb02f278d89c8b9e78286d4c0960a89e3251"
+    },
+    {
+      "id": "tools-lib",
+      "status": "passed",
+      "result": "Final workspace tools lib: 394 passed, 0 failed in 31.18s, including actual native Git, REPL and process supervision. Nested one-test process reexecution is not an additional independent test.",
+      "priorAttempts": [
+        {
+          "status": "passed",
+          "command": "CARGO_INCREMENTAL=0 ZK_RUN_GIT_TESTS=true cargo test -p zk-tools --lib --offline",
+          "result": "394 passed, 0 failed in 31.09s, including native Git and REPL. Initial native Git fixture exposed TAB path delimiter handling, repaired without weakening assertions.",
+          "evidence": {
+            "path": "/tmp/zk-tools-alignment-all-lib.txt",
+            "sha256": "d03462b5b7244dcf52adb313064b075c83414454e49c044e5bf9bed1df0c61c9"
+          }
+        }
+      ],
+      "exitCode": 0,
+      "selectedTests": [
+        "zk_tools lib: 394"
+      ],
+      "evidence": {
+        "path": "/tmp/zk-alignment-workspace-tests-final.txt",
+        "sha256": "d7e0c4cc106318b9d13f2b82b5730d6211d3bc4d052372327130028c96c8dc98"
+      }
+    },
+    {
+      "id": "sqlite-all-targets",
+      "status": "passed",
+      "result": "Final workspace DB: 23 executable harnesses, 232 passed, 0 failed/ignored (164 unit + 68 integration), plus successful empty doctest harness. Includes purpose projection, retention, immutable evidence, cleanup reconciliation and tool ceilings.",
+      "priorAttempts": [
+        {
+          "status": "failed",
+          "reason": "Two older immutable evidence fixtures lacked a real owner Session; fixtures corrected, production owner validation preserved.",
+          "evidence": {
+            "path": "/tmp/zk-db-alignment-full.txt",
+            "sha256": "e59f17186bc07ec0af90ff607fe404f695073b4cac1e641c9df30ef78aa6d6f7"
+          }
+        },
+        {
+          "status": "failed",
+          "reason": "Fresh -1 replay cursor was falsely expired; corrected to require an actual retention marker. External operation temporary service fixture was invalid; long-lived temporary MCP still rejected.",
+          "evidence": {
+            "path": "/tmp/zk-db-alignment-all-targets.txt",
+            "sha256": "673552a00114e32240f43a11dba71103dd1da7378c0c4d0548980b6946c40158"
+          }
+        },
+        {
+          "status": "failed",
+          "reason": "Compile failed: new crate documentation placed after items; moved to file head.",
+          "evidence": {
+            "path": "/tmp/zk-db-alignment-all-targets2.txt",
+            "sha256": "fa2cdff74503e955b20e0a4c4217015a04ea76c91e8826a29da5c4782d3e9440"
+          }
+        },
+        {
+          "status": "in_progress",
+          "command": "CARGO_INCREMENTAL=0 cargo test -p zk-db --offline --no-fail-fast",
+          "result": "Latest full attempt: 223 passed, 2 failed due to purpose field contract expectations. Corrected contracts: lib 164 passed on rerun; other integration harnesses had 61 passed. Newly added tool ceiling: 4 passed separately. Final unified workspace run remains required.",
+          "evidence": {
+            "path": "/tmp/zk-db-alignment-all-targets4.txt",
+            "sha256": "ee682007b04bd07413688bec4ef9ea3647aa73735536d42b2fe00a5346224d64"
+          },
+          "additionalEvidence": [
+            {
+              "path": "/tmp/zk-db-ceiling-purpose-final.txt",
+              "sha256": "0d5037cbd7b82849c1b3f2fa3e5f2de65cd20d7d299007423d9911e38a531ad5"
+            },
+            {
+              "path": "/tmp/zk-db-tool-ceiling-final2.txt",
+              "sha256": "5efd5b6a7a20f694e868b322aac0707724ad060416aaa61a49620810291190a3"
+            }
+          ]
+        }
+      ],
+      "exitCode": 0,
+      "selectedTests": [
+        "zk_db lib: 164",
+        "zk_db integration harnesses: 68"
+      ],
+      "evidence": {
+        "path": "/tmp/zk-alignment-workspace-tests-final.txt",
+        "sha256": "d7e0c4cc106318b9d13f2b82b5730d6211d3bc4d052372327130028c96c8dc98"
+      }
+    },
+    {
+      "id": "mcp-library",
+      "status": "passed",
+      "result": "Final workspace MCP lib: 210 passed; one Keychain case ignored by the normal harness and explicitly passed in native-keychain. Local OAuth and transport fixtures passed; no remote-provider interoperability claim.",
+      "priorAttempts": [
+        {
+          "status": "passed",
+          "command": "CARGO_INCREMENTAL=0 cargo test -p zk-mcp --locked --offline --no-fail-fast",
+          "result": "210 passed; one native Keychain ignored by normal harness, executed separately below. All local OAuth/transport fixtures passed.",
+          "evidence": {
+            "path": "/tmp/zk-mcp-alignment-final-all.txt",
+            "sha256": "d7173dce5acb87141816aa54c37420d5f3c63b4709e84da388d0641fea2894c0"
+          }
+        }
+      ],
+      "exitCode": 0,
+      "selectedTests": [
+        "zk_mcp lib: 210"
+      ],
+      "evidence": {
+        "path": "/tmp/zk-alignment-workspace-tests-final.txt",
+        "sha256": "d7e0c4cc106318b9d13f2b82b5730d6211d3bc4d052372327130028c96c8dc98"
+      }
+    },
+    {
+      "id": "native-keychain",
+      "status": "passed",
+      "command": "CARGO_INCREMENTAL=0 cargo test -p zk-mcp --lib oauth::tests::native_keychain_round_trip --locked --offline -- --ignored --nocapture",
+      "result": "One native login Keychain write/read/delete round trip passed in0.12s.",
+      "evidence": {
+        "path": "/tmp/zk-alignment-keychain-native-current.txt",
+        "sha256": "55686cad180f3cada149b816bef0937937febb75f0354bac5df055aa833d04c8"
+      }
+    },
+    {
+      "id": "hook-resource-admission",
+      "status": "passed",
+      "result": "Final workspace: DB Hook owner/cancel/bind/terminal checks 3, Session Hook ownership 6, diagnostic logs 2 and real terminal Hook notifications/seal fencing passed. Final no-default Engine suite also passed.",
+      "priorAttempts": [
+        {
+          "status": "passed",
+          "result": "Three real DB active/cancel/bind/terminal/foreign-owner and waitingDependencies legacy cancellation checks passed. Full Engine Hook tests passed in no-default suite.",
+          "evidence": {
+            "path": "/tmp/zk-alignment-hook-db-current.txt",
+            "sha256": "fe089b01dea501fdb71a44d9378dcb368712e8775d0ca558997c800a487e7db8"
+          }
+        }
+      ],
+      "exitCode": 0,
+      "selectedTests": [
+        "hook_resources: 3",
+        "session_hook_ownership: 6",
+        "hook_diagnostic_logs: 2",
+        "zk_engine::task::runtime::terminal_hooks::tests: 4"
+      ],
+      "evidence": {
+        "path": "/tmp/zk-alignment-workspace-tests-final.txt",
+        "sha256": "d7e0c4cc106318b9d13f2b82b5730d6211d3bc4d052372327130028c96c8dc98"
+      }
+    },
+    {
+      "id": "git-history-api",
+      "status": "passed",
+      "result": "Final workspace: six native Git REST cases plus server-lib in-flight cancellation and dropped-request reaping passed. Covers pagination, root commit/diff, Unicode/TAB blame and exact workspace authorization.",
+      "priorAttempts": [
+        {
+          "status": "passed",
+          "result": "Six actual temporary Git repository/API cases passed: fixed pagination, root commit, diff, Unicode/TAB blame, scoped authorization and exact-owner pre-cancel. Inflight cancellation added separately still pending.",
+          "evidence": {
+            "path": "/tmp/zk-alignment-git-read-api-current.txt",
+            "sha256": "d1abca7db82d54438a953e60486e8358e3816f5b20d0caa7ca7bc0481f24fe73"
+          }
+        }
+      ],
+      "exitCode": 0,
+      "selectedTests": [
+        "git_read_api: 6",
+        "zk_server::api::git_read::tests::in_flight_cancellation_reaps_the_supervised_git_process",
+        "zk_server::api::git_read::tests::dropped_request_reaps_the_supervised_git_process"
+      ],
+      "evidence": {
+        "path": "/tmp/zk-alignment-workspace-tests-final.txt",
+        "sha256": "d7e0c4cc106318b9d13f2b82b5730d6211d3bc4d052372327130028c96c8dc98"
+      }
+    },
+    {
+      "id": "git-diff-check",
+      "status": "passed",
+      "command": "git diff --check",
+      "result": "Thinking-corrected source diff check exited 0.",
+      "priorAttempts": [
+        {
+          "status": "passed",
+          "command": "git diff --check",
+          "result": "Frozen-source whitespace/conflict-marker diff check exited 0.",
+          "exitCode": 0,
+          "evidence": {
+            "path": "/tmp/zk-alignment-diff-check-final.txt",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "sourceSnapshotNote": "Passed before correcting DeepSeek explicit thinking=disabled handling. Retained as historical source/artifact evidence, not final validation of the correction."
+        },
+        {
+          "status": "passed",
+          "command": "git diff --check",
+          "result": "Thinking-corrected source diff check exited 0.",
+          "exitCode": 0,
+          "evidence": {
+            "path": "/tmp/zk-alignment-thinking-diff-check.txt",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          }
+        }
+      ],
+      "exitCode": 0,
+      "evidence": {
+        "path": "/tmp/zk-alignment-thinking-diff-check-final.txt",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "id": "live-deepseek-release-query",
+      "status": "passed",
+      "result": "One user-authorized real release Query passed against official DeepSeek TLS /v1/chat/completions using deepseek-flash: exactly 1 attempted/forwarded upstream request, HTTP 200; thinking disabled, no auxiliary/fallback/tools. Official usage 32 input / 2 output / 0 cached tokens matches completed Rust LLM call and Run ledger, cost 12000 nanos USD ($0.000012), below $0.05 ceiling. First text 404ms, terminal 562ms. Cleanup confirmed, 0 unreleased resources, process group gone, server exit 0; release binary unchanged and credential absent from probe files. Covers this exact model/interface/ledger path, not all providers, endpoints or thinking modes.",
+      "exitCode": 0,
+      "evidence": {
+        "path": "/Users/guoqingtao/Desktop/dev/code/zkcode/docs/migration/deepseek-flash-release-probe.json",
+        "sha256": "1c3140fbfed1850e604f92ed77d8e17750378907d128b4cd82861191ae653fea"
+      },
+      "additionalEvidence": [
+        {
+          "path": "/tmp/zk-deepseek-release-probe-execution4.txt",
+          "sha256": "28c23faedd57dab12913c65d66732d7656157973d6b6856ee99c575e70ab5be4"
+        },
+        {
+          "path": "/private/var/folders/g_/cgkxr_w91xg7tx8n84hjt9zm0000gn/T/zk-deepseek-release-c7naj5q2/probe-report.json",
+          "sha256": "1c3140fbfed1850e604f92ed77d8e17750378907d128b4cd82861191ae653fea"
+        }
+      ],
+      "artifactSha256": "cca0d0a64e2ab3bad9bf95fdc22fcb02f278d89c8b9e78286d4c0960a89e3251",
+      "liveRequest": {
+        "provider": "deepseek",
+        "model": "deepseek-flash",
+        "upstream": "https://api.deepseek.com/v1/chat/completions",
+        "attempts": 1,
+        "forwarded": 1,
+        "inputTokens": 32,
+        "outputTokens": 2,
+        "cacheReadTokens": 0,
+        "costNanosUsd": 12000,
+        "maxBudgetUsd": 0.05,
+        "thinking": "disabled",
+        "auxiliaryEnabled": false,
+        "fallbackChain": [],
+        "tools": []
+      },
+      "priorAttempts": [
+        {
+          "status": "failed",
+          "result": "Local readiness fixture treated text/plain health as JSON and timed out before dispatch. Exactly zero upstream attempts/forwards and zero LLM ledger calls; not a paid request. Server exited 0.",
+          "evidence": {
+            "path": "/private/var/folders/g_/cgkxr_w91xg7tx8n84hjt9zm0000gn/T/zk-deepseek-release-swkvg0vj/probe-report.json",
+            "sha256": "44dd7a4c124636c0c3f28816a248adda4f2f9e04043f3652096f04f29fb896df"
+          },
+          "additionalEvidence": [
+            {
+              "path": "/tmp/zk-deepseek-release-probe-execution.txt",
+              "sha256": "cda03beacf24c51fec389b046de9cd5971632184c02e6b2b651a10731eb93a58"
+            }
+          ],
+          "upstreamAttempts": 0,
+          "upstreamForwarded": 0,
+          "llmCalls": 0
+        },
+        {
+          "status": "failed",
+          "result": "Local authenticated Query was rejected before dispatch; this initial fixture attempt did not retain the specific HTTP status. Exactly zero upstream attempts/forwards and zero LLM ledger calls; not a paid request. Server exited 0.",
+          "evidence": {
+            "path": "/private/var/folders/g_/cgkxr_w91xg7tx8n84hjt9zm0000gn/T/zk-deepseek-release-0b7jyyaa/probe-report.json",
+            "sha256": "80eee5c752a32478f83af630130f70e517f2626e2ac3efacbecbdc2856c53801"
+          },
+          "additionalEvidence": [
+            {
+              "path": "/tmp/zk-deepseek-release-probe-execution2.txt",
+              "sha256": "4f1f776c67782af1eea2856d5c98057984317ef2bc7e56aa5bf967de9878d206"
+            }
+          ],
+          "upstreamAttempts": 0,
+          "upstreamForwarded": 0,
+          "llmCalls": 0
+        },
+        {
+          "status": "failed",
+          "result": "Safe diagnostic capture confirmed 403 MCP_REQUEST_ORIGIN_DENIED. Supplying the exact localhost Origin fixed the fixture; production access guard was preserved. Exactly zero upstream attempts/forwards and zero LLM ledger calls; not a paid request. Server exited 0.",
+          "evidence": {
+            "path": "/private/var/folders/g_/cgkxr_w91xg7tx8n84hjt9zm0000gn/T/zk-deepseek-release-8raovu88/probe-report.json",
+            "sha256": "6aa74bbf1ff8013288b913cce0c4d0ff455b3d26242dc59944ed0b5abfe9713f"
+          },
+          "additionalEvidence": [
+            {
+              "path": "/tmp/zk-deepseek-release-probe-execution3.txt",
+              "sha256": "2fd214fef51a75554d4cd43043aaaf3074a24da6b5c36a0327d17b581ec4ca09"
+            }
+          ],
+          "upstreamAttempts": 0,
+          "upstreamForwarded": 0,
+          "llmCalls": 0
+        }
+      ]
+    },
+    {
+      "id": "llm-thinking-override",
+      "status": "passed",
+      "result": "All 9 real loopback wire cases passed in 0.03s: explicit DeepSeek disabled, summary override, Qwen/GLM, OpenRouter, direct OpenAI and strengthened Kimi/Responses behavior. Negative unsupported-model and conservative input-budget boundaries remain intact. No paid provider call is implied.",
+      "exitCode": 0,
+      "evidence": {
+        "path": "/tmp/zk-alignment-thinking-wire-final.txt",
+        "sha256": "dac7806e1c89d06792ca460904685f038197cef944811742769bd7f8b960cde8"
+      },
+      "command": "CARGO_INCREMENTAL=0 cargo test -p zk-llm --test provider_routing_wire --locked --offline"
+    },
+    {
+      "id": "source-freeze-identity",
+      "status": "passed",
+      "result": "Final snapshot equals the pre-final snapshot exactly: 1374 regular files + 3 deleted tracked paths, 0 symlinks, 21776379 content bytes, unchanged HEAD and bytewise path/content SHA-256 37ee9ab3456b0953469042a52fd1216a0929e408bbeed2331bd380cf12785f5c. docs/** excluded; no ignored user configuration/database read. Comparison includes every path/kind/size/per-file digest.",
+      "evidence": {
+        "path": "/tmp/zk-alignment-source-freeze-after.json",
+        "sha256": "aeb591b79ded9fb5d54ad7dad02c68e8ce03f73e94db2a7edfa844604fa63b41"
+      },
+      "command": "python3 /tmp/zk-source-freeze-snapshot.py /tmp/zk-alignment-source-freeze-after.json; compare exact metadata and all entries with before snapshot",
+      "exitCode": 0,
+      "additionalEvidence": [
+        {
+          "path": "/tmp/zk-alignment-source-freeze-before.json",
+          "sha256": "e242e18f796e7a69ba5475bad63c1b30a1d6a352f1fe63a3eef3668e4a5db3af"
+        }
+      ],
+      "sourceSha256": "37ee9ab3456b0953469042a52fd1216a0929e408bbeed2331bd380cf12785f5c"
+    }
+  ],
+  "verificationLimits": [
+    "Five historical real-credential LLM/search test functions remain ignored and are not counted as passed. A distinct single authorized deepseek-flash release Query passed; it covers only that official chat-completions path and usage/fee ledger, not all providers or modes.",
+    "Real remote OAuth provider interoperability was not exercised; local HTTP/PKCE/refresh fixtures and native Keychain were exercised.",
+    "Temporary Java LSP is explicitly unavailable because JDT may log request content to disk.",
+    "External MCP does not publish REPL/WebBrowser until a connection-owned adapter is implemented; ordinary Query REPL/WebBrowser remain available.",
+    "Native Office evidence uses the actual installed LibreOfficeDev alpha, not a claimed stable LibreOffice release."
+  ],
+  "sourceSnapshot": {
+    "recordedAt": "2026-10-07T10:25:30.593374+00:00",
+    "head": "08cbdc45e12cc28f3f13aaafbd0b056b980dfb1a",
+    "algorithm": {
+      "selection": "git ls-files -co --exclude-standard -z; deduplicate; exclude docs/**; bytewise path sort",
+      "digest": "SHA-256 over each sorted raw path byte string, one NUL byte, then payload; concatenated without extra separators",
+      "payload": "Regular file: exact original bytes; symlink: link target string as filesystem bytes without following; deleted path: hex 005a4b5f44454c4554454400 (NUL ZK_DELETED NUL)",
+      "metadata": "Metadata manifest saved outside repository; no ignored user .env/database is read. Repository env configuration examples and the public bootstrap demo database are source inputs."
+    },
+    "sourceSha256": "37ee9ab3456b0953469042a52fd1216a0929e408bbeed2331bd380cf12785f5c",
+    "entryCount": 1377,
+    "fileCount": 1374,
+    "symlinkCount": 0,
+    "deletedCount": 3,
+    "totalBytes": 21776379,
+    "manifest": {
+      "path": "/tmp/zk-alignment-source-freeze-before.json",
+      "sha256": "e242e18f796e7a69ba5475bad63c1b30a1d6a352f1fe63a3eef3668e4a5db3af"
+    },
+    "verificationStatus": "matched",
+    "afterManifest": {
+      "path": "/tmp/zk-alignment-source-freeze-after.json",
+      "sha256": "aeb591b79ded9fb5d54ad7dad02c68e8ce03f73e94db2a7edfa844604fa63b41"
+    },
+    "finalComparisonAt": "2026-10-07T10:30:54.592620+00:00"
+  }
+}

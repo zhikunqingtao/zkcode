@@ -22,7 +22,7 @@ zk-protocol = { version = "0.1.0", path = "../zk-protocol" }
 zk-db = { version = "0.1.0", path = "../zk-db" }
 # S9 引入：对话引擎装配（EngineHook 桥 + MessageSink 适配）与 provider
 # 构造（OpenAiCompatProvider + ApiKey 脱敏配置承载）。
-zk-engine = { version = "0.1.0", path = "../zk-engine" }
+zk-engine = { version = "0.1.0", path = "../zk-engine", features = ["image-budget"] }
 zk-llm = { version = "0.1.0", path = "../zk-llm" }
 # 2.2 引入：工具注册表组合根装配；2.3 起注册基础工具族 9 件并实现
 # SnapshotSink（写前快照 → zk-db file_snapshots）。
@@ -68,7 +68,7 @@ base64 = { workspace = true }
 # 2.6 引入：侧车优雅停止走进程组信号（killpg SIGTERM → 10s 宽限 → SIGKILL）。
 # workspace `unsafe_code = "forbid"`，故不用 libc 裸调用，改 tokio
 # `Command::process_group(0)` + nix `killpg` 的安全封装组合。
-nix = { workspace = true }
+nix = { workspace = true, features = ["dir"] }
 # 2b-2 引入：access token 的 32 字节 CSPRNG 源（旧 `SecureRandom.nextBytes`）。
 getrandom = { workspace = true }
 # Batch 4B 引入：MCP 服务器信任表的配置指纹（旧 `McpApprovalService`

@@ -4,7 +4,8 @@
  */
 
 import { create } from 'zustand';
-import { ensurePythonPanelResponse } from '@/api/pythonServiceError';
+import { AnalysisRequest, isAnalysisCancelled } from '@/api/analysisClient';
+import { useSessionStore } from './sessionStore';
 import { immer } from 'zustand/middleware/immer';
 
 // ── 类型定义 ──
@@ -45,6 +46,12 @@ export interface DiagramState {
   updateMermaidSyntax: (syntax: string) => void;
 }
 
+let activeRequest: AnalysisRequest | null = null;
+function cancelRequest() {
+  activeRequest?.cancel();
+  activeRequest = null;
+}
+
 export const useDiagramStore = create<DiagramState>()(
   immer((set, get) => ({
     diagramType: 'sequence',
@@ -56,10 +63,10 @@ export const useDiagramStore = create<DiagramState>()(
     error: null,
     editedMermaidSyntax: null,
 
-    setDiagramType: (type) => set(d => { d.diagramType = type; }),
-    setTarget: (target) => set(d => { d.target = target; }),
-    setProjectRoot: (root) => set(d => { d.projectRoot = root; }),
-    setDepth: (depth) => set(d => { d.depth = depth; }),
+    setDiagramType: (type) => { cancelRequest(); set(d => { d.diagramType = type; d.result = null; d.loading = false; d.error = null; }); },
+    setTarget: (target) => { cancelRequest(); set(d => { d.target = target; d.result = null; d.loading = false; d.error = null; }); },
+    setProjectRoot: (root) => { cancelRequest(); set(d => { d.projectRoot = root; d.result = null; d.loading = false; d.error = null; }); },
+    setDepth: (depth) => { cancelRequest(); set(d => { d.depth = depth; d.result = null; d.loading = false; d.error = null; }); },
 
     generateDiagram: async () => {
       const { diagramType, target, projectRoot, depth } = get();
@@ -67,40 +74,46 @@ export const useDiagramStore = create<DiagramState>()(
         set(d => { d.error = '请输入目标路径或方法签名'; });
         return;
       }
-      set(d => { d.loading = true; d.error = null; d.editedMermaidSyntax = null; });
+      cancelRequest();
+      set(d => { d.loading = true; d.error = null; d.result = null; d.editedMermaidSyntax = null; });
+      let request: AnalysisRequest | null = null;
       try {
-        const resp = await fetch('/api/analysis/generate-diagram', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ diagramType, target, projectRoot, depth }),
-        });
-        await ensurePythonPanelResponse(resp);
-        const json = await resp.json();
-        // API 返回 200 但 success=false 时视为错误
-        if (json.success === false || json.error) {
-          throw new Error(json.error || 'Unknown error');
+        request = new AnalysisRequest(projectRoot);
+        activeRequest = request;
+        const result = await request.post<DiagramGenerationResult>('/api/code-diagrams/generate', { diagramType, target, depth });
+        if (activeRequest !== request) return;
+        if (typeof result.mermaidSyntax !== 'string' || !result.mermaidSyntax.trim() || !Number.isFinite(result.confidenceScore) || !result.metadata) {
+          throw new Error('分析服务返回无效图表');
         }
-        const result: DiagramGenerationResult = json;
-        set(d => {
-          d.result = result;
-          d.loading = false;
-        });
-      } catch (e) {
-        set(d => {
-          d.error = e instanceof Error ? e.message : String(e);
-          d.loading = false;
-        });
+        set(d => { d.result = result; d.loading = false; });
+      } catch (error) {
+        if (request && activeRequest !== request) return;
+        set(d => { d.error = isAnalysisCancelled(error) ? null : error instanceof Error ? error.message : String(error); d.loading = false; });
+      } finally {
+        if (activeRequest === request) activeRequest = null;
       }
     },
 
-    clearDiagram: () => set(d => {
-      d.result = null;
-      d.error = null;
-      d.editedMermaidSyntax = null;
-    }),
+    clearDiagram: () => {
+      cancelRequest();
+      set(d => { d.result = null; d.error = null; d.loading = false; d.editedMermaidSyntax = null; });
+    },
 
     updateMermaidSyntax: (syntax) => set(d => {
       d.editedMermaidSyntax = syntax;
     }),
   }))
 );
+
+const unsubscribeSession = useSessionStore.subscribe((state, previous) => {
+  if (state.sessionId !== previous.sessionId) {
+    useDiagramStore.getState().clearDiagram();
+    useDiagramStore.setState({ projectRoot: '.' });
+  }
+});
+if (import.meta.hot) import.meta.hot.dispose(unsubscribeSession);
+
+export function cancelPendingDiagramAnalysis(): void {
+  cancelRequest();
+  useDiagramStore.setState({ loading: false });
+}

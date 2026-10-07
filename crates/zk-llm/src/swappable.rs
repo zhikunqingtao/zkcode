@@ -46,6 +46,10 @@ impl ChatProvider for SwappableProvider {
         "swappable"
     }
 
+    fn validate_request_options(&self, request: &ChatRequest) -> Result<(), ProviderError> {
+        self.inner.load().validate_request_options(request)
+    }
+
     fn chat_stream(
         &self,
         request: ChatRequest,

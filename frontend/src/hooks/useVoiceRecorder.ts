@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
+import { useConfigStore } from '@/store/configStore';
+import { useMessageStore } from '@/store/messageStore';
+import { buildAsrContext } from '@/store/selectors/asrContext';
+
 export type VoiceState = 'idle' | 'requesting' | 'recording' | 'transcribing' | 'error';
 
 const MIME_CANDIDATES = [
@@ -44,6 +48,7 @@ export function useVoiceRecorder(
     const maxTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const abortRef = useRef<AbortController | null>(null);
     const operationRef = useRef(0);
+    const contextRef = useRef('');
     const mountedRef = useRef(true);
 
     const setVoiceState = useCallback((next: VoiceState) => {
@@ -125,6 +130,7 @@ export function useVoiceRecorder(
 
             const form = new FormData();
             form.append('audio', audio, `recording.${extensionForMime(mimeType)}`);
+            if (contextRef.current) form.append('context', contextRef.current);
             const controller = new AbortController();
             abortRef.current = controller;
             let timedOut = false;
@@ -167,6 +173,9 @@ export function useVoiceRecorder(
         }
 
         const operation = ++operationRef.current;
+        const messages = useMessageStore.getState();
+        contextRef.current = useConfigStore.getState().asrContextEnabled
+            ? buildAsrContext(messages.messages.filter(message => !messages.messagePartitionKeys.get(message.uuid) || messages.messagePartitionKeys.get(message.uuid) === 'root')) : '';
         setVoiceState('requesting');
         setElapsedSeconds(0);
         setError(null);

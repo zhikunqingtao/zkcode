@@ -35,7 +35,9 @@
 //!    `ProcessBuilder`。本实现直接走等价的 `tokio::process::Command`，
 //!    不复刻这条死代码。
 
+mod drivers;
 mod manager;
+mod owned;
 mod session;
 mod tool;
 
@@ -44,6 +46,7 @@ use std::time::Duration;
 pub use manager::{
     MAX_CONCURRENT_SESSIONS, ReplError, ReplManager, interpreter_argv, is_supported_language,
 };
+pub use owned::{ReplRunScopeFactory, ReplServiceHandle, ReplServiceScopeFactory};
 pub use session::ReplSession;
 pub use tool::{REPLTool, REPORTED_OUTPUT_LIMIT};
 

@@ -61,7 +61,9 @@
 
 pub mod access_token;
 pub mod api;
+mod artifact_integrity;
 pub mod authz;
+mod auxiliary;
 pub mod command;
 pub mod config;
 pub mod cost;
@@ -70,13 +72,17 @@ mod demo_credentials;
 pub mod engine_bridge;
 pub mod error;
 pub mod file_access;
+mod handoff;
+mod hook_admission;
 pub mod http_fetch;
 pub mod http_search;
 pub mod interaction;
 pub mod iso;
 pub mod logging;
+pub mod maintenance;
 pub mod mcp;
 pub mod mcp_search;
+pub mod mcp_stdio;
 pub mod mcp_tools;
 mod memory_store;
 pub mod metrics_recorder;
@@ -84,14 +90,17 @@ pub mod middleware;
 pub mod network;
 pub mod oss_trust;
 pub mod python;
+pub(crate) mod repl_service;
 pub mod routes;
 pub mod run_termination;
 pub mod runtime_health_metrics;
 pub mod session_access;
+mod session_merge_summary;
 pub mod skill;
 pub mod snapshot_sink;
 pub(crate) mod speech;
 pub mod state;
+mod team_runtime;
 pub mod tool_catalog;
 pub mod workspace;
 pub mod ws;
@@ -121,3 +130,8 @@ fn crate_boots() {
     let skeleton_ready = true;
     assert!(skeleton_ready);
 }
+
+#[cfg(test)]
+mod task_display_admission_tests;
+
+mod context_info;

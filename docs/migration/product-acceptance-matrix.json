@@ -1,0 +1,968 @@
+{
+  "verificationPrecedence": {
+    "current": "#/fullAlignmentVerification",
+    "historical": "Other verification/evidence fields and path target fingerprints describe their recorded implementation snapshot; preserve their original hashes and binary identities."
+  },
+  "schemaVersion": 1,
+  "scope": "Required local product acceptance, one row per behavior. Each row lists actual executed tests and specific limits, not source-only family mapping.",
+  "sourceTarget": "053adf90",
+  "targetBaseline": "08cbdc45",
+  "evidence": {
+    "frontendUnit": {
+      "command": "cd frontend && npm test -- --run --reporter=verbose",
+      "result": "135 files /1190 passed /16 skipped",
+      "path": "/tmp/zk-frontend-product-final-tests.txt",
+      "sha256": "2cfd332e58298aa51e36b6ad5b5d6504a7c68d970c88857208a579ab8e1ec819"
+    },
+    "nativeWorkspaceDefault": {
+      "result": "106 harnesses /2852 passed /8 ignored",
+      "path": "/tmp/zk-workspace-tests-default-final.txt",
+      "sha256": "c0c9fb73f284c8b10c830886ec5e4f416d92dad7a5ba20f1f0a704ed0752a567"
+    },
+    "releaseBrowser": {
+      "result": "4 passed19.3s",
+      "binaryIdentity": {
+        "binary": "/Users/guoqingtao/Desktop/dev/code/zkcode/target/release/zk-server",
+        "sha256Before": "5c7985aba8e25b2356f343c401f21b72b191f3a6c99ef7b8e3a23198a8817491",
+        "version": "zk-server 0.1.0 (git 08cbdc45e12cc28f3f13aaafbd0b056b980dfb1a, built 1791332366, schema 2, ws 4)",
+        "sha256After": "5c7985aba8e25b2356f343c401f21b72b191f3a6c99ef7b8e3a23198a8817491",
+        "binaryHashBeforeEqualsAfter": true,
+        "exitCode": 0,
+        "result": "4 passed (19.3s)",
+        "log": "/tmp/zk-frontend-production-release-final.txt",
+        "logSha256": "f72567c6cabc2dedae57f04c3b1d8ab2d96c76921a5dc49f15f8b4f880ed0e17"
+      },
+      "path": "/tmp/zk-frontend-production-release-final.txt",
+      "sha256": "f72567c6cabc2dedae57f04c3b1d8ab2d96c76921a5dc49f15f8b4f880ed0e17"
+    },
+    "nativeJourney": {
+      "result": "1 explicitly enabled real browser/HTTP test passed",
+      "path": "/tmp/zk-verify-journey-native-final.txt",
+      "sha256": "d7a59ab06950e8b15d1b1dcb4b350f5f845c1f515dc651f2a1d573c0f55b1d07"
+    },
+    "themeBrowser": {
+      "command": "cd frontend && npm run test:theme-regression",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "20 scenarios;12508 color/isolation assertions; no business requests",
+      "browser": "installed Chrome154.0.8037.98",
+      "evidence": {
+        "path": "/tmp/zk-theme-browser-final-chrome.log",
+        "sha256": "86e435ef0f869e7ba7a3318cf0bd95151ab6c50004f7ef87f16b5631ab91c296"
+      }
+    },
+    "jellyBrowser": {
+      "command": "cd frontend && npm run test:jelly-regression",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "42 scenarios passed",
+      "browser": "installed Chrome154.0.8037.98",
+      "evidence": {
+        "path": "/tmp/zk-jelly-browser-final-chrome.log",
+        "sha256": "0f3f5e13033729148a98c05e331562f7811337abdc593f9d59c43e47caf43ca2"
+      }
+    },
+    "alignmentFrozenFrontend": {
+      "path": "/tmp/zk-frontend-alignment-frozen-unit.txt",
+      "sha256": "6a9465fb91646482334658d565bb6e43781a22aa7dd2700a8a012f3e91681f83",
+      "exitCode": 0
+    },
+    "alignmentFrozenPython": {
+      "log": "/tmp/zk-python-alignment-final-coverage.txt",
+      "sha256": "c36a07d7903e2ce700bbca684922e0081e01e62d1493faeb860e13be9ffc00ca",
+      "result": "335 passed; coverage 75.83%; exit 0"
+    },
+    "alignmentReleaseBrowser": {
+      "log": "/tmp/zk-post-adapter-production-e2e.txt",
+      "sha256": "cfbe74f16458554432cc4b94cd39d982c7a8ff41883c79b6733baa8920fdad7f",
+      "passed": 6,
+      "seconds": 29.1,
+      "exitCode": 0
+    },
+    "alignmentReleaseAnalysisBrowser": {
+      "log": "/tmp/zk-post-adapter-analysis-e2e.txt",
+      "sha256": "b52821d6e8d9eecbe3336bf29100912a0e8af0cfb43a4ac9a1dbe45eccd7728e",
+      "passed": 3,
+      "seconds": 30.6,
+      "exitCode": 0
+    },
+    "alignmentReleaseBrowserBeforeAdapterFix": {
+      "log": "/tmp/zk-alignment-release-production-e2e-final.txt",
+      "sha256": "ce95505eec2f4b4dc8ba5918e93a016b03b73cd7ca3e70afdb93fc2c1ad150ba",
+      "passed": 6,
+      "seconds": 24.8,
+      "exitCode": 0
+    },
+    "alignmentReleaseAnalysisBrowserBeforeAdapterFix": {
+      "log": "/tmp/zk-alignment-release-analysis-e2e.txt",
+      "sha256": "470364627f8867e43dbbd0fa59b74217c10928963ea86d26ce275e68e6fe65af",
+      "passed": 3,
+      "seconds": 58.0,
+      "exitCode": 0
+    }
+  },
+  "capabilities": [
+    {
+      "id": "simple-workbench",
+      "capability": "新简洁工作台",
+      "status": "verified_listed_native_assertions",
+      "assertions": [
+        "未配置的新安装默认 development；已有 simple 偏好和逐会话视图保留，不污染全局偏好",
+        "当前工作台来自唯一权威投影；迟到结果被忽略；权威空投影会清除旧树/usage",
+        "Run usage 不篡改全局费用"
+      ],
+      "tests": [
+        {
+          "file": "frontend/src/utils/workbenchFeature.test.ts",
+          "executedTest": "workbenchFeature > defaults new installations to developer view without overriding saved preferences",
+          "evidenceRef": "#evidence/alignmentFrozenFrontend"
+        },
+        {
+          "file": "frontend/src/utils/workbenchFeature.test.ts",
+          "executedTest": "workbenchFeature > uses a per-session view without changing the machine default",
+          "evidenceRef": "#evidence/frontendUnit"
+        },
+        {
+          "file": "frontend/src/hooks/useSimpleWorkbenchData.test.tsx",
+          "executedTest": "useSimpleWorkbenchData > loads the single authoritative current projection",
+          "evidenceRef": "#evidence/frontendUnit"
+        },
+        {
+          "file": "frontend/src/hooks/useSimpleWorkbenchData.test.tsx",
+          "executedTest": "useSimpleWorkbenchData > ignores a late response from the previously selected Session",
+          "evidenceRef": "#evidence/frontendUnit"
+        },
+        {
+          "file": "frontend/src/hooks/useSimpleWorkbenchData.test.tsx",
+          "executedTest": "useSimpleWorkbenchData > replaces a populated run tree and usage with an authoritative empty projection",
+          "evidenceRef": "#evidence/frontendUnit"
+        },
+        {
+          "file": "frontend/src/components/workbench/SimpleWorkbench.test.tsx",
+          "executedTest": "SimpleWorkbench Run usage > preserves native run usage without writing global totals",
+          "evidenceRef": "#evidence/frontendUnit"
+        }
+      ],
+      "limits": "组件测试使用契约响应夹具；实际后端 E2E主要覆盖开发视图，不声称简洁工作台全部视觉排列经浏览器验收。"
+    },
+    {
+      "id": "developer-workbench",
+      "capability": "保留开发工作台",
+      "status": "verified_listed_native_assertions",
+      "assertions": [
+        "从准确消息位置切入开发视图，导航请求只消费一次",
+        "真实 Rust/Chrome 普通聊天持久化后重新加载同一会话"
+      ],
+      "tests": [
+        {
+          "file": "frontend/src/store/workbenchViewStore.test.ts",
+          "executedTest": "workbenchViewStore view boundary > opens an exact message in the developer view and consumes the target once",
+          "evidenceRef": "#evidence/frontendUnit"
+        },
+        {
+          "test": "real backend: browser chat is durable before message_complete",
+          "evidenceRef": "#evidence/releaseBrowser"
+        }
+      ],
+      "limits": "此E2E显式设置development；不声称所有旧工作台工具卡/面板都覆盖。"
+    },
+    {
+      "id": "themes",
+      "capability": "保留 system 与新主题/动效偏好",
+      "status": "verified_listed_native_assertions",
+      "assertions": [
+        "system 缓存恢复和本地选择优先",
+        "缺省强动效关闭；有效设置保真；主题切换对称清除旧class",
+        "Jelly reduced/off生命周期不保留旧监听"
+      ],
+      "tests": [
+        {
+          "file": "frontend/src/store/__tests__/configStore.test.ts",
+          "executedTest": "ConfigStore > normalizes cached system theme after all network retries fail",
+          "evidenceRef": "#evidence/frontendUnit"
+        },
+        {
+          "file": "frontend/src/store/__tests__/configStore.test.ts",
+          "executedTest": "ConfigStore > keeps a locally chosen light theme when the server returns a fixed dark theme",
+          "evidenceRef": "#evidence/frontendUnit"
+        },
+        {
+          "file": "frontend/src/store/__tests__/configStore.spaceshipFx.test.ts",
+          "executedTest": "configStore spaceshipFx 持久化迁移 > 旧持久化数据（无 spaceshipFx 字段）→ merge/migrate 路径补默认值",
+          "evidenceRef": "#evidence/frontendUnit"
+        },
+        {
+          "file": "frontend/src/store/__tests__/configStore.spaceshipFx.test.ts",
+          "executedTest": "normalizeSpaceshipFx > 全合法值 → 原样保真",
+          "evidenceRef": "#evidence/frontendUnit"
+        },
+        {
+          "file": "frontend/src/store/__tests__/configStore.inkHavocFx.test.ts",
+          "executedTest": "configStore inkHavocFx 持久化迁移 > 旧持久化数据（无 inkHavocFx 字段）→ merge/migrate 路径补默认值",
+          "evidenceRef": "#evidence/frontendUnit"
+        },
+        {
+          "file": "frontend/src/store/__tests__/configStore.jellyFx.test.ts",
+          "executedTest": "configStore jellyFx 持久化迁移 > 旧持久化数据（无 jellyFx 字段）→ merge/migrate 路径补默认值",
+          "evidenceRef": "#evidence/frontendUnit"
+        },
+        {
+          "file": "frontend/src/components/theme/__tests__/ThemeProvider.spaceship.test.tsx",
+          "executedTest": "ThemeProvider spaceship fx class 生命周期 > 切到 light → spaceship 特效 class 全部对称移除，html 只有 light",
+          "evidenceRef": "#evidence/frontendUnit"
+        },
+        {
+          "file": "frontend/src/components/theme/__tests__/ThemeProvider.inkHavoc.test.tsx",
+          "executedTest": "ThemeProvider ink-havoc fx class 生命周期 > boot 期间切走 → ink-boot 即刻清理（不等定时器）",
+          "evidenceRef": "#evidence/frontendUnit"
+        },
+        {
+          "file": "frontend/src/components/theme/__tests__/ThemeProvider.jelly.test.tsx",
+          "executedTest": "ThemeProvider jelly fx class 生命周期 > jelly → ink-havoc 互切 → 双方门控 class 无残留",
+          "evidenceRef": "#evidence/frontendUnit"
+        },
+        {
+          "scenarioSet": "20 theme scenarios /12508 color and isolation assertions",
+          "evidenceRef": "#evidence/themeBrowser"
+        },
+        {
+          "scenarioSet": "42 Jelly scenarios",
+          "evidenceRef": "#evidence/jellyBrowser"
+        }
+      ],
+      "limits": "Executed real installed Chrome154 theme/Jelly fixtures with actual CSS/components and no business requests. These cover the harness scenarios, not every possible viewport, OS theme event, visual arrangement or full app combination."
+    },
+    {
+      "id": "model-choice",
+      "capability": "当前会话模型与新会话默认模型",
+      "status": "verified_listed_native_assertions",
+      "assertions": [
+        "设置面板两个操作分别调用对应链路",
+        "首页临时选择仅用于下一会话；取消不改默认；冷启动刷新模型目录",
+        "后端保存默认只影响新会话，显式选择优先"
+      ],
+      "tests": [
+        {
+          "file": "frontend/src/components/dialog/SettingsPanel.test.tsx",
+          "executedTest": "SettingsPanel permission modes > keeps current-session selection separate from the new-session default",
+          "evidenceRef": "#evidence/frontendUnit"
+        },
+        {
+          "file": "frontend/src/services/authorizedSession.test.ts",
+          "executedTest": "requestAuthorizedSession > uses a home model choice only for the next session, preserving the default after cancellation",
+          "evidenceRef": "#evidence/frontendUnit"
+        },
+        {
+          "file": "frontend/src/services/authorizedSession.test.ts",
+          "executedTest": "requestAuthorizedSession > loads the catalog on a cold start before validating a stale model",
+          "evidenceRef": "#evidence/frontendUnit"
+        },
+        {
+          "test": "saved_default_changes_only_new_sessions_and_explicit_selection_wins",
+          "evidenceRef": "#evidence/nativeWorkspaceDefault"
+        }
+      ],
+      "limits": "实际release设置E2E另验证native REST与WebSocket；远端模型凭据未调用。"
+    },
+    {
+      "id": "interrupt",
+      "capability": "Ctrl+C 与停止按钮确认",
+      "status": "verified_listed_native_assertions",
+      "assertions": [
+        "按钮取消不停止；确认只发一次中断，保留草稿",
+        "streaming/waiting_permission中Ctrl+C立即停止无需确认",
+        "选中文本/IME/idle不误中断；自然结束自动取消旧确认"
+      ],
+      "tests": [
+        {
+          "file": "frontend/src/App.review-command.test.tsx",
+          "executedTest": "App handleSlashCommand — /review 参数保真 > 停止按钮取消保持运行，确认后才发送一次中断并保留草稿",
+          "evidenceRef": "#evidence/frontendUnit"
+        },
+        {
+          "file": "frontend/src/App.review-command.test.tsx",
+          "executedTest": "App handleSlashCommand — /review 参数保真 > Ctrl+C 在 streaming 时立即停止，无需确认",
+          "evidenceRef": "#evidence/frontendUnit"
+        },
+        {
+          "file": "frontend/src/App.review-command.test.tsx",
+          "executedTest": "App handleSlashCommand — /review 参数保真 > Ctrl+C 在 waiting_permission 时立即停止，无需确认",
+          "evidenceRef": "#evidence/frontendUnit"
+        },
+        {
+          "file": "frontend/src/App.review-command.test.tsx",
+          "executedTest": "App handleSlashCommand — /review 参数保真 > Ctrl+C 在选中文本、输入法组合或空闲时不误中断",
+          "evidenceRef": "#evidence/frontendUnit"
+        },
+        {
+          "file": "frontend/src/App.review-command.test.tsx",
+          "executedTest": "App handleSlashCommand — /review 参数保真 > 确认期间任务自然结束会关闭对话框且不补发中断",
+          "evidenceRef": "#evidence/frontendUnit"
+        }
+      ],
+      "limits": "真实App+输入框+桌面对话框，网络发送被mock以精确断言；后端DB取消意图写失败策略仍为独立待确认决策。"
+    },
+    {
+      "id": "drafts",
+      "capability": "草稿、附件与异步归属",
+      "status": "verified_listed_native_assertions",
+      "assertions": [
+        "卸载/重挂恢复文本和附件；会话间隔离",
+        "首消息创建会话期间提交归属正确；失败保留草稿",
+        "旧异步操作不能写入清除后重建的草稿"
+      ],
+      "tests": [
+        {
+          "file": "frontend/src/components/input/PromptInput/promptDraftPersistence.test.tsx",
+          "executedTest": "prompt draft persistence across unmount/remount > restores the draft text after an unmount/remount cycle (mobile tab switch)",
+          "evidenceRef": "#evidence/frontendUnit"
+        },
+        {
+          "file": "frontend/src/components/input/PromptInput/promptDraftPersistence.test.tsx",
+          "executedTest": "prompt draft persistence across unmount/remount > restores attachments after an unmount/remount cycle",
+          "evidenceRef": "#evidence/frontendUnit"
+        },
+        {
+          "file": "frontend/src/components/input/PromptInput/promptDraftPersistence.test.tsx",
+          "executedTest": "prompt draft persistence across unmount/remount > keeps drafts separate when switching between two sessions",
+          "evidenceRef": "#evidence/frontendUnit"
+        },
+        {
+          "file": "frontend/src/components/input/PromptInput/promptDraftPersistence.test.tsx",
+          "executedTest": "prompt draft persistence across unmount/remount > keeps the draft when a mid-submit session creation ends in a rejected send",
+          "evidenceRef": "#evidence/frontendUnit"
+        },
+        {
+          "file": "frontend/src/store/promptDraftStore.test.ts",
+          "executedTest": "promptDraftStore > invalidates an old operation when its draft is cleared and recreated",
+          "evidenceRef": "#evidence/frontendUnit"
+        },
+        {
+          "file": "frontend/src/store/promptDraftStore.test.ts",
+          "executedTest": "promptDraftStore > keeps an operation attached to its draft through migration and later fallback reuse",
+          "evidenceRef": "#evidence/frontendUnit"
+        }
+      ],
+      "limits": "本地store/组件交互验证，不声称跨设备或历史数据库迁移。"
+    },
+    {
+      "id": "voice-selection",
+      "capability": "语音选区替换",
+      "status": "verified_listed_native_assertions",
+      "assertions": [
+        "返回转写替换当前选区并恢复光标",
+        "先前会话的转写结果不写入新会话"
+      ],
+      "tests": [
+        {
+          "file": "frontend/src/components/input/PromptInput.test.tsx",
+          "executedTest": "PromptInput asynchronous submit > inserts a voice transcript at the current selection",
+          "evidenceRef": "#evidence/frontendUnit"
+        },
+        {
+          "file": "frontend/src/components/input/PromptInput.test.tsx",
+          "executedTest": "PromptInput asynchronous submit > ignores a transcript captured by a previous session",
+          "evidenceRef": "#evidence/frontendUnit"
+        }
+      ],
+      "limits": "录音/ASR回调为夹具；未发起真实麦克风或付费ASR请求。此处覆盖客户端选区和归属要求，不冒充远端语音质量验证。"
+    },
+    {
+      "id": "relative-images",
+      "capability": "相对图片与授权本地预览",
+      "status": "verified_listed_native_assertions",
+      "assertions": [
+        "绝对/相对/file引用走session预览端点且释放Blob",
+        "嵌套Markdown目录正确解析相对图片",
+        "切会话不复用旧Blob；SVG/可执行data被拒绝"
+      ],
+      "tests": [
+        {
+          "file": "frontend/src/components/message/TextBlock.test.tsx",
+          "executedTest": "TextBlock markdown images > loads absolute, relative, and file URLs through the session preview endpoint and cleans them up",
+          "evidenceRef": "#evidence/frontendUnit"
+        },
+        {
+          "file": "frontend/src/components/message/TextBlock.test.tsx",
+          "executedTest": "TextBlock markdown images > resolves relative images from the directory of a nested Markdown file",
+          "evidenceRef": "#evidence/frontendUnit"
+        },
+        {
+          "file": "frontend/src/components/message/TextBlock.test.tsx",
+          "executedTest": "TextBlock markdown images > does not reuse a local image Blob URL after the session changes",
+          "evidenceRef": "#evidence/frontendUnit"
+        },
+        {
+          "file": "frontend/src/components/message/TextBlock.test.tsx",
+          "executedTest": "TextBlock markdown images > allows blob and raster base64 images while rejecting executable or SVG data protocols",
+          "evidenceRef": "#evidence/frontendUnit"
+        },
+        {
+          "file": "frontend/src/components/workbench/FilePreviewDialog.test.tsx",
+          "executedTest": "FilePreviewDialog Markdown images > loads a relative image from the previewed Markdown file directory",
+          "evidenceRef": "#evidence/frontendUnit"
+        }
+      ],
+      "limits": "组件端fetch为契约夹具；实际授权/完整性后端测试见cross-session-access。"
+    },
+    {
+      "id": "local-attachments",
+      "capability": "本地文件、附件和安全名称",
+      "status": "verified_listed_native_assertions",
+      "assertions": [
+        "本地路径引用无需上传；迟到选择按会话丢弃",
+        "选择会话后清除旧路径；文件名和office后缀保持合法",
+        "UUID冲突、符号链接及元数据失败不会引用其他文件"
+      ],
+      "tests": [
+        {
+          "file": "frontend/src/components/input/PromptInput.test.tsx",
+          "executedTest": "PromptInput asynchronous submit > references a picked local path without creating an attachment",
+          "evidenceRef": "#evidence/frontendUnit"
+        },
+        {
+          "file": "frontend/src/components/input/PromptInput.test.tsx",
+          "executedTest": "PromptInput asynchronous submit > ignores a local path picked for a previous session",
+          "evidenceRef": "#evidence/frontendUnit"
+        },
+        {
+          "file": "frontend/src/components/input/PromptInput.test.tsx",
+          "executedTest": "PromptInput asynchronous submit > clears a selected local path when the session changes",
+          "evidenceRef": "#evidence/frontendUnit"
+        },
+        {
+          "test": "api::attachment::tests::display_names_remove_bidi_but_preserve_unicode_and_complete_office_extensions",
+          "evidenceRef": "#evidence/nativeWorkspaceDefault"
+        },
+        {
+          "test": "api::attachment::tests::exact_uuid_conflict_and_symlinks_never_return_arbitrary_candidate",
+          "evidenceRef": "#evidence/nativeWorkspaceDefault"
+        },
+        {
+          "test": "api::attachment::tests::metadata_failure_leaves_no_payload_and_symlinked_upload_root_is_supported",
+          "evidenceRef": "#evidence/nativeWorkspaceDefault"
+        }
+      ],
+      "limits": "原生macOS文件选择器由返回路径夹具代替，未宣称实际打开系统对话框；Rust附件存储是真实临时文件系统。"
+    },
+    {
+      "id": "cross-session-access",
+      "capability": "跨会话访问和证据归属",
+      "status": "verified_listed_native_assertions",
+      "assertions": [
+        "其他会话不能读取证据/图片；损坏Blob不被预览",
+        "合并封存附件只有目标会话可访问，源删除后仍有效",
+        "项目授权撤销后执行期复验拒绝访问",
+        "切会话清除旧任务/费用/coordinator，迟到消息不覆盖新会话"
+      ],
+      "tests": [
+        {
+          "test": "evidence_bundle_and_blob_round_trip_with_session_authorization",
+          "evidenceRef": "#evidence/nativeWorkspaceDefault"
+        },
+        {
+          "test": "image_preview_requires_authorization_and_detects_blob_corruption",
+          "evidenceRef": "#evidence/nativeWorkspaceDefault"
+        },
+        {
+          "test": "sealed_asset_download_requires_target_session_and_survives_source_deletion",
+          "evidenceRef": "#evidence/nativeWorkspaceDefault"
+        },
+        {
+          "test": "project_file_scope_recheck_denies_after_project_revoked",
+          "evidenceRef": "#evidence/nativeWorkspaceDefault"
+        },
+        {
+          "file": "frontend/src/store/__tests__/dispatch.test.ts",
+          "executedTest": "dispatch 消息分发 > session switch replaces empty cost/task/coordinator projections",
+          "evidenceRef": "#evidence/frontendUnit"
+        },
+        {
+          "file": "frontend/src/store/__tests__/dispatch.test.ts",
+          "executedTest": "dispatch 消息分发 > a late committed completion cannot replace the newly selected session",
+          "evidenceRef": "#evidence/frontendUnit"
+        },
+        {
+          "file": "frontend/src/components/verify/EvidenceBundleView.test.tsx",
+          "executedTest": "EvidenceBundleView > ignores old JSON parsing that finishes after the target changes",
+          "evidenceRef": "#evidence/frontendUnit"
+        },
+        {
+          "file": "frontend/src/components/verify/EvidenceBundleView.test.tsx",
+          "executedTest": "EvidenceBundleView > aborts on unmount and ignores a late response after a new viewer mounts",
+          "evidenceRef": "#evidence/frontendUnit"
+        }
+      ],
+      "limits": "覆盖真实本地REST/DB授权和客户端迟到响应，不推导为任意外部多用户部署安全认证。"
+    },
+    {
+      "id": "agent-tree",
+      "capability": "Agent 树与状态真实性",
+      "status": "verified_listed_native_assertions",
+      "assertions": [
+        "canonical Run 状态渲染；附加显示说明不会掩盖真实失败",
+        "会话恢复原子替换耐久Task树",
+        "原生Swarm/Worker事件投影与失败事件保持终态"
+      ],
+      "tests": [
+        {
+          "file": "frontend/src/components/workbench/AgentRunTree.test.tsx",
+          "executedTest": "AgentRunTree > renders canonical lowerCamelCase Run states without normalization",
+          "evidenceRef": "#evidence/frontendUnit"
+        },
+        {
+          "file": "frontend/src/store/__tests__/dispatch.test.ts",
+          "executedTest": "dispatch 消息分发 > session_restored atomically replaces the durable Task tree projection",
+          "evidenceRef": "#evidence/frontendUnit"
+        },
+        {
+          "file": "frontend/src/__tests__/stores/coordinatorStore.test.ts",
+          "executedTest": "CoordinatorStore > CS-13 Swarm 与 Worker 原生事件形成 DAG 唯一投影",
+          "evidenceRef": "#evidence/frontendUnit"
+        },
+        {
+          "file": "frontend/src/__tests__/stores/coordinatorStore.test.ts",
+          "executedTest": "CoordinatorStore > CS-14 原生 Agent 失败事件保留终态与错误",
+          "evidenceRef": "#evidence/frontendUnit"
+        }
+      ],
+      "limits": "原生Run树/事件通路有有效测试；旧时间推断DAG的分组/排版/fitView仍是未执行占位，逐条见baselineSkippedTests。"
+    },
+    {
+      "id": "complexity-panel",
+      "capability": "真实首次复杂度分析与作用域隔离",
+      "status": "verified_listed_native_and_release_browser_assertions",
+      "assertions": [
+        "首次分析明确点击，hint只预填；原钻取与筛选保留",
+        "Session/Project归属、取消迟到、返回路径与非验证证据约束",
+        "真实Python worker缓存命中、文件字节变化、非法编码拒绝、全树截断"
+      ],
+      "tests": [
+        {
+          "file": "frontend/src/components/visualization/backend/CodeComplexityTreemap.test.tsx",
+          "executedTest": "has an explicit first analysis action and only prefills visualization hints",
+          "evidenceRef": "#evidence/alignmentFrozenFrontend"
+        },
+        {
+          "file": "frontend/src/store/__tests__/gitComplexityScope.test.ts",
+          "executedTest": "uses the captured Session and real heuristic-only complexity response",
+          "evidenceRef": "#evidence/alignmentFrozenFrontend"
+        },
+        {
+          "file": "python-service/tests/test_complexity_workers.py",
+          "executedTest": "test_real_worker_metrics_cache_and_changed_bytes",
+          "evidenceRef": "#evidence/alignmentFrozenPython"
+        },
+        {
+          "file": "frontend/e2e/analysis-backend.spec.ts",
+          "executedTest": "complexity and Git panels use real authorized parsers and native Git",
+          "evidenceRef": "#evidence/alignmentReleaseAnalysisBrowser"
+        }
+      ],
+      "limits": "Real release React→Rust→UDS→Python browser chain passed. Static complexity is advisory; it does not prove runtime correctness or exhaustive dynamic call analysis."
+    },
+    {
+      "id": "native-git-timeline",
+      "capability": "原生Git时间线、固定分页、Diff与Blame",
+      "status": "verified_listed_native_and_release_browser_assertions",
+      "assertions": [
+        "后续分页绑定首次head SHA；root commit无需伪造父提交",
+        "精确Unicode/空格/TAB路径及scope拒绝，保留真实diff/blame失败",
+        "在途cancel与HTTPfuture drop都实际收敛所属进程，接口不假报清理完成"
+      ],
+      "tests": [
+        {
+          "file": "frontend/src/store/__tests__/gitComplexityScope.test.ts",
+          "executedTest": "pages an immutable Git head and requests root-commit diff by exact commit",
+          "evidenceRef": "#evidence/alignmentFrozenFrontend"
+        },
+        {
+          "file": "crates/zk-server/tests/git_read_api.rs",
+          "result": "6 real Git REST cases passed",
+          "log": "/tmp/zk-alignment-git-read-api-current.txt"
+        },
+        {
+          "file": "crates/zk-server/src/api/git_read.rs",
+          "executedTests": [
+            "in_flight_cancellation_reaps_the_supervised_git_process",
+            "dropped_request_reaps_the_supervised_git_process"
+          ],
+          "log": "/tmp/zk-alignment-workspace-tests-final.txt",
+          "result": "Both actual process cancellation cases passed in the final workspace run (exit 0); see full-alignment-gates for overall counts and separately executed ignored cases."
+        },
+        {
+          "file": "frontend/e2e/analysis-backend.spec.ts",
+          "executedTest": "complexity and Git panels use real authorized parsers and native Git",
+          "evidenceRef": "#evidence/alignmentReleaseAnalysisBrowser"
+        }
+      ],
+      "limits": "Real release UI log/root Diff/Blame chain passed. Reads stay local, scoped and output-bounded; no remote Git integration or unbounded history claim."
+    }
+  ],
+  "baselineSkippedTests": [
+    {
+      "file": "frontend/src/components/browser/BrowserReplayTimeline.test.tsx",
+      "test": "BRT-04 点击 refresh 按钮重新拉取时间线",
+      "status": "empty_placeholder_replaced_by_mounted_production_panel_tests",
+      "reason": "Baseline contains an empty reserved test body, not a live dependency/OS failure; retained without manufacturing pass status.",
+      "relatedExecutedCoverage": [
+        "BRT-01/02/03 executed: fetch contract, URL rendering and HTTP500 error only.",
+        "Native browser_replay atomic_store_survives_restart_and_remove, append_bounds_frames_and_omits_oversized_screenshot and python_snapshot_is_normalized_to_frontend_contract passed.",
+        "Actual VerifyJourney validates browser/HTTP evidence ownership and cleanup.",
+        "/tmp/zk-browser-dag-actual-tests.txt: 6 mounted browser panel tests; scoped refresh, confirmation and acknowledged delete, HTTP error preservation, screenshot and details, empty/ephemeral boundaries, late responses and ownership rejection"
+      ],
+      "remainingLimit": "Latest Rust replay API and final production browser entrypoint E2E await the new stable binary.",
+      "previousStatus": "skipped_unchanged_empty_placeholder",
+      "previousRemainingLimit": "This exact frontend refresh/delete/expanded/empty/thumbnail assertion was not executed. The legacy timeline component has no production import/mount in src (source search); this does not leave the mounted evidence viewer acceptance empty."
+    },
+    {
+      "file": "frontend/src/components/browser/BrowserReplayTimeline.test.tsx",
+      "test": "BRT-05 点击 clear 按钮发送 DELETE 并清空本地状态",
+      "status": "empty_placeholder_replaced_by_mounted_production_panel_tests",
+      "reason": "Baseline contains an empty reserved test body, not a live dependency/OS failure; retained without manufacturing pass status.",
+      "relatedExecutedCoverage": [
+        "BRT-01/02/03 executed: fetch contract, URL rendering and HTTP500 error only.",
+        "Native browser_replay atomic_store_survives_restart_and_remove, append_bounds_frames_and_omits_oversized_screenshot and python_snapshot_is_normalized_to_frontend_contract passed.",
+        "Actual VerifyJourney validates browser/HTTP evidence ownership and cleanup.",
+        "/tmp/zk-browser-dag-actual-tests.txt: 6 mounted browser panel tests; scoped refresh, confirmation and acknowledged delete, HTTP error preservation, screenshot and details, empty/ephemeral boundaries, late responses and ownership rejection"
+      ],
+      "remainingLimit": "Latest Rust replay API and final production browser entrypoint E2E await the new stable binary.",
+      "previousStatus": "skipped_unchanged_empty_placeholder",
+      "previousRemainingLimit": "This exact frontend refresh/delete/expanded/empty/thumbnail assertion was not executed. The legacy timeline component has no production import/mount in src (source search); this does not leave the mounted evidence viewer acceptance empty."
+    },
+    {
+      "file": "frontend/src/components/browser/BrowserReplayTimeline.test.tsx",
+      "test": "BRT-06 选中某帧后展开 interactive 表",
+      "status": "empty_placeholder_replaced_by_mounted_production_panel_tests",
+      "reason": "Baseline contains an empty reserved test body, not a live dependency/OS failure; retained without manufacturing pass status.",
+      "relatedExecutedCoverage": [
+        "BRT-01/02/03 executed: fetch contract, URL rendering and HTTP500 error only.",
+        "Native browser_replay atomic_store_survives_restart_and_remove, append_bounds_frames_and_omits_oversized_screenshot and python_snapshot_is_normalized_to_frontend_contract passed.",
+        "Actual VerifyJourney validates browser/HTTP evidence ownership and cleanup.",
+        "/tmp/zk-browser-dag-actual-tests.txt: 6 mounted browser panel tests; scoped refresh, confirmation and acknowledged delete, HTTP error preservation, screenshot and details, empty/ephemeral boundaries, late responses and ownership rejection"
+      ],
+      "remainingLimit": "Latest Rust replay API and final production browser entrypoint E2E await the new stable binary.",
+      "previousStatus": "skipped_unchanged_empty_placeholder",
+      "previousRemainingLimit": "This exact frontend refresh/delete/expanded/empty/thumbnail assertion was not executed. The legacy timeline component has no production import/mount in src (source search); this does not leave the mounted evidence viewer acceptance empty."
+    },
+    {
+      "file": "frontend/src/components/browser/BrowserReplayTimeline.test.tsx",
+      "test": "BRT-07 空时间线展示 empty state 提示",
+      "status": "empty_placeholder_replaced_by_mounted_production_panel_tests",
+      "reason": "Baseline contains an empty reserved test body, not a live dependency/OS failure; retained without manufacturing pass status.",
+      "relatedExecutedCoverage": [
+        "BRT-01/02/03 executed: fetch contract, URL rendering and HTTP500 error only.",
+        "Native browser_replay atomic_store_survives_restart_and_remove, append_bounds_frames_and_omits_oversized_screenshot and python_snapshot_is_normalized_to_frontend_contract passed.",
+        "Actual VerifyJourney validates browser/HTTP evidence ownership and cleanup.",
+        "/tmp/zk-browser-dag-actual-tests.txt: 6 mounted browser panel tests; scoped refresh, confirmation and acknowledged delete, HTTP error preservation, screenshot and details, empty/ephemeral boundaries, late responses and ownership rejection"
+      ],
+      "remainingLimit": "Latest Rust replay API and final production browser entrypoint E2E await the new stable binary.",
+      "previousStatus": "skipped_unchanged_empty_placeholder",
+      "previousRemainingLimit": "This exact frontend refresh/delete/expanded/empty/thumbnail assertion was not executed. The legacy timeline component has no production import/mount in src (source search); this does not leave the mounted evidence viewer acceptance empty."
+    },
+    {
+      "file": "frontend/src/components/browser/BrowserReplayTimeline.test.tsx",
+      "test": "BRT-08 screenshotBase64 存在时渲染缩略图",
+      "status": "empty_placeholder_replaced_by_mounted_production_panel_tests",
+      "reason": "Baseline contains an empty reserved test body, not a live dependency/OS failure; retained without manufacturing pass status.",
+      "relatedExecutedCoverage": [
+        "BRT-01/02/03 executed: fetch contract, URL rendering and HTTP500 error only.",
+        "Native browser_replay atomic_store_survives_restart_and_remove, append_bounds_frames_and_omits_oversized_screenshot and python_snapshot_is_normalized_to_frontend_contract passed.",
+        "Actual VerifyJourney validates browser/HTTP evidence ownership and cleanup.",
+        "/tmp/zk-browser-dag-actual-tests.txt: 6 mounted browser panel tests; scoped refresh, confirmation and acknowledged delete, HTTP error preservation, screenshot and details, empty/ephemeral boundaries, late responses and ownership rejection"
+      ],
+      "remainingLimit": "Latest Rust replay API and final production browser entrypoint E2E await the new stable binary.",
+      "previousStatus": "skipped_unchanged_empty_placeholder",
+      "previousRemainingLimit": "This exact frontend refresh/delete/expanded/empty/thumbnail assertion was not executed. The legacy timeline component has no production import/mount in src (source search); this does not leave the mounted evidence viewer acceptance empty."
+    },
+    {
+      "file": "frontend/src/components/visualization/shared/AgentDAGChart.test.tsx",
+      "test": "DAG-03 2s 内连续 agent_spawn 归入同 phase（并行节点）",
+      "status": "empty_placeholder_replaced_by_mounted_graph_tests",
+      "reason": "Baseline contains an empty reserved test body, not a live dependency/OS failure; retained without manufacturing pass status.",
+      "relatedExecutedCoverage": [
+        "AgentRunTree actual native tree status/advisory-output assertions passed.",
+        "coordinatorStore CS-13/14 and dispatch session switching exercise native events and clear stale tree projection.",
+        "/tmp/zk-browser-dag-actual-tests.txt: 5 mounted DAG tests exercise actual dagre layout and store subscriptions; graph canvas is mocked, not the projection or layout."
+      ],
+      "remainingLimit": "Third-party ReactFlow canvas rendering/zoom internals are not asserted by this jsdom test.",
+      "previousStatus": "skipped_unchanged_empty_placeholder",
+      "previousRemainingLimit": "AgentDAGChart smoke tests do not mount the chart. Exact temporal grouping/edge inference/LR layout/fitView behavior is not verified by these substitutes; third-party rendering and legacy inferred layout remain an explicit test limitation."
+    },
+    {
+      "file": "frontend/src/components/visualization/shared/AgentDAGChart.test.tsx",
+      "test": "DAG-04 间隔 >2s 的 agent_spawn 生成串行 edge",
+      "status": "empty_placeholder_replaced_by_mounted_graph_tests",
+      "reason": "Baseline contains an empty reserved test body, not a live dependency/OS failure; retained without manufacturing pass status.",
+      "relatedExecutedCoverage": [
+        "AgentRunTree actual native tree status/advisory-output assertions passed.",
+        "coordinatorStore CS-13/14 and dispatch session switching exercise native events and clear stale tree projection.",
+        "/tmp/zk-browser-dag-actual-tests.txt: 5 mounted DAG tests exercise actual dagre layout and store subscriptions; graph canvas is mocked, not the projection or layout."
+      ],
+      "remainingLimit": "Third-party ReactFlow canvas rendering/zoom internals are not asserted by this jsdom test.",
+      "previousStatus": "skipped_unchanged_empty_placeholder",
+      "previousRemainingLimit": "AgentDAGChart smoke tests do not mount the chart. Exact temporal grouping/edge inference/LR layout/fitView behavior is not verified by these substitutes; third-party rendering and legacy inferred layout remain an explicit test limitation."
+    },
+    {
+      "file": "frontend/src/components/visualization/shared/AgentDAGChart.test.tsx",
+      "test": "DAG-05 direction=LR 时节点宽高切换",
+      "status": "empty_placeholder_replaced_by_mounted_graph_tests",
+      "reason": "Baseline contains an empty reserved test body, not a live dependency/OS failure; retained without manufacturing pass status.",
+      "relatedExecutedCoverage": [
+        "AgentRunTree actual native tree status/advisory-output assertions passed.",
+        "coordinatorStore CS-13/14 and dispatch session switching exercise native events and clear stale tree projection.",
+        "/tmp/zk-browser-dag-actual-tests.txt: 5 mounted DAG tests exercise actual dagre layout and store subscriptions; graph canvas is mocked, not the projection or layout."
+      ],
+      "remainingLimit": "Third-party ReactFlow canvas rendering/zoom internals are not asserted by this jsdom test.",
+      "previousStatus": "skipped_unchanged_empty_placeholder",
+      "previousRemainingLimit": "AgentDAGChart smoke tests do not mount the chart. Exact temporal grouping/edge inference/LR layout/fitView behavior is not verified by these substitutes; third-party rendering and legacy inferred layout remain an explicit test limitation."
+    },
+    {
+      "file": "frontend/src/components/visualization/shared/AgentDAGChart.test.tsx",
+      "test": "DAG-06 fitView 在 nodes 变化时触发",
+      "status": "empty_placeholder_replaced_by_mounted_graph_tests",
+      "reason": "Baseline contains an empty reserved test body, not a live dependency/OS failure; retained without manufacturing pass status.",
+      "relatedExecutedCoverage": [
+        "AgentRunTree actual native tree status/advisory-output assertions passed.",
+        "coordinatorStore CS-13/14 and dispatch session switching exercise native events and clear stale tree projection.",
+        "/tmp/zk-browser-dag-actual-tests.txt: 5 mounted DAG tests exercise actual dagre layout and store subscriptions; graph canvas is mocked, not the projection or layout."
+      ],
+      "remainingLimit": "Third-party ReactFlow canvas rendering/zoom internals are not asserted by this jsdom test.",
+      "previousStatus": "skipped_unchanged_empty_placeholder",
+      "previousRemainingLimit": "AgentDAGChart smoke tests do not mount the chart. Exact temporal grouping/edge inference/LR layout/fitView behavior is not verified by these substitutes; third-party rendering and legacy inferred layout remain an explicit test limitation."
+    },
+    {
+      "file": "frontend/src/__tests__/stores/coordinatorStore.test.ts",
+      "test": "CS-06 completeAgentTask 把对应任务 status=completed 并写入 result",
+      "status": "empty_placeholder_replaced_by_state_flow_tests",
+      "reason": "Baseline contains an empty reserved test body, not a live dependency/OS failure; retained without manufacturing pass status.",
+      "relatedExecutedCoverage": [
+        "CS-01..05, CS-13/14 passed for phase transition/spawn/ring buffer/warning dismissal/native Swarm and Agent failure.",
+        "dispatch session switch clears agentTasks and atomically restores task tree; prompt/current projection tests ignore late old-session responses.",
+        "/tmp/zk-coordinator-final-tests.txt: 10 passed including progress→completion, unknown task rejection, completed phase→scope reset, warning bound and dismissal."
+      ],
+      "remainingLimit": "No empty assertion is counted as passed; tests follow the current typed native state flow rather than the reserved legacy object-serialization description.",
+      "previousStatus": "skipped_unchanged_empty_placeholder",
+      "previousRemainingLimit": "Related native behaviors are covered, but this exact legacy store action/boundary is not independently asserted. Do not count this placeholder as completed."
+    },
+    {
+      "file": "frontend/src/__tests__/stores/coordinatorStore.test.ts",
+      "test": "CS-07 updateAgentTask 写入 progress 字符串（对象序列化）",
+      "status": "empty_placeholder_replaced_by_state_flow_tests",
+      "reason": "Baseline contains an empty reserved test body, not a live dependency/OS failure; retained without manufacturing pass status.",
+      "relatedExecutedCoverage": [
+        "CS-01..05, CS-13/14 passed for phase transition/spawn/ring buffer/warning dismissal/native Swarm and Agent failure.",
+        "dispatch session switch clears agentTasks and atomically restores task tree; prompt/current projection tests ignore late old-session responses.",
+        "/tmp/zk-coordinator-final-tests.txt: 10 passed including progress→completion, unknown task rejection, completed phase→scope reset, warning bound and dismissal."
+      ],
+      "remainingLimit": "No empty assertion is counted as passed; tests follow the current typed native state flow rather than the reserved legacy object-serialization description.",
+      "previousStatus": "skipped_unchanged_empty_placeholder",
+      "previousRemainingLimit": "Related native behaviors are covered, but this exact legacy store action/boundary is not independently asserted. Do not count this placeholder as completed."
+    },
+    {
+      "file": "frontend/src/__tests__/stores/coordinatorStore.test.ts",
+      "test": "CS-08 isComplete && phaseIndex=-1 时清理 active 阶段为 completed",
+      "status": "empty_placeholder_replaced_by_state_flow_tests",
+      "reason": "Baseline contains an empty reserved test body, not a live dependency/OS failure; retained without manufacturing pass status.",
+      "relatedExecutedCoverage": [
+        "CS-01..05, CS-13/14 passed for phase transition/spawn/ring buffer/warning dismissal/native Swarm and Agent failure.",
+        "dispatch session switch clears agentTasks and atomically restores task tree; prompt/current projection tests ignore late old-session responses.",
+        "/tmp/zk-coordinator-final-tests.txt: 10 passed including progress→completion, unknown task rejection, completed phase→scope reset, warning bound and dismissal."
+      ],
+      "remainingLimit": "No empty assertion is counted as passed; tests follow the current typed native state flow rather than the reserved legacy object-serialization description.",
+      "previousStatus": "skipped_unchanged_empty_placeholder",
+      "previousRemainingLimit": "Related native behaviors are covered, but this exact legacy store action/boundary is not independently asserted. Do not count this placeholder as completed."
+    },
+    {
+      "file": "frontend/src/__tests__/stores/coordinatorStore.test.ts",
+      "test": "CS-09 clearCoordinatorEvents 仅清事件不动工作流",
+      "status": "obsolete_empty_placeholder_removed_no_production_consumer",
+      "reason": "Baseline contains an empty reserved test body, not a live dependency/OS failure; retained without manufacturing pass status.",
+      "relatedExecutedCoverage": [
+        "CS-01..05, CS-13/14 passed for phase transition/spawn/ring buffer/warning dismissal/native Swarm and Agent failure.",
+        "dispatch session switch clears agentTasks and atomically restores task tree; prompt/current projection tests ignore late old-session responses."
+      ],
+      "remainingLimit": "clearCoordinatorEvents and coordinator panelVisible have no production consumer in current React; no completed product behavior is claimed for these reserved assertions. Actual sidebar visibility and graph mount are tested elsewhere.",
+      "previousStatus": "skipped_unchanged_empty_placeholder",
+      "previousRemainingLimit": "Related native behaviors are covered, but this exact legacy store action/boundary is not independently asserted. Do not count this placeholder as completed."
+    },
+    {
+      "file": "frontend/src/__tests__/stores/coordinatorStore.test.ts",
+      "test": "CS-10 addDelegationWarning 超 20 条 FIFO",
+      "status": "empty_placeholder_replaced_by_state_flow_tests",
+      "reason": "Baseline contains an empty reserved test body, not a live dependency/OS failure; retained without manufacturing pass status.",
+      "relatedExecutedCoverage": [
+        "CS-01..05, CS-13/14 passed for phase transition/spawn/ring buffer/warning dismissal/native Swarm and Agent failure.",
+        "dispatch session switch clears agentTasks and atomically restores task tree; prompt/current projection tests ignore late old-session responses.",
+        "/tmp/zk-coordinator-final-tests.txt: 10 passed including progress→completion, unknown task rejection, completed phase→scope reset, warning bound and dismissal."
+      ],
+      "remainingLimit": "No empty assertion is counted as passed; tests follow the current typed native state flow rather than the reserved legacy object-serialization description.",
+      "previousStatus": "skipped_unchanged_empty_placeholder",
+      "previousRemainingLimit": "Related native behaviors are covered, but this exact legacy store action/boundary is not independently asserted. Do not count this placeholder as completed."
+    },
+    {
+      "file": "frontend/src/__tests__/stores/coordinatorStore.test.ts",
+      "test": "CS-11 setPanelVisible(false) 手动收起面板",
+      "status": "obsolete_empty_placeholder_removed_no_production_consumer",
+      "reason": "Baseline contains an empty reserved test body, not a live dependency/OS failure; retained without manufacturing pass status.",
+      "relatedExecutedCoverage": [
+        "CS-01..05, CS-13/14 passed for phase transition/spawn/ring buffer/warning dismissal/native Swarm and Agent failure.",
+        "dispatch session switch clears agentTasks and atomically restores task tree; prompt/current projection tests ignore late old-session responses."
+      ],
+      "remainingLimit": "clearCoordinatorEvents and coordinator panelVisible have no production consumer in current React; no completed product behavior is claimed for these reserved assertions. Actual sidebar visibility and graph mount are tested elsewhere.",
+      "previousStatus": "skipped_unchanged_empty_placeholder",
+      "previousRemainingLimit": "Related native behaviors are covered, but this exact legacy store action/boundary is not independently asserted. Do not count this placeholder as completed."
+    },
+    {
+      "file": "frontend/src/__tests__/stores/coordinatorStore.test.ts",
+      "test": "CS-12 clearAll 完全复位全部字段",
+      "status": "empty_placeholder_replaced_by_state_flow_tests",
+      "reason": "Baseline contains an empty reserved test body, not a live dependency/OS failure; retained without manufacturing pass status.",
+      "relatedExecutedCoverage": [
+        "CS-01..05, CS-13/14 passed for phase transition/spawn/ring buffer/warning dismissal/native Swarm and Agent failure.",
+        "dispatch session switch clears agentTasks and atomically restores task tree; prompt/current projection tests ignore late old-session responses.",
+        "/tmp/zk-coordinator-final-tests.txt: 10 passed including progress→completion, unknown task rejection, completed phase→scope reset, warning bound and dismissal."
+      ],
+      "remainingLimit": "No empty assertion is counted as passed; tests follow the current typed native state flow rather than the reserved legacy object-serialization description.",
+      "previousStatus": "skipped_unchanged_empty_placeholder",
+      "previousRemainingLimit": "Related native behaviors are covered, but this exact legacy store action/boundary is not independently asserted. Do not count this placeholder as completed."
+    }
+  ],
+  "baselineSkipInventoryVerifiedAt": "08cbdc45",
+  "globalLimits": [
+    "npm audit remains failed with6 high in Tailwind3/braces; major-upgrade decision unresolved.",
+    "DB cancel-intent write failure behavior remains native persist-first, pending user decision.",
+    "Remote credentials, microphone capture, native OS picker UI and full combinatorial visual/product matrix are not claimed executed.",
+    "34 source browser reference paths are not a blanket execution claim: the theme/Jelly scripts and their fixtures were actually exercised in this run. Native/component evidence replaces applicable Java/mock dependencies for other behaviors; unexecuted reference scenarios remain explicitly limited."
+  ],
+  "fullAlignmentVerification": {
+    "status": "frozen_frontend_and_post_adapter_release_browser_gates_passed",
+    "details": "docs/migration/full-alignment-frontend.md",
+    "sourceCommit": "053adf9071dc1996aa1ebfa30c0a23d587ffad5c",
+    "unitFull": {
+      "path": "/tmp/zk-frontend-alignment-frozen-unit.txt",
+      "sha256": "6a9465fb91646482334658d565bb6e43781a22aa7dd2700a8a012f3e91681f83",
+      "exitCode": 0,
+      "result": "156 files, 1295 passed, zero skipped; 241.48 seconds; exit 0"
+    },
+    "lint": {
+      "path": "/tmp/zk-frontend-alignment-frozen-lint.txt",
+      "sha256": "b60802a2486a38abed82876ac6a1e311e4fc7c1c79b586671b867ae4dab4a448",
+      "exitCode": 0,
+      "result": "zero warnings; exit 0"
+    },
+    "build": {
+      "path": "/tmp/zk-frontend-alignment-frozen-build.txt",
+      "sha256": "e9f23082510ab2f44fbf79672b75ba3bcfd998156bada6648dd6f59e2033f937",
+      "exitCode": 0,
+      "result": "13.34 seconds; exit 0; existing large chunk warning"
+    },
+    "pythonFullCoverage": {
+      "path": "/tmp/zk-python-alignment-final-coverage.txt",
+      "sha256": "c36a07d7903e2ce700bbca684922e0081e01e62d1493faeb860e13be9ffc00ca",
+      "exitCode": 0,
+      "passed": 335,
+      "coveragePercent": 75.83
+    },
+    "sourceTreeIdentity": {
+      "sourceSha256": "a3bb63bff6ef933a0648f2bc2299abe34aecaf18d42a63b8e66be55f94cea71c",
+      "files": 502,
+      "beforeEqualsAfter": true,
+      "algorithm": "SHA256 of sorted src file relative paths, NUL delimiter, then file bytes"
+    },
+    "limitations": [
+      "Prior targetCurrent path fingerprints and older binary identities remain historical snapshots; no blind refresh.",
+      "The final six-case product and three-case analysis suites test the listed real local Rust/Python/browser chains; they do not claim exhaustive third-party renderer internals or every dynamic language behavior.",
+      "Other workstreams and credential-dependent live model validations remain governed by full-alignment-gates.json; this domain does not infer their results."
+    ],
+    "releaseBinary": {
+      "path": "/Users/guoqingtao/Desktop/dev/code/zkcode/target/release/zk-server",
+      "version": "zk-server 0.1.0 (git 08cbdc45e12cc28f3f13aaafbd0b056b980dfb1a, built 1791332366, schema 2, ws 4)",
+      "beforeSha256": "cca0d0a64e2ab3bad9bf95fdc22fcb02f278d89c8b9e78286d4c0960a89e3251",
+      "afterSha256": "cca0d0a64e2ab3bad9bf95fdc22fcb02f278d89c8b9e78286d4c0960a89e3251",
+      "unchanged": true
+    },
+    "releaseBrowser": {
+      "production": {
+        "log": "/tmp/zk-post-adapter-production-e2e.txt",
+        "sha256": "cfbe74f16458554432cc4b94cd39d982c7a8ff41883c79b6733baa8920fdad7f",
+        "passed": 6,
+        "seconds": 29.1,
+        "exitCode": 0
+      },
+      "analysis": {
+        "log": "/tmp/zk-post-adapter-analysis-e2e.txt",
+        "sha256": "b52821d6e8d9eecbe3336bf29100912a0e8af0cfb43a4ac9a1dbe45eccd7728e",
+        "passed": 3,
+        "seconds": 30.6,
+        "exitCode": 0
+      }
+    },
+    "releaseBrowserPreviousFailure": {
+      "log": "/tmp/zk-alignment-release-production-e2e.txt",
+      "result": "5 passed; 1 failed due to obsolete Qwen-low fixture assumption",
+      "resolution": "Only fixture changed: Qwen unsupported rejected explicitly; supported DeepSeek low reaches loopback wire with thinking enabled, persists, resets auto, and remains isolated from new sessions. No production or release binary change."
+    },
+    "runtimeAdapterRevalidation": {
+      "status": "passed",
+      "metadata": "/tmp/zk-post-adapter-browser-binary-evidence.json",
+      "fixtureChanged": false,
+      "result": "6 production and 3 analysis cases passed; before/after release hash unchanged"
+    },
+    "releaseBrowserHistory": [
+      {
+        "binary": {
+          "path": "/Users/guoqingtao/Desktop/dev/code/zkcode/target/release/zk-server",
+          "version": "zk-server 0.1.0 (git 08cbdc45e12cc28f3f13aaafbd0b056b980dfb1a, built 1791332366, schema 2, ws 4)",
+          "beforeSha256": "822adfed182e047c0cc31ac4b9e1c41a14d474f19d249f331f27aa83a92a6315",
+          "afterSha256": "822adfed182e047c0cc31ac4b9e1c41a14d474f19d249f331f27aa83a92a6315",
+          "unchanged": true
+        },
+        "browser": {
+          "production": {
+            "log": "/tmp/zk-alignment-release-production-e2e-final.txt",
+            "sha256": "ce95505eec2f4b4dc8ba5918e93a016b03b73cd7ca3e70afdb93fc2c1ad150ba",
+            "passed": 6,
+            "seconds": 24.8,
+            "exitCode": 0
+          },
+          "analysis": {
+            "log": "/tmp/zk-alignment-release-analysis-e2e.txt",
+            "sha256": "470364627f8867e43dbbd0fa59b74217c10928963ea86d26ce275e68e6fe65af",
+            "passed": 3,
+            "seconds": 58.0,
+            "exitCode": 0
+          }
+        },
+        "reason": "Passed before subsequent Rust provider-thinking adapter fixes; superseded by complete suites on cca0 release."
+      }
+    ]
+  },
+  "baselineSkipCurrentState": {
+    "previous": 16,
+    "currentEmptySkippedTests": 0,
+    "note": "Removed empty placeholders were replaced by meaningful executed coverage or explicitly classified as obsolete unconsumed state. Original descriptions remain as historical inventory."
+  },
+  "fullAlignmentVerificationHistory": [
+    {
+      "status": "latest_frontend_production_tree_verified_backend_release_e2e_pending",
+      "details": "docs/migration/full-alignment-frontend.md",
+      "sourceCommit": "053adf9071dc1996aa1ebfa30c0a23d587ffad5c",
+      "unitFull": {
+        "log": "/tmp/zk-browser-replay-final-tests.txt",
+        "sha256": "583d525fd012761f0b206699d89cb6220b65242cd95e06835aa6460aedcb0aa2",
+        "result": "155 files, 1279 passed, 7 legacy empty placeholders skipped; exit 0"
+      },
+      "testOnlyFollowup": {
+        "log": "/tmp/zk-coordinator-final-tests.txt",
+        "sha256": "dedcd04c7e7c6c1570bd2f658ee503f144fd1d388e545620ad43849ca5f5cccf",
+        "result": "10 passed; includes three new state-flow assertions; removes seven empty placeholders after assessing replacement or lack of a production consumer"
+      },
+      "limitations": [
+        "The two unit runs use the same production source tree. Do not describe 1282 as the result of one full-suite invocation.",
+        "Prior evidence, binary identities and targetCurrent path fingerprints belong to their recorded earlier snapshot; they are not refreshed blindly for this implementation round.",
+        "Final six-case production and two-case analysis E2E must use the new stable Rust binary with before/after identity checks."
+      ]
+    }
+  ]
+}

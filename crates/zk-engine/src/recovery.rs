@@ -63,6 +63,8 @@ pub fn is_context_limit_error(status: Option<u16>, message: &str) -> bool {
         || lower.contains("context length")
         || lower.contains("maximum context")
         || lower.contains("token limit")
+        || lower.contains("context_budget_exceeded")
+        || lower.contains("payload_too_large")
 }
 
 /// 判断错误是否与媒体相关（逐条对照旧 `QueryEngine.isMediaRelatedError`）。
@@ -124,9 +126,27 @@ pub enum RecoveryOutcome {
     Exhausted,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum LocalRecoveryKind {
+    Image,
+    Payload,
+}
+
 /// 跨轮次持久化的恢复簿记（对照旧 `QueryLoopState` 的三个 413 相关字段）。
 #[derive(Debug, Default, Clone)]
 pub struct RecoveryState {
+    /// Tool-summary compression is assessed at the next physical request too.
+    pub(crate) pending_compaction_before_tokens: Option<u32>,
+    /// Successful provider turns confirm only tool image sources actually dispatched.
+    pub(crate) confirmed_image_sources: std::collections::HashSet<String>,
+    /// At most one local retry per cause, independent of remote recovery stages.
+    local_attempts: std::collections::HashSet<LocalRecoveryKind>,
+    /// A notice is durably published once per Run and reason.
+    pub(crate) image_notice_keys: std::collections::HashSet<String>,
+    /// The pre-request compaction and its recovery retries share one summary attempt.
+    pub(crate) summary_attempt: Arc<std::sync::atomic::AtomicBool>,
+    /// One supplementary answer per continuous empty/placeholder response streak.
+    pub final_answer_recovery_attempted: bool,
     /// 上一次状态转移原因（防止 Phase 1 重复触发，旧 `lastTransitionReason`）。
     pub last_transition_reason: Option<String>,
     /// 是否已尝试过反应式压缩（旧 `hasAttemptedReactiveCompact` 单次 guard）。
@@ -155,6 +175,38 @@ impl Default for ContextRecovery {
 }
 
 impl ContextRecovery {
+    /// Prepare a request copy, with one local history compaction before an image budget failure.
+    pub(crate) async fn prepare_images(
+        &self,
+        request: &mut zk_llm::ChatRequest,
+        state: &mut RecoveryState,
+        execution: &SummaryExecution,
+    ) -> Result<bool, String> {
+        suppress_confirmed_tool_images(&mut request.messages, &state.confirmed_image_sources);
+        let before = image_count(&request.messages);
+        if let Err(error) = crate::context::image_budget::enforce_request(request).await {
+            if !error.contains("IMAGE_BUDGET_EXCEEDED")
+                || state.local_attempts.contains(&LocalRecoveryKind::Image)
+            {
+                return Err(error);
+            }
+            state.local_attempts.insert(LocalRecoveryKind::Image);
+            let compacted = compact_messages_scoped(
+                &request.messages,
+                &request.model,
+                crate::context::context_window_for(&request.model),
+                true,
+                self.summarizer.as_ref(),
+                Some(execution),
+            )
+            .map_err(|_| error)?;
+            request.messages = compacted.messages;
+            crate::normalize::normalize(&mut request.messages);
+            crate::context::image_budget::enforce_request(request).await?;
+        }
+        Ok(image_count(&request.messages) < before)
+    }
+
     /// 构造使用 [`no_summarizer`]（确定性降级）的恢复器。
     #[must_use]
     pub fn new() -> Self {
@@ -199,6 +251,36 @@ impl ContextRecovery {
     ) -> RecoveryOutcome {
         let before_tokens = estimate_tokens(messages, model);
 
+        if error_message.contains("CONTEXT_BUDGET_EXCEEDED")
+            || error_message.contains("PAYLOAD_TOO_LARGE")
+        {
+            if state.local_attempts.contains(&LocalRecoveryKind::Payload) {
+                state.recovery_exhausted = true;
+                return RecoveryOutcome::Exhausted;
+            }
+            state.local_attempts.insert(LocalRecoveryKind::Payload);
+            return compact_messages_scoped(
+                messages,
+                model,
+                context_window,
+                true,
+                self.summarizer.as_ref(),
+                execution,
+            )
+            .map_or_else(
+                |_| {
+                    state.recovery_exhausted = true;
+                    RecoveryOutcome::Exhausted
+                },
+                |result| RecoveryOutcome::Recovered {
+                    messages: result.messages,
+                    phase: RecoveryPhase::ReactiveCompact,
+                    before_tokens: result.before_tokens,
+                    after_tokens: result.after_tokens,
+                },
+            );
+        }
+
         // Phase 1: CollapseDrain（半窗口目标；防重复守卫）
         if state.last_transition_reason.as_deref() != Some("collapse_drain_retry")
             && let Ok(result) = compact_messages_scoped(
@@ -242,7 +324,11 @@ impl ContextRecovery {
 
         // Phase 3: MediaRecovery（仅媒体相关错误）
         if is_media_related_error(error_message)
-            && let Some(stripped) = strip_media_payloads(messages)
+            && let Some(stripped) = if execution.is_some() {
+                strip_transient_media(messages)
+            } else {
+                strip_media_payloads(messages)
+            }
         {
             let after_tokens = estimate_tokens(&stripped, model);
             state.last_transition_reason = Some("media_strip_retry".to_owned());
@@ -262,7 +348,79 @@ impl ContextRecovery {
     }
 }
 
+fn image_count(messages: &[ChatMessage]) -> usize {
+    messages.iter().map(|message| message.images.len()).sum()
+}
+
+/// Confirm only the last physical attempt's actual image projection, after a complete successful turn.
+pub(crate) fn confirm_request_images(request: &mut zk_llm::ChatRequest, state: &mut RecoveryState) {
+    if let Ok(delivered) = request.delivered_image_sources.lock() {
+        state
+            .confirmed_image_sources
+            .extend(delivered.iter().cloned());
+    }
+    suppress_confirmed_tool_images(&mut request.messages, &state.confirmed_image_sources);
+}
+
+fn suppress_confirmed_tool_images(
+    messages: &mut [ChatMessage],
+    confirmed: &std::collections::HashSet<String>,
+) {
+    for message in messages {
+        let Some(metadata) = message
+            .metadata
+            .as_mut()
+            .and_then(serde_json::Value::as_object_mut)
+        else {
+            continue;
+        };
+        if metadata
+            .get("syntheticToolImages")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+        {
+            continue;
+        }
+        let Some(digests) = metadata
+            .get_mut("imageSourceDigests")
+            .and_then(serde_json::Value::as_array_mut)
+        else {
+            continue;
+        };
+        for index in (0..message.images.len()).rev() {
+            if digests
+                .get(index)
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|source| confirmed.contains(source))
+            {
+                message.images.remove(index);
+                digests.remove(index);
+            }
+        }
+    }
+}
+
 // ============ 媒体载荷剥离（Phase 3 载体适配） ============
+
+fn strip_transient_media(messages: &[ChatMessage]) -> Option<Vec<ChatMessage>> {
+    let mut result = messages.to_vec();
+    let mut changed = false;
+    for message in &mut result {
+        if !message.images.is_empty()
+            && message
+                .metadata
+                .as_ref()
+                .is_some_and(|meta| meta["syntheticToolImages"] == true)
+        {
+            message.images.clear();
+            message
+                .content
+                .push_str("\n[Tool image omitted for this request after provider media rejection]");
+            changed = true;
+        }
+    }
+    changed.then_some(result)
+}
 
 /// 剥离所有 [`Role::User`] 消息中的 `data:<mime>;base64,<payload>` 载荷；正文全空时
 /// 替换为 [`MEDIA_PLACEHOLDER`]。无任何改动返回 `None`（对照旧 `tryStripMediaBlocks`
@@ -566,7 +724,7 @@ mod tests {
         // 构造足够长、含可压缩中段的历史。
         let mut msgs = vec![ChatMessage::system("system rules")];
         for i in 0..40 {
-            msgs.push(user(&format!("user turn {i}: {}", "x".repeat(400))));
+            msgs.push(user(&format!("user turn {i}: {}", "x".repeat(40))));
             msgs.push(assistant(&format!(
                 "assistant turn {i}: {}",
                 "y".repeat(400)
@@ -604,6 +762,7 @@ mod tests {
     fn recover_phase2_reactive_when_drain_already_done() {
         let recovery = ContextRecovery::new();
         let mut state = RecoveryState {
+            final_answer_recovery_attempted: false,
             last_transition_reason: Some("collapse_drain_retry".to_owned()),
             ..RecoveryState::default()
         };
@@ -627,9 +786,11 @@ mod tests {
         let recovery = ContextRecovery::new();
         // 短历史 + 已尝试 reactive → Phase1/2 均无功，仅媒体剥离可用。
         let mut state = RecoveryState {
+            final_answer_recovery_attempted: false,
             last_transition_reason: Some("collapse_drain_retry".to_owned()),
             has_attempted_reactive: true,
             recovery_exhausted: false,
+            ..RecoveryState::default()
         };
         let msgs = vec![
             ChatMessage::system("rules"),
@@ -656,9 +817,11 @@ mod tests {
     fn recover_exhausts_when_no_strategy_applies() {
         let recovery = ContextRecovery::new();
         let mut state = RecoveryState {
+            final_answer_recovery_attempted: false,
             last_transition_reason: Some("collapse_drain_retry".to_owned()),
             has_attempted_reactive: true,
             recovery_exhausted: false,
+            ..RecoveryState::default()
         };
         // 非媒体错误 + 无可剥离媒体 → 耗尽。
         let msgs = vec![ChatMessage::system("rules"), user("plain text only")];
@@ -804,5 +967,30 @@ mod tests {
         let recovery = ContextRecovery::default();
         let mut state = RecoveryState::default();
         let _ = recovery.recover(&[user("x")], "gpt-4o", 8192, "", &mut state);
+    }
+
+    #[test]
+    fn local_payload_recovery_is_bounded_once_even_when_rebuild_cannot_fit() {
+        let recovery = ContextRecovery::default();
+        let mut state = RecoveryState::default();
+        let messages = vec![user("mandatory original text")];
+        let _ = recovery.recover(
+            &messages,
+            "gpt-4o",
+            8192,
+            "CONTEXT_BUDGET_EXCEEDED",
+            &mut state,
+        );
+        assert!(
+            state
+                .local_attempts
+                .contains(&super::LocalRecoveryKind::Payload)
+        );
+        assert!(matches!(
+            recovery.recover(&messages, "gpt-4o", 8192, "PAYLOAD_TOO_LARGE", &mut state),
+            RecoveryOutcome::Exhausted
+        ));
+        assert!(state.recovery_exhausted);
+        assert_eq!(messages[0].content, "mandatory original text");
     }
 }

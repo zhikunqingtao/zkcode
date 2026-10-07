@@ -15,7 +15,7 @@ use std::sync::Arc;
 use futures::future::BoxFuture;
 use serde_json::json;
 
-use crate::atomic::{ExpectedOldState, WriteEffect, write_checked_authorized};
+use crate::atomic::{ExpectedOldState, WriteEffect, write_checked_bytes_authorized};
 use crate::file_state::{self, session_key};
 use crate::input::{failure, required_str, resolve_path};
 use crate::snapshot::{MAX_SNAPSHOT_BYTES, SnapshotRequest, SnapshotSink};
@@ -55,14 +55,27 @@ impl WriteFileTool {
 
     /// 写前快照（旧 `trackAppliedEdit` 逐条对齐：无旧内容 / 超 10 MiB /
     /// 无 `session_id` → 跳过；落库失败仅告警）。
-    async fn capture(&self, ctx: &ToolContext, path: &str, previous: Option<&str>) -> bool {
+    async fn capture(
+        &self,
+        ctx: &ToolContext,
+        path: &str,
+        previous: Option<&str>,
+        original_bytes: Option<&[u8]>,
+    ) -> bool {
         let (Some(sink), Some(session_id), Some(content)) =
             (self.sink.as_ref(), ctx.session_id(), previous)
         else {
             return false;
         };
-        if content.len() > MAX_SNAPSHOT_BYTES {
-            tracing::warn!(path, bytes = content.len(), "snapshot skipped: too large");
+        if content.len() > MAX_SNAPSHOT_BYTES
+            || original_bytes.is_some_and(|bytes| bytes.len() > MAX_SNAPSHOT_BYTES)
+        {
+            tracing::warn!(
+                tool = "Write",
+                code = "HISTORY_SNAPSHOT_TOO_LARGE",
+                bytes = content.len(),
+                "snapshot skipped"
+            );
             return false;
         }
         let request = SnapshotRequest {
@@ -70,14 +83,18 @@ impl WriteFileTool {
             message_id: ctx.tool_use_id().map(str::to_owned),
             file_path: path.to_owned(),
             content: content.to_owned(),
+            original_bytes: original_bytes.map(<[u8]>::to_vec),
             operation: SNAPSHOT_OPERATION.to_owned(),
         };
-        match sink.capture(request).await {
-            Ok(()) => true,
-            Err(error) => {
-                tracing::warn!(path, %error, "snapshot persist failed");
-                false
-            }
+        if sink.capture(request).await.is_ok() {
+            true
+        } else {
+            tracing::warn!(
+                tool = "Write",
+                code = "HISTORY_SNAPSHOT_PERSIST_FAILED",
+                "snapshot persist failed"
+            );
+            false
         }
     }
 }
@@ -139,51 +156,37 @@ impl WriteFileTool {
         };
         let path = resolve_path(raw_path, &ctx);
         let display = path.display().to_string();
-        let metadata = match tokio::fs::symlink_metadata(&path).await {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                return failure(
-                    "FILE_WRITE_SYMLINK_FORBIDDEN",
-                    format!("refusing to overwrite symbolic link: {display}"),
-                );
-            }
-            Ok(metadata) => Some(metadata),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => {
-                return failure("FILE_WRITE_IO_FAILED", format!("{display}: {error}"));
-            }
+        let metadata = match write_target_metadata(&path, &display).await {
+            Ok(metadata) => metadata,
+            Err(output) => return output,
         };
-        if metadata.as_ref().is_some_and(std::fs::Metadata::is_dir) {
-            return failure(
-                "FILE_WRITE_IO_FAILED",
-                format!("{display} is an existing directory"),
-            );
-        }
         let is_create = metadata.is_none();
         let session = session_key(ctx.session_id());
-        let (previous, expected) = if is_create {
-            (None, ExpectedOldState::Absent)
+        let format = if is_create {
+            crate::text_encoding::TextFormat::default()
         } else {
-            let store = file_state::global();
-            let Some(expected_hash) = store.read_hash(session, &display) else {
-                return failure(
-                    "FILE_READ_REQUIRED",
-                    "请先使用 Read 工具完整读取文件内容后再覆盖",
-                );
-            };
-            if store.is_stale(session, &display) {
-                return failure("FILE_READ_STATE_STALE", "文件已被外部修改，请重新 Read");
-            }
-            let previous = match tokio::fs::read(&path).await {
-                Ok(bytes) => Some(String::from_utf8_lossy(&bytes).into_owned()),
-                Err(error) => {
-                    return failure("FILE_WRITE_IO_FAILED", format!("{display}: {error}"));
-                }
-            };
-            (previous, ExpectedOldState::sha256(&expected_hash))
+            file_state::global().read_text_format(session, &display)
         };
-
+        let (previous, original_bytes, expected) = if is_create {
+            (None, None, ExpectedOldState::Absent)
+        } else {
+            match read_write_target(&path, &display, session, format).await {
+                Ok((text, bytes, expected)) => (Some(text), bytes, expected),
+                Err(output) => return output,
+            }
+        };
+        let encoded = match format.encode(content) {
+            Ok(encoded) => encoded,
+            Err(code) => {
+                return failure(
+                    code,
+                    "New text cannot be represented in the file's observed encoding",
+                );
+            }
+        };
         let outcome =
-            write_checked_authorized(&path, content, &expected, ctx.authorized_write_path()).await;
+            write_checked_bytes_authorized(&path, &encoded, &expected, ctx.authorized_write_path())
+                .await;
         if !outcome.success {
             let reason = outcome.error.as_deref().unwrap_or("ATOMIC_WRITE_FAILED");
             let code = if reason.contains("CONFLICT") {
@@ -195,7 +198,14 @@ impl WriteFileTool {
             };
             return failure(code, format!("{display}: {reason}"));
         }
-        let snapshot = self.capture(&ctx, &display, previous.as_deref()).await;
+        let snapshot = self
+            .capture(
+                &ctx,
+                &display,
+                previous.as_deref(),
+                original_bytes.as_deref(),
+            )
+            .await;
         // 已读台账失效（对照旧 post-commit `cache.markModified(filePath)`，
         // 位于 `trackAppliedEdit` 之后、返回之前）。
         file_state::global().mark_modified(session_key(ctx.session_id()), &display);
@@ -205,18 +215,22 @@ impl WriteFileTool {
             &path,
             operation,
             outcome.new_hash.as_deref(),
-            content.len(),
+            encoded.len(),
         )
         .await;
         if artifact.is_none() {
-            tracing::error!(path = %path.display(), "applied Write could not produce an artifact receipt");
+            tracing::error!(
+                tool = "Write",
+                code = "FILE_ARTIFACT_RECEIPT_UNAVAILABLE",
+                "applied file operation could not produce an artifact receipt"
+            );
         }
         let mut output = ToolOutput::ok(format!("{kind}: {display}"));
         output.metadata = Some(json!({
             "structuredResult": {
                 "filePath": display,
                 "type": kind,
-                "bytesWritten": content.len(),
+                "bytesWritten": encoded.len(),
                 "snapshot": snapshot,
                 "sealedHash": outcome.new_hash,
                 "artifact": artifact,
@@ -224,6 +238,72 @@ impl WriteFileTool {
         }));
         output
     }
+}
+
+async fn write_target_metadata(
+    path: &std::path::Path,
+    display: &str,
+) -> Result<Option<std::fs::Metadata>, ToolOutput> {
+    match tokio::fs::symlink_metadata(path).await {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(failure(
+            "FILE_WRITE_SYMLINK_FORBIDDEN",
+            format!("refusing to overwrite symbolic link: {display}"),
+        )),
+        Ok(metadata) if metadata.is_dir() => Err(failure(
+            "FILE_WRITE_IO_FAILED",
+            format!("{display} is an existing directory"),
+        )),
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(failure(
+            "FILE_WRITE_IO_FAILED",
+            format!("{display}: {error}"),
+        )),
+    }
+}
+
+async fn read_write_target(
+    path: &std::path::Path,
+    display: &str,
+    session: &str,
+    format: crate::text_encoding::TextFormat,
+) -> Result<(String, Option<Vec<u8>>, ExpectedOldState), ToolOutput> {
+    let store = file_state::global();
+    let expected_hash = store.read_hash(session, display).ok_or_else(|| {
+        failure(
+            "FILE_READ_REQUIRED",
+            "请先使用 Read 工具完整读取文件内容后再覆盖",
+        )
+    })?;
+    if store.is_stale(session, display) {
+        return Err(failure(
+            "FILE_READ_STATE_STALE",
+            "文件已被外部修改，请重新 Read",
+        ));
+    }
+    let bytes = tokio::fs::read(path)
+        .await
+        .map_err(|error| failure("FILE_WRITE_IO_FAILED", format!("{display}: {error}")))?;
+    if crate::atomic::sha256_hex(&bytes) != expected_hash {
+        return Err(failure(
+            "FILE_VERSION_CONFLICT",
+            "File changed since the last complete Read",
+        ));
+    }
+    let decoded = crate::text_encoding::decode(&bytes, Some(format.encoding.name()))
+        .ok()
+        .filter(|decoded| decoded.reversible && decoded.format == format)
+        .ok_or_else(|| {
+            failure(
+                "FILE_ENCODING_NOT_REVERSIBLE",
+                "Re-read using the actual file encoding before writing",
+            )
+        })?;
+    Ok((
+        decoded.text,
+        (format != crate::text_encoding::TextFormat::default()).then_some(bytes),
+        ExpectedOldState::sha256(&expected_hash),
+    ))
 }
 
 #[cfg(test)]

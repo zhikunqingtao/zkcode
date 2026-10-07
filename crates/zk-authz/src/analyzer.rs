@@ -68,7 +68,7 @@ pub const CONTROL: [&str; 17] = [
 /// 旧源 `VERIFY_CONTROL`（L40）。
 pub const VERIFY_CONTROL: [&str; 2] = ["VerifyPlanExecution", "VerifyJourney"];
 /// 旧源 `SAFE_INTERNAL`（L41-43）。
-pub const SAFE_INTERNAL: [&str; 15] = [
+pub const SAFE_INTERNAL: [&str; 16] = [
     "TodoWrite",
     "TaskList",
     "TaskGet",
@@ -84,6 +84,8 @@ pub const SAFE_INTERNAL: [&str; 15] = [
     "CronList",
     "ListMcpResources",
     "CodeIntel",
+    // 只读封存资料；工具自身在每次读取时校验目标会话和 Task 根归属。
+    "HandoffRead",
 ];
 
 /// 旧源 `redactCommand` 的正则（`OperationAnalyzerRegistry.java:598-601`）。
@@ -94,6 +96,8 @@ static SECRET_ASSIGNMENT: LazyLock<Regex> = LazyLock::new(|| {
 /// 分析器身份（旧源 6 个 `OperationAnalyzer` 实例的判别式）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnalyzerKind {
+    /// Host-only exact Hook identity.
+    Hook,
     /// `bash-v2`
     Bash,
     /// `file-v1`
@@ -113,6 +117,7 @@ impl AnalyzerKind {
     #[must_use]
     pub const fn id(self) -> &'static str {
         match self {
+            Self::Hook => "hook-v1",
             Self::Bash => "bash-v2",
             Self::File => "file-v1",
             Self::Network => "network-v1",
@@ -179,6 +184,9 @@ impl OperationAnalyzerRegistry {
     /// 旧源 `analyzerFor(Tool)`（`OperationAnalyzerRegistry.java:81-95`）。
     #[must_use]
     pub fn analyzer_for(&self, tool: &dyn ToolFacts) -> AnalyzerKind {
+        if tool.host_hook_facts().is_some() {
+            return AnalyzerKind::Hook;
+        }
         if tool.is_mcp() {
             return AnalyzerKind::Mcp;
         }
@@ -375,6 +383,7 @@ impl OperationAnalyzerRegistry {
         subject: &AuthorizationSubject,
     ) -> AuthzResult<OperationDescriptor> {
         match kind {
+            AnalyzerKind::Hook => self.analyze_hook(tool, frozen.input_hash(), subject),
             AnalyzerKind::Bash => {
                 self.analyze_bash(tool, frozen.input_hash(), input, context, subject)
             }
@@ -411,6 +420,13 @@ impl OperationAnalyzerRegistry {
         subject: &AuthorizationSubject,
     ) -> AuthzResult<()> {
         match kind {
+            AnalyzerKind::Hook => {
+                let current = self.analyze_hook(tool, &descriptor.input_hash, subject)?;
+                if current.operation_hash != descriptor.operation_hash {
+                    return Err(final_recheck_denied("Hook execution identity changed"));
+                }
+                Ok(())
+            }
             AnalyzerKind::Bash => self.recheck_bash(tool, descriptor, input, context, subject),
             AnalyzerKind::File => self.recheck_file(tool, descriptor, input, context, subject),
             AnalyzerKind::ArtifactPublish => {
@@ -561,7 +577,7 @@ fn relative_resource(kind: &str, target: &Path, subject: &AuthorizationSubject) 
 /// L221-244 逐字重复的那一段）。
 struct BashFacts {
     command: String,
-    cwd: PathBuf,
+    resources: Vec<ResourceRef>,
     inherited: Vec<String>,
     risk: RiskClass,
     effects: Vec<EffectClass>,
@@ -593,6 +609,91 @@ fn has_nul(value: &str) -> bool {
 }
 
 impl OperationAnalyzerRegistry {
+    fn analyze_hook(
+        &self,
+        tool: &dyn ToolFacts,
+        input_hash: &str,
+        subject: &AuthorizationSubject,
+    ) -> AuthzResult<OperationDescriptor> {
+        let facts = tool.host_hook_facts().ok_or_else(|| {
+            AuthzError::new(
+                "HOOK_HOST_IDENTITY_REQUIRED",
+                "Hook identity requires a host adapter",
+            )
+        })?;
+        let root = facts["workingRoot"].as_str().ok_or_else(|| {
+            AuthzError::new("HOOK_ROOT_UNAVAILABLE", "Hook working root is unavailable")
+        })?;
+        let root = Path::new(root).canonicalize().map_err(|_| {
+            AuthzError::new("HOOK_ROOT_UNAVAILABLE", "Hook working root is unavailable")
+        })?;
+        if root.to_string_lossy() != facts["workingRoot"].as_str().unwrap_or_default() {
+            return Err(final_recheck_denied("Hook working root changed"));
+        }
+        let declaration = &facts["declaration"];
+        let command = declaration["command"].as_str();
+        let url = declaration["url"].as_str();
+        let (effects, risk, target) = if let Some(url) = url {
+            (
+                vec![EffectClass::Network],
+                RiskClass::Guarded,
+                redact_endpoint(url),
+            )
+        } else if let Some(command) = command {
+            let security = self.bash_security.as_ref().ok_or_else(|| {
+                AuthzError::new(
+                    "BASH_SECURITY_ANALYZER_UNAVAILABLE",
+                    "Shell security analyzer is unavailable",
+                )
+            })?;
+            if let BashParseOutcome::BlacklistDeny { reason } =
+                security.parse_for_security(command, &root, &subject.authorization_root)
+            {
+                return Err(AuthzError::new("COMMAND_ABSOLUTELY_DENIED", reason));
+            }
+            let risk = if tool.is_destructive(&serde_json::json!({"command": command})) {
+                RiskClass::High
+            } else {
+                RiskClass::Guarded
+            };
+            (
+                vec![
+                    EffectClass::Process,
+                    EffectClass::WriteResource,
+                    EffectClass::Network,
+                ],
+                risk,
+                redact_command(command),
+            )
+        } else {
+            return Err(AuthzError::new(
+                "HOOK_DECLARATION_INVALID",
+                "Hook has no execution target",
+            ));
+        };
+        let summary = format!(
+            "Hook {} [{}]\nWorking root: {}\nConfiguration: {}\n{}",
+            declaration["name"].as_str().unwrap_or("unnamed"),
+            declaration["event"].as_str().unwrap_or("unknown"),
+            root.display(),
+            facts["source"].as_str().unwrap_or("unknown"),
+            self.sensitive.filter(&target)
+        );
+        Ok(Self::descriptor(
+            "hook-v1",
+            tool.name(),
+            input_hash,
+            "execute-hook",
+            &effects,
+            &[cwd_resource(&root, subject)],
+            &[],
+            &[],
+            risk,
+            &summary,
+            facts,
+        ))
+    }
+
     // ---------- BashAnalyzer（旧源 L186-265）----------
 
     /// 旧源 L189-214 / L221-244：解析 → 绝对拒绝 → 环境引用 → 风险 → 副作用 →
@@ -620,9 +721,9 @@ impl OperationAnalyzerRegistry {
                 return Err(AuthzError::new("COMMAND_ABSOLUTELY_DENIED", reason));
             }
             // 旧源 L196-198：解析过于复杂只记日志并回落 GUARDED，不拒绝。
-            BashParseOutcome::TooComplex { reason } => {
+            BashParseOutcome::TooComplex { .. } => {
                 tracing::debug!(
-                    reason = %reason,
+                    code = "BASH_PARSE_COMPLEXITY_FALLBACK",
                     "Shell parse too complex for command, defaulting to GUARDED"
                 );
             }
@@ -630,7 +731,11 @@ impl OperationAnalyzerRegistry {
         }
         let mut inherited = bash_security.inherited_environment_references(&command);
         inherited.sort();
-        let risk = if tool.is_destructive(input) {
+        let (declared_resources, declared_sensitive) =
+            self.declared_output_facts(tool, input, &cwd, context, subject)?;
+        let mut resources = vec![cwd_resource(&cwd, subject)];
+        resources.extend(declared_resources);
+        let risk = if tool.is_destructive(input) || declared_sensitive {
             RiskClass::High
         } else if tool.is_read_only(input) {
             RiskClass::Safe
@@ -648,18 +753,94 @@ impl OperationAnalyzerRegistry {
             "isBackground".into(),
             input_bool(input, "is_background", false).into(),
         );
+        if let Some(declarations) = input.get("declared_outputs") {
+            authorization_input.insert("declaredOutputs".into(), declarations.clone());
+        }
         authorization_input.insert(
             "dynamicEnvironmentHash".into(),
             self.dynamic_environment_hash(&inherited).into(),
         );
         Ok(BashFacts {
             command,
-            cwd,
+            resources,
             inherited,
             risk,
             effects,
             authorization_input: Value::Object(authorization_input),
         })
+    }
+
+    /// Freeze declared output resources into the same authorization decision as the command.
+    fn declared_output_facts(
+        &self,
+        tool: &dyn ToolFacts,
+        input: &Value,
+        cwd: &Path,
+        context: &ToolUseContext,
+        subject: &AuthorizationSubject,
+    ) -> AuthzResult<(Vec<ResourceRef>, bool)> {
+        let mut resources = Vec::new();
+        let mut declared_sensitive = false;
+        if let Some(declarations) = input.get("declared_outputs") {
+            let declarations = declarations
+                .as_array()
+                .filter(|items| items.len() <= 32)
+                .ok_or_else(|| {
+                    AuthzError::new(
+                        "BASH_OUTPUT_DECLARATION_INVALID",
+                        "declared_outputs must contain at most 32 files",
+                    )
+                })?;
+            if !declarations.is_empty() && input_bool(input, "is_background", false) {
+                return Err(AuthzError::new(
+                    "BASH_BACKGROUND_OUTPUTS_UNSUPPORTED",
+                    "Background commands cannot declare outputs",
+                ));
+            }
+            let mut paths = std::collections::BTreeSet::new();
+            for declaration in declarations {
+                let raw = declaration
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .filter(|path| !path.trim().is_empty())
+                    .ok_or_else(|| {
+                        AuthzError::new(
+                            "BASH_OUTPUT_DECLARATION_INVALID",
+                            "Every output requires a path",
+                        )
+                    })?;
+                let operation = declaration
+                    .get("operation")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                if !matches!(
+                    operation.as_str(),
+                    "created" | "create" | "modified" | "update" | "deleted" | "delete"
+                ) {
+                    return Err(AuthzError::new(
+                        "BASH_OUTPUT_OPERATION_INVALID",
+                        "Output operation is invalid",
+                    ));
+                }
+                let path = Path::new(raw);
+                let path = if path.is_absolute() {
+                    path.to_owned()
+                } else {
+                    cwd.join(path)
+                };
+                let facts = self.inspect(tool, true, &path.to_string_lossy(), context, subject)?;
+                if !paths.insert(path) {
+                    return Err(AuthzError::new(
+                        "BASH_OUTPUT_PATH_INVALID",
+                        "Output paths must be unique",
+                    ));
+                }
+                declared_sensitive |= facts.sensitive;
+                resources.push(facts.resource);
+            }
+        }
+        Ok((resources, declared_sensitive))
     }
 
     /// 旧源 `BashAnalyzer#analyze`（L188-219）。
@@ -679,7 +860,7 @@ impl OperationAnalyzerRegistry {
             input_hash,
             "execute",
             &facts.effects,
-            &[cwd_resource(&facts.cwd, subject)],
+            &facts.resources,
             &facts.inherited,
             &[],
             facts.risk,
@@ -698,7 +879,7 @@ impl OperationAnalyzerRegistry {
         subject: &AuthorizationSubject,
     ) -> AuthzResult<()> {
         let facts = self.bash_facts(tool, input, context, subject)?;
-        let current_resources = vec![cwd_resource(&facts.cwd, subject)];
+        let current_resources = facts.resources.clone();
         // 旧源刻意复用「已批准」的 effects 与 summary，只让 risk / resources /
         // environment / authorizationInput 参与漂移检测。
         let current = Self::descriptor(
@@ -1168,7 +1349,8 @@ impl OperationAnalyzerRegistry {
         tool: &dyn ToolFacts,
         input_hash: &str,
     ) -> OperationDescriptor {
-        let safe = SAFE_INTERNAL.contains(&tool.name()) && !tool.is_mcp();
+        let safe = (SAFE_INTERNAL.contains(&tool.name()) || tool.is_safe_internal_projection())
+            && !tool.is_mcp();
         let effect = if safe {
             EffectClass::SafeInternal
         } else if CONTROL.contains(&tool.name()) || VERIFY_CONTROL.contains(&tool.name()) {

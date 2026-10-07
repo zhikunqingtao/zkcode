@@ -2,17 +2,27 @@
 Journey Run 端点 Pydantic 模型 — 用户旅程验证 DSL 请求/响应定义
 """
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from typing import List, Dict, Any, Optional
 
 
 class JourneyRunRequest(BaseModel):
     session_id: Optional[str] = None
+    ephemeral_content: bool = False
     base_url: str
     steps: List[Dict[str, Any]]
     record: Dict[str, bool] = {}
     viewport: Dict[str, int] = {"width": 1280, "height": 800}
     mode: str = "browser"  # "browser" 或 "http_api"
+    # Optional for existing callers. Java/Python normally share the host clock;
+    # an absolute deadline also rejects requests delayed beyond the caller budget.
+    deadline_epoch_ms: Optional[int] = None
+
+    @model_validator(mode="after")
+    def reject_ephemeral_recording(self):
+        if self.ephemeral_content and any(self.record.values()):
+            raise ValueError("EPHEMERAL_RECORDING_UNSUPPORTED")
+        return self
 
 
 class StepResultModel(BaseModel):
@@ -23,6 +33,9 @@ class StepResultModel(BaseModel):
     screenshot_base64: Optional[str] = None
     error: Optional[str] = None
     console_errors: List[str] = []
+    method: Optional[str] = None
+    warning: Optional[str] = None
+    screenshot_error: Optional[str] = None
 
 
 class JourneyRunResponse(BaseModel):

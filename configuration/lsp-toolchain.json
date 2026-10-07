@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "platform": "darwin",
+  "architecture": "arm64",
+  "artifacts": {
+    "node": {
+      "version": "22.23.3",
+      "url": "https://nodejs.org/dist/v22.23.3/node-v22.23.3-darwin-arm64.tar.gz",
+      "sha256": "23b25245dcfb9af7262f8ff142e9e2e0af025368117329e7a7458a51e5922f53",
+      "format": "tar.gz",
+      "stripRoot": true
+    },
+    "go": {
+      "version": "1.27.1",
+      "url": "https://dl.google.com/go/go1.27.1.darwin-arm64.tar.gz",
+      "sha256": "ee215d57e0ec269c60cc9ceca68e6bda321ba9ee5afe24f4b0988703c2d87d12",
+      "format": "tar.gz",
+      "stripRoot": true
+    },
+    "java": {
+      "version": "21.0.12.1+1",
+      "url": "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12.1%2B1/OpenJDK21U-jdk_aarch64_mac_hotspot_21.0.12.1_1.tar.gz",
+      "sha256": "3623232f33a9c3baadf304480b2535f9a3cba8a58d42ecbb438ba267315d9998",
+      "format": "tar.gz",
+      "stripRoot": true
+    },
+    "jdtls": {
+      "version": "1.61.0",
+      "url": "https://download.eclipse.org/jdtls/milestones/1.61.0/jdt-language-server-1.61.0-202609031315.tar.gz",
+      "sha256": "338e7e73d61836651ba2453919a0d34fa763eb4e7c03342092309bffb8934c64",
+      "format": "tar.gz",
+      "stripRoot": false
+    },
+    "rust-analyzer": {
+      "version": "2026-10-05",
+      "url": "https://github.com/rust-lang/rust-analyzer/releases/download/2026-10-05/rust-analyzer-aarch64-apple-darwin.gz",
+      "sha256": "64d3f6b8aacd94a93a03298d7988dfa0c747f8a4fcc539a4e59d9c9f920ca62f",
+      "format": "gz",
+      "executable": "rust-analyzer"
+    }
+  },
+  "gopls": {
+    "module": "golang.org/x/tools/gopls",
+    "version": "v0.23.0"
+  },
+  "rustCompiler": "1.97.1"
+}

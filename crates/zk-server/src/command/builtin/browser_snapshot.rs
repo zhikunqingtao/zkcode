@@ -37,6 +37,19 @@ impl Command for BrowserSnapshotCommand {
         ctx: &'a CommandContext,
     ) -> BoxFuture<'a, CommandResult> {
         Box::pin(async move {
+            match ctx.state.db.session_retention(&ctx.session_id).await {
+                Ok(zk_db::content::ContentRetention::Persistent) => {}
+                Ok(zk_db::content::ContentRetention::Ephemeral) => {
+                    return CommandResult::error(
+                        "EPHEMERAL_OPERATION_UNSUPPORTED: Use the Run-owned WebBrowser tool for temporary browser evidence",
+                    );
+                }
+                Err(_) => {
+                    return CommandResult::error(
+                        "BROWSER_SESSION_UNAVAILABLE: Session retention could not be confirmed",
+                    );
+                }
+            }
             let selector = if args.trim().is_empty() {
                 None
             } else {
@@ -103,7 +116,9 @@ mod tests {
 
     #[tokio::test]
     async fn returns_unavailable_message() {
-        let ctx = CommandContext::of("s-1", "/tmp", "kimi-k3", AppState::for_tests());
+        let state = AppState::for_tests();
+        let session = state.db.create_session("kimi-k3", "/tmp").await.unwrap();
+        let ctx = CommandContext::of(&session.id, "/tmp", "kimi-k3", state);
         let registry = CommandRegistry::with_builtin_commands();
         let command = registry
             .find_command("browser-snapshot")

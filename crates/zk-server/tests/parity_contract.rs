@@ -1,4 +1,4 @@
-//! WP-00 safety-freeze integration gates against the real Axum router.
+//! Readiness gates and managed-task query contracts against the real Axum router.
 
 mod common;
 
@@ -40,7 +40,7 @@ async fn unfinished_swarm_is_fail_closed() {
 }
 
 #[tokio::test]
-async fn unfinished_agent_and_worktree_tools_are_not_exposed() {
+async fn managed_task_queries_are_available_without_opening_agent_or_worktree_gates() {
     let mut router = app();
     let (status, _headers, body) = call(&mut router, local_get("/api/tools")).await;
     assert_eq!(status, StatusCode::OK);
@@ -52,15 +52,13 @@ async fn unfinished_agent_and_worktree_tools_are_not_exposed() {
         .iter()
         .map(|item| item["name"].as_str().expect("tool name"))
         .collect();
-    for frozen in [
-        "Agent",
-        "TaskCreate",
-        "TaskGet",
-        "TaskList",
-        "TaskStop",
-        "TaskUpdate",
-        "Worktree",
-    ] {
+    for frozen in ["Agent", "TaskCreate", "TaskUpdate", "Worktree"] {
         assert!(!names.contains(&frozen), "{frozen} must be fail-closed");
+    }
+    for managed_query in ["TaskGet", "TaskList", "TaskOutput", "TaskStop"] {
+        assert!(
+            names.contains(&managed_query),
+            "{managed_query} must remain available for owned background shell tasks"
+        );
     }
 }

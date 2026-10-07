@@ -130,6 +130,8 @@ impl std::fmt::Display for McpConnectionStatus {
 
 /// 单个 MCP 服务器的连接实例。
 pub struct McpServerConnection {
+    execution_context: RwLock<Option<zk_tools::ToolContext>>,
+    request_authorizer: RwLock<Option<Arc<dyn crate::transport::RequestAuthorizer>>>,
     config: McpServerConfig,
     status: RwLock<McpConnectionStatus>,
     tools: RwLock<Vec<ToolDefinition>>,
@@ -154,6 +156,8 @@ impl McpServerConnection {
     #[must_use]
     pub fn new(config: McpServerConfig) -> Arc<Self> {
         Arc::new(Self {
+            execution_context: RwLock::new(None),
+            request_authorizer: RwLock::new(None),
             config,
             status: RwLock::new(McpConnectionStatus::Pending),
             tools: RwLock::new(Vec::new()),
@@ -418,6 +422,16 @@ impl McpServerConnection {
         }));
     }
 
+    /// Install the host's request-time OAuth policy before connecting.
+    pub fn set_execution_context(&self, context: zk_tools::ToolContext) {
+        *write_lock(&self.execution_context) = Some(context);
+    }
+
+    /// Attach a resource-bound credential decorator.
+    pub fn set_request_authorizer(&self, authorizer: Arc<dyn crate::transport::RequestAuthorizer>) {
+        *write_lock(&self.request_authorizer) = Some(authorizer);
+    }
+
     /// 建立连接并完成 MCP 协议握手（对照 Java `connect()`）。
     pub async fn connect(self: &Arc<Self>) {
         let _lifecycle = self.lifecycle.lock().await;
@@ -434,12 +448,24 @@ impl McpServerConnection {
         self.clear_transport_capabilities(true);
         if let Some(previous) = previous {
             previous.close().await;
+            if !previous.cleanup_confirmed() {
+                *write_lock(&self.transport) = Some(previous);
+                self.set_status(McpConnectionStatus::Failed);
+                return;
+            }
         }
         let Some(transport) = create_transport(&self.config) else {
-            // 不支持的传输类型 — 容错标记为 CONNECTED（与 Java 原始行为一致）。
-            self.set_status(McpConnectionStatus::Connected);
+            // An unsupported transport has performed no handshake or I/O.
+            // Reporting Connected would falsely advertise an executable service.
+            self.set_status(McpConnectionStatus::Failed);
             return;
         };
+        if let Some(context) = read_lock(&self.execution_context).clone() {
+            transport.set_execution_context(context);
+        }
+        if let Some(authorizer) = read_lock(&self.request_authorizer).clone() {
+            transport.set_request_authorizer(authorizer);
+        }
         *write_lock(&self.transport) = Some(Arc::clone(&transport));
 
         self.bind_disconnect_handler(&transport, generation);
@@ -451,9 +477,11 @@ impl McpServerConnection {
                 if self.is_current_transport(generation, &transport) {
                     self.set_status(McpConnectionStatus::Failed);
                     self.clear_transport_capabilities(true);
-                    write_lock(&self.transport).take();
                 }
                 transport.close().await;
+                if transport.cleanup_confirmed() {
+                    write_lock(&self.transport).take();
+                }
                 return;
             }
             Err(_) => {
@@ -464,9 +492,11 @@ impl McpServerConnection {
                 if self.is_current_transport(generation, &transport) {
                     self.set_status(McpConnectionStatus::Failed);
                     self.clear_transport_capabilities(true);
-                    write_lock(&self.transport).take();
                 }
                 transport.close().await;
+                if transport.cleanup_confirmed() {
+                    write_lock(&self.transport).take();
+                }
                 return;
             }
         }
@@ -848,7 +878,18 @@ impl McpServerConnection {
         self.clear_transport_capabilities(true);
         if let Some(transport) = transport {
             transport.close().await;
+            if !transport.cleanup_confirmed() {
+                *write_lock(&self.transport) = Some(transport);
+            }
         }
+    }
+
+    /// Closing cannot discard an unconfirmed process or durable resource lease.
+    #[must_use]
+    pub fn cleanup_confirmed(&self) -> bool {
+        read_lock(&self.transport)
+            .as_ref()
+            .is_none_or(|transport| transport.cleanup_confirmed())
     }
 
     /// 发现资源（TTL 5 分钟缓存，含空结果；对照 Java `discoverResources()`）。
@@ -1194,7 +1235,7 @@ impl McpServerConnection {
 
 /// 传输工厂（对照 Java `createTransport`）。
 ///
-/// `None` = 不支持的传输类型：调用方按 Java 语义把状态置 `CONNECTED` 而不重试。
+/// `None` means unsupported or invalid transport; the connection reports failure.
 fn create_transport(config: &McpServerConfig) -> Option<Arc<dyn McpTransport>> {
     match config.transport {
         McpTransportType::Stdio => Some(Arc::new(StdioTransport::new(config))),
@@ -1525,13 +1566,12 @@ done"#
     }
 
     #[tokio::test]
-    async fn unsupported_sdk_transport_is_marked_connected_without_transport() {
+    async fn unsupported_sdk_transport_fails_without_advertising_a_connection() {
         let mut config = McpServerConfig::sse("ws-server", "http://127.0.0.1:9/mcp");
         config.transport = McpTransportType::Sdk;
         let connection = McpServerConnection::new(config);
         connection.connect().await;
-        // 对照 Java：不支持类型容错标记 CONNECTED 且不创建传输。
-        assert_eq!(connection.status(), McpConnectionStatus::Connected);
+        assert_eq!(connection.status(), McpConnectionStatus::Failed);
         assert!(connection.transport().is_none());
         assert!(!connection.is_alive());
     }

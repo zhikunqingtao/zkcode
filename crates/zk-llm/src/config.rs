@@ -27,7 +27,7 @@
 //! [`provider_configs_from_env`] 返回空列表，调用方（zk-server main）改以
 //! `ZK_LLM_BASE_URL` + `ZK_LLM_API_KEY` 构建单 provider——行为与 S9 一致。
 
-use crate::secret::{ApiKey, ApiKeyRing};
+use crate::secret::{ApiKey, ApiKeyRing, KeySelectionStrategy};
 
 /// `DashScope` `OpenAI` 兼容端点（application.yml `llm.providers.dashscope`）。
 pub const DASHSCOPE_BASE_URL: &str = "https://dashscope.aliyuncs.com/compatible-mode/v1";
@@ -37,6 +37,11 @@ pub const DASHSCOPE_TOKEN_PLAN_BASE_URL: &str =
 /// `DeepSeek` 官方端点。
 pub const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com/v1";
 /// `Moonshot`（Kimi）官方端点。
+/// Kimi Code subscription endpoint.
+pub const KIMI_CODE_BASE_URL: &str = "https://api.kimi.com/coding/v1";
+/// `OpenRouter` chat endpoint.
+pub const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
+/// Moonshot direct endpoint.
 pub const MOONSHOT_BASE_URL: &str = "https://api.moonshot.cn/v1";
 /// 智谱（`GLM`）开放平台端点。
 pub const ZHIPU_BASE_URL: &str = "https://open.bigmodel.cn/api/paas/v4";
@@ -208,6 +213,8 @@ pub const PROVIDER_CATALOG: &[CatalogEntry] = &[
             "qwen3.8-flash",
             "deepseek-v4-pro-0813",
             "deepseek-v4-flash-0731",
+            "deepseek-v4.1-flash",
+            "bailian/glm-5.3",
         ],
         protocol: ProviderProtocol::OpenAiCompat,
         in_default_catalog: true,
@@ -220,6 +227,7 @@ pub const PROVIDER_CATALOG: &[CatalogEntry] = &[
             "deepseek-v4-pro",
             "deepseek-v4-flash",
             "deepseek-v4-flash-vision-exp",
+            "deepseek-flash",
         ],
         protocol: ProviderProtocol::OpenAiCompat,
         in_default_catalog: true,
@@ -255,10 +263,31 @@ pub const PROVIDER_CATALOG: &[CatalogEntry] = &[
         models: &[
             "anthropic/claude-opus-4.8",
             "anthropic/claude-fable-5",
+            "anthropic/claude-fable-5.1",
             "openai/gpt-5.6-sol",
             "openai/gpt-6-astra",
             "google/gemini-3.8-flash",
             "x-ai/grok-4.6",
+        ],
+        protocol: ProviderProtocol::OpenAiCompat,
+        in_default_catalog: true,
+    },
+    CatalogEntry {
+        name: "kimi-code",
+        base_url: KIMI_CODE_BASE_URL,
+        default_model: "k3",
+        models: &["k3", "kimi-for-coding"],
+        protocol: ProviderProtocol::OpenAiCompat,
+        in_default_catalog: true,
+    },
+    CatalogEntry {
+        name: "openrouter",
+        base_url: OPENROUTER_BASE_URL,
+        default_model: "stealth/union-alpha",
+        models: &[
+            "stealth/union-alpha",
+            "openrouter/openai/gpt-6-astra",
+            "openrouter/anthropic/claude-fable-5.1",
         ],
         protocol: ProviderProtocol::OpenAiCompat,
         in_default_catalog: true,
@@ -345,7 +374,44 @@ pub fn config_from_env_with(
     lookup: impl Fn(&str) -> Option<String>,
 ) -> Option<ProviderConfig> {
     let raw_keys = lookup(&api_key_env(entry.name))?;
-    let api_keys = ApiKeyRing::from_csv(&raw_keys);
+    let root = env_name_root(entry.name);
+    let strategy = lookup(&format!(
+        "{PROVIDER_ENV_PREFIX}{root}_KEY_SELECTION_STRATEGY"
+    ))
+    .unwrap_or_else(|| {
+        if entry.name == "zenmux" {
+            "PRIORITY_FAILOVER"
+        } else {
+            "ROUND_ROBIN"
+        }
+        .to_owned()
+    });
+    let strategy = if strategy.eq_ignore_ascii_case("PRIORITY_FAILOVER") {
+        KeySelectionStrategy::PriorityFailover
+    } else {
+        KeySelectionStrategy::RoundRobin
+    };
+    let allow_paid = lookup(&format!("{PROVIDER_ENV_PREFIX}{root}_ALLOW_PAID_FAILOVER"))
+        .is_some_and(|value| value.eq_ignore_ascii_case("true"));
+    let subscription_present = raw_keys
+        .split(',')
+        .any(|key| key.trim().starts_with("sk-ss-v1-"));
+    // A paid-only configuration is an explicit choice. A subscription configuration
+    // must separately opt in before a quota failure can incur pay-as-you-go charges.
+    let api_keys = ApiKeyRing::with_strategy(
+        raw_keys
+            .split(',')
+            .map(str::trim)
+            .filter(|key| {
+                entry.name != "zenmux"
+                    || allow_paid
+                    || !subscription_present
+                    || !key.starts_with("sk-ai-v1-")
+            })
+            .map(ApiKey::new)
+            .collect(),
+        strategy,
+    );
     if api_keys.is_empty() {
         return None;
     }
@@ -356,9 +422,28 @@ pub fn config_from_env_with(
         .map(|raw| split_csv(&raw))
         .filter(|models: &Vec<String>| !models.is_empty())
         .unwrap_or_else(|| entry.models.iter().map(|m| (*m).to_owned()).collect());
+    let mut seen_models = std::collections::HashSet::new();
+    let models: Vec<String> = models
+        .into_iter()
+        .map(|model| match (entry.name, model.as_str()) {
+            ("dashscope-token-plan", "glm-5.3") => "bailian/glm-5.3".to_owned(),
+            ("openrouter", "openai/gpt-6-astra" | "anthropic/claude-fable-5.1") => {
+                format!("openrouter/{model}")
+            }
+            _ => model,
+        })
+        .filter(|model| seen_models.insert(model.clone()))
+        .collect();
     let default_model = lookup(&format!("{PROVIDER_ENV_PREFIX}{root}_DEFAULT_MODEL"))
         .or_else(|| models.first().cloned())
         .unwrap_or_else(|| entry.default_model.to_owned());
+    let default_model = match (entry.name, default_model.as_str()) {
+        ("dashscope-token-plan", "glm-5.3") => "bailian/glm-5.3".to_owned(),
+        ("openrouter", "openai/gpt-6-astra" | "anthropic/claude-fable-5.1") => {
+            format!("openrouter/{default_model}")
+        }
+        _ => default_model,
+    };
     Some(
         ProviderConfig::with_keys(entry.name, base_url, api_keys, default_model, models)
             .with_protocol(entry.protocol),
@@ -404,6 +489,75 @@ mod tests {
     use super::*;
 
     #[test]
+    fn subscription_does_not_silently_fail_over_to_paid_key() {
+        let entry = catalog_entry("zenmux").unwrap();
+        let configured = |allow: bool| {
+            config_from_env_with(entry, |key| match key {
+                "LLM_PROVIDER_ZENMUX_API_KEY" => Some("sk-ss-v1-sub,sk-ai-v1-paid".into()),
+                "LLM_PROVIDER_ZENMUX_ALLOW_PAID_FAILOVER" if allow => Some("true".into()),
+                _ => None,
+            })
+            .unwrap()
+        };
+        assert_eq!(configured(false).api_keys.len(), 1);
+        let config = configured(true);
+        assert_eq!(config.api_keys.len(), 2);
+        let subscription = config.api_keys.next_key_at(1).unwrap();
+        assert_eq!(subscription.expose(), "sk-ss-v1-sub");
+        assert_eq!(config.api_keys.next_key_at(2).unwrap(), subscription);
+        config.api_keys.mark_rate_limited_at(&subscription, 2, 100);
+        assert_eq!(
+            config.api_keys.next_key_at(3).unwrap().expose(),
+            "sk-ai-v1-paid"
+        );
+        assert_eq!(config.api_keys.next_key_at(103).unwrap(), subscription);
+    }
+
+    #[test]
+    fn provider_qualified_models_do_not_steal_direct_routes() {
+        let entry = catalog_entry("dashscope-token-plan").unwrap();
+        let config = config_from_env_with(entry, |key| match key {
+            "LLM_PROVIDER_DASHSCOPE_TOKEN_PLAN_API_KEY" => Some("test".into()),
+            "LLM_PROVIDER_DASHSCOPE_TOKEN_PLAN_MODELS" => Some("glm-5.3".into()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(config.models, vec!["bailian/glm-5.3"]);
+        assert_eq!(config.default_model, "bailian/glm-5.3");
+    }
+
+    #[test]
+    fn normalization_deduplicates_provider_model_aliases_in_configured_order() {
+        for (name, key_root, raw, expected) in [
+            (
+                "dashscope-token-plan",
+                "DASHSCOPE_TOKEN_PLAN",
+                "glm-5.3,bailian/glm-5.3,custom,custom",
+                vec!["bailian/glm-5.3", "custom"],
+            ),
+            (
+                "openrouter",
+                "OPENROUTER",
+                "openai/gpt-6-astra,openrouter/openai/gpt-6-astra,stealth/union-alpha,stealth/union-alpha",
+                vec!["openrouter/openai/gpt-6-astra", "stealth/union-alpha"],
+            ),
+        ] {
+            let config = config_from_env_with(catalog_entry(name).unwrap(), |key| {
+                if key == format!("LLM_PROVIDER_{key_root}_API_KEY") {
+                    Some("fixture".into())
+                } else if key == format!("LLM_PROVIDER_{key_root}_MODELS") {
+                    Some(raw.into())
+                } else {
+                    None
+                }
+            })
+            .unwrap();
+            assert_eq!(config.models, expected);
+            assert_eq!(config.default_model, expected[0]);
+        }
+    }
+
+    #[test]
     fn dashscope_preset_matches_application_yml() {
         let cfg = ProviderConfig::dashscope(ApiKey::new("sk-x"));
         assert_eq!(cfg.name, "dashscope");
@@ -432,19 +586,21 @@ mod tests {
     /// 目录逐条对照方案 §13-3 / 旧 application.yml（base-url + default-model）。
     #[test]
     fn catalog_matches_plan_matrix() {
-        let expected: [(&str, &str, &str, usize); 9] = [
+        let expected: [(&str, &str, &str, usize); 11] = [
             ("dashscope", DASHSCOPE_BASE_URL, "qwen3.8-max-0902", 2),
             (
                 "dashscope-token-plan",
                 DASHSCOPE_TOKEN_PLAN_BASE_URL,
                 "qwen3.8-max",
-                4,
+                6,
             ),
-            ("deepseek", DEEPSEEK_BASE_URL, "deepseek-v4-pro", 3),
+            ("deepseek", DEEPSEEK_BASE_URL, "deepseek-v4-pro", 4),
             ("moonshot", MOONSHOT_BASE_URL, "kimi-k3", 3),
             ("zhipu", ZHIPU_BASE_URL, "glm-5.3", 2),
             ("minimax", MINIMAX_BASE_URL, "MiniMax-M3", 1),
-            ("zenmux", ZENMUX_BASE_URL, "anthropic/claude-opus-4.8", 6),
+            ("zenmux", ZENMUX_BASE_URL, "anthropic/claude-opus-4.8", 7),
+            ("kimi-code", KIMI_CODE_BASE_URL, "k3", 2),
+            ("openrouter", OPENROUTER_BASE_URL, "stealth/union-alpha", 3),
             ("anthropic", ANTHROPIC_BASE_URL, "claude-sonnet-4-6", 3),
             ("openai", OPENAI_BASE_URL, "gpt-4o", 2),
         ];
@@ -480,9 +636,12 @@ mod tests {
                 "qwen3.8-flash",
                 "deepseek-v4-pro-0813",
                 "deepseek-v4-flash-0731",
+                "deepseek-v4.1-flash",
+                "bailian/glm-5.3",
                 "deepseek-v4-pro",
                 "deepseek-v4-flash",
                 "deepseek-v4-flash-vision-exp",
+                "deepseek-flash",
                 "kimi-k3",
                 "kimi-k2.7-code",
                 "moonshot-v1-128k",
@@ -491,10 +650,16 @@ mod tests {
                 "MiniMax-M3",
                 "anthropic/claude-opus-4.8",
                 "anthropic/claude-fable-5",
+                "anthropic/claude-fable-5.1",
                 "openai/gpt-5.6-sol",
                 "openai/gpt-6-astra",
                 "google/gemini-3.8-flash",
                 "x-ai/grok-4.6",
+                "k3",
+                "kimi-for-coding",
+                "stealth/union-alpha",
+                "openrouter/openai/gpt-6-astra",
+                "openrouter/anthropic/claude-fable-5.1",
             ]
         );
     }

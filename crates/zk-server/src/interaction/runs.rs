@@ -93,4 +93,15 @@ impl RunEventSink for RunEvents {
             tracing::warn!(run_id, event_type, %error, "run event append failed in current write");
         }
     }
+
+    fn append_required_event_in_current_write(
+        &self,
+        conn: &Connection,
+        run_id: &str,
+        event_type: &str,
+        tool_use_id: Option<&str>,
+        payload: &Value,
+    ) -> Result<(), zk_db::DbError> {
+        append_event_in_current_write(conn, run_id, event_type, tool_use_id, payload).map(|_| ())
+    }
 }

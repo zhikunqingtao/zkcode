@@ -1,19 +1,9 @@
-//! Hook 事件类型与配置数据模型（Batch 8B Step 1）。
+//! Declared local-command and HTTP notification hooks.
 //!
-//! 对照旧 `hook/HookEvent.java`（76L）。语义偏离留痕：
+//! PRE transforms are re-admitted; security hooks may deny but never mutate
+//! arguments. POST presentation is a separate UI projection. Source names
+//! `PRE_TOOL_USE`, `POST_TOOL_USE` and `STOP_HOOKS` alias the corresponding native events.
 //!
-//! - **H-01 事件集**：旧枚举 12 成员（`PRE_TOOL_USE` / `POST_TOOL_USE` /
-//!   `USER_PROMPT_SUBMIT` / `NOTIFICATION` / `STOP` / `SESSION_START` /
-//!   `SESSION_END` / `TASK_COMPLETED` / `TEAMMATE_IDLE` / `STOP_HOOKS` /
-//!   `PRE_COMPACT` / `POST_COMPACT`），且旧 hook 是**进程内函数**——可改写
-//!   工具输入/输出、拒绝调用（`HookResult.proceed=false`），参与准入裁决。
-//!   本端 hook 是**外部副作用通知**（本地命令 / HTTP POST），仅告知事件发生，
-//!   **绝不**参与主流程裁决（准入唯一权威仍是 [`crate::admission::ToolAdmission`]）。
-//!   故事件集按 Batch 8B 规格重定为 8 个观测点：工具执行前后、会话起止、
-//!   run 起止、消息发送、错误发生。
-//! - **H-01b 解析容错**：保留旧 `fromString` 的多写法归一（`UPPER_SNAKE` /
-//!   `kebab-case` / `PascalCase` 皆可），供 `.zk/hooks.toml` 的 `event` 键手写。
-
 use std::fmt;
 
 use serde::de::{self, Deserializer, Visitor};
@@ -22,7 +12,7 @@ use serde::{Deserialize, Serialize, Serializer};
 /// Hook 观测事件（外部副作用通知的触发点；见模块文档 H-01）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HookEvent {
-    /// 工具执行前（派发执行器之前，准入已放行）。
+    /// Tool arguments are transformed before the authoritative admission step.
     PreToolExecution,
     /// 工具执行后（结果落库之后）。
     PostToolExecution,
@@ -38,11 +28,25 @@ pub enum HookEvent {
     MessageSent,
     /// 错误发生。
     ErrorOccurred,
+    /// Current user input was accepted; original text remains unchanged.
+    UserPromptSubmit,
+    /// General runtime notification.
+    Notification,
+    /// Natural answer completion; may request one bounded correction.
+    Stop,
+    /// A child Task committed its result.
+    TaskCompleted,
+    /// A team worker became idle after durable completion.
+    TeammateIdle,
+    /// Before context compaction.
+    PreCompact,
+    /// After a compacted checkpoint is durable.
+    PostCompact,
 }
 
 impl HookEvent {
     /// 全部事件（`.zk/hooks.toml` 校验与索引初始化用）。
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 15] = [
         Self::PreToolExecution,
         Self::PostToolExecution,
         Self::SessionStart,
@@ -51,6 +55,13 @@ impl HookEvent {
         Self::RunEnd,
         Self::MessageSent,
         Self::ErrorOccurred,
+        Self::UserPromptSubmit,
+        Self::Notification,
+        Self::Stop,
+        Self::TaskCompleted,
+        Self::TeammateIdle,
+        Self::PreCompact,
+        Self::PostCompact,
     ];
 
     /// 规范字面量（`UPPER_SNAKE`，出线 / 环境变量注入用）。
@@ -65,6 +76,13 @@ impl HookEvent {
             Self::RunEnd => "RUN_END",
             Self::MessageSent => "MESSAGE_SENT",
             Self::ErrorOccurred => "ERROR_OCCURRED",
+            Self::UserPromptSubmit => "USER_PROMPT_SUBMIT",
+            Self::Notification => "NOTIFICATION",
+            Self::Stop => "STOP",
+            Self::TaskCompleted => "TASK_COMPLETED",
+            Self::TeammateIdle => "TEAMMATE_IDLE",
+            Self::PreCompact => "PRE_COMPACT",
+            Self::PostCompact => "POST_COMPACT",
         }
     }
 
@@ -75,6 +93,12 @@ impl HookEvent {
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
         let normalized = normalize(value);
+        match normalized.as_str() {
+            "pretooluse" => return Some(Self::PreToolExecution),
+            "posttooluse" => return Some(Self::PostToolExecution),
+            "stophooks" => return Some(Self::Stop),
+            _ => {}
+        }
         if normalized.is_empty() {
             return None;
         }
@@ -128,7 +152,7 @@ impl<'de> Deserialize<'de> for HookEvent {
 /// `command` 与 `url` 二选一：`url` 存在 → HTTP POST 通知（经
 /// [`crate::hook::HttpHookExecutor`] 走 SSRF 防护）；否则 `command` 存在 →
 /// 本地命令通知（`sh -c`）。两者皆空的条目在加载期被丢弃并 warn。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct HookConfig {
     /// hook 名（日志定位 / 注销键）。
     pub name: String,
@@ -168,7 +192,7 @@ pub enum HookRole {
     Notification,
     /// May return a modified input or a stable denial.
     Transform,
-    /// May modify/deny and fails closed on execution or protocol errors.
+    /// May deny without mutation and fails closed on execution or protocol errors.
     Security,
     /// Post-execution presentation notification.
     Presentation,
@@ -244,7 +268,7 @@ mod tests {
         assert_eq!(HookEvent::parse(""), None);
         assert_eq!(HookEvent::parse("   "), None);
         assert_eq!(HookEvent::parse("__"), None);
-        assert_eq!(HookEvent::parse("NOTIFICATION"), None);
+        assert_eq!(HookEvent::parse("UNKNOWN_EVENT"), None);
     }
 
     #[test]
@@ -254,7 +278,7 @@ mod tests {
             assert!(seen.insert(event.as_str()), "duplicate literal {event}");
             assert_eq!(HookEvent::parse(event.as_str()), Some(event));
         }
-        assert_eq!(seen.len(), 8);
+        assert_eq!(seen.len(), 15);
     }
 
     #[test]

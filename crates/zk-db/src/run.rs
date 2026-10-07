@@ -212,7 +212,27 @@ pub fn append_event_in_current_write(
         |row| row.get(0),
     )?;
     let seq = max + 1;
-    let json_text = serialize_event(run_id, tool_use_id, data);
+    let text = serialize_event(run_id, tool_use_id, data);
+    let json_text = if matches!(
+        event_type,
+        "run_status_changed"
+            | "task_needs_attention"
+            | "task_cancelling"
+            | "run_cleanup_unconfirmed"
+            | "verification_stale"
+            | "interaction_terminal"
+            | "task_inbox_closed"
+            | "run_cleanup_confirmed"
+    ) {
+        crate::content::store_diagnostic(
+            conn,
+            &crate::content::run_session(conn, run_id)?,
+            Some(&text),
+        )?
+        .ok_or_else(|| DbError::Invalid("RUN_EVENT_DIAGNOSTIC_MISSING".into()))?
+    } else {
+        crate::content::store_run_text(conn, run_id, &text)?
+    };
     let ts = time::now_millis();
     conn.execute(
         "INSERT INTO run_event_log(run_id,seq,event_type,event_data,ts) VALUES(?1,?2,?3,?4,?5)",
@@ -336,15 +356,18 @@ pub fn transition_in_current_write(
          WHERE id=?13 AND version=?14 AND status IN ({in_clause})"
     );
     let terminal_at = if terminal { Some(now.as_str()) } else { None };
+    let session = crate::content::run_session(conn, run_id)?;
+    let stored_error = crate::content::store_diagnostic(conn, &session, error)?;
+    let stored_waiting = crate::content::store_diagnostic(conn, &session, waiting_reason)?;
     let updated = conn.execute(
         &sql,
         params![
             target,
             exit_reason,
             requested_reason,
-            waiting_reason,
+            stored_waiting,
             abort_reason,
-            error,
+            stored_error,
             tokens,
             cost,
             turns,
@@ -450,7 +473,7 @@ pub fn request_cancel_in_current_write(
     transition_in_current_write(
         conn,
         run_id,
-        &[STATUS_RUNNING, "waitingInteraction"],
+        &[STATUS_RUNNING, "waitingInteraction", "waitingDependencies"],
         "cancelling",
         None,
         Some(exit_reason),
@@ -578,6 +601,10 @@ pub fn interrupt_in_current_write(
 /// # Errors
 /// 根 Run 的会话不存在返回 `RUN_ROOT_SESSION_NOT_FOUND`、父 Run 不存在返回
 /// `RUN_PARENT_NOT_FOUND`（均为 [`DbError::Invalid`]）；插入失败原样上抛。
+#[allow(
+    clippy::too_many_lines,
+    reason = "The compatibility admission must create Task, Run, dependency and initial event in the caller transaction"
+)]
 pub fn start_in_current_write(
     conn: &Connection,
     run_id: &str,
@@ -586,6 +613,9 @@ pub fn start_in_current_write(
     agent_type: Option<&str>,
     model: &str,
 ) -> Result<(), DbError> {
+    if parent_run_id.is_none() {
+        crate::service_session::require_conversation(conn, session_id)?;
+    }
     let parent_task: Option<(String, String)> = if let Some(parent) = parent_run_id {
         let found = conn
             .query_row(
@@ -632,7 +662,7 @@ pub fn start_in_current_write(
             (id,session_id,parent_task_id,root_task_id,creator_run_id,ordinal,
              description,task_type,status,execution_config_json,lifecycle_policy,
              cleanup_status,verification_status,created_at,updated_at)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,'agent','running','{}','attached',
+         VALUES(?1,?2,?3,?4,?5,?6,?7,'agent','running',?9,'attached',
                 'notRequired','notRequested',?8,?8)",
         params![
             task_id,
@@ -641,8 +671,13 @@ pub fn start_in_current_write(
             root_task_id,
             parent_run_id,
             ordinal,
-            format!("{} run", agent_type.unwrap_or("query")),
+            crate::content::store_text(
+                conn,
+                session_id,
+                &format!("{} run", agent_type.unwrap_or("query"))
+            )?,
             now,
+            crate::content::store_text(conn, session_id, "{}")?,
         ],
     )?;
     conn.execute(
@@ -771,8 +806,16 @@ impl Db {
         model: &str,
         limits: &TaskBudgetLimits,
     ) -> Result<(), DbError> {
-        self.start_root_run_with_budget_inner(run_id, session_id, agent_type, model, limits, 0)
-            .await
+        self.start_root_run_with_budget_inner(
+            run_id,
+            session_id,
+            agent_type,
+            model,
+            Some(limits),
+            0,
+            None,
+        )
+        .await
     }
 
     /// Atomically create a production root Task/Run with durable execution limits
@@ -800,30 +843,66 @@ impl Db {
             session_id,
             agent_type,
             model,
-            limits,
+            Some(limits),
             startup_epoch,
+            None,
         )
         .await
     }
 
+    /// Atomically freeze request tool constraints with the root Task and budget.
+    /// # Errors
+    /// Invalid limits, startup epoch, ownership or persistence failures are returned.
+    pub async fn start_conversation_run_with_policy(
+        &self,
+        run_id: &str,
+        session_id: &str,
+        model: &str,
+        limits: Option<&TaskBudgetLimits>,
+        startup_epoch: i64,
+        ceiling: &crate::tool_ceiling::ToolCeiling,
+    ) -> Result<(), DbError> {
+        if startup_epoch < 0 {
+            return Err(DbError::Invalid("STARTUP_EPOCH_INVALID".into()));
+        }
+        self.start_root_run_with_budget_inner(
+            run_id,
+            session_id,
+            Some(AGENT_TYPE_QUERY),
+            model,
+            limits,
+            startup_epoch,
+            Some(ceiling),
+        )
+        .await
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "One writer transaction atomically installs identity, optional legacy budget, startup epoch and request tool authority"
+    )]
     async fn start_root_run_with_budget_inner(
         &self,
         run_id: &str,
         session_id: &str,
         agent_type: Option<&str>,
         model: &str,
-        limits: &TaskBudgetLimits,
+        limits: Option<&TaskBudgetLimits>,
         startup_epoch: i64,
+        ceiling: Option<&crate::tool_ceiling::ToolCeiling>,
     ) -> Result<(), DbError> {
-        validate_limits(limits)?;
-        if limits.deadline_at_ms.is_none() {
-            return Err(DbError::Invalid("ROOT_BUDGET_NOT_CONFIGURED".to_owned()));
+        if let Some(limits) = limits {
+            validate_limits(limits)?;
+            if limits.deadline_at_ms.is_none() {
+                return Err(DbError::Invalid("ROOT_BUDGET_NOT_CONFIGURED".into()));
+            }
         }
+        let limits = limits.cloned().unwrap_or_default();
+        let ceiling = ceiling.cloned();
         let run_id = run_id.to_owned();
         let session_id = session_id.to_owned();
         let agent_type = agent_type.map(str::to_owned);
         let model = model.to_owned();
-        let limits = limits.clone();
         self.with_writer(move |conn| {
             let tx = conn.transaction()?;
             start_in_current_write(
@@ -848,12 +927,15 @@ impl Db {
                     "ROOT_STARTUP_EPOCH_INITIALIZATION_FAILED".to_owned(),
                 ));
             }
-            let execution_config_json = serde_json::json!({
+            let mut execution_config = serde_json::json!({
                 "budget": limits,
                 "source": "conversation",
                 "startupEpoch": startup_epoch,
-            })
-            .to_string();
+            });
+            if let Some(ceiling) = ceiling {
+                execution_config["toolCeiling"] = serde_json::to_value(ceiling)?;
+            }
+            let execution_config_json = execution_config.to_string();
             let updated = tx.execute(
                 "UPDATE tasks SET token_budget_limit=?1,cost_budget_nanos_usd=?2,
                     deadline_at_ms=?3,execution_config_json=?4,budget_version=budget_version+1,
@@ -862,7 +944,7 @@ impl Db {
                     limits.token_limit,
                     limits.cost_limit_nanos_usd,
                     limits.deadline_at_ms,
-                    execution_config_json,
+                    crate::content::store_text(&tx, &session_id, &execution_config_json)?,
                     time::format_rfc3339_micros(time::now_millis()),
                     run_id,
                 ],
@@ -1207,7 +1289,10 @@ pub struct WsReplayEvent {
 }
 
 /// 行 → [`RunEnvelopeView`]（旧 `RunEnvelopeRepository.ROW_MAPPER`）。
-pub(crate) fn map_envelope_row(row: &Row<'_>) -> rusqlite::Result<RunEnvelopeView> {
+pub(crate) fn map_envelope_row(
+    conn: &Connection,
+    row: &Row<'_>,
+) -> rusqlite::Result<RunEnvelopeView> {
     let status: String = row.get("status")?;
     let verification_status: String = row.get("verification_status")?;
     let exit_reason: Option<String> = row.get("exit_reason")?;
@@ -1231,7 +1316,11 @@ pub(crate) fn map_envelope_row(row: &Row<'_>) -> rusqlite::Result<RunEnvelopeVie
         total_cost_usd: row.get("total_cost_usd")?,
         tool_call_count: row.get("tool_call_count")?,
         turn_count: row.get("turn_count")?,
-        error_summary: row.get("error_summary")?,
+        error_summary: crate::content::load_diagnostic(
+            conn,
+            &row.get::<_, String>("session_id")?,
+            row.get("error_summary")?,
+        )?,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
         version: row.get("version")?,
@@ -1246,18 +1335,26 @@ pub(crate) fn map_envelope_row(row: &Row<'_>) -> rusqlite::Result<RunEnvelopeVie
         cost_nanos_usd: row.get("cost_nanos_usd")?,
         usage_complete: row.get::<_, i64>("usage_complete")? != 0,
         terminal_at: row.get("terminal_at")?,
-        waiting_reason: row.get("waiting_reason")?,
+        waiting_reason: crate::content::load_reason(
+            conn,
+            &row.get::<_, String>("session_id")?,
+            row.get("waiting_reason")?,
+        )?,
     })
 }
 
 /// 行 → [`RunEventView`]（旧 `RunEventRepository.ROW_MAPPER`）。
-fn map_event_row(row: &Row<'_>) -> rusqlite::Result<RunEventView> {
+fn map_event_row(conn: &Connection, row: &Row<'_>) -> rusqlite::Result<RunEventView> {
     Ok(RunEventView {
         id: row.get("id")?,
         run_id: row.get("run_id")?,
         seq: row.get("seq")?,
         event_type: row.get("event_type")?,
-        event_data: row.get("event_data")?,
+        event_data: crate::content::load_run_text(
+            conn,
+            &row.get::<_, String>("run_id")?,
+            row.get("event_data")?,
+        )?,
         ts: row.get("ts")?,
     })
 }
@@ -1295,7 +1392,17 @@ impl Db {
         let payload = payload.clone();
         self.with_writer(move |conn| {
             let tx = conn.transaction()?;
-            let source: Option<(String, String, String)> = if let Some(run_id) =
+            let source: Option<(String, String, String)> = if matches!(event_type.as_str(),"ws_task_boundary"|"ws_assistant_segment_complete"|"ws_system_message") {
+                let message_id = if event_type == "ws_system_message" {
+                    payload.get("message").and_then(|message| message.get("uuid"))
+                } else {
+                    payload.get("messageId")
+                }.and_then(Value::as_str).ok_or_else(||DbError::Invalid("WS_OUTBOX_MESSAGE_ID_REQUIRED".into()))?;
+                Some(tx.query_row(
+                    "SELECT r.id,r.task_id,t.root_task_id FROM messages m JOIN run_envelopes r ON r.id=m.run_id JOIN tasks t ON t.id=r.task_id WHERE m.id=?1 AND m.session_id=?2",
+                    params![message_id,source_session_id], |row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+                ).optional()?.ok_or_else(||DbError::Invalid("WS_OUTBOX_MESSAGE_NOT_OWNED".into()))?)
+            } else if let Some(run_id) =
                 source_run_id_hint.as_deref()
             {
                 tx.query_row(
@@ -1398,7 +1505,7 @@ impl Db {
                     source_run_id,
                     seq,
                     event_type,
-                    Value::Object(envelope).to_string(),
+                    crate::content::store_run_text(&tx,&source_run_id,&Value::Object(envelope).to_string())?,
                     ts
                 ],
             )?;
@@ -1428,6 +1535,10 @@ impl Db {
     ///
     /// # Errors
     /// Returns [`DbError`] for invalid persisted payloads or `SQLite` failures.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Retention floor, bounded replay range and decoded events share one consistent read transaction"
+    )]
     pub async fn get_ws_outbox_events_after(
         &self,
         root_session_id: &str,
@@ -1449,6 +1560,17 @@ impl Db {
                 tx.commit()?;
                 return Ok(Vec::new());
             };
+            let discarded_through: Option<i64> = tx.query_row(
+                "WITH RECURSIVE tree(id) AS (
+                     SELECT ?1 UNION ALL
+                     SELECT child.id FROM run_envelopes child JOIN tree parent ON child.parent_run_id=parent.id
+                 ) SELECT MAX(retention.through_event_id)
+                   FROM run_event_retention retention JOIN tree ON tree.id=retention.run_id",
+                [&root_run_id], |row|row.get(0),
+            )?;
+            if discarded_through.is_some_and(|through| after_event_id < through) {
+                return Err(DbError::Conflict("RUNTIME_CURSOR_EXPIRED".into()));
+            }
             let through_event_id: i64 = tx.query_row(
                 "WITH RECURSIVE tree(id) AS (
                      SELECT ?1
@@ -1498,6 +1620,7 @@ impl Db {
             drop(stmt);
             let mut events = Vec::with_capacity(rows.len());
             for (id, ts, source_task_id, source_run_id, event_data) in rows {
+                let event_data=crate::content::load_run_text(&tx,&source_run_id,event_data)?;
                 let mut envelope: Value = serde_json::from_str(&event_data).map_err(|error| {
                     DbError::Invalid(format!("WS_OUTBOX_PAYLOAD_INVALID:{id}:{error}"))
                 })?;
@@ -1538,7 +1661,7 @@ impl Db {
             conn.query_row(
                 "SELECT * FROM run_envelopes WHERE id = ?1",
                 params![run_id],
-                map_envelope_row,
+                |row| map_envelope_row(conn, row),
             )
             .optional()
             .map_err(Into::into)
@@ -1564,7 +1687,9 @@ impl Db {
                  ORDER BY started_at DESC LIMIT ?2",
             )?;
             let rows = stmt
-                .query_map(params![session_id, limit], map_envelope_row)?
+                .query_map(params![session_id, limit], |row| {
+                    map_envelope_row(conn, row)
+                })?
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(rows)
         })
@@ -1596,7 +1721,7 @@ impl Db {
                           run_envelopes.started_at ASC,
                           run_envelopes.id ASC",
             )?;
-            stmt.query_map([root_run_id], map_envelope_row)?
+            stmt.query_map([root_run_id], |row| map_envelope_row(conn, row))?
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(Into::into)
         })
@@ -1620,7 +1745,7 @@ impl Db {
                 "SELECT * FROM run_envelopes WHERE session_id = ?1 \
                  AND parent_run_id IS NULL ORDER BY started_at DESC LIMIT 1",
                 [session_id],
-                map_envelope_row,
+                |row| map_envelope_row(conn, row),
             )
             .optional()
             .map_err(Into::into)
@@ -1672,13 +1797,26 @@ impl Db {
     ) -> Result<Vec<RunEventView>, DbError> {
         let run_id = run_id.to_owned();
         self.with_reader(move |conn| {
-            let mut stmt = conn.prepare(
+            let tx = conn.transaction()?;
+            let discarded_through: Option<i64> = tx.query_row(
+                "SELECT (SELECT through_seq FROM run_event_retention WHERE run_id=?1)",
+                [&run_id],
+                |row| row.get(0),
+            )?;
+            if discarded_through.is_some_and(|through| after_seq < through) {
+                return Err(DbError::Conflict("RUNTIME_CURSOR_EXPIRED".into()));
+            }
+            let mut stmt = tx.prepare(
                 "SELECT * FROM run_event_log WHERE run_id = ?1 AND seq > ?2 \
                  ORDER BY seq ASC LIMIT ?3",
             )?;
             let rows = stmt
-                .query_map(params![run_id, after_seq, limit], map_event_row)?
+                .query_map(params![run_id, after_seq, limit], |row| {
+                    map_event_row(&tx, row)
+                })?
                 .collect::<Result<Vec<_>, _>>()?;
+            drop(stmt);
+            tx.commit()?;
             Ok(rows)
         })
         .await

@@ -19,11 +19,26 @@ use zk_protocol::model::{ContentBlock, Message as WsMessage, Usage};
 
 use crate::model::{MessageRecord, MessageRole, StoredBlock};
 
+/// Keep display metadata while withholding private image replay/provenance state.
+#[must_use]
+pub fn public_tool_result_metadata(
+    metadata: Option<serde_json::Value>,
+) -> Option<serde_json::Value> {
+    metadata.map(|mut metadata| {
+        if let Some(object) = metadata.as_object_mut() {
+            object.remove("__zkTrustedImageProducer");
+            object.remove("inlineImages");
+        }
+        metadata
+    })
+}
+
 /// `MessageRecord` → 协议 `Message`（角色三分支）。
 #[must_use]
 pub fn record_to_ws_message(record: MessageRecord) -> WsMessage {
     match record.role {
         MessageRole::User => WsMessage::User {
+            meta: record.meta,
             uuid: record.id,
             timestamp: record.created_at,
             content: blocks_to_ws(record.content),
@@ -53,6 +68,13 @@ pub fn record_to_ws_message(record: MessageRecord) -> WsMessage {
                 .collect::<Vec<_>>()
                 .join("");
             WsMessage::System {
+                subtype: record
+                    .meta
+                    .as_ref()
+                    .and_then(|m| m.get("subtype"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+                metadata: record.meta,
                 uuid: record.id,
                 timestamp: record.created_at,
                 content,
@@ -66,6 +88,7 @@ pub fn record_to_ws_message(record: MessageRecord) -> WsMessage {
 pub fn blocks_to_ws(blocks: Vec<StoredBlock>) -> Vec<ContentBlock> {
     blocks
         .into_iter()
+        .filter(|block| !matches!(block, StoredBlock::ProviderResponseState { .. }))
         .map(|block| match block {
             StoredBlock::Text { text } => ContentBlock::Text { text },
             StoredBlock::ToolUse { id, name, input } => ContentBlock::ToolUse {
@@ -82,7 +105,7 @@ pub fn blocks_to_ws(blocks: Vec<StoredBlock>) -> Vec<ContentBlock> {
                 tool_use_id,
                 content,
                 is_error,
-                metadata,
+                metadata: public_tool_result_metadata(metadata),
             },
             StoredBlock::Thinking { thinking } => ContentBlock::Thinking { thinking },
             // WS 转换层丢弃 width/height（zk-protocol model 模块文档丢弃清单）。
@@ -97,7 +120,9 @@ pub fn blocks_to_ws(blocks: Vec<StoredBlock>) -> Vec<ContentBlock> {
                 }
             }
             // WS 形状无字段（data 被转换层丢弃）。
-            StoredBlock::RedactedThinking { .. } => ContentBlock::RedactedThinking,
+            StoredBlock::RedactedThinking { .. } | StoredBlock::ProviderResponseState { .. } => {
+                ContentBlock::RedactedThinking
+            }
         })
         .collect()
 }

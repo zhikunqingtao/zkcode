@@ -27,10 +27,14 @@ use crate::tool::{Tool, ToolSpec};
 /// 下发 LLM 的 tools 列表与未知工具引导文案跨次运行确定）。
 #[derive(Clone, Default)]
 pub struct ToolRegistry {
+    fallback: Option<Arc<ToolRegistry>>,
+    adaptations: Arc<BTreeMap<String, (Arc<ToolRegistry>, ToolBinding)>>,
     tools: Arc<RwLock<BTreeMap<String, Arc<dyn Tool>>>>,
     generation: Arc<AtomicU64>,
     revocations: Arc<RwLock<BTreeMap<String, CancellationToken>>>,
     visibility: Option<Arc<ToolVisibility>>,
+    source_visibility: Option<Arc<ToolVisibility>>,
+    project_for_child: bool,
 }
 
 /// A live visibility policy evaluated against the currently registered tool
@@ -44,6 +48,8 @@ type ToolVisibility = dyn Fn(&str, &dyn Tool) -> bool + Send + Sync;
 #[derive(Clone)]
 pub struct ToolBinding {
     tool: Arc<dyn Tool>,
+    source: Arc<dyn Tool>,
+    project_for_child: bool,
     directory_generation: u64,
     connection_generation: Option<u64>,
     revocation: CancellationToken,
@@ -80,6 +86,70 @@ impl ToolRegistry {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A run-local directory over a live shared base. Mutations affect only
+    /// the local layer. Same-name registrations in both layers fail closed,
+    /// including names hidden by a base visibility policy.
+    #[must_use]
+    pub fn overlay(base: Arc<Self>) -> Self {
+        Self {
+            fallback: Some(base),
+            ..Self::default()
+        }
+    }
+
+    /// Adapt one exact, visible binding in trusted host code. The replacement
+    /// keeps its public name; disabling/replacing the original revokes this view.
+    /// Configuration-driven overlays must continue using `overlay`, which never
+    /// overrides existing names. This method grants no execution authorization.
+    ///
+    /// # Errors
+    /// Rejects a renamed, hidden, revoked, or stale source binding.
+    pub fn adapt_bound(
+        base: Arc<Self>,
+        binding: ToolBinding,
+        replacement: Arc<dyn Tool>,
+    ) -> Result<Self, String> {
+        if binding.tool.name() != replacement.name() || !base.is_binding_current(&binding) {
+            return Err("TOOL_ADAPTATION_SOURCE_CHANGED".into());
+        }
+        let name = replacement.name().to_owned();
+        let mut directory = Self::overlay(base.clone());
+        directory.register_dynamic(replacement);
+        directory
+            .revocations
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(name.clone(), binding.revocation.child_token());
+        directory.adaptations = Arc::new(BTreeMap::from([(name, (base, binding))]));
+        Ok(directory)
+    }
+
+    fn fallback_conflicts(&self, name: &str) -> bool {
+        match self.adaptations.get(name) {
+            Some((owner, binding)) => {
+                !owner.is_binding_current(binding)
+                    || self
+                        .fallback
+                        .as_ref()
+                        .is_none_or(|base| base.get(name).is_none())
+            }
+            None => self
+                .fallback
+                .as_ref()
+                .is_some_and(|base| base.contains_registered(name)),
+        }
+    }
+
+    /// Whether a name is registered anywhere, even when policy hides it.
+    #[must_use]
+    pub fn contains_registered(&self, name: &str) -> bool {
+        self.read_table().contains_key(name)
+            || self
+                .fallback
+                .as_ref()
+                .is_some_and(|base| base.contains_registered(name))
     }
 
     /// 注册工具；同名重复注册以后者覆盖并告警（对照旧 register 的
@@ -176,7 +246,17 @@ impl ToolRegistry {
     #[must_use]
     pub fn resolve(&self, name: &str) -> Option<ToolBinding> {
         let table = self.read_table();
-        let tool = table.get(name)?.clone();
+        let Some(source) = table.get(name).cloned() else {
+            drop(table);
+            return self.fallback.as_ref()?.resolve(name);
+        };
+        if self.fallback_conflicts(name) {
+            return None;
+        }
+        if !self.is_source_visible(name, source.as_ref()) {
+            return None;
+        }
+        let tool = self.project_tool(&source);
         if !self.is_visible(name, tool.as_ref()) {
             return None;
         }
@@ -189,6 +269,8 @@ impl ToolRegistry {
         Some(ToolBinding {
             connection_generation: tool.connection_generation(),
             tool,
+            source,
+            project_for_child: self.project_for_child,
             directory_generation: self.generation.load(Ordering::Acquire),
             revocation,
         })
@@ -202,11 +284,23 @@ impl ToolRegistry {
             return false;
         }
         let table = self.read_table();
+        if !table.contains_key(binding.tool.name()) {
+            drop(table);
+            return self
+                .fallback
+                .as_ref()
+                .is_some_and(|base| base.is_binding_current(binding));
+        }
+        if self.fallback_conflicts(binding.tool.name()) {
+            return false;
+        }
         self.generation.load(Ordering::Acquire) == binding.directory_generation
+            && self.is_source_visible(binding.source.name(), binding.source.as_ref())
+            && self.project_for_child == binding.project_for_child
             && !binding.revocation.is_cancelled()
             && table
                 .get(binding.tool.name())
-                .is_some_and(|current| Arc::ptr_eq(current, &binding.tool))
+                .is_some_and(|current| Arc::ptr_eq(current, &binding.source))
             && binding
                 .connection_generation
                 .is_none_or(|generation| binding.tool.is_connection_generation_current(generation))
@@ -215,21 +309,32 @@ impl ToolRegistry {
     /// 导出全量规格（名字典序，供 LLM tools 参数）。
     #[must_use]
     pub fn specs(&self) -> Vec<ToolSpec> {
-        self.read_table()
-            .iter()
-            .filter(|(name, tool)| self.is_visible(name, tool.as_ref()))
-            .map(|(_, tool)| tool.spec())
+        self.names()
+            .into_iter()
+            .filter_map(|name| self.get(&name).map(|tool| tool.spec()))
             .collect()
     }
 
     /// 全量工具名（名字典序，供未知工具引导文案的可用工具列表）。
     #[must_use]
     pub fn names(&self) -> Vec<String> {
-        self.read_table()
+        let table = self.read_table();
+        let mut names: BTreeSet<String> = table
             .iter()
+            .filter(|(name, tool)| self.is_source_visible(name, tool.as_ref()))
+            .map(|(name, tool)| (name, self.project_tool(tool)))
             .filter(|(name, tool)| self.is_visible(name, tool.as_ref()))
             .map(|(name, _)| name.clone())
-            .collect()
+            .filter(|name| !self.fallback_conflicts(name))
+            .collect();
+        if let Some(base) = &self.fallback {
+            names.extend(
+                base.names()
+                    .into_iter()
+                    .filter(|name| !table.contains_key(name)),
+            );
+        }
+        names.into_iter().collect()
     }
 
     /// 注册数量。
@@ -247,7 +352,35 @@ impl ToolRegistry {
     /// Monotonic generation shared by every filtered view of this directory.
     #[must_use]
     pub fn generation(&self) -> u64 {
-        self.generation.load(Ordering::Acquire)
+        self.generation
+            .load(Ordering::Acquire)
+            .wrapping_add(self.fallback.as_ref().map_or(0, |base| base.generation()))
+    }
+
+    /// Project explicitly narrowed child instances while keeping the live
+    /// source directory and its replacement/revocation fences.
+    #[must_use]
+    pub fn child_view(&self) -> Self {
+        let mut view = self.clone();
+        if !view.project_for_child {
+            view.source_visibility = view.visibility.take();
+        }
+        view.project_for_child = true;
+        view.fallback = view
+            .fallback
+            .as_ref()
+            .map(|base| Arc::new(base.child_view()));
+        view
+    }
+
+    fn project_tool(&self, tool: &Arc<dyn Tool>) -> Arc<dyn Tool> {
+        if self.project_for_child
+            && let Some(child) = tool.child_view()
+            && child.name() == tool.name()
+        {
+            return child;
+        }
+        Arc::clone(tool)
     }
 
     /// Create a live, read-only visibility view over the same directory. Dynamic
@@ -269,7 +402,14 @@ impl ToolRegistry {
         &self,
         predicate: impl Fn(&str, &dyn Tool) -> bool + Send + Sync + 'static,
     ) -> Self {
-        let predicate: Arc<ToolVisibility> = Arc::new(predicate);
+        self.filtered_with(Arc::new(predicate))
+    }
+
+    fn filtered_with(&self, predicate: Arc<ToolVisibility>) -> Self {
+        let fallback = self
+            .fallback
+            .as_ref()
+            .map(|base| Arc::new(base.filtered_with(predicate.clone())));
         let visibility = match self.visibility.as_ref() {
             None => predicate,
             Some(current) => {
@@ -280,10 +420,14 @@ impl ToolRegistry {
             }
         };
         Self {
+            fallback,
+            adaptations: self.adaptations.clone(),
             tools: Arc::clone(&self.tools),
             generation: Arc::clone(&self.generation),
             revocations: Arc::clone(&self.revocations),
             visibility: Some(visibility),
+            source_visibility: self.source_visibility.clone(),
+            project_for_child: self.project_for_child,
         }
     }
 
@@ -310,6 +454,12 @@ impl ToolRegistry {
 
     fn is_visible(&self, name: &str, tool: &dyn Tool) -> bool {
         self.visibility
+            .as_ref()
+            .is_none_or(|visibility| visibility(name, tool))
+    }
+
+    fn is_source_visible(&self, name: &str, tool: &dyn Tool) -> bool {
+        self.source_visibility
             .as_ref()
             .is_none_or(|visibility| visibility(name, tool))
     }
@@ -372,6 +522,62 @@ mod tests {
         Arc::new(StubTool { name, description })
     }
 
+    struct ProjectedStub(bool);
+    impl Tool for ProjectedStub {
+        fn name(&self) -> &'static str {
+            "TaskUpdate"
+        }
+        fn description(&self) -> &'static str {
+            if self.0 {
+                "self output"
+            } else {
+                "full advisory"
+            }
+        }
+        fn parameters(&self) -> serde_json::Value {
+            json!({"selfOnly": self.0})
+        }
+        fn child_view(&self) -> Option<Arc<dyn Tool>> {
+            Some(Arc::new(Self(true)))
+        }
+        fn execute(&self, _: serde_json::Value, _: ToolContext) -> BoxFuture<'_, ToolOutput> {
+            Box::pin(async { ToolOutput::ok("stub") })
+        }
+    }
+
+    #[test]
+    fn child_projection_preserves_parent_filters_live_updates_and_original_revocation() {
+        let registry = ToolRegistry::new();
+        registry.register_dynamic(Arc::new(ProjectedStub(false)));
+        let parent_denied = registry.filtered_by(|_, tool| tool.parameters()["selfOnly"] == true);
+        assert!(
+            parent_denied.child_view().is_empty(),
+            "projection must not widen a preexisting parent predicate"
+        );
+        let child = registry
+            .child_view()
+            .filtered_by(|name, _| name != "Hidden");
+        assert_eq!(
+            registry.get("TaskUpdate").unwrap().description(),
+            "full advisory"
+        );
+        assert_eq!(child.specs()[0].description, "self output");
+        let bound = child.resolve("TaskUpdate").unwrap();
+        assert!(child.is_binding_current(&bound));
+        assert!(!registry.is_binding_current(&bound));
+        registry.register_dynamic(stub("Later", "live dynamic tool"));
+        assert!(child.names().contains(&"Later".into()));
+        registry.replace_dynamic(Arc::new(ProjectedStub(false)));
+        assert!(bound.revocation_token().is_cancelled());
+        assert!(!child.is_binding_current(&bound));
+        assert_eq!(
+            child.get("TaskUpdate").unwrap().description(),
+            "self output"
+        );
+        registry.unregister("TaskUpdate");
+        assert!(child.get("TaskUpdate").is_none());
+    }
+
     #[test]
     fn register_and_get_round_trip() {
         let mut registry = ToolRegistry::new();
@@ -382,6 +588,53 @@ mod tests {
         assert!(!registry.is_empty());
         assert_eq!(registry.get("Echo").expect("echo").name(), "Echo");
         assert!(registry.get("Missing").is_none());
+    }
+
+    #[test]
+    fn overlay_is_local_but_observes_base_updates_revocations_and_conflicts() {
+        let base = Arc::new(ToolRegistry::new());
+        base.register_dynamic(stub("Base", "base"));
+        let overlay = ToolRegistry::overlay(base.clone());
+        overlay.register_dynamic(stub("Local", "local"));
+        assert_eq!(base.names(), vec!["Base"]);
+        assert_eq!(overlay.names(), vec!["Base", "Local"]);
+        let binding = overlay.resolve("Base").unwrap();
+        base.replace_dynamic(stub("Base", "replacement"));
+        assert!(!overlay.is_binding_current(&binding));
+        assert!(binding.revocation_token().is_cancelled());
+        let local = overlay.resolve("Local").unwrap();
+        base.register_dynamic(stub("Local", "conflict"));
+        assert!(!overlay.is_binding_current(&local));
+        assert!(overlay.get("Local").is_none());
+        assert_eq!(overlay.names(), vec!["Base"]);
+        base.unregister("Local");
+        assert_eq!(overlay.get("Local").unwrap().description(), "local");
+        overlay.unregister("Base");
+        assert!(
+            base.get("Base").is_some(),
+            "local cleanup must never remove a base tool"
+        );
+    }
+
+    #[test]
+    fn overlay_cannot_override_hidden_base_tools_and_views_narrow_both_layers() {
+        let base = ToolRegistry::new();
+        base.register_dynamic(stub("Disabled", "must stay hidden"));
+        base.register_dynamic(Arc::new(ProjectedStub(false)));
+        let overlay =
+            ToolRegistry::overlay(Arc::new(base.filtered_by(|name, _| name != "Disabled")));
+        overlay.register_dynamic(stub("Disabled", "attempted override"));
+        overlay.register_dynamic(stub("Local", "local"));
+        assert!(overlay.get("Disabled").is_none());
+        let child = overlay.child_view().filtered_by(|name, _| name != "Local");
+        assert_eq!(child.names(), vec!["TaskUpdate"]);
+        assert_eq!(
+            child.get("TaskUpdate").unwrap().description(),
+            "self output"
+        );
+        let bound = child.resolve("TaskUpdate").unwrap();
+        assert!(child.is_binding_current(&bound));
+        assert!(!overlay.is_binding_current(&bound));
     }
 
     #[test]
@@ -544,5 +797,40 @@ mod tests {
 
         registry.unregister("Echo");
         assert!(!registry.is_binding_current(&second));
+    }
+    #[test]
+    fn trusted_adaptation_retains_live_revocation_and_child_visibility() {
+        let base = Arc::new(ToolRegistry::new());
+        base.register_dynamic(stub("WebBrowser", "original"));
+        let original = base.resolve("WebBrowser").unwrap();
+        let directory =
+            ToolRegistry::adapt_bound(base.clone(), original.clone(), stub("WebBrowser", "owned"))
+                .unwrap();
+        assert_eq!(directory.get("WebBrowser").unwrap().description(), "owned");
+        let child = directory.child_view();
+        assert_eq!(child.get("WebBrowser").unwrap().description(), "owned");
+        assert!(child.is_binding_current(&child.resolve("WebBrowser").unwrap()));
+        assert!(
+            directory
+                .filtered_by(|_, _| false)
+                .get("WebBrowser")
+                .is_none()
+        );
+        let bound = directory.resolve("WebBrowser").unwrap();
+        assert!(
+            ToolRegistry::adapt_bound(base.clone(), original.clone(), stub("Other", "renamed"))
+                .is_err()
+        );
+        base.unregister("WebBrowser");
+        assert!(bound.revocation_token().is_cancelled());
+        assert!(!directory.is_binding_current(&bound));
+        assert!(directory.get("WebBrowser").is_none());
+        assert!(child.get("WebBrowser").is_none());
+        base.register_dynamic(stub("WebBrowser", "new"));
+        assert!(
+            directory.get("WebBrowser").is_none(),
+            "never silently rebind a revoked wrapper"
+        );
+        assert!(ToolRegistry::adapt_bound(base, original, stub("WebBrowser", "owned")).is_err());
     }
 }

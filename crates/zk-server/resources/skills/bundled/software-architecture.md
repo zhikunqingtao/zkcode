@@ -1,8 +1,12 @@
 ---
 name: software-architecture
 description: 提供Clean Architecture、SOLID原则与15种核心设计模式的中文化决策指引，重点覆盖Java/Spring Boot服务端场景
-allowed-tools: [Read, Write]
-arguments: [problem_description, tech_stack]
+allowed-tools:
+  - Read
+  - Write
+arguments:
+  - problem_description
+  - tech_stack
 argument-hint: "问题描述与技术栈，如 '订单服务耦合过深 java-spring-boot'"
 when_to_use: 当用户面临架构选型、模块解耦、设计模式选择或代码可维护性问题时
 effort: medium

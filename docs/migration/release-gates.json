@@ -1,0 +1,1121 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-07T00:30:19.024781+00:00",
+  "sourceTarget": "053adf9071dc1996aa1ebfa30c0a23d587ffad5c",
+  "rustBaseline": "08cbdc4",
+  "scope": "Historical pre-full-alignment evidence only. Further uncommitted changes have invalidated current-tree release claims. See full-alignment.md and full-alignment-gates.json for current verification. No remote credentialed API validation is implied.",
+  "gates": [
+    {
+      "id": "machine-contracts",
+      "command": "./scripts/parity/check-contracts.sh",
+      "status": "passed",
+      "exitCode": 0,
+      "evidence": {
+        "path": "/tmp/zk-release-contracts-final.log",
+        "sha256": "dd7dca9f28ae775b866302044d05a2c4700f78b16d8efd9ce8ec2ee7f9173de5"
+      },
+      "details": {
+        "toolSchemaSha256": "315d341299f27dbe83a7e2ce808b994b72b9a701914e955920ddbf0abfd36e35",
+        "ddlTableCount": 56,
+        "downstreamWsKindCount": 60,
+        "addedRestRoutes": 14,
+        "defaultToolCount": 34
+      },
+      "result": "Structural contract and compiled registry golden both pass: 56 DDL tables, 60 downstream message kinds, 34 default tools. Schema digest 315d341299f27dbe83a7e2ce808b994b72b9a701914e955920ddbf0abfd36e35.",
+      "compiledSchemaEvidence": {
+        "path": "/tmp/zk-workspace-tests-resume7.txt",
+        "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7"
+      },
+      "priorSnapshots": [
+        {
+          "evidence": {
+            "path": "/tmp/zk-release-contracts-resume7.log",
+            "sha256": "dd7dca9f28ae775b866302044d05a2c4700f78b16d8efd9ce8ec2ee7f9173de5"
+          },
+          "result": "Structural contract and compiled registry golden both pass: 56 DDL tables, 60 downstream message kinds, 34 default tools. Schema digest 315d341299f27dbe83a7e2ce808b994b72b9a701914e955920ddbf0abfd36e35."
+        }
+      ]
+    },
+    {
+      "id": "rust-tool-schema-golden",
+      "command": "ZK_RUN_GIT_TESTS=true CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --workspace --all-features --locked --no-fail-fast",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "Compiled production registry digest equals the updated golden and parity JSON: 315d341299f27dbe83a7e2ce808b994b72b9a701914e955920ddbf0abfd36e35. The exact golden test passed in successful workspace resume7.",
+      "evidence": {
+        "path": "/tmp/zk-workspace-tests-resume7.txt",
+        "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7"
+      },
+      "previousValidatedHash": "c37c8abc54f28a492299af54f70a3750d3b41493f9cdcecfc786c04bdf7f9f76",
+      "observedCompiledSchemaSha256": "315d341299f27dbe83a7e2ce808b994b72b9a701914e955920ddbf0abfd36e35",
+      "observedCompiledSchemaLog": "/tmp/zk-workspace-tests-resume6.txt"
+    },
+    {
+      "id": "cargo-deny",
+      "command": "cargo deny check",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "advisories ok, bans ok, licenses ok, sources ok; duplicate-version warnings retained.",
+      "evidence": {
+        "path": "/tmp/zk-release-cargo-deny-latest.log",
+        "sha256": "2e58fd047f33ddb6e0813cc82af270c7671544825052fc3e384c30eae9d1a010"
+      },
+      "priorSnapshots": [
+        {
+          "status": "passed",
+          "evidence": {
+            "path": "/tmp/zk-release-final-cargo-deny.log",
+            "sha256": "d8654ff68d3476b8ab9947cef77d57fb86e7db120d07fc05f6020dfa7f10db1d"
+          },
+          "result": "advisories ok, bans ok, licenses ok, sources ok; duplicate-version warnings retained"
+        }
+      ]
+    },
+    {
+      "id": "python-dependencies",
+      "command": "python-service/.venv/bin/python -m pip check",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "No broken requirements found in the newly rebuilt locked Python environment.",
+      "evidence": {
+        "path": "/tmp/zk-python-rebuilt-deps.log",
+        "sha256": "9261363b733079a641c2e4cc9bc46ffa1d8336945a87f807b6cf68847dbc9b09"
+      },
+      "priorSnapshots": [
+        {
+          "status": "passed",
+          "evidence": {
+            "path": "/tmp/zk-release-final-python-deps.log",
+            "sha256": "9261363b733079a641c2e4cc9bc46ffa1d8336945a87f807b6cf68847dbc9b09"
+          },
+          "result": "No broken requirements found"
+        },
+        {
+          "status": "passed",
+          "result": "No broken requirements found.",
+          "evidence": {
+            "path": "/tmp/zk-release-python-deps-latest.log",
+            "sha256": "9261363b733079a641c2e4cc9bc46ffa1d8336945a87f807b6cf68847dbc9b09"
+          }
+        }
+      ]
+    },
+    {
+      "id": "release-secret-scan",
+      "command": "./scripts/parity/scan-release-secrets.sh",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "Final release secret scan after new frontend behavior tests and documentation passed: 20.27 MB scanned, no leaks found.",
+      "evidence": {
+        "path": "/tmp/zk-release-secrets-completed.log",
+        "sha256": "511095f4e1fb726184040cafda0fd465811f7401d710df20b4ffdc484da295af"
+      },
+      "priorSnapshots": [
+        {
+          "status": "passed",
+          "evidence": {
+            "path": "/tmp/zk-release-final-secrets.log",
+            "sha256": "60a8a0fca1fde0645211b7a23d76bec10dc55172fe1edb39b2e4271eb5b0b767"
+          },
+          "result": "gitleaks scanned 18.91 MB; no leaks found"
+        },
+        {
+          "evidence": {
+            "path": "/tmp/zk-release-secrets-latest.log",
+            "sha256": "4df970fa96cc6a1ea3779ad40aa1468d2411c667d58f6064b04b82ffd458b7c9"
+          },
+          "result": "gitleaks scanned 19.78 MB; no leaks found."
+        },
+        {
+          "status": "passed",
+          "evidence": {
+            "path": "/tmp/zk-release-secrets-final.log",
+            "sha256": "20c3ab15ffe2f53be75884ed753e7bb8a4c613530937f586cd3638737e0f022e"
+          },
+          "result": "Final release secret scan passed: 20.13 MB scanned, no leaks found."
+        }
+      ]
+    },
+    {
+      "id": "frontend-build",
+      "command": "npm run build",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "tsc and Vite production build passed in 11.71s for the native segment changes. Existing mixed dynamic/static import, empty editor/terminal chunk and large-chunk warnings remain visible.",
+      "evidence": {
+        "path": "/tmp/zk-frontend-native-segment-build.txt",
+        "sha256": "6c4d1cf7990beb3becba17691b9504e8ead144169012541fed531398ec026ea1"
+      },
+      "priorSnapshots": [
+        {
+          "status": "passed",
+          "result": "tsc and Vite production build pass in16.38s; existing large-chunk warnings retained",
+          "evidence": {
+            "path": "/tmp/zk-release-frontend-build.log",
+            "sha256": "1d55f577aec8339769d84d8976b21eaa5e33c507216273b594e3da6ba33e1563"
+          }
+        }
+      ]
+    },
+    {
+      "id": "frontend-dependency-audit",
+      "command": "./scripts/parity/npm-audit.sh",
+      "status": "failed",
+      "exitCode": 1,
+      "result": "Explicit online npm audit and its single official-registry retry both report the same 6 high findings in the Tailwind 3/braces development chain. The offline npm ci zero-vulnerability message is not an audit result and is not used as release evidence.",
+      "counts": {
+        "info": 0,
+        "low": 0,
+        "moderate": 0,
+        "high": 6,
+        "critical": 0,
+        "total": 6
+      },
+      "packages": [
+        "@tailwindcss/typography",
+        "braces",
+        "chokidar",
+        "fast-glob",
+        "micromatch",
+        "tailwindcss"
+      ],
+      "advisory": "https://github.com/advisories/GHSA-vfj7-8cjw-p6xm",
+      "upstreamIssue": "https://github.com/micromatch/braces/issues/73",
+      "upstreamPatchStatus": "Open PR72; npm latest3.0.3 affected, no official patched release",
+      "dependencyChain": "tailwindcss3.4.19 -> chokidar3.6.0 or micromatch4.0.8/fast-glob -> braces3.0.3; typography affected through tailwind peer",
+      "decision": "Tailwind4 would remove dependency chain but requires stylesheet compatibility migration and visual regression; user decision pending, no major upgrade or advisory suppression performed",
+      "evidence": {
+        "path": "/tmp/zk-npm-audit-latest.log",
+        "sha256": "7d230633c0c776d2d3b691675498db4a9d36027acb5e7ccc3b2deafd7fecaf0c"
+      },
+      "priorSnapshots": [
+        {
+          "command": "npm audit --json",
+          "status": "failed",
+          "exitCode": 1,
+          "result": "6 high findings remain in Tailwind 3/braces transitive development chain; no suppression or unsupported major upgrade applied",
+          "evidence": {
+            "path": "/tmp/zk-release-final-npm-audit.json",
+            "sha256": "51d3856e85d980ce07bc5aab6c009c67774a0672ff858d46ed97e2540f7813c2"
+          }
+        }
+      ],
+      "proposedBreakingFix": "Official npm audit suggests tailwindcss@4.3.3; user decision still pending, no major upgrade performed."
+    },
+    {
+      "id": "deep-doctor",
+      "command": "./dev doctor --deep --json",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "All 36 deep checks passed, including current dependency/build fingerprints, lock validation and actual managed Chromium launch/page/close. Backend, frontend and Python services were intentionally stopped, with no recorded or stale PID; this is a valid doctor state.",
+      "failedChecks": [],
+      "evidence": {
+        "path": "/tmp/zk-doctor-deep-final.json",
+        "sha256": "19b4b8cb97c26935d64ef0ceacebc8e00d77925a92a5b139f4ca0ed231dafa5a"
+      },
+      "priorAttempts": [
+        {
+          "command": "./dev doctor --deep --json",
+          "status": "failed",
+          "exitCode": 1,
+          "result": "All dependency/lock/build/real browser capability checks pass; stale source state stamps and old dead PID records must be resolved through formal lifecycle after edits stabilize",
+          "failedChecks": [
+            {
+              "detail": "stale",
+              "name": "state-frontend",
+              "ok": false,
+              "repair": "./dev repair frontend"
+            },
+            {
+              "detail": "stale",
+              "name": "state-python",
+              "ok": false,
+              "repair": "./dev repair python"
+            },
+            {
+              "detail": "stale",
+              "name": "state-browser",
+              "ok": false,
+              "repair": "./dev repair browser"
+            },
+            {
+              "detail": "stale",
+              "name": "state-rust",
+              "ok": false,
+              "repair": "./dev repair rust"
+            },
+            {
+              "detail": "stale or belongs to another command",
+              "name": "pid-backend",
+              "ok": false,
+              "repair": "./dev stop"
+            },
+            {
+              "detail": "stale or belongs to another command",
+              "name": "pid-frontend",
+              "ok": false,
+              "repair": "./dev stop"
+            },
+            {
+              "detail": "stale or belongs to another command",
+              "name": "pid-python",
+              "ok": false,
+              "repair": "./dev stop"
+            }
+          ],
+          "evidence": {
+            "path": "/tmp/zk-release-doctor.json",
+            "sha256": "d8b348fe7fb917fb490671e8cbda0cf3e5f8181bc60111d300ac88b95a8ede0a"
+          }
+        }
+      ],
+      "checksPassed": 36,
+      "stderrEvidence": {
+        "path": "/tmp/zk-doctor-deep-final.err",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "id": "frontend-unit",
+      "command": "npm run test:run",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "135 test files passed; 1190 tests passed, 16 skipped in 141.86s. Includes five additional actual Ctrl+C/stop-confirmation interaction assertions. Skipped tests are not counted as passed; they are individually explained in docs/migration/product-acceptance-matrix.json.",
+      "evidence": {
+        "path": "/tmp/zk-frontend-product-final-tests.txt",
+        "sha256": "2cfd332e58298aa51e36b6ad5b5d6504a7c68d970c88857208a579ab8e1ec819"
+      },
+      "priorSnapshots": [
+        {
+          "status": "passed",
+          "evidence": {
+            "path": "/tmp/zk-release-frontend-tests.log",
+            "sha256": "ecc34140178db016c581bdfaa3868375738f31cd55a5fd212846fbf32bc64148"
+          },
+          "result": "134files;1173 passed,16 skipped (existing) in121.30s"
+        },
+        {
+          "status": "passed",
+          "evidence": {
+            "path": "/tmp/zk-frontend-native-segment-full.txt",
+            "sha256": "72c0e93f5abb385473d216d15cc43b1e56f27eeefc0ca36138139f502bd1ae89"
+          },
+          "result": "135 test files passed; 1185 tests passed, 16 skipped in 106.80s. Skipped tests are not counted as passed."
+        }
+      ],
+      "counts": {
+        "files": 135,
+        "passed": 1190,
+        "skipped": 16
+      }
+    },
+    {
+      "id": "general-tools-clippy",
+      "command": "CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "Superseded the earlier zk-tools/zk-mcp failure with strict workspace-wide, all-target and all-feature Clippy. Root confirmed exit 0; warnings denied. This also validates all native Read/image/merge test source compilation.",
+      "evidence": {
+        "path": "/tmp/zk-workspace-clippy-resume10.txt",
+        "sha256": "d2c539975b17f1983e2c2f9465869204726adf8cf656244c3e35b4ca27489d0c"
+      },
+      "priorAttempts": [
+        {
+          "command": "cargo clippy -p zk-tools -p zk-mcp --no-deps --all-targets",
+          "status": "failed",
+          "exitCode": 101,
+          "result": "Owned generic tools/MCP warnings resolved; parallel worktree.rs blocks at items_after_test_module (WorktreeBackend and ManagedWorktreeTool after tests), assigned runtime owner",
+          "evidence": {
+            "path": "/tmp/zk-release-general-clippy.log",
+            "sha256": "23797cb44521a5bdcfecaf276b43cd055dbaf45816a9c142fe6ddf110d970dd7"
+          }
+        }
+      ]
+    },
+    {
+      "id": "python-full-suite",
+      "command": "cd python-service && .venv/bin/python -m pytest --cov=src --cov-fail-under=70",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "Freshly rebuilt locked Python 3.11.15 environment: all 279 tests passed, 9 warnings in 42.94s. This run includes real native browser lifecycle tests.",
+      "evidence": {
+        "path": "/tmp/zk-python-rebuilt-coverage.log",
+        "sha256": "3b9e59340a99131ed30efaaa8aea828884059b61d96d3746fe8308f520d12bd0"
+      },
+      "priorSnapshots": [
+        {
+          "command": "python-service/.venv/bin/python -m pytest -q",
+          "status": "passed",
+          "result": "279 passed, 9 warnings in 30.42s",
+          "evidence": {
+            "path": "/tmp/zk-python-final-full.log",
+            "sha256": "12233aaefcefc799d189f1542eb72b339d75491e86ea06dbdad0d62e49dd86c0"
+          }
+        }
+      ]
+    },
+    {
+      "id": "native-dev-script-tests",
+      "command": "python-service/.venv/bin/python -m unittest discover -s scripts/dev/tests -v",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "84 tests passed in 25.165s with required Python 3.11",
+      "evidence": {
+        "path": "/tmp/zk-dev-final-tests3.log",
+        "sha256": "dba47ab23dcca440b3cb6d8a43aa9cedfc8a899a34303039bafae1da7e3cdd2e"
+      },
+      "priorAttempts": [
+        {
+          "command": "python3 -m unittest discover -s scripts/dev/tests -v",
+          "status": "failed_unsupported_interpreter",
+          "result": "Xcode system Python 3.9 lacks tomllib; project and CI require Python 3.11. No compatibility shim or dependency downgrade applied.",
+          "evidence": "/tmp/zk-dev-final-tests2.log"
+        }
+      ]
+    },
+    {
+      "id": "python-coverage",
+      "command": "cd python-service && .venv/bin/python -m pytest --cov=src --cov-fail-under=70",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "Freshly rebuilt locked Python environment: all 279 tests passed; statement/branch-aware coverage 76.49% meets the 70% gate. 9 dependency warnings retained.",
+      "evidence": {
+        "path": "/tmp/zk-python-rebuilt-coverage.log",
+        "sha256": "3b9e59340a99131ed30efaaa8aea828884059b61d96d3746fe8308f520d12bd0"
+      },
+      "priorSnapshots": [
+        {
+          "command": "cd python-service && .venv/bin/python -m pytest --cov=src --cov-fail-under=70",
+          "status": "passed",
+          "result": "279 passed, 9 warnings; branch coverage 76.49% >= 70%; 31.48s",
+          "evidence": {
+            "path": "/tmp/zk-python-final-coverage.log",
+            "sha256": "92db026eabe7bdd118acba982aacd842b9de8f6ea76357da55124e8da787c7d3"
+          }
+        }
+      ]
+    },
+    {
+      "id": "attachment-safety-targeted",
+      "command": "cargo test -q -p zk-server --lib api::attachment::tests",
+      "status": "targeted_snapshot_passed",
+      "exitCode": 0,
+      "result": "6 passed; local targeted evidence before final shared full-workspace regression; remote API availability is not implied.",
+      "evidence": {
+        "path": "/tmp/zk-attachment-final-tests.log",
+        "sha256": "93a6087221d25f8a575446d17d05b873e69cd67be5f5c11137e6f013c9c883db"
+      }
+    },
+    {
+      "id": "screenshot-safety-targeted",
+      "command": "cargo test -q -p zk-server --lib api::evidence::tests",
+      "status": "targeted_snapshot_passed",
+      "exitCode": 0,
+      "result": "2 passed; local targeted evidence before final shared full-workspace regression; remote API availability is not implied.",
+      "evidence": {
+        "path": "/tmp/zk-screenshot-final-tests.log",
+        "sha256": "ba409261034d09b788c7480e2dfacfee61e79f0734a4619ec5327aa6c569aa94"
+      }
+    },
+    {
+      "id": "evidence-api-targeted",
+      "command": "cargo test -q -p zk-server --test evidence_api",
+      "status": "targeted_snapshot_passed",
+      "exitCode": 0,
+      "result": "4 passed; local targeted evidence before final shared full-workspace regression; remote API availability is not implied.",
+      "evidence": {
+        "path": "/tmp/zk-evidence-final-tests.log",
+        "sha256": "4cea5823678ef8adff5ac2756435c8c0f05f46a121a69654b90df656ed135664"
+      }
+    },
+    {
+      "id": "office-real-bash",
+      "command": "cargo test -q -p zk-tools --test office_toolchain",
+      "status": "targeted_snapshot_passed",
+      "exitCode": 0,
+      "result": "1 passed; local targeted evidence before final shared full-workspace regression; remote API availability is not implied.",
+      "evidence": {
+        "path": "/tmp/zk-office-bash-tests.log",
+        "sha256": "0f4f4e9d36f2f8f8db108144f29141469568d74c2ded6ab739d56600313bee45"
+      }
+    },
+    {
+      "id": "image-owned-http-wire",
+      "command": "ZK_RUN_GIT_TESTS=true CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --workspace --all-features --locked --no-fail-fast",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "All 3 actual HTTP wire tests passed: exact Chat/Anthropic/Responses bytes and private-identity suppression, cancellation socket closure, and streamed chunked 10MiB+1 rejection before provider request.",
+      "evidence": {
+        "path": "/tmp/zk-workspace-tests-resume7.txt",
+        "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7"
+      },
+      "targetExitCode": 0,
+      "target": "zk-llm / tests/image_wire.rs",
+      "priorSnapshots": [
+        {
+          "status": "target_passed_in_failed_workspace",
+          "exitCode": 101,
+          "result": "All 3 target tests passed: Chat/Anthropic/Responses exact image bytes and private-identity suppression, cancellation closes actual image GET socket, chunked 10MiB+1 body fails immediately and closes socket before any provider call. The containing workspace run failed 10 other targets.",
+          "evidence": {
+            "path": "/tmp/zk-workspace-tests-resume6.txt",
+            "sha256": "c9f463313c4200373d7b2bb451318d8d0f9401eef80ae6c700206057b377bf24"
+          }
+        }
+      ]
+    },
+    {
+      "id": "database-post-source-audit",
+      "command": "ZK_RUN_GIT_TESTS=true CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --workspace --all-features --locked --no-fail-fast",
+      "status": "passed",
+      "exitCode": 0,
+      "evidence": {
+        "path": "/tmp/zk-workspace-tests-resume7.txt",
+        "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7"
+      },
+      "result": "All database unit/integration targets passed in the successful full workspace gate, including 2 trusted tool-image sealing tests, 11 migration integrity tests, 15 repository/idempotency tests and search/status/ownership regressions.",
+      "priorSnapshots": [
+        {
+          "status": "intermediate_passed",
+          "exitCode": 0,
+          "result": "178 passed (141 unit +37 integration), including fresh merge constraints, Handoff 16KiB response/8MiB scanning, message idempotency, search and system notice ownership. Later tool-image archive projection/sealing edits still require final workspace gate.",
+          "evidence": {
+            "path": "/tmp/zk-db-post-audit-final.txt",
+            "sha256": "e358af77b8e54c407d2da9b0614e309759876553146bd68038927125207c8173"
+          }
+        }
+      ]
+    },
+    {
+      "id": "native-office-regression",
+      "command": "./dev test office",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "41 passed in 20.57s on native Apple Silicon macOS: editable XLSX/DOCX/PPTX structure and negative fixtures, actual LibreOffice recalculation/conversion, Chinese PDF extraction, and real Chromium HTML keyboard/resource/print checks. No Docker or mocked renderer.",
+      "scope": "The already-completed native Office/Python fixture suite; does not imply final Rust release/workspace gates have passed.",
+      "evidence": {
+        "path": "/var/folders/g_/cgkxr_w91xg7tx8n84hjt9zm0000gn/T/zkcode-office-45eb21ro/pytest.log",
+        "sha256": "9b28c4f3cf6d5fbfc4ecb6f92aa370d86ef523d2158aa94af27d028cae7a13f9"
+      },
+      "identityEvidence": [
+        {
+          "path": "/var/folders/g_/cgkxr_w91xg7tx8n84hjt9zm0000gn/T/zkcode-office-45eb21ro/run-identity.json",
+          "sha256": "09c72c42a8a030045035416db47721fcea5faa3dfef7225098399bd5f23cdb5e"
+        },
+        {
+          "path": "/var/folders/g_/cgkxr_w91xg7tx8n84hjt9zm0000gn/T/zkcode-office-45eb21ro/evidence/preflight-toolchain.json",
+          "sha256": "1f7dd7f399283a37e287036ac3a311655084a314986ca41962aeac7a23cff49c"
+        },
+        {
+          "path": "/var/folders/g_/cgkxr_w91xg7tx8n84hjt9zm0000gn/T/zkcode-office-45eb21ro/evidence/native-browser-identity.json",
+          "sha256": "a3f4ff039b36a33d29a1ef3f6cdebb2a4024c31d99658d9c5fb6ee0570224fca"
+        },
+        {
+          "path": "/var/folders/g_/cgkxr_w91xg7tx8n84hjt9zm0000gn/T/zkcode-office-45eb21ro/evidence/preflight-python-packages.json",
+          "sha256": "f933e1c620db78602549dacdd83865b8ae73b815a49881e93ccbfef274ec937c"
+        }
+      ],
+      "identities": [
+        {
+          "name": "libreoffice",
+          "path": "/Users/guoqingtao/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/override/soffice",
+          "sha256": "81c7db1c6dbcdd606d95abef337b4529aeda6a4fa1cf23a5a567f9c5655c8b66"
+        },
+        {
+          "name": "pdf",
+          "path": "/opt/homebrew/Cellar/poppler/26.10.0/bin/pdftoppm",
+          "sha256": "3bdab16e11c8d10b4fd9615231210125dbb195ae3ec2f22d641758242b159cb1"
+        },
+        {
+          "name": "pdf-text",
+          "path": "/opt/homebrew/Cellar/poppler/26.10.0/bin/pdftotext",
+          "sha256": "83c5be5ea8da9fdeae4df5bb15395265770a84e89fe81d89b9b2535a669ec214"
+        },
+        {
+          "name": "pdf-info",
+          "path": "/opt/homebrew/Cellar/poppler/26.10.0/bin/pdfinfo",
+          "sha256": "a6c5a5a30d25cb70a22707c9f8000e7bccdf3fad7ff810a3f1af8cddf075a454"
+        },
+        {
+          "name": "qpdf",
+          "path": "/opt/homebrew/Cellar/qpdf/12.4.2/bin/qpdf",
+          "sha256": "a6f9eb3ea45df2d5a1e044e06fcdfec8defa523ac9fc362c02180b4427459b0e"
+        },
+        {
+          "name": "media",
+          "path": "/opt/homebrew/Cellar/ffmpeg/9.0.2/bin/ffmpeg",
+          "sha256": "1ede5c7fd4e97d832ec69c97c78231875de7d69c55423158f5f4a4d923227dd5"
+        },
+        {
+          "name": "images",
+          "path": "/opt/homebrew/Cellar/imagemagick/7.1.2-32/bin/magick",
+          "sha256": "b4af751707a5b8aecd5729d85f8f0e28863472cb154fbf3e6ed61840271be97f"
+        },
+        {
+          "name": "diagrams",
+          "path": "/opt/homebrew/Cellar/graphviz/16.1.0/bin/dot",
+          "sha256": "a0a492e997c991ad95256eaf9b8f1d4a1a7033f494dd4f3dd33e91afe9caf2ec"
+        },
+        {
+          "name": "documents",
+          "path": "/opt/homebrew/Cellar/pandoc/3.12/bin/pandoc",
+          "sha256": "facb69e317dfea78d0b34d7637e2eca0920fef08f554551e6b9f6b0ed664b5d6"
+        },
+        {
+          "name": "ocr",
+          "path": "/opt/homebrew/Cellar/tesseract/5.5.3/bin/tesseract",
+          "sha256": "21674e0595020d02c049765fba6a51cedccdbae26eac94c5d15b55e3e6ecdec3"
+        },
+        {
+          "name": "cjk-fonts",
+          "path": "/Users/guoqingtao/Library/Fonts/NotoSansCJKsc-Bold.otf",
+          "sha256": "b5f0d1a190a7f9b43c310a8850630af12553df32c4c050543f9059732d9b4c0a"
+        },
+        {
+          "name": "cjk-fonts",
+          "path": "/Users/guoqingtao/Library/Fonts/NotoSansCJKsc-Regular.otf",
+          "sha256": "2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b"
+        },
+        {
+          "name": "cjk-fonts",
+          "path": "/Users/guoqingtao/Library/Fonts/NotoSansCJKsc-Thin.otf",
+          "sha256": "89bb8179d1b285ac0ca236b37ff29929ee3cc4526048dc11630a55728063e5ba"
+        },
+        {
+          "name": "cjk-fonts",
+          "path": "/Users/guoqingtao/Library/Fonts/NotoSansCJKsc-Black.otf",
+          "sha256": "2267c4a0312d267dff8c0d1609948f7d949a3da8be3e126f5e2690cb9cc883b4"
+        },
+        {
+          "name": "cjk-fonts",
+          "path": "/Users/guoqingtao/Library/Fonts/NotoSansCJKsc-DemiLight.otf",
+          "sha256": "4600700d1b10c8e82074de7c91fa60d2ff5d0a7b9588edea6ab0929424b1699f"
+        },
+        {
+          "name": "cjk-fonts",
+          "path": "/Users/guoqingtao/Library/Fonts/NotoSansCJKsc-Light.otf",
+          "sha256": "e78bbbe1573bbb006156c1198f5c8cd6329470cb6e0b6702c7a3c83913db4abf"
+        },
+        {
+          "name": "cjk-fonts",
+          "path": "/Users/guoqingtao/Library/Fonts/NotoSansCJKsc-Medium.otf",
+          "sha256": "ca094f6b0001fb048ca39ddd797a0cdb0179e1e55c6561e111c49c3e6a61d7b7"
+        },
+        {
+          "name": "ocr-chi_sim",
+          "path": "/opt/homebrew/share/tessdata/chi_sim.traineddata",
+          "sha256": "a5fcb6f0db1e1d6d8522f39db4e848f05984669172e584e8d76b6b3141e1f730"
+        },
+        {
+          "name": "ocr-chi_tra",
+          "path": "/opt/homebrew/share/tessdata/chi_tra.traineddata",
+          "sha256": "529c5b5797d64b126065cd55f2bb4c7fd7b15790798091b1ff259941a829330b"
+        },
+        {
+          "name": "chromium",
+          "path": "/Users/guoqingtao/Desktop/dev/code/zkcode/.runtime/playwright/chromium_headless_shell-1208/chrome-headless-shell-mac-arm64/chrome-headless-shell",
+          "sha256": "a46b3b1e63163fa2d2437fb6ae967cb5a73b50050bca32f1964e6129b6228244",
+          "version": "145.0.7632.6"
+        }
+      ],
+      "toolchainChecks": [
+        {
+          "detail": "LibreOfficeDev 26.8.0.0.alpha0 2c87e51eeaa2b413ff4ae097b2705eea1995d8e5",
+          "name": "libreoffice",
+          "ok": true,
+          "path": "/Users/guoqingtao/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/override/soffice"
+        },
+        {
+          "detail": "pdftoppm version 26.10.0",
+          "name": "pdf",
+          "ok": true,
+          "path": "/opt/homebrew/bin/pdftoppm"
+        },
+        {
+          "detail": "pdftotext version 26.10.0",
+          "name": "pdf-text",
+          "ok": true,
+          "path": "/opt/homebrew/bin/pdftotext"
+        },
+        {
+          "detail": "pdfinfo version 26.10.0",
+          "name": "pdf-info",
+          "ok": true,
+          "path": "/opt/homebrew/bin/pdfinfo"
+        },
+        {
+          "detail": "qpdf version 12.4.2",
+          "name": "qpdf",
+          "ok": true,
+          "path": "/opt/homebrew/bin/qpdf"
+        },
+        {
+          "detail": "ffmpeg version 9.0.2 Copyright (c) 2000-2026 the FFmpeg developers",
+          "name": "media",
+          "ok": true,
+          "path": "/opt/homebrew/bin/ffmpeg"
+        },
+        {
+          "detail": "Version: ImageMagick 7.1.2-32 Q16-HDRI aarch64 68f8d115a:20260926 https://imagemagick.org",
+          "name": "images",
+          "ok": true,
+          "path": "/opt/homebrew/bin/magick"
+        },
+        {
+          "detail": "dot - graphviz version 16.1.0 (20260904.0139)",
+          "name": "diagrams",
+          "ok": true,
+          "path": "/opt/homebrew/bin/dot"
+        },
+        {
+          "detail": "pandoc 3.12",
+          "name": "documents",
+          "ok": true,
+          "path": "/opt/homebrew/bin/pandoc"
+        },
+        {
+          "detail": "tesseract 5.5.3",
+          "name": "ocr",
+          "ok": true,
+          "path": "/opt/homebrew/bin/tesseract"
+        },
+        {
+          "detail": "chi_sim and chi_tra required",
+          "name": "ocr-chinese",
+          "ok": true
+        },
+        {
+          "detail": "Noto Sans CJK or native PingFang",
+          "name": "cjk-fonts",
+          "ok": true,
+          "paths": [
+            "/Users/guoqingtao/Library/Fonts/NotoSansCJKsc-Bold.otf",
+            "/Users/guoqingtao/Library/Fonts/NotoSansCJKsc-Regular.otf",
+            "/Users/guoqingtao/Library/Fonts/NotoSansCJKsc-Thin.otf",
+            "/Users/guoqingtao/Library/Fonts/NotoSansCJKsc-Black.otf",
+            "/Users/guoqingtao/Library/Fonts/NotoSansCJKsc-DemiLight.otf",
+            "/Users/guoqingtao/Library/Fonts/NotoSansCJKsc-Light.otf",
+            "/Users/guoqingtao/Library/Fonts/NotoSansCJKsc-Medium.otf"
+          ]
+        }
+      ],
+      "notes": [
+        "Existing healthy LibreOfficeDev 26.8.0.0.alpha0 was used after the stable cask download failed; its exact executable identity is retained.",
+        "Chinese OCR model identities and actual CJK font file SHA-256 values are included."
+      ]
+    },
+    {
+      "id": "native-read-image-unit",
+      "command": "ZK_RUN_GIT_TESTS=true CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --workspace --all-features --locked --no-fail-fast",
+      "status": "passed",
+      "exitCode": 0,
+      "passedCases": 4,
+      "scope": "image_read::tests::",
+      "result": "All 4 native Read image tests passed, covering format preservation, original-versus-transcoded source identities, resource bounds and authorized-path rebound rejection.",
+      "evidence": {
+        "path": "/tmp/zk-workspace-tests-resume7.txt",
+        "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7"
+      },
+      "priorSnapshots": [
+        {
+          "status": "targeted_cases_passed_in_failed_workspace",
+          "exitCode": 101,
+          "result": "Four native Read tests passed: PNG/JPEG/GIF/WebP identity preservation, separate BMP source identities sharing PNG payload, size/dimension limits, file/parent symlink rebound rejection. Final workspace release gate remains failed; no end-to-end image fixture pass is implied.",
+          "evidence": {
+            "path": "/tmp/zk-workspace-tests-resume6.txt",
+            "sha256": "c9f463313c4200373d7b2bb451318d8d0f9401eef80ae6c700206057b377bf24"
+          }
+        }
+      ]
+    },
+    {
+      "id": "bounded-image-payload-unit",
+      "command": "ZK_RUN_GIT_TESTS=true CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --workspace --all-features --locked --no-fail-fast",
+      "status": "passed",
+      "exitCode": 0,
+      "passedCases": 8,
+      "scope": "payload_guard::tests::",
+      "result": "All 8 bounded header/container/wire-limit tests passed. No raster or optional metadata is inflated for admission estimates.",
+      "evidence": {
+        "path": "/tmp/zk-workspace-tests-resume7.txt",
+        "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7"
+      },
+      "priorSnapshots": [
+        {
+          "status": "targeted_cases_passed_in_failed_workspace",
+          "exitCode": 101,
+          "result": "Eight bounded image/header/container/wire-limit unit tests passed, including shared validated dimensions, GIF/WebP complete containers and metadata-decompression avoidance. Final workspace release gate remains failed; no end-to-end image fixture pass is implied.",
+          "evidence": {
+            "path": "/tmp/zk-workspace-tests-resume6.txt",
+            "sha256": "c9f463313c4200373d7b2bb451318d8d0f9401eef80ae6c700206057b377bf24"
+          }
+        }
+      ]
+    },
+    {
+      "id": "rust-workspace-intermediate",
+      "command": "ZK_RUN_GIT_TESTS=true CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --workspace --all-features --locked --no-fail-fast",
+      "status": "failed_intermediate",
+      "exitCode": 101,
+      "failedTargets": [
+        "-p zk-authz --test tool_gateway_architecture",
+        "-p zk-db --test merge_tool_images",
+        "-p zk-engine --lib",
+        "-p zk-engine --test image_roundtrip",
+        "-p zk-engine --test runtime_migration",
+        "-p zk-llm --test provider_routing_wire",
+        "-p zk-llm --test summary_wire",
+        "-p zk-server --lib",
+        "-p zk-server --test config_models_api",
+        "-p zk-server --test production_runtime_roundtrip"
+      ],
+      "result": "Complete resume6 run reached all test targets and doc tests, with 10 failed targets. Fixes and updated fixtures after this run require rerun; this is not a passing release gate. Environment-gated Git tests were explicitly enabled.",
+      "evidence": {
+        "path": "/tmp/zk-workspace-tests-resume6.txt",
+        "sha256": "c9f463313c4200373d7b2bb451318d8d0f9401eef80ae6c700206057b377bf24"
+      }
+    },
+    {
+      "id": "rust-workspace-clippy",
+      "command": "CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "Strict Clippy passed for the full workspace, all targets and all features with -D warnings. Test execution and release build are separate gates.",
+      "evidence": {
+        "path": "/tmp/zk-workspace-clippy-resume10.txt",
+        "sha256": "d2c539975b17f1983e2c2f9465869204726adf8cf656244c3e35b4ca27489d0c"
+      }
+    },
+    {
+      "id": "frontend-lint",
+      "command": "cd frontend && npm run lint",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "Final ESLint gate passed with no reported errors or warnings for the frontend source/test snapshot after adding the stop-interaction tests.",
+      "evidence": {
+        "path": "/tmp/zk-frontend-product-final-lint.txt",
+        "sha256": "b60802a2486a38abed82876ac6a1e311e4fc7c1c79b586671b867ae4dab4a448"
+      },
+      "priorSnapshots": [
+        {
+          "status": "passed",
+          "evidence": {
+            "path": "/tmp/zk-frontend-native-segment-lint.txt",
+            "sha256": "b60802a2486a38abed82876ac6a1e311e4fc7c1c79b586671b867ae4dab4a448"
+          },
+          "result": "ESLint passed with no reported errors or warnings; frontend owner validated this source snapshot."
+        }
+      ]
+    },
+    {
+      "id": "rust-workspace-all-features",
+      "command": "ZK_RUN_GIT_TESTS=true CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --workspace --all-features --locked --no-fail-fast",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "All 106 top-level test harnesses completed: 2852 passed, 0 failed, 8 ignored. Count excludes one nested process self-reexecution reported inside its parent test. Git environment-gated tests were enabled. Ignored tests are not counted as passed.",
+      "counts": {
+        "passed": 2852,
+        "failed": 0,
+        "ignored": 8,
+        "harnesses": 106
+      },
+      "ignoredScopes": {
+        "credentialedLiveLlm": 4,
+        "credentialedDashscopeSearch": 1,
+        "legacySwarm": 2,
+        "nativeVerifyJourneyExecutedSeparately": 1
+      },
+      "evidence": {
+        "path": "/tmp/zk-workspace-tests-resume7.txt",
+        "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7"
+      },
+      "separateNativeValidationGate": "native-verify-journey"
+    },
+    {
+      "id": "dev-sync",
+      "command": "./dev sync --build",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "Formal locked online ./dev sync --build completed successfully after rebuilding the Python virtual environment and managed Chromium shell, then building the current Rust debug server. Runtime state stamps are current.",
+      "priorAttempts": [
+        {
+          "command": "./dev sync --offline --build",
+          "status": "failed_missing_cached_dependency",
+          "exitCode": null,
+          "result": "Python wheel cache lacked required setuptools==79.0.1. Formal sync restored the previous venv; no unsupported dependency substitution or version change was made. Frontend offline npm ci printed zero vulnerabilities, which is not accepted as the online audit gate.",
+          "evidence": {
+            "path": "/tmp/zk-dev-sync-latest.log",
+            "sha256": "15b6fa2a2c6accfad31cb62fe02b533120105dec45ba8252e94ddfa89f62ff2f"
+          },
+          "reportedOutcome": "failed"
+        }
+      ],
+      "evidence": {
+        "path": "/tmp/zk-dev-sync-online-latest.log",
+        "sha256": "55c5e8b42f9d845c601d6d3cf32545b23cd474cd007262256ab2fc1cba0d0948"
+      }
+    },
+    {
+      "id": "frontend-real-rust-backend-e2e",
+      "command": "ZK_E2E_SERVER_BINARY=/Users/guoqingtao/Desktop/dev/code/zkcode/target/debug/zk-server npm run test:e2e:production",
+      "workingDirectory": "frontend",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "4 passed in 21.3s using actual Chromium, the formal-sync Rust debug binary, isolated SQLite and a scripted local HTTP model provider. Covers diagram/math rendering, durable chat and V4 boundaries, settings/Skill/revisioned memory, and charged durable session merge with primary permission inheritance. This is not live external provider verification.",
+      "passed": 4,
+      "failed": 0,
+      "evidence": {
+        "path": "/tmp/zk-frontend-production-latest.txt",
+        "sha256": "f83589d871f65cfa5e20186ca70ee81d14ff5d2f63b1edcf1b8a2e7f248aa4f5"
+      },
+      "serverBinaryAtRun": {
+        "path": "/Users/guoqingtao/Desktop/dev/code/zkcode/target/debug/zk-server",
+        "sha256": "de3da835bd01a7a7fe3ecd6c6261af12d9b99a7690d0d47cd431332ecdd3c6d6",
+        "sameSha256BeforeAndAfter": true,
+        "identitySource": "Before/after binary hashing confirmed by frontend test owner. This is an execution snapshot; subsequent Cargo checks can rebuild the same path."
+      },
+      "priorSnapshots": [
+        {
+          "result": "Earlier 4-test real Rust backend E2E snapshot; replaced by formal-sync binary run.",
+          "evidence": {
+            "path": "/tmp/zk-frontend-production-audit-final.txt",
+            "sha256": "53011d2cdcac03fe57d6f301c3b249eee3cb3a6ee6032c585061079b48e150c6"
+          }
+        }
+      ]
+    },
+    {
+      "id": "rust-workspace-default-features",
+      "command": "ZK_RUN_GIT_TESTS=true CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --workspace --locked --no-fail-fast",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "All 106 top-level test harnesses completed: 2852 passed, 0 failed, 8 ignored. Count excludes one nested process self-reexecution reported inside its parent test. Git environment-gated tests were enabled. Ignored tests are not counted as passed. This workspace feature graph includes image-budget via zk-server; engine --no-default-features is a separate validation gate.",
+      "counts": {
+        "passed": 2852,
+        "failed": 0,
+        "ignored": 8,
+        "harnesses": 106
+      },
+      "ignoredScopes": {
+        "credentialedLiveLlm": 4,
+        "credentialedDashscopeSearch": 1,
+        "legacySwarm": 2,
+        "nativeVerifyJourneyExecutedSeparately": 1
+      },
+      "evidence": {
+        "path": "/tmp/zk-workspace-tests-default-final.txt",
+        "sha256": "c0c9fb73f284c8b10c830886ec5e4f416d92dad7a5ba20f1f0a704ed0752a567"
+      },
+      "separateNativeValidationGate": "native-verify-journey"
+    },
+    {
+      "id": "native-verify-journey",
+      "command": "CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test -p zk-server --test verify_journey_native --locked -- --ignored",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "1 passed, 0 failed, 0 ignored in 6.42s. Explicit native invocation exercises the actual Rust → UDS → Python → Chromium and managed HTTP preview path, evidence archival, and owned resource release after the formal runtime synchronization.",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "evidence": {
+        "path": "/tmp/zk-verify-journey-native-final.txt",
+        "sha256": "d7a59ab06950e8b15d1b1dcb4b350f5f845c1f515dc651f2a1d573c0f55b1d07"
+      },
+      "priorSnapshots": [
+        {
+          "result": "Earlier successful native runtime validation; superseded by the current explicit run.",
+          "evidence": {
+            "path": "/tmp/zk-journey-native-final.log",
+            "sha256": "39408633b8274486f60e39e8655a4f83840b0eceb147eec7ee3146b13b35a0c1"
+          }
+        }
+      ]
+    },
+    {
+      "id": "rust-engine-no-default-features",
+      "command": "CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test -p zk-engine --no-default-features --locked --no-fail-fast",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "7 harnesses, 616 passed, 0 failed, 0 ignored. Explicitly disables optional image-budget thumbnail support; default workspace coverage alone enables it through zk-server and is insufficient to prove this branch.",
+      "counts": {
+        "harnesses": 7,
+        "passed": 616,
+        "failed": 0,
+        "ignored": 0
+      },
+      "evidence": {
+        "path": "/tmp/zk-engine-no-default-final.txt",
+        "sha256": "bdd59d268e7d6123198fa92c90b7df41a76811fc3b7e103c0aabf2ac9fb39eae"
+      }
+    },
+    {
+      "id": "rust-format",
+      "command": "cargo fmt --all -- --check",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "Formatting check completed successfully; empty output is expected on success.",
+      "evidence": {
+        "path": "/tmp/zk-format-final.txt",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "id": "rust-release-build",
+      "command": "CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo build --workspace --release --locked",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "Entire workspace release build completed successfully in 5m 00s.",
+      "evidence": {
+        "path": "/tmp/zk-release-build-final.txt",
+        "sha256": "e15503438c2785d4d8bc4ee32c1c58c98b507267096635fbe2719320b5c438af"
+      },
+      "serverBinaryAtBuild": {
+        "path": "/Users/guoqingtao/Desktop/dev/code/zkcode/target/release/zk-server",
+        "sha256": "5c7985aba8e25b2356f343c401f21b72b191f3a6c99ef7b8e3a23198a8817491"
+      }
+    },
+    {
+      "id": "rust-release-version-smoke",
+      "command": "./target/release/zk-server --version",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "zk-server 0.1.0 (git 08cbdc45e12cc28f3f13aaafbd0b056b980dfb1a, built 1791332366, schema 2, ws 4)",
+      "evidence": {
+        "path": "/tmp/zk-release-version-final.txt",
+        "sha256": "c7d5ee134b90ac5681d068a386ab6751caaa5ae6010147cd9f967cd3fcfa22ff"
+      },
+      "serverBinaryAtRun": {
+        "path": "/Users/guoqingtao/Desktop/dev/code/zkcode/target/release/zk-server",
+        "sha256": "5c7985aba8e25b2356f343c401f21b72b191f3a6c99ef7b8e3a23198a8817491"
+      }
+    },
+    {
+      "id": "frontend-release-rust-backend-e2e",
+      "command": "ZK_E2E_SERVER_BINARY=/Users/guoqingtao/Desktop/dev/code/zkcode/target/release/zk-server npm run test:e2e:production",
+      "workingDirectory": "frontend",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "4 passed in 19.3s using actual Chromium and the exact completed release artifact with isolated SQLite and a scripted local HTTP model provider. Covers diagram/math rendering, durable chat and V4 boundaries, settings/Skill/revisioned memory, and charged durable merge with primary permission inheritance. This does not claim external credentialed provider verification.",
+      "passed": 4,
+      "failed": 0,
+      "evidence": {
+        "path": "/tmp/zk-frontend-production-release-final.txt",
+        "sha256": "f72567c6cabc2dedae57f04c3b1d8ab2d96c76921a5dc49f15f8b4f880ed0e17"
+      },
+      "serverBinaryAtRun": {
+        "path": "/Users/guoqingtao/Desktop/dev/code/zkcode/target/release/zk-server",
+        "sha256": "5c7985aba8e25b2356f343c401f21b72b191f3a6c99ef7b8e3a23198a8817491",
+        "sameSha256BeforeAndAfter": true
+      },
+      "binaryIdentityEvidence": {
+        "path": "/tmp/zk-frontend-release-binary-evidence.json",
+        "sha256": "51cda4f879900e2ea6f8890c72847f87eb7d576392ef7091158d47f15bd19e2c"
+      }
+    },
+    {
+      "id": "frontend-theme-browser",
+      "command": "npm run test:theme-regression",
+      "workingDirectory": "frontend",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "20 desktop/mobile scenarios and 12508 actual-browser color/isolation assertions passed using the installed Chrome channel 154.0.8037.98, matching production E2E. Exercises real renderers/styles, code highlighting, copy/download, image preview, message disclosure and rich/calm themes. All business requests were blocked and none attempted.",
+      "evidence": {
+        "path": "/tmp/zk-theme-browser-final-chrome.log",
+        "sha256": "86e435ef0f869e7ba7a3318cf0bd95151ab6c50004f7ef87f16b5631ab91c296"
+      },
+      "priorAttempts": [
+        {
+          "command": "PLAYWRIGHT_BROWSERS_PATH=/Users/guoqingtao/Desktop/dev/code/zkcode/.runtime/playwright npm run test:theme-regression",
+          "workingDirectory": "frontend",
+          "status": "failed_environment",
+          "exitCode": 1,
+          "result": "The browser harness stopped before any scenario at chromium.launch: frontend Playwright requires chromium_headless_shell-1217 while the formally managed Python runtime provides revision 1208. No screenshot was produced because no browser launched. No product behavior assertion has run in this attempt.",
+          "evidence": {
+            "path": "/tmp/zk-theme-browser-final.log",
+            "sha256": "497ef1ec5f966686faf90cd4335a67703a8e52ed4793007a961e636a648d0e10"
+          }
+        }
+      ],
+      "browser": {
+        "channel": "chrome",
+        "version": "154.0.8037.98"
+      },
+      "scenarioCount": 20,
+      "colorIsolationAssertionCount": 12508
+    },
+    {
+      "id": "frontend-jelly-browser",
+      "command": "npm run test:jelly-regression",
+      "workingDirectory": "frontend",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "42 actual-browser scenarios passed at 1440px and 390px using the installed Chrome channel 154.0.8037.98. Covers send-button edges, mouse/keyboard image preview and copy, real log/diff readability, full/reduced/off decorative motion, dynamic system reduced-motion changes, and message unmount cleanup. Stores and clipboard were isolated; no business requests occurred.",
+      "evidence": {
+        "path": "/tmp/zk-jelly-browser-final-chrome.log",
+        "sha256": "0f3f5e13033729148a98c05e331562f7811337abdc593f9d59c43e47caf43ca2"
+      },
+      "priorAttempts": [
+        {
+          "command": "PLAYWRIGHT_BROWSERS_PATH=/Users/guoqingtao/Desktop/dev/code/zkcode/.runtime/playwright npm run test:jelly-regression",
+          "workingDirectory": "frontend",
+          "status": "failed_environment",
+          "exitCode": 1,
+          "result": "The browser harness stopped before any scenario at chromium.launch: frontend Playwright requires chromium_headless_shell-1217 while the formally managed Python runtime provides revision 1208. No screenshot was produced because no browser launched. No product behavior assertion has run in this attempt.",
+          "evidence": {
+            "path": "/tmp/zk-jelly-browser-final.log",
+            "sha256": "3156c1a5ddf5cf3b3ed13c9b0937f5ba1520237048a751fdc613bb1e8aba6549"
+          }
+        }
+      ],
+      "browser": {
+        "channel": "chrome",
+        "version": "154.0.8037.98"
+      },
+      "scenarioCount": 42
+    }
+  ],
+  "patchedDependencies": {
+    "dompurify": "3.4.16",
+    "mermaid": "11.17.2",
+    "katex": "0.18.10",
+    "postcss-selector-parser": "7.1.6",
+    "undici": "7.30.0",
+    "source-map-js": "1.2.2"
+  },
+  "overrideEvidence": {
+    "katex": "https://github.com/KaTeX/KaTeX/security/advisories/GHSA-238p-pmpm-9mq7",
+    "postcss-selector-parser": "https://github.com/postcss/postcss-selector-parser/releases/tag/7.1.6"
+  },
+  "pending": [
+    "User decision pending: Tailwind 4 major upgrade to resolve unpatched Tailwind 3/braces dev dependency advisory, or retain 3 with explicit failed audit gate.",
+    "User decision pending: stop local owned processes when durable cancellation intent cannot be stored, or report failure and retain current execution."
+  ],
+  "verificationLimitations": [
+    {
+      "scope": "credentialed-external-services",
+      "status": "not_run",
+      "detail": "Four live LLM tests and one live DashScope search test remain ignored. Local real HTTP/wire fixtures and scripted-provider browser E2E do not establish remote service availability, credentials, production billing, or response quality. Live external MCP APIs were not run."
+    },
+    {
+      "scope": "legacy-swarm",
+      "status": "not_run",
+      "detail": "Two legacy Swarm coordinator tests remain ignored behind their existing runtime gate. The existing Swarm configuration is preserved; no claim is made that this legacy adapter was enabled or validated by the migration."
+    },
+    {
+      "scope": "frontend-skipped-tests",
+      "status": "not_run",
+      "count": 16,
+      "detail": "The frontend unit gate reports these as skipped, not passed; 1190 is the passing-test count. Individual reasons are recorded in docs/migration/product-acceptance-matrix.json."
+    },
+    {
+      "scope": "source-java-assertion-mapping",
+      "status": "native_adaptation",
+      "detail": "Source Java tests were inspected, not executed. Native equivalents and assertion-level differences are explicitly recorded in module audit files; passing local gates do not imply an exact one-to-one execution of every source Java fixture."
+    },
+    {
+      "scope": "native-journey-ignore-in-workspace",
+      "status": "passed_separately",
+      "detail": "The native journey is ignored by ordinary Cargo workspace invocations but its explicit native-verify-journey gate passed. It is not an outstanding technical blocker."
+    }
+  ],
+  "supersededForCurrentTree": true
+}

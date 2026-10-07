@@ -38,12 +38,17 @@
 //! | `BrowserSnapshotCommand` / `FeedbackCommand` / `StatsCommand` / `UsageCommand` / `VersionCommand` | 依赖后续 Batch 的域能力（浏览器、遥测、版本元数据），本批不实现 |
 
 mod clear;
+mod code_search;
 mod compact;
 mod config;
+mod context;
 mod diff;
 mod doctor;
+mod editor;
 mod exit;
 mod git_commit;
+#[cfg(test)]
+mod git_regressions;
 mod git_review;
 mod help;
 mod info;
@@ -51,6 +56,7 @@ mod init;
 mod mcp_cmd;
 mod memory;
 mod model;
+mod panels;
 mod plan;
 mod resume;
 mod retry;
@@ -75,11 +81,17 @@ use super::registry::CommandRegistry;
 /// 此处按命令名字典序枚举以便与下方清单单测逐行对读。
 pub(super) fn register_builtin_commands(registry: &CommandRegistry) {
     registry.register(Arc::new(clear::ClearCommand));
+    registry.register(Arc::new(code_search::CodeSearchCommand));
     registry.register(Arc::new(compact::CompactCommand));
+    registry.register(Arc::new(context::ContextCommand));
     registry.register(Arc::new(config::ConfigCommand));
     registry.register(Arc::new(info::CostCommand));
     registry.register(Arc::new(diff::DiffCommand));
     registry.register(Arc::new(doctor::DoctorCommand));
+    registry.register(Arc::new(editor::FastCommand));
+    registry.register(Arc::new(editor::EffortCommand));
+    registry.register(Arc::new(editor::VimCommand));
+    registry.register(Arc::new(editor::KeybindingsCommand));
     registry.register(Arc::new(exit::ExitCommand));
     registry.register(Arc::new(git_commit::GitCommitCommand));
     registry.register(Arc::new(git_review::GitReviewCommand));
@@ -89,6 +101,9 @@ pub(super) fn register_builtin_commands(registry: &CommandRegistry) {
     registry.register(Arc::new(memory::MemoryCommand));
     registry.register(Arc::new(model::ModelCommand));
     registry.register(Arc::new(plan::PlanCommand));
+    for name in ["theme", "skills", "tasks", "export", "hooks", "rewind"] {
+        registry.register(Arc::new(panels::PanelCommand(name)));
+    }
     registry.register(Arc::new(config::PermissionsCommand));
     registry.register(Arc::new(resume::ResumeCommand));
     registry.register(Arc::new(retry::RetryCommand));
@@ -120,7 +135,7 @@ mod tests {
     #[test]
     fn builtin_catalog_matches_the_legacy_component_set() {
         let registry = CommandRegistry::with_builtin_commands();
-        assert_eq!(registry.len(), 32);
+        assert_eq!(registry.len(), 44);
 
         let local: Vec<&str> = registry
             .commands_by_type(CommandType::Local)
@@ -133,6 +148,7 @@ mod tests {
                 "browser-snapshot",
                 "clear",
                 "compact",
+                "context",
                 "cost",
                 "diff",
                 "env-vars",
@@ -163,12 +179,22 @@ mod tests {
             [
                 "config",
                 "doctor",
+                "effort",
+                "export",
+                "fast",
+                "hooks",
+                "keybindings",
                 "login",
                 "memory",
                 "model",
                 "permissions",
                 "resume",
+                "rewind",
                 "session",
+                "skills",
+                "tasks",
+                "theme",
+                "vim",
                 "visualize",
             ]
         );
@@ -180,7 +206,7 @@ mod tests {
             .iter()
             .map(|command| command.name())
             .collect();
-        assert_eq!(prompt, ["git-review", "init", "retry"]);
+        assert_eq!(prompt, ["code-search", "git-review", "init", "retry"]);
 
         // 别名索引（旧各 `getAliases()` 逐字；`review` / `commit` 是旧主名，
         // zkcode 主名加 `git-` 前缀，故旧名降级为别名）。
@@ -188,6 +214,7 @@ mod tests {
             ("reset", "clear"),
             ("new", "clear"),
             ("settings", "config"),
+            ("changes", "diff"),
             ("commit", "git-commit"),
             ("review", "git-review"),
             ("allowed-tools", "permissions"),
@@ -204,7 +231,7 @@ mod tests {
         }
 
         // 本批命令无一隐藏（旧侧同样均未覆写 `isHidden`）。
-        assert_eq!(registry.visible_commands().len(), 32);
+        assert_eq!(registry.visible_commands().len(), 44);
 
         // 旧 `supportsNonInteractive()` 覆写者恰为 `/compact` 与 `/cost`。
         let non_interactive: Vec<&str> = registry
@@ -213,7 +240,7 @@ mod tests {
             .filter(|command| command.supports_non_interactive())
             .map(|command| command.name())
             .collect();
-        assert_eq!(non_interactive, ["compact", "cost"]);
+        assert_eq!(non_interactive, ["compact", "context", "cost"]);
     }
 
     /// `/skill` 不进本注册表——分发侧对它保持 3B.7 的独立拦截路径。

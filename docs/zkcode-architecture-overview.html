@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="color-scheme" content="dark">
-<title>zkcode 真实系统架构与能力全景</title>
+<title>zkcode 架构历史快照（2026-08-31）</title>
 <style>:root{color-scheme:dark;background:#02070d;--font-sans:-apple-system,BlinkMacSystemFont,"SF Pro Display","SF Pro Text","PingFang SC","Microsoft YaHei",sans-serif;--font-mono:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace;--surface-0:#030810;--surface-1:#07131d;--surface-2:#0a1b26;--text-strong:#eefaff;--text-body:#dcebf1;--text-muted:#a9bec9;--text-note:#91a9b6}
 *{box-sizing:border-box}
 html,body{margin:0;min-height:100%;background:#02070d;color:#e7f5fb}
@@ -86,8 +86,18 @@ use{fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-l
 </head>
 <body>
 <main class="poster-shell" aria-label="zkcode architecture poster">
+<aside aria-label="历史快照说明" style="padding:24px 40px;border-bottom:2px solid #f4c95d;background:#15202a;font-size:18px;line-height:1.7">
+<strong>历史快照：2026-08-31，HEAD 0296619，含当时本地改动。</strong>
+下图保留迁移前的源码地图，数量、默认开关、接口和持久化说明不代表当前实现。
+当前以 <a href="architecture.md" style="color:#79d9ff">Rust 架构说明</a>、
+<a href="configuration.md" style="color:#79d9ff">配置参考</a>、
+<a href="task-runtime-v4.md" style="color:#79d9ff">TaskRuntime V4 契约</a>和
+<a href="migration/2026-10-migration.md" style="color:#79d9ff">迁移及验收台账</a>为准。
+2026 年 10 月实现包含 60 种下行事件、56 张表、34 个默认工具，支持显式 Worktree 交付、
+SQLite 全局 Skill 开关与记忆、事务会话合并；不应沿用图内的旧禁用状态或旧文件来源规则。
+</aside>
 <svg xmlns="http://www.w3.org/2000/svg" width="1600" height="24000" viewBox="0 0 1600 24000" role="graphics-document" aria-labelledby="svg-title svg-desc">
-<title id="svg-title">zkcode 真实系统架构与能力全景</title>
+<title id="svg-title">zkcode 架构历史快照（2026-08-31，非当前契约）</title>
 <desc id="svg-desc">巨幅单画布工程架构图，以十二个连续章节呈现部署拓扑、前端一致性、Rust 依赖、Engine 耐久提交、授权与工具事务、Agent 调度、LLM 路由、MCP 与 Skill、Python Sidecar、数据快照、可信交付和运维观测，并用状态机、泳道、矩阵和信任边界解释真实代码行为。</desc>
 <metadata>Snapshot HEAD 0296619, working tree dirty, 2026-08-31. Corpus: 885 tracked files; 788 code files and 237086 physical lines in the working tree under the documented exclusion policy. Rust crates: 9. WebSocket contract groups: 15 uplink and 57 downlink; several are contract-only or lack a production producer. Base tools: 33; default Agent and Task additions: 8. Built-in slash commands: 32. Bundled skills: 14. LLM providers: 9. Python optional capability domains: 7. SQLite: 25 business tables and 27 physical tables. This local single-user loopback application is not an OS sandbox. Wiring maturity uses WIRED, CONDITIONAL, DYNAMIC, UI-UNMOUNTED, CONTRACT and DEFERRED. Lifetime is independently marked DURABLE or EPHEMERAL. Runtime states remain local to each state machine.</metadata>
 <defs>

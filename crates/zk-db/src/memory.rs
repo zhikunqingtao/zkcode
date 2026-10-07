@@ -134,6 +134,103 @@ pub struct MemoryUpsert {
 }
 
 const DEFAULT_SOURCE: &str = "USER";
+
+/// Consistent entry snapshot and optimistic concurrency token for one scope.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemorySnapshot {
+    /// Ordered authoritative `SQLite` entries.
+    pub entries: Vec<MemoryRecord>,
+    /// Monotonic scope revision, including writes through legacy tools.
+    pub revision: i64,
+    /// Last modification time, absent for a never-written scope.
+    pub updated_at: Option<String>,
+}
+
+fn read_snapshot(
+    conn: &rusqlite::Connection,
+    target: &MemoryTarget,
+) -> Result<MemorySnapshot, DbError> {
+    use rusqlite::OptionalExtension;
+    let version = conn.query_row(
+        "SELECT revision, updated_at FROM memory_scope_versions WHERE scope=?1 AND project_key=?2",
+        params![target.scope.as_str(), target.project_path.as_deref().unwrap_or("")],
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+    ).optional()?;
+    let mut stmt = conn.prepare(&format!(
+        "{MEMORY_SELECT} WHERE {TARGET_PREDICATE} ORDER BY document_order, id"
+    ))?;
+    let entries = stmt
+        .query_map(
+            params![target.scope.as_str(), target.project_path],
+            map_memory_row,
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+    let (revision, updated_at) = version.map_or((0, None), |(r, t)| (r, Some(t)));
+    Ok(MemorySnapshot {
+        entries,
+        revision,
+        updated_at,
+    })
+}
+
+impl crate::Db {
+    /// Read entries and revision in the same `SQLite` snapshot.
+    /// # Errors
+    /// Returns database errors without inventing an empty document.
+    pub async fn memory_snapshot(&self, target: MemoryTarget) -> Result<MemorySnapshot, DbError> {
+        self.with_reader(move |conn| {
+            let tx = conn.transaction()?;
+            let result = read_snapshot(&tx, &target)?;
+            tx.commit()?;
+            Ok(result)
+        })
+        .await
+    }
+
+    /// Replace one scope atomically if its revision still matches.
+    /// # Errors
+    /// Rejects stale revisions, duplicate ids and ids owned by other scopes.
+    pub async fn replace_memory_scope(
+        &self,
+        target: MemoryTarget,
+        expected_revision: i64,
+        entries: Vec<MemoryUpsert>,
+    ) -> Result<MemorySnapshot, DbError> {
+        self.with_writer(move |conn| {
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let old = read_snapshot(&tx, &target)?;
+            if old.revision != expected_revision {
+                return Err(DbError::Conflict(format!("memory revision changed: expected {expected_revision}, actual {}", old.revision)));
+            }
+            let mut ids = std::collections::HashSet::new();
+            let mut normalized = Vec::new();
+            for entry in entries {
+                let id = entry.id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                if id.trim().is_empty() || !ids.insert(id.clone()) {
+                    return Err(DbError::Validation("memory ids must be nonblank and unique".into()));
+                }
+                let foreign: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM memories WHERE id=?1 AND NOT(scope=?2 AND COALESCE(project_path,'')=?3))",
+                    params![id, target.scope.as_str(), target.project_path.as_deref().unwrap_or("")], |r| r.get(0))?;
+                if foreign { return Err(DbError::Validation("memory id belongs to another scope".into())); }
+                normalized.push((id, entry));
+            }
+            let now = format_rfc3339_micros(now_millis());
+            tx.execute(&format!("DELETE FROM memories WHERE {TARGET_PREDICATE}"), params![target.scope.as_str(), target.project_path])?;
+            for (order, (id, entry)) in normalized.into_iter().enumerate() {
+                let created = old.entries.iter().find(|e| e.id == id).map_or(now.as_str(), |e| e.created_at.as_str());
+                tx.execute("INSERT INTO memories(id,category,title,content,keywords,scope,project_path,source,created_at,updated_at,document_order) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+                    params![id,entry.category,entry.title,entry.content,entry.keywords,target.scope.as_str(),target.project_path,entry.source.unwrap_or_else(|| DEFAULT_SOURCE.into()),created,now,i64::try_from(order).map_err(|_|DbError::Validation("too many memory entries".into()))?])?;
+            }
+            // Even replacing an empty document advances its token (no ABA).
+            tx.execute("INSERT INTO memory_scope_versions VALUES(?1,?2,1,?3) ON CONFLICT(scope,project_key) DO UPDATE SET revision=revision+1,updated_at=excluded.updated_at",
+                params![target.scope.as_str(),target.project_path.as_deref().unwrap_or(""),now])?;
+            let result = read_snapshot(&tx, &target)?;
+            tx.commit()?;
+            Ok(result)
+        }).await
+    }
+}
 const MEMORY_SELECT: &str = "SELECT id, category, title, content, keywords, scope, \
                              project_path, source, created_at, updated_at FROM memories";
 const TARGET_PREDICATE: &str =

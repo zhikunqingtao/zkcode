@@ -36,6 +36,8 @@ function saveActiveSessionId(sessionId: string): void {
 export interface SessionStoreState {
     // 状态
     sessionId: string | null;
+    /** Server-derived service identity, never inferred from names or user metadata. */
+    purpose: 'chat' | 'mcp';
     model: string | null;
     status: 'idle' | 'streaming' | 'waiting_permission' | 'compacting';
     turnCount: number;
@@ -59,6 +61,7 @@ export const useSessionStore = create<SessionStoreState>()(
     subscribeWithSelector(immer((set) => ({
         // 初始值
         sessionId: readActiveSessionId(),
+        purpose: 'chat',
         model: null,
         status: 'idle' as const,
         turnCount: 0,
@@ -100,7 +103,7 @@ export const useSessionStore = create<SessionStoreState>()(
             return body.sessionId;
         },
         resumeSession: async (sessionId) => {
-            set(d => { d.sessionId = sessionId; d.status = 'idle'; });
+            set(d => { d.sessionId = sessionId; d.status = 'idle'; d.purpose = 'chat'; });
             saveActiveSessionId(sessionId);
         },
         setModel: (model) => set(d => { d.model = model; }),

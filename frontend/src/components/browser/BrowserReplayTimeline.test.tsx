@@ -1,97 +1,81 @@
-/**
- * BrowserReplayTimeline 单元测试 — 对应 Task3-5 方案 §11.11 资产 #9。
- *
- * MVP 3 用例（骨架：fetch mock + 基本渲染 + 错误处理），预备周补到 8 用例。
- */
-
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
-import BrowserReplayTimeline from '@/components/browser/BrowserReplayTimeline';
+import { render, screen, waitFor, fireEvent, act } from '@testing-library/react';
+import BrowserReplayTimeline from './BrowserReplayTimeline';
 
-const mockSnap = {
-    snapshotId: 'sid-1',
-    sessionId: 'sess-1',
-    capturedAt: new Date().toISOString(),
-    url: 'https://example.com',
-    title: 'Example',
-    selector: null,
-    nodeCount: 5,
-    interactive: [{ role: 'button', name: 'OK' }],
-    tree: null,
-    screenshotBase64: null,
+const frame = {
+    snapshotId: 'frame-1', sessionId: 'session-1', capturedAt: '2026-10-07T00:00:00Z',
+    url: 'https://example.com', title: 'Example', selector: null, nodeCount: 5,
+    interactive: [{ role: 'button', name: 'Confirm' }], tree: null, screenshotBase64: null,
 };
+const response = (data: unknown, status = 200) => ({ ok: status < 400, status, json: async () => data }) as Response;
+const props = { open: true, onClose: vi.fn(), sessionId: 'session-1', inline: true };
 
-describe('BrowserReplayTimeline', () => {
-    beforeEach(() => {
-        global.fetch = vi.fn(() =>
-            Promise.resolve({
-                ok: true,
-                status: 200,
-                json: () => Promise.resolve([mockSnap]),
-            } as unknown as Response)
-        );
+describe('Browser replay production panel', () => {
+    beforeEach(() => { vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response([frame]))); });
+    afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+    it('loads the exact session scope and renders its real frame', async () => {
+        render(<BrowserReplayTimeline {...props} />);
+        await screen.findByText('Example');
+        expect(fetch).toHaveBeenCalledWith('/api/browser/replay/session-1', expect.objectContaining({
+            method: 'GET', headers: { 'X-Session-Id': 'session-1' }, signal: expect.any(AbortSignal),
+        }));
+        fireEvent.click(screen.getByTitle('刷新'));
+        await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
     });
-
-    afterEach(() => {
-        vi.restoreAllMocks();
+    it('requires ordinary confirmation and server acknowledgement before clearing', async () => {
+        const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+        render(<BrowserReplayTimeline {...props} />);
+        await screen.findByText('Example');
+        fireEvent.click(screen.getByTitle('清空'));
+        expect(fetch).toHaveBeenCalledTimes(1);
+        confirm.mockReturnValue(true);
+        vi.mocked(fetch).mockResolvedValueOnce(response({ code: 'STORE_FAILED' }, 500));
+        fireEvent.click(screen.getByTitle('清空'));
+        await screen.findByText(/HTTP 500/);
+        expect(screen.getByText('Example')).toBeInTheDocument();
+        vi.mocked(fetch).mockResolvedValueOnce(response({ status: 'deleted', replayId: 'session-1' }));
+        fireEvent.click(screen.getByTitle('清空'));
+        await screen.findByText(/暂无快照/);
+        expect(fetch).toHaveBeenLastCalledWith('/api/browser/replay/session-1', expect.objectContaining({ method: 'DELETE', headers: { 'X-Session-Id': 'session-1' } }));
     });
-
-    it('BRT-01 open=true 时拉取 /api/browser/replay/{sessionId}', async () => {
-        render(
-            <BrowserReplayTimeline
-                open={true}
-                onClose={() => {}}
-                sessionId="sess-1"
-            />
-        );
-
-        await waitFor(() => {
-            expect(global.fetch).toHaveBeenCalledWith(
-                expect.stringContaining('/api/browser/replay/sess-1')
-            );
-        });
+    it('expands real interaction detail and displays a stored screenshot', async () => {
+        vi.mocked(fetch).mockResolvedValueOnce(response([{ ...frame, screenshotBase64: 'iVBORw0KGgo=' }]));
+        render(<BrowserReplayTimeline {...props} />);
+        fireEvent.click(await screen.findByText('Example'));
+        expect(screen.getByText('Confirm')).toBeInTheDocument();
+        expect(screen.getByRole('img')).toHaveAttribute('src', 'data:image/png;base64,iVBORw0KGgo=');
     });
-
-    it('BRT-02 渲染时间线项目（URL / nodeCount 展示）', async () => {
-        render(
-            <BrowserReplayTimeline
-                open={true}
-                onClose={() => {}}
-                sessionId="sess-1"
-            />
-        );
-
-        await waitFor(() => {
-            expect(screen.getByText(/example\.com/i)).toBeInTheDocument();
-        });
+    it('distinguishes absent replay from failed authorization and temporary evidence', async () => {
+        vi.mocked(fetch).mockResolvedValueOnce(response({ code: 'REPLAY_NOT_FOUND' }, 404));
+        render(<BrowserReplayTimeline {...props} />);
+        await screen.findByText(/暂无快照/);
+        vi.mocked(fetch).mockResolvedValueOnce(response({ code: 'EPHEMERAL_OPERATION_UNSUPPORTED' }, 400));
+        fireEvent.click(screen.getByTitle('刷新'));
+        await screen.findByText(/临时会话不保存磁盘时间线/);
+        vi.mocked(fetch).mockResolvedValueOnce(response({ code: 'SESSION_NOT_FOUND' }, 404));
+        fireEvent.click(screen.getByTitle('刷新'));
+        await screen.findByText(/HTTP 404/);
     });
-
-    it('BRT-03 fetch 非 200 响应时展示错误消息', async () => {
-        global.fetch = vi.fn(() =>
-            Promise.resolve({
-                ok: false,
-                status: 500,
-                json: () => Promise.resolve({}),
-            } as unknown as Response)
-        );
-
-        render(
-            <BrowserReplayTimeline
-                open={true}
-                onClose={() => {}}
-                sessionId="sess-1"
-            />
-        );
-
-        await waitFor(() => {
-            expect(screen.getByText(/HTTP 500/i)).toBeInTheDocument();
-        });
+    it('rejects cross-session frames without rendering their body', async () => {
+        vi.mocked(fetch).mockResolvedValueOnce(response([{ ...frame, sessionId: 'foreign', title: 'private foreign title' }]));
+        render(<BrowserReplayTimeline {...props} />);
+        await screen.findByText(/无效或跨会话数据/);
+        expect(screen.queryByText('private foreign title')).not.toBeInTheDocument();
     });
-
-    // 预备周补 5 条
-    it.skip('BRT-04 点击 refresh 按钮重新拉取时间线', async () => {});
-    it.skip('BRT-05 点击 clear 按钮发送 DELETE 并清空本地状态', async () => {});
-    it.skip('BRT-06 选中某帧后展开 interactive 表', async () => {});
-    it.skip('BRT-07 空时间线展示 empty state 提示', async () => {});
-    it.skip('BRT-08 screenshotBase64 存在时渲染缩略图', async () => {});
+    it('aborts old requests on session change and close, even when transport resolves late', async () => {
+        let complete!: (value: Response) => void;
+        vi.mocked(fetch).mockImplementationOnce(() => new Promise(resolve => { complete = resolve; }));
+        const { rerender } = render(<BrowserReplayTimeline {...props} />);
+        const firstSignal = vi.mocked(fetch).mock.calls[0][1]?.signal;
+        vi.mocked(fetch).mockResolvedValueOnce(response([{ ...frame, sessionId: 'session-2', title: 'Current' }]));
+        rerender(<BrowserReplayTimeline {...props} sessionId="session-2" />);
+        await screen.findByText('Current');
+        expect(firstSignal?.aborted).toBe(true);
+        await act(async () => { complete(response([frame])); });
+        expect(screen.queryByText('Example')).not.toBeInTheDocument();
+        expect(screen.getByText('Current')).toBeInTheDocument();
+        const currentSignal = vi.mocked(fetch).mock.calls[1][1]?.signal;
+        rerender(<BrowserReplayTimeline {...props} open={false} sessionId="session-2" />);
+        expect(currentSignal?.aborted).toBe(true);
+    });
 });

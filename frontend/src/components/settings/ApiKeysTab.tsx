@@ -127,11 +127,11 @@ export function ApiKeysTab() {
     return (
       <div className="space-y-4">
         <h3 className="text-lg font-semibold text-[var(--text-primary)]">API Keys</h3>
-        <p role="alert" className="text-sm text-red-500">加载失败：{error}</p>
+        <p role="alert" className="text-sm text-errstrong">加载失败：{error}</p>
         <button
           type="button"
           onClick={() => void loadProviders()}
-          className="px-3 py-1.5 text-sm rounded bg-[var(--bg-secondary)] hover:bg-[var(--bg-hover)] text-[var(--text-primary)]"
+          className="px-3 py-1.5 text-sm rounded-sm bg-[var(--bg-secondary)] hover:bg-[var(--bg-hover)] text-[var(--text-primary)]"
         >
           重试
         </button>
@@ -155,8 +155,8 @@ export function ApiKeysTab() {
           aria-describedby="api-keys-description"
           className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors
             ${dirtyCount > 0 && !saving
-              ? 'bg-blue-600 text-white hover:bg-blue-700'
-              : 'bg-gray-100 dark:bg-gray-800 text-gray-400 dark:text-gray-500 cursor-not-allowed'
+              ? 'bg-accent2-strong text-[var(--v2-on-accent)] hover:bg-accent2-hover'
+              : 'bg-sunken2 text-t4 cursor-not-allowed'
             }`}
         >
           {saving ? '保存中…' : '保存'}
@@ -179,12 +179,12 @@ export function ApiKeysTab() {
       </div>
 
       {dirtyCount > 0 && (
-        <p role="status" aria-live="polite" className="text-xs text-amber-600 dark:text-amber-400">
+        <p role="status" aria-live="polite" className="text-xs text-warnstrong">
           有 {dirtyCount} 项未保存的更改
         </p>
       )}
       {saveError && (
-        <p role="alert" className="text-sm text-red-500">
+        <p role="alert" className="text-sm text-errstrong">
           保存失败：{saveError}
         </p>
       )}
@@ -223,10 +223,10 @@ function ProviderRow({ provider, rowState, onChange, disabled }: ProviderRowProp
     : '未配置';
 
   const statusColor =
-    isCleared ? 'text-amber-600 dark:text-amber-400'
-    : rowState.kind === 'edited' ? 'text-blue-600 dark:text-blue-400'
-    : provider.has_key ? 'text-green-600 dark:text-green-400'
-    : 'text-gray-400 dark:text-gray-500';
+    isCleared ? 'text-warnstrong'
+    : rowState.kind === 'edited' ? 'text-accent2-ink'
+    : provider.has_key ? 'text-okstrong'
+    : 'text-t3';
 
   const handleInput = (val: string) => {
     if (val === '') {
@@ -255,8 +255,8 @@ function ProviderRow({ provider, rowState, onChange, disabled }: ProviderRowProp
     <div
       className={`flex flex-col sm:flex-row sm:items-center gap-3 px-4 py-3 rounded-lg border transition-colors
         ${isCleared || rowState.kind === 'edited'
-          ? 'border-blue-300 dark:border-blue-700 bg-blue-50/40 dark:bg-blue-900/10'
-          : 'border-gray-200 dark:border-gray-700 hover:border-gray-300 dark:hover:border-gray-600'
+          ? 'border-accent2-ring bg-accent2-soft'
+          : 'border-hairline hover:border-accent2-ring'
         }`}
     >
       {/* Label */}
@@ -264,7 +264,8 @@ function ProviderRow({ provider, rowState, onChange, disabled }: ProviderRowProp
         <label htmlFor={inputId} className="text-sm font-medium text-[var(--text-primary)]">
           {provider.label}
         </label>
-        <span id={statusId} aria-live="polite" className={`block text-xs mt-0.5 ${statusColor}`}>
+        <span id={statusId} aria-live="polite" className="block text-xs mt-0.5 text-t2">
+          <span aria-hidden="true" className={`mr-1.5 inline-block h-1.5 w-1.5 rounded-full ${statusColor}`} style={{ backgroundColor: 'currentColor' }} />
           {statusLabel}
         </span>
       </div>
@@ -283,9 +284,9 @@ function ProviderRow({ provider, rowState, onChange, disabled }: ProviderRowProp
         onFocus={() => setFocused(true)}
         onBlur={() => setFocused(false)}
         onChange={(e) => handleInput(e.target.value)}
-        className="flex-1 min-w-0 px-3 py-1.5 text-sm rounded border border-gray-200 dark:border-gray-600
+        className="flex-1 min-w-0 px-3 py-1.5 text-sm rounded-sm border border-hairline
           bg-[var(--bg-secondary)] text-[var(--text-primary)] placeholder-[var(--text-muted)]
-          focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+          focus:outline-hidden focus:ring-2 focus:ring-accent2-ring focus:border-transparent"
       />
 
       {/* Actions */}
@@ -297,9 +298,9 @@ function ProviderRow({ provider, rowState, onChange, disabled }: ProviderRowProp
             disabled={disabled}
             aria-label={`清除 ${provider.label} API 密钥`}
             title="清除当前保存的密钥；如果配置了环境变量，则恢复使用环境变量"
-            className="px-2.5 py-1 text-xs rounded border border-gray-300 dark:border-gray-600
-              text-gray-500 dark:text-gray-400
-              hover:border-red-400 hover:text-red-500 dark:hover:border-red-500 dark:hover:text-red-400
+            className="px-2.5 py-1 text-xs rounded-sm border border-hairline
+              text-t2
+              hover:border-err hover:text-errstrong
               transition-colors"
           >
             清除
@@ -312,9 +313,9 @@ function ProviderRow({ provider, rowState, onChange, disabled }: ProviderRowProp
             disabled={disabled}
             aria-label={`撤销 ${provider.label} API 密钥更改`}
             title="撤销更改"
-            className="px-2.5 py-1 text-xs rounded border border-gray-300 dark:border-gray-600
-              text-gray-500 dark:text-gray-400
-              hover:border-gray-400 hover:text-gray-700 dark:hover:text-gray-300
+            className="px-2.5 py-1 text-xs rounded-sm border border-hairline
+              text-t2
+              hover:border-accent2-ring hover:text-t1
               transition-colors"
           >
             撤销

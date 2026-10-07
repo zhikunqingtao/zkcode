@@ -87,14 +87,17 @@ fn nanos_to_usd(nanos: i64) -> f64 {
 /// 摘要行 SELECT。会话类型是结构化列，只有 root 会话进入用户列表；
 /// internal transcript 不再依赖易漏标的 metadata JSON 模糊匹配。
 const SUMMARY_SELECT: &str = r"
-    SELECT s.id, s.title, s.model, s.working_dir, s.total_cost_usd,
+    SELECT s.id, s.title, s.model, s.working_dir, s.total_cost_usd, s.permission_mode,
+           COALESCE((SELECT r.status='running' FROM run_envelopes r WHERE r.session_id=s.id AND r.parent_run_id IS NULL ORDER BY r.created_at DESC,r.id DESC LIMIT 1),0) AS running,
+           (SELECT operation_id FROM session_merge_locks l WHERE l.session_id=s.id) AS merge_operation_id,
            s.created_at, s.updated_at,
            (SELECT m.content_json FROM messages m
             WHERE m.session_id = s.id AND m.role = 'user'
             ORDER BY m.seq_num ASC LIMIT 1) AS first_user_content,
-           (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS message_count
+           (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS message_count,
+           EXISTS(SELECT 1 FROM tasks t WHERE t.session_id=s.id AND t.task_type='mcp' AND t.parent_task_id IS NULL) AS is_mcp
     FROM sessions s
-    WHERE s.kind = 'root'
+    WHERE s.kind = 'root' AND s.content_retention = 'persistent'
 ";
 
 /// 库内 RFC 3339 → epoch 毫秒（旧库畸形时间戳兜底 0，不阻断读取）。
@@ -115,6 +118,14 @@ fn map_summary_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(SessionSummary,
     let message_count: i64 = row.get("message_count")?;
     Ok((
         SessionSummary {
+            purpose: if row.get::<_, bool>("is_mcp")? {
+                zk_protocol::SessionPurpose::Mcp
+            } else {
+                zk_protocol::SessionPurpose::Chat
+            },
+            running: row.get("running")?,
+            merge_operation_id: row.get("merge_operation_id")?,
+            permission_mode: row.get("permission_mode")?,
             id,
             title,
             goal_preview: goal_preview(first_user_content.as_deref()),
@@ -142,6 +153,40 @@ fn query_from_latest(
 }
 
 impl crate::Db {
+    /// Stable keyset search over titles and literal text blocks; filtering occurs
+    /// before pagination so matching older sessions are not omitted.
+    /// # Errors
+    /// Database and malformed persisted row errors are surfaced to the caller.
+    pub async fn search_sessions(
+        &self,
+        cursor: Option<&str>,
+        limit: u32,
+        query: &str,
+    ) -> Result<SessionPage, DbError> {
+        let position = cursor.and_then(crate::cursor::decode_session_position);
+        let (anchor, before) = position.map_or((None, None), |(time, id)| (Some(time), Some(id)));
+        let query = query.trim().to_owned();
+        if query.len() > 4096 || !(1..=500).contains(&limit) {
+            return Err(DbError::Validation(
+                "session search query or limit exceeds capacity".into(),
+            ));
+        }
+        self.with_reader(move|conn|{
+            let sql=format!("{SUMMARY_SELECT} AND (?1='' OR instr(lower(COALESCE(s.title,'')),lower(?1))>0 OR EXISTS(
+                SELECT 1 FROM json_each(CASE WHEN json_valid(first_user_content) THEN
+                  CASE WHEN json_type(first_user_content)='array' THEN first_user_content ELSE '[]' END ELSE '[]' END) b
+                WHERE json_extract(CASE WHEN b.type='object' THEN b.value ELSE '{{}}' END,'$.type')='text'
+                  AND json_type(CASE WHEN b.type='object' THEN b.value ELSE '{{}}' END,'$.text')='text'
+                  AND instr(lower(json_extract(CASE WHEN b.type='object' THEN b.value ELSE '{{}}' END,'$.text')),lower(?1))>0
+                )) AND (?2 IS NULL OR s.updated_at<?2 OR (s.updated_at=?2 AND s.id<?3)) ORDER BY s.updated_at DESC,s.id DESC LIMIT ?4");
+            let mut stmt=conn.prepare(&sql)?;
+            let mut rows=stmt.query_map(params![query,anchor,before,i64::from(limit)+1],map_summary_row)?.collect::<Result<Vec<_>,_>>()?;
+            let has_more=rows.len()>limit as usize;
+            rows.truncate(limit as usize);
+            let next_cursor=if has_more {rows.last().map(|(s,iso)|encode_session_cursor(iso,&s.id))} else {None};
+            Ok(SessionPage {sessions:rows.into_iter().map(|(s,_)|s).collect(),has_more,next_cursor})
+        }).await
+    }
     /// 创建会话（`POST /api/sessions` 数据源；对齐 `SessionRepository.create`）。
     ///
     /// 生成 `UUIDv4` 主键，`status='active'`，`created_at = updated_at = now`；
@@ -170,18 +215,37 @@ impl crate::Db {
         model: &str,
         working_dir: &str,
     ) -> Result<SessionSummary, DbError> {
+        self.create_session_with_permission(session_id, model, working_dir, None)
+            .await
+    }
+
+    /// Create identity and initial authorization mode in one atomic insert.
+    /// # Errors
+    /// Invalid modes or database errors leave no partial session behind.
+    pub async fn create_session_with_permission(
+        &self,
+        session_id: &str,
+        model: &str,
+        working_dir: &str,
+        permission_mode: Option<&str>,
+    ) -> Result<SessionSummary, DbError> {
+        let permission_mode = permission_mode.map(str::to_owned);
         let id = session_id.to_owned();
         let model = model.to_owned();
         let working_dir = working_dir.to_owned();
         self.with_writer(move |conn| {
             let now_iso = format_rfc3339_micros(now_millis());
             conn.execute(
-                "INSERT INTO sessions (id, model, working_dir, status, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, 'active', ?4, ?4)",
-                params![id, model, working_dir, now_iso],
+                "INSERT INTO sessions (id, model, working_dir, status, created_at, updated_at, permission_mode)
+                 VALUES (?1, ?2, ?3, 'active', ?4, ?4, ?5)",
+                params![id, model, working_dir, now_iso, permission_mode],
             )?;
             let now_ms = iso_to_millis(&now_iso);
             Ok(SessionSummary {
+                purpose: zk_protocol::SessionPurpose::Chat,
+                running: false,
+                merge_operation_id: None,
+                permission_mode,
                 title: None,
                 goal_preview: None,
                 message_count: 0,
@@ -235,14 +299,19 @@ impl crate::Db {
                 return Err(DbError::Invalid("INTERNAL_SESSION_PARENT_NOT_FOUND".to_owned()));
             }
             let now_iso = format_rfc3339_micros(now_millis());
+            let retention=crate::content::attach_session(conn,&parent_session_id,&id)?;
             conn.execute(
                 "INSERT INTO sessions
-                    (id,kind,parent_session_id,parent_task_id,model,working_dir,status,created_at,updated_at)
-                 VALUES (?1,'internal',?2,?3,?4,?5,'active',?6,?6)",
-                params![id, parent_session_id, parent_task_id, model, working_dir, now_iso],
+                    (id,kind,parent_session_id,parent_task_id,model,working_dir,status,created_at,updated_at,content_retention)
+                 VALUES (?1,'internal',?2,?3,?4,?5,'active',?6,?6,?7)",
+                params![id, parent_session_id, parent_task_id, model, working_dir, now_iso,retention.as_str()],
             )?;
             let now_ms = iso_to_millis(&now_iso);
             Ok(SessionSummary {
+                purpose: zk_protocol::SessionPurpose::Chat,
+                running: false,
+                merge_operation_id: None,
+                permission_mode: None,
                 title: None,
                 goal_preview: None,
                 message_count: 0,
@@ -369,7 +438,7 @@ impl crate::Db {
                      WHERE session_id=?1 AND parent_run_id IS NULL
                      ORDER BY started_at DESC,id DESC LIMIT 1",
                     params![session_id],
-                    map_envelope_row,
+                    |row| map_envelope_row(&tx, row),
                 )
                 .optional()?;
 
@@ -380,7 +449,7 @@ impl crate::Db {
                 );
                 let mut stmt = tx.prepare(&sql)?;
                 let tasks = stmt
-                    .query_map(params![session_id], map_runtime_task)?
+                    .query_map(params![session_id], |row| map_runtime_task(&tx, row))?
                     .collect::<Result<Vec<_>, _>>()?;
                 drop(stmt);
                 tasks
@@ -660,7 +729,20 @@ impl crate::Db {
     pub async fn delete_session(&self, session_id: &str) -> Result<bool, DbError> {
         let session_id = session_id.to_owned();
         self.with_writer(move |conn| {
-            let rows = conn.execute("DELETE FROM sessions WHERE id = ?1", params![session_id])?;
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            crate::session_merge::ensure_idle(&tx, &session_id)?;
+            let billing: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sessions WHERE id=?1 AND kind='merge_billing')",
+                [&session_id],
+                |r| r.get(0),
+            )?;
+            if billing {
+                return Err(DbError::Validation(
+                    "merge accounting sessions are not user sessions".into(),
+                ));
+            }
+            let rows = tx.execute("DELETE FROM sessions WHERE id = ?1", params![session_id])?;
+            tx.commit()?;
             Ok(rows > 0)
         })
         .await
@@ -705,6 +787,7 @@ impl crate::Db {
             let Some(working_dir) = working_dir else {
                 return Ok(SnapshotRestoreOutcome::NotFound);
             };
+            crate::content::require_persistent_session(&tx, &session_id)?;
             if working_dir != expected_working_dir {
                 return Ok(SnapshotRestoreOutcome::WorkspaceMismatch);
             }
@@ -726,8 +809,8 @@ impl crate::Db {
                 tx.execute(
                     "INSERT INTO messages (
                         id, session_id, role, content_json, stop_reason,
-                        input_tokens, output_tokens, created_at, seq_num
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                        input_tokens, output_tokens, created_at, seq_num, metadata_json
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                     params![
                         message.id,
                         &session_id,
@@ -738,6 +821,11 @@ impl crate::Db {
                         message.output_tokens,
                         format_rfc3339_micros(message.created_at),
                         message.seq_num,
+                        message
+                            .meta
+                            .as_ref()
+                            .map(serde_json::to_string)
+                            .transpose()?,
                     ],
                 )?;
             }
@@ -777,6 +865,20 @@ fn set_session_column(
     value: &str,
 ) -> Result<bool, DbError> {
     let now_iso = format_rfc3339_micros(now_millis());
+    let stored;
+    let value = if matches!(column, "title" | "summary" | "metadata_json") {
+        if !conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sessions WHERE id=?1)",
+            [session_id],
+            |row| row.get::<_, bool>(0),
+        )? {
+            return Ok(false);
+        }
+        stored = crate::content::store_text(conn, session_id, value)?;
+        stored.as_str()
+    } else {
+        value
+    };
     let sql = format!("UPDATE sessions SET {column} = ?1, updated_at = ?2 WHERE id = ?3");
     let rows = conn.execute(&sql, params![value, now_iso, session_id])?;
     Ok(rows > 0)
@@ -791,7 +893,8 @@ fn load_session_detail(
         .query_row(
             "SELECT id, model, working_dir, title, status, summary, metadata_json,
                     total_input_tokens, total_output_tokens, total_cache_read,
-                    total_cache_create, total_cost_usd, created_at, updated_at
+                    total_cache_create, total_cost_usd, created_at, updated_at,
+                    EXISTS(SELECT 1 FROM tasks t WHERE t.session_id=sessions.id AND t.task_type='mcp' AND t.parent_task_id IS NULL) AS is_mcp
              FROM sessions WHERE id = ?1",
             params![session_id],
             |row| {
@@ -799,10 +902,10 @@ fn load_session_detail(
                     row.get::<_, String>("id")?,
                     row.get::<_, String>("model")?,
                     row.get::<_, String>("working_dir")?,
-                    row.get::<_, Option<String>>("title")?,
+                    crate::content::load_optional(conn,session_id,row.get("title")?)?,
                     row.get::<_, String>("status")?,
-                    row.get::<_, Option<String>>("summary")?,
-                    row.get::<_, Option<String>>("metadata_json")?,
+                    crate::content::load_optional(conn,session_id,row.get("summary")?)?,
+                    crate::content::load_optional(conn,session_id,row.get("metadata_json")?)?,
                     row.get::<_, i64>("total_input_tokens")?,
                     row.get::<_, i64>("total_output_tokens")?,
                     row.get::<_, i64>("total_cache_read")?,
@@ -810,6 +913,7 @@ fn load_session_detail(
                     row.get::<_, f64>("total_cost_usd")?,
                     row.get::<_, String>("created_at")?,
                     row.get::<_, String>("updated_at")?,
+                    row.get::<_, bool>("is_mcp")?,
                 ))
             },
         )
@@ -829,6 +933,7 @@ fn load_session_detail(
         cost_usd,
         created_iso,
         updated_iso,
+        is_mcp,
     )) = row
     else {
         return Ok(None);
@@ -839,6 +944,11 @@ fn load_session_detail(
         .and_then(|json| serde_json::from_str(json).ok())
         .unwrap_or_default();
     Ok(Some(SessionDetail {
+        purpose: if is_mcp {
+            zk_protocol::SessionPurpose::Mcp
+        } else {
+            zk_protocol::SessionPurpose::Chat
+        },
         session_id: id,
         model,
         working_dir,

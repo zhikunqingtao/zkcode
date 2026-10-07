@@ -101,6 +101,7 @@ mod tests {
             .append_message(
                 session_id,
                 NewMessage {
+                    meta: None,
                     role,
                     content: blocks,
                     stop_reason: None,

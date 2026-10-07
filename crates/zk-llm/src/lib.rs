@@ -59,13 +59,19 @@ mod clock;
 pub mod config;
 pub mod error;
 pub mod ledger;
+mod model_cooldown;
 pub mod models;
 pub mod openai_compat;
+pub mod payload_guard;
 pub mod provider;
 pub mod registry;
+pub mod request_options;
+pub mod responses;
 pub mod retry;
 pub mod secret;
+mod summary_transport;
 pub mod swappable;
+mod user_images;
 pub mod vision_router;
 
 pub use anthropic::AnthropicProvider;
@@ -89,10 +95,14 @@ pub use models::{
 };
 pub use openai_compat::{OpenAiCompatProvider, shared_http_client, sse_event_stream};
 pub use provider::{
-    ChatMessage, ChatProvider, ChatRequest, FinishReason, ImageSource, ProviderEvent, Role,
-    ThinkingMode, ToolCallRequest, ToolSpec,
+    ChatMessage, ChatProvider, ChatRequest, FinishReason, ImageSource, ProviderEvent,
+    ProviderResponseState, Role, SummaryThinkingMode, ThinkingMode, ToolCallRequest, ToolSpec,
 };
 pub use registry::{MAX_FALLBACK_DEPTH, ProviderRegistry};
+pub use request_options::{
+    ReasoningEffort, supported_reasoning_efforts, supported_reasoning_efforts_for_provider,
+    validate_reasoning_effort, validate_request_options,
+};
 pub use retry::{
     BASE_DELAY_MS, CAPACITY_LIMIT_STATUS, DEFAULT_MAX_RETRIES, FOREGROUND_529_RETRY_SOURCES,
     FOREGROUND_QUERY_SOURCE, MAX_529_RETRIES, MAX_DELAY_MS, ModelRetryConfig, RetryPolicy,

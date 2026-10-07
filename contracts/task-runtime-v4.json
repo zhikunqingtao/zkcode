@@ -125,7 +125,8 @@
         "resultRef": { "type": ["string", "null"] },
         "usageSummary": { "type": "object", "additionalProperties": true },
         "cleanupStatus": { "$ref": "#/statuses/cleanupStatus" },
-        "waitExpired": { "type": "boolean" }
+        "waitExpired": { "type": "boolean" },
+        "displayOutput": { "type": ["string", "null"], "description": "Mutable advisory display text; never replaces the immutable TaskResult or error" }
       },
       "required": [
         "taskId",
@@ -194,21 +195,51 @@
       }
     },
     "TaskCreate": {
-      "legacyFields": ["run_in_background", "runInBackground", "block", "timeout"],
+      "legacyFields": [
+        "run_in_background",
+        "runInBackground",
+        "block",
+        "timeout"
+      ],
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "description": { "type": "string", "description": "Task description" },
-          "prompt": { "type": "string", "description": "Task prompt / instructions" },
+          "description": {
+            "type": "string",
+            "description": "Task description"
+          },
+          "prompt": {
+            "type": "string",
+            "description": "Task prompt / instructions"
+          },
           "taskType": {
             "type": "string",
-            "enum": ["agent"],
+            "enum": [
+              "agent",
+              "shell"
+            ],
             "default": "agent",
-            "description": "V4 currently supports attached agent tasks only"
+            "description": "Durable agent or shell task"
+          },
+          "command": {
+            "type": "string",
+            "description": "Shell command; required for shell tasks and checked by the normal Bash permission policy"
+          },
+          "lifecycle": {
+            "type": "string",
+            "enum": [
+              "attached",
+              "detached"
+            ],
+            "default": "attached",
+            "description": "Attached children end with the parent. Detached tasks retain their own deadline, budget, output and stop control."
           }
         },
-        "required": ["description", "prompt", "taskType"]
+        "required": [
+          "description",
+          "taskType"
+        ]
       }
     },
     "TaskGet": {
@@ -270,13 +301,14 @@
       }
     },
     "TaskUpdate": {
-      "legacyFields": ["status", "output", "error"],
+      "legacyFields": ["status", "error"],
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
           "taskId": { "$ref": "#/$defs/taskId" },
           "description": { "type": "string", "description": "Updated task description" },
+          "output": { "type": "string", "description": "Replace advisory display text, including after execution ends; empty clears it. Limited to 1048576 UTF-16 characters with truncation notice. Does not change execution state, errors, result pages, or usage." },
           "plan": { "type": "string", "description": "Advisory execution plan" },
           "reportedProgress": {
             "type": "number",

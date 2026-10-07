@@ -236,6 +236,7 @@ impl Db {
                 ));
             }
 
+            let content_session=crate::content::run_session(&tx,&capture.run_id)?;
             let existing = tx
                 .query_row(
                     "SELECT receipt_sha256 FROM research_captures \
@@ -245,7 +246,7 @@ impl Db {
                 )
                 .optional()?;
             if let Some(existing_hash) = existing {
-                if existing_hash == receipt_sha256 {
+                if crate::content::load_text(&tx,&content_session,&existing_hash)? == receipt_sha256 {
                     tx.commit()?;
                     return Ok(());
                 }
@@ -266,9 +267,9 @@ impl Db {
                     &capture.task_id,
                     &capture.run_id,
                     capture.kind.as_db(),
-                    &capture.query,
+                    crate::content::store_optional(&tx,&content_session,capture.query.as_deref())?,
                     &capture.fetched_at,
-                    &receipt_sha256,
+                    crate::content::store_text(&tx,&content_session,&receipt_sha256)?,
                     &now,
                 ],
             )?;
@@ -290,12 +291,12 @@ impl Db {
                         &capture.producer_invocation_id,
                         ordinal,
                         capture.kind.source_kind(),
-                        &entry.url,
-                        &entry.title,
-                        &entry.provider,
+                        crate::content::store_text(&tx,&content_session,&entry.url)?,
+                        crate::content::store_optional(&tx,&content_session,entry.title.as_deref())?,
+                        crate::content::store_optional(&tx,&content_session,entry.provider.as_deref())?,
                         &capture.fetched_at,
                         entry.http_status,
-                        &entry.content_type,
+                        crate::content::store_optional(&tx,&content_session,entry.content_type.as_deref())?,
                         i64::from(entry.truncated),
                         &now,
                     ],
@@ -315,7 +316,7 @@ impl Db {
                             &capture.producer_invocation_id,
                             ordinal,
                             capture.kind.finding_kind(),
-                            excerpt,
+                            crate::content::store_text(&tx,&content_session,excerpt)?,
                             entry.rank,
                             &now,
                         ],
@@ -464,6 +465,7 @@ pub(crate) fn load_projection(
     conn: &rusqlite::Connection,
     root_task_id: &str,
 ) -> Result<ResearchProjection, DbError> {
+    let content_session = crate::content::task_session(conn, root_task_id)?;
     let mut captures = {
         let mut statement = conn.prepare(
             "SELECT producer_invocation_id,root_task_id,task_id,run_id,capture_kind,query, \
@@ -478,7 +480,7 @@ pub(crate) fn load_projection(
                     task_id: row.get(2)?,
                     run_id: row.get(3)?,
                     capture_kind: row.get(4)?,
-                    query: row.get(5)?,
+                    query: crate::content::load_optional(conn, &content_session, row.get(5)?)?,
                     fetched_at: row.get(6)?,
                     created_at: row.get(7)?,
                 })
@@ -502,12 +504,16 @@ pub(crate) fn load_projection(
                     producer_invocation_id: row.get(4)?,
                     ordinal: row.get(5)?,
                     source_kind: row.get(6)?,
-                    url: row.get(7)?,
-                    title: row.get(8)?,
-                    provider: row.get(9)?,
+                    url: crate::content::load_row_text(conn, &content_session, row.get(7)?)?,
+                    title: crate::content::load_optional(conn, &content_session, row.get(8)?)?,
+                    provider: crate::content::load_optional(conn, &content_session, row.get(9)?)?,
                     fetched_at: row.get(10)?,
                     http_status: row.get(11)?,
-                    content_type: row.get(12)?,
+                    content_type: crate::content::load_optional(
+                        conn,
+                        &content_session,
+                        row.get(12)?,
+                    )?,
                     truncated: row.get::<_, i64>(13)? != 0,
                     created_at: row.get(14)?,
                 })
@@ -532,7 +538,7 @@ pub(crate) fn load_projection(
                     producer_invocation_id: row.get(5)?,
                     ordinal: row.get(6)?,
                     finding_kind: row.get(7)?,
-                    excerpt: row.get(8)?,
+                    excerpt: crate::content::load_row_text(conn, &content_session, row.get(8)?)?,
                     rank: row.get(9)?,
                     created_at: row.get(10)?,
                 })
@@ -552,9 +558,9 @@ pub(crate) fn load_projection(
                     root_task_id: row.get(1)?,
                     left_finding_id: row.get(2)?,
                     right_finding_id: row.get(3)?,
-                    summary: row.get(4)?,
+                    summary: crate::content::load_row_text(conn, &content_session, row.get(4)?)?,
                     status: row.get(5)?,
-                    resolution: row.get(6)?,
+                    resolution: crate::content::load_optional(conn, &content_session, row.get(6)?)?,
                     created_at: row.get(7)?,
                     updated_at: row.get(8)?,
                 })
@@ -574,9 +580,9 @@ pub(crate) fn load_projection(
                     root_task_id: row.get(1)?,
                     task_id: row.get(2)?,
                     run_id: row.get(3)?,
-                    question: row.get(4)?,
+                    question: crate::content::load_row_text(conn, &content_session, row.get(4)?)?,
                     status: row.get(5)?,
-                    resolution: row.get(6)?,
+                    resolution: crate::content::load_optional(conn, &content_session, row.get(6)?)?,
                     created_at: row.get(7)?,
                     updated_at: row.get(8)?,
                 })
@@ -595,11 +601,19 @@ pub(crate) fn load_projection(
                 Ok(ResearchRequirementCoverageRecord {
                     coverage_id: row.get(0)?,
                     root_task_id: row.get(1)?,
-                    requirement_key: row.get(2)?,
-                    requirement_text: row.get(3)?,
+                    requirement_key: crate::content::load_row_text(
+                        conn,
+                        &content_session,
+                        row.get(2)?,
+                    )?,
+                    requirement_text: crate::content::load_row_text(
+                        conn,
+                        &content_session,
+                        row.get(3)?,
+                    )?,
                     status: row.get(4)?,
                     supporting_finding_id: row.get(5)?,
-                    notes: row.get(6)?,
+                    notes: crate::content::load_optional(conn, &content_session, row.get(6)?)?,
                     created_at: row.get(7)?,
                     updated_at: row.get(8)?,
                 })

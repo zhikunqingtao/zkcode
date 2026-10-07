@@ -95,6 +95,7 @@ fn server_samples() -> Vec<ServerEnvelope> {
             committed_messages: None,
         }),
         env(ServerMessage::Error {
+            request_id: None,
             code: "query_busy".into(),
             message: "当前会话正在处理中".into(),
             retryable: false,
@@ -194,11 +195,13 @@ fn server_samples() -> Vec<ServerEnvelope> {
         }),
         env(ServerMessage::SessionRestored {
             messages: vec![Message::User {
+                meta: None,
                 uuid: "u1".into(),
                 timestamp: 1,
                 content: vec![ContentBlock::Text { text: "hi".into() }],
             }],
             metadata: SessionMetadata {
+                purpose: zk_protocol::SessionPurpose::Chat,
                 session_id: "s1".into(),
                 model: "qwen3-coder".into(),
                 permission_mode: "AUTO_APPROVE".into(),
@@ -239,6 +242,7 @@ fn server_samples() -> Vec<ServerEnvelope> {
             model: "qwen3.6-plus".into(),
         }),
         env(ServerMessage::PermissionModeChanged {
+            request_id: None,
             mode: "AUTO_APPROVE".into(),
             previous: Some("DEFAULT".into()),
         }),
@@ -459,6 +463,7 @@ fn client_samples() -> Vec<ClientEnvelope> {
             }]),
         }),
         ClientEnvelope::new(ClientMessage::RunInput {
+            meta: None,
             request_id: "r1".into(),
             text: "追加指令".into(),
         }),
@@ -475,6 +480,7 @@ fn client_samples() -> Vec<ClientEnvelope> {
             model: "qwen3-coder".into(),
         }),
         ClientEnvelope::new(ClientMessage::SetPermissionMode {
+            request_id: None,
             mode: "AUTO_APPROVE".into(),
         }),
         ClientEnvelope::new(ClientMessage::SlashCommand {
@@ -654,6 +660,7 @@ fn shape_assertions_on_activation_set() {
         ),
         (
             env(ServerMessage::Error {
+                request_id: None,
                 code: "query_busy".into(),
                 message: "busy".into(),
                 retryable: false,
@@ -678,6 +685,7 @@ fn shape_assertions_on_activation_set() {
             env(ServerMessage::SessionRestored {
                 messages: vec![],
                 metadata: SessionMetadata {
+                    purpose: zk_protocol::SessionPurpose::Chat,
                     session_id: "s1".into(),
                     model: "m".into(),
                     permission_mode: "DEFAULT".into(),
@@ -714,6 +722,7 @@ fn shape_assertions_on_activation_set() {
         ),
         (
             env(ServerMessage::PermissionModeChanged {
+                request_id: None,
                 mode: "AUTO_APPROVE".into(),
                 previous: Some("DEFAULT".into()),
             }),
@@ -837,7 +846,7 @@ fn real_world_samples_parse_and_reemit_equal() {
         // dispatch.test.ts L74-77
         r#"{"type":"error","ts":1,"message":"Rate limited","code":"RATE_LIMIT","retryable":true}"#,
         // dispatch.test.ts L48-53（session_restored 恢复门形状）
-        r#"{"type":"session_restored","ts":1,"bindRequestId":"br-1","protocolVersion":4,"bindingEpoch":1,"messages":[{"type":"user","uuid":"1","timestamp":1,"content":[{"type":"text","text":"hi"}]}],"metadata":{"sessionId":"s1","model":"gpt-4o","permissionMode":"AUTO_APPROVE","status":"idle"},"taskTree":[]}"#,
+        r#"{"type":"session_restored","ts":1,"bindRequestId":"br-1","protocolVersion":4,"bindingEpoch":1,"messages":[{"type":"user","uuid":"1","timestamp":1,"content":[{"type":"text","text":"hi"}]}],"metadata":{"sessionId":"s1","model":"gpt-4o","permissionMode":"AUTO_APPROVE","status":"idle","purpose":"chat"},"taskTree":[]}"#,
         // dispatch.test.ts L135-140
         r#"{"type":"permission_mode_changed","mode":"AUTO_APPROVE","previous":"DEFAULT","ts":1}"#,
         // dispatch.test.ts L121
@@ -1005,4 +1014,26 @@ fn image_block_roundtrips_legacy_base64_and_url_shapes() {
         }
     );
     assert_eq!(serde_json::to_value(&block).expect("serialize"), remote);
+}
+
+/// Missing purpose remains readable; published metadata always carries a typed purpose.
+#[test]
+fn session_purpose_is_explicit_and_unknown_values_are_rejected() {
+    let mut payload = json!({
+        "sessionId":"s1", "model":"fixture", "permissionMode":"DEFAULT", "status":"idle"
+    });
+    let legacy: SessionMetadata = serde_json::from_value(payload.clone()).unwrap();
+    assert_eq!(legacy.purpose, zk_protocol::SessionPurpose::Chat);
+    assert_eq!(serde_json::to_value(&legacy).unwrap()["purpose"], "chat");
+    for (name, expected) in [
+        ("chat", zk_protocol::SessionPurpose::Chat),
+        ("mcp", zk_protocol::SessionPurpose::Mcp),
+    ] {
+        payload["purpose"] = json!(name);
+        let parsed: SessionMetadata = serde_json::from_value(payload.clone()).unwrap();
+        assert_eq!(parsed.purpose, expected);
+        assert_eq!(serde_json::to_value(&parsed).unwrap()["purpose"], name);
+    }
+    payload["purpose"] = json!("untrusted");
+    assert!(serde_json::from_value::<SessionMetadata>(payload).is_err());
 }

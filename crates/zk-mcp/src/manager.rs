@@ -33,6 +33,10 @@
 //! - `abortContextLookup()` 无对应物——取消经 `zk_tools::ToolContext::cancel`
 //!   传递（见 `tool_adapter` 模块文档）。
 
+mod oauth;
+mod services;
+pub use services::{McpServicePreferenceStore, McpServiceView};
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -91,6 +95,15 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 /// 管理器生命周期错误（对照 Java 抛出的两类运行时异常）。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ManagerError {
+    /// Resource-bound OAuth failed without exposing credentials.
+    #[error("{0}")]
+    OAuth(#[from] crate::oauth::OAuthError),
+    /// Explicitly disabled services cannot be reactivated by another entry point.
+    #[error("MCP_SERVICE_DISABLED: {0}")]
+    ServiceDisabled(String),
+    /// Durable preferences could not be loaded or committed.
+    #[error("MCP_SERVICE_STORAGE_UNAVAILABLE")]
+    ServiceStorageUnavailable,
     /// 对照 `IllegalStateException("MCP_CLIENT_MANAGER_NOT_RUNNING")`。
     #[error("MCP_CLIENT_MANAGER_NOT_RUNNING")]
     NotRunning,
@@ -231,6 +244,10 @@ fn next_double() -> f64 {
 /// 一致性由「代际号 + 连接引用相等」双重校验保证（对照 Java 的
 /// `isCurrentConnection`），而非长时持锁。
 pub struct McpClientManager {
+    scope_context: Option<zk_tools::ToolContext>,
+    scope_parent: Option<std::sync::Weak<McpClientManager>>,
+    oauth: Option<Arc<crate::oauth::OAuthCoordinator>>,
+    services: services::ServiceState,
     resolver: McpConfigurationResolver,
     static_configs: Vec<McpServerConfig>,
     registry: Option<Arc<McpCapabilityRegistry>>,
@@ -272,6 +289,10 @@ impl std::fmt::Debug for McpClientManager {
 
 /// [`McpClientManager`] 的构建器 — 替代 Java 的 12 参数构造函数注入。
 pub struct McpClientManagerBuilder {
+    scope_context: Option<zk_tools::ToolContext>,
+    scope_parent: Option<std::sync::Weak<McpClientManager>>,
+    oauth: Option<Arc<crate::oauth::OAuthCoordinator>>,
+    service_preferences: Option<Arc<dyn McpServicePreferenceStore>>,
     resolver: McpConfigurationResolver,
     static_configs: Vec<McpServerConfig>,
     registry: Option<Arc<McpCapabilityRegistry>>,
@@ -290,6 +311,10 @@ impl McpClientManagerBuilder {
     #[must_use]
     pub fn new(approval: Arc<dyn ApprovalPort>, tool_sink: Arc<dyn McpToolSink>) -> Self {
         Self {
+            scope_context: None,
+            scope_parent: None,
+            service_preferences: None,
+            oauth: None,
             resolver: McpConfigurationResolver::default(),
             static_configs: Vec::new(),
             registry: None,
@@ -369,10 +394,40 @@ impl McpClientManagerBuilder {
         self
     }
 
+    /// Inject durable service switches independently of capability preferences.
+    #[must_use]
+    pub fn service_preferences(mut self, store: Arc<dyn McpServicePreferenceStore>) -> Self {
+        self.service_preferences = Some(store);
+        self
+    }
+
+    /// Attach the host's Keychain-backed OAuth coordinator.
+    #[must_use]
+    pub fn oauth(mut self, coordinator: Arc<crate::oauth::OAuthCoordinator>) -> Self {
+        self.oauth = Some(coordinator);
+        self
+    }
+
+    /// Isolate a run's transports and inherit live global service/tool gates.
+    #[must_use]
+    pub fn run_scope(
+        mut self,
+        context: zk_tools::ToolContext,
+        parent: &Arc<McpClientManager>,
+    ) -> Self {
+        self.scope_context = Some(context);
+        self.scope_parent = Some(Arc::downgrade(parent));
+        self
+    }
+
     /// 装配管理器。
     #[must_use]
     pub fn build(self) -> Arc<McpClientManager> {
         Arc::new(McpClientManager {
+            scope_context: self.scope_context,
+            scope_parent: self.scope_parent,
+            services: services::ServiceState::new(self.service_preferences),
+            oauth: self.oauth,
             resolver: self.resolver,
             static_configs: self.static_configs,
             registry: self.registry,
@@ -431,6 +486,7 @@ impl McpClientManager {
     /// [`ManagerError::CannotRestartAfterShutdown`]：[`Self::shutdown`] 之后不可
     /// 重启（对照 Java 检查 `reconnectPool.isShutdown()`）。
     pub async fn start(self: &Arc<Self>) -> Result<(), ManagerError> {
+        self.load_service_preferences().await?;
         if self.shutdown_done.load(Ordering::Acquire) {
             return Err(ManagerError::CannotRestartAfterShutdown);
         }
@@ -444,6 +500,34 @@ impl McpClientManager {
         tracing::info!("McpClientManager starting — initializing MCP connections");
         self.initialize_default_roots();
         self.initialize_all().await;
+        Ok(())
+    }
+
+    /// Start only explicitly supplied run-local configurations. Never reads
+    /// user/project files, environment configuration, or the global capability catalog.
+    /// # Errors
+    /// Invalid configuration, disabled services or failed scoped setup return errors.
+    pub async fn start_scoped(
+        self: &Arc<Self>,
+        configs: Vec<McpServerConfig>,
+    ) -> Result<(), ManagerError> {
+        self.load_service_preferences().await?;
+        if self.shutdown_done.load(Ordering::Acquire) {
+            return Err(ManagerError::CannotRestartAfterShutdown);
+        }
+        if self.running.swap(true, Ordering::AcqRel) {
+            return Err(ManagerError::LifecycleChanged);
+        }
+        if let Some(context) = &self.scope_context {
+            self.roots_provider
+                .update_roots(&context.working_dir().to_string_lossy(), "workspace");
+        }
+        for config in configs {
+            let connection = self.add_server(config).await?;
+            if connection.status() != McpConnectionStatus::Connected {
+                return Err(ManagerError::LifecycleChanged);
+            }
+        }
         Ok(())
     }
 
@@ -650,7 +734,11 @@ impl McpClientManager {
             .map(|(_, connection)| connection)
             .collect();
         for connection in &connections {
+            self.clear_tool_directory(connection.name());
             connection.close().await;
+            if !connection.cleanup_confirmed() {
+                lock(&self.connections).insert(connection.name().to_owned(), connection.clone());
+            }
         }
 
         await_reconnect_tasks(scheduled, "reconnect scheduler").await;
@@ -695,8 +783,35 @@ impl McpClientManager {
         self: &Arc<Self>,
         config: McpServerConfig,
     ) -> Result<Arc<McpServerConnection>, ManagerError> {
+        self.add_server_from(config, false).await
+    }
+
+    async fn add_server_from(
+        self: &Arc<Self>,
+        mut config: McpServerConfig,
+        from_registry: bool,
+    ) -> Result<Arc<McpServerConnection>, ManagerError> {
         self.require_running()?;
-        let generation = self.next_generation(&config.name);
+        {
+            let mut registry = lock(&self.services.registry_configs);
+            if from_registry {
+                registry.insert(config.name.clone());
+            } else {
+                registry.remove(&config.name);
+            }
+        }
+        lock(&self.services.configs).insert(config.name.clone(), config.clone());
+        let (generation, cancel) = {
+            let _directory = lock(&self.services.directory);
+            if !self.is_service_enabled(&config.name) {
+                return Err(ManagerError::ServiceDisabled(config.name.clone()));
+            }
+            let cancel = lock(&self.services.cancellations)
+                .entry(config.name.clone())
+                .or_default()
+                .clone();
+            (self.next_generation(&config.name), cancel)
+        };
 
         if !self.approval.is_trusted(&config) {
             tracing::info!(server = %config.name, "MCP server not trusted, pending approval");
@@ -707,8 +822,47 @@ impl McpClientManager {
             return Ok(connection);
         }
 
+        if let Some(oauth) = &self.oauth
+            && matches!(
+                config.transport,
+                McpTransportType::Http | McpTransportType::Sse | McpTransportType::SseIde
+            )
+            && let Some(resource) = &config.url
+        {
+            match oauth.authorization_header(&config.name, resource).await {
+                Ok(Some(header)) => {
+                    config
+                        .headers
+                        .retain(|name, _| !name.eq_ignore_ascii_case("authorization"));
+                    config.headers.insert("Authorization".into(), header);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    let connection = self.new_connection(config.clone());
+                    connection.set_status(McpConnectionStatus::NeedsAuth);
+                    self.install_connection(&config.name, generation, &connection)
+                        .await?;
+                    return Err(error.into());
+                }
+            }
+        }
         let connection = self.new_connection(config.clone());
-        connection.connect().await;
+        let scope_cancel = self
+            .scope_context
+            .as_ref()
+            .map_or_else(CancellationToken::new, |context| context.cancel.clone());
+        tokio::select! {
+            biased;
+            () = scope_cancel.cancelled() => {
+                connection.close().await;
+                return Err(ManagerError::LifecycleChanged);
+            }
+            () = cancel.cancelled() => {
+                connection.close().await;
+                return Err(ManagerError::ServiceDisabled(config.name.clone()));
+            }
+            () = connection.connect() => {}
+        }
         self.install_connection(&config.name, generation, &connection)
             .await?;
         if connection.status() == McpConnectionStatus::Connected {
@@ -726,7 +880,22 @@ impl McpClientManager {
 
     /// 建连接实例并注入 roots / progress 端口（对照 Java 的三行装配）。
     fn new_connection(&self, config: McpServerConfig) -> Arc<McpServerConnection> {
+        let authorizer = self.oauth.as_ref().and_then(|oauth| {
+            config.url.as_ref().map(|resource| {
+                let cancel = lock(&self.services.cancellations)
+                    .entry(config.name.clone())
+                    .or_default()
+                    .clone();
+                oauth.request_authorizer(config.name.clone(), resource.clone(), cancel)
+            })
+        });
         let connection = McpServerConnection::new(config);
+        if let Some(context) = &self.scope_context {
+            connection.set_execution_context(context.clone());
+        }
+        if let Some(authorizer) = authorizer {
+            connection.set_request_authorizer(authorizer);
+        }
         connection.set_roots_provider(Arc::clone(&self.roots_provider));
         if let Some(tracker) = &self.progress_tracker {
             connection.set_progress_tracker(Arc::clone(tracker));
@@ -740,12 +909,13 @@ impl McpClientManager {
         lock(&self.registry_owned_servers).remove(name);
         let connection = lock(&self.connections).remove(name);
         self.cancel_reconnect_work(name);
+        self.clear_tool_directory(name);
         let Some(connection) = connection else {
             return false;
         };
         remove_if_same(&self.reconnecting_servers, name, &connection);
-        self.clear_tool_directory(name);
         connection.close().await;
+        self.broadcast_health_status(name, McpConnectionStatus::Disabled);
         tracing::info!(server = name, "MCP server removed");
         true
     }
@@ -767,7 +937,10 @@ impl McpClientManager {
     pub fn connected_servers(&self) -> Vec<Arc<McpServerConnection>> {
         lock(&self.connections)
             .values()
-            .filter(|connection| connection.status() == McpConnectionStatus::Connected)
+            .filter(|connection| {
+                self.is_service_enabled(connection.name())
+                    && connection.status() == McpConnectionStatus::Connected
+            })
             .map(Arc::clone)
             .collect()
     }
@@ -786,16 +959,41 @@ impl McpClientManager {
     /// - [`ManagerError::ServerNotFound`]：无该服务器。
     pub async fn restart_server(self: &Arc<Self>, name: &str) -> Result<(), ManagerError> {
         self.require_running()?;
+        if !self.is_service_enabled(name) {
+            return Err(ManagerError::ServiceDisabled(name.to_owned()));
+        }
         let Some(connection) = self.get_connection(name) else {
             return Err(ManagerError::ServerNotFound(name.to_owned()));
         };
+        if let Some(oauth) = &self.oauth
+            && oauth.has_binding(name).await?
+        {
+            let config = lock(&self.services.configs)
+                .get(name)
+                .cloned()
+                .ok_or_else(|| ManagerError::ServerNotFound(name.to_owned()))?;
+            let from_registry = lock(&self.services.registry_configs).contains(name);
+            self.add_server_from(config, from_registry).await?;
+            return Ok(());
+        }
         let generation = self.next_generation(name);
         self.cancel_reconnect_work(name);
         tracing::info!(server = name, "Restarting MCP server");
         self.clear_tool_directory(name);
         connection.close().await;
 
-        connection.connect().await;
+        let cancel = lock(&self.services.cancellations)
+            .entry(name.to_owned())
+            .or_default()
+            .clone();
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => {
+                connection.close().await;
+                return Err(ManagerError::ServiceDisabled(name.to_owned()));
+            }
+            () = connection.connect() => {}
+        }
         if !self.is_current_connection(name, &connection, generation) {
             connection.close().await;
             return Ok(());
@@ -853,11 +1051,21 @@ impl McpClientManager {
         generation: u64,
         connection: &Arc<McpServerConnection>,
     ) -> Result<(), ManagerError> {
-        if !self.is_running() || self.generation_of(server_id) != generation {
+        let installed = {
+            let _directory = lock(&self.services.directory);
+            if !self.is_running()
+                || !self.is_service_enabled(server_id)
+                || self.generation_of(server_id) != generation
+            {
+                None
+            } else {
+                Some(lock(&self.connections).insert(server_id.to_owned(), Arc::clone(connection)))
+            }
+        };
+        let Some(previous) = installed else {
             connection.close().await;
             return Err(ManagerError::LifecycleChanged);
-        }
-        let previous = lock(&self.connections).insert(server_id.to_owned(), Arc::clone(connection));
+        };
         if let Some(previous) = previous
             && !Arc::ptr_eq(&previous, connection)
         {
@@ -874,6 +1082,7 @@ impl McpClientManager {
         generation: u64,
     ) -> bool {
         self.is_running()
+            && self.is_service_enabled(server_id)
             && self.generation_of(server_id) == generation
             && lock(&self.connections)
                 .get(server_id)
@@ -901,25 +1110,29 @@ impl McpClientManager {
 impl McpClientManager {
     /// 包装所有已连接服务器的工具（对照 `discoverAndWrapTools()`）。
     #[must_use]
-    pub fn discover_and_wrap_tools(&self) -> Vec<Arc<dyn Tool>> {
+    pub fn discover_and_wrap_tools(self: &Arc<Self>) -> Vec<Arc<dyn Tool>> {
         self.connected_servers()
             .iter()
             .flat_map(|connection| self.wrap_mcp_tools(connection))
             .collect()
     }
 
-    /// 单连接的工具包装（对照 `wrapMcpTools`：不做频道权限过滤）。
-    fn wrap_mcp_tools(&self, connection: &Arc<McpServerConnection>) -> Vec<Arc<dyn Tool>> {
+    /// Discovery and registration share the same service/capability policy.
+    fn wrap_mcp_tools(
+        self: &Arc<Self>,
+        connection: &Arc<McpServerConnection>,
+    ) -> Vec<Arc<dyn Tool>> {
         connection
             .tools()
             .iter()
+            .filter(|tool| self.is_tool_allowed(connection.name(), &tool.name))
             .map(|tool| self.build_adapter(connection, tool))
             .collect()
     }
 
     /// 装配单个适配器（注册表覆盖 + 进度端口 + 共享降级缓存）。
     fn build_adapter(
-        &self,
+        self: &Arc<Self>,
         connection: &Arc<McpServerConnection>,
         tool: &crate::protocol::ToolDefinition,
     ) -> Arc<dyn Tool> {
@@ -931,6 +1144,10 @@ impl McpClientManager {
             capability.as_ref().map_or((None, 0), |capability| {
                 (capability.description.clone(), capability.timeout_ms)
             });
+        let manager = Arc::downgrade(self);
+        let current_connection = Arc::downgrade(connection);
+        let server_name = connection.name().to_owned();
+        let original_tool = tool.name.clone();
         let mut adapter = McpToolAdapter::new(
             build_external_tool_name(connection.name(), &tool.name, capability.as_ref()),
             Some(tool.description.clone()),
@@ -938,6 +1155,18 @@ impl McpClientManager {
             Arc::clone(connection),
             tool.name.clone(),
         )
+        .with_execution_gate(Arc::new(move || {
+            let (Some(manager), Some(connection)) =
+                (manager.upgrade(), current_connection.upgrade())
+            else {
+                return false;
+            };
+            manager.is_current_connection(
+                &server_name,
+                &connection,
+                manager.generation_of(&server_name),
+            ) && manager.is_tool_allowed(&server_name, &original_tool)
+        }))
         .with_registry_overrides(enhanced_description, timeout_ms)
         .with_capability_identity(
             capability.as_ref().map(|value| value.id.clone()),
@@ -962,7 +1191,17 @@ impl McpClientManager {
     /// 监听回调持 `Weak` 引用（管理器与连接均是），避免
     /// `connection → callback → connection` 的 `Arc` 环。
     fn register_tools_from_connection(self: &Arc<Self>, connection: &Arc<McpServerConnection>) {
-        if connection.status() != McpConnectionStatus::Connected {
+        let _directory = lock(&self.services.directory);
+        self.register_tools_locked(connection);
+    }
+
+    fn register_tools_locked(self: &Arc<Self>, connection: &Arc<McpServerConnection>) {
+        if !self.is_current_connection(
+            connection.name(),
+            connection,
+            self.generation_of(connection.name()),
+        ) || connection.status() != McpConnectionStatus::Connected
+        {
             return;
         }
         let mut published = Vec::new();
@@ -995,6 +1234,7 @@ impl McpClientManager {
             let name = connection.name().to_owned();
             let generation = manager.generation_of(&name);
             let prompts = connection.list_prompts().await;
+            let _directory = lock(&manager.services.directory);
             if !manager.is_current_connection(&name, &connection, generation) {
                 return;
             }
@@ -1020,10 +1260,12 @@ impl McpClientManager {
             if !manager.is_current_connection(&name, &connection, manager.generation_of(&name)) {
                 return;
             }
-            manager.clear_tool_directory(&name);
-            if connection.status() == McpConnectionStatus::Connected {
-                manager.register_tools_from_connection(&connection);
+            let _directory = lock(&manager.services.directory);
+            if !manager.is_current_connection(&name, &connection, manager.generation_of(&name)) {
+                return;
             }
+            manager.clear_tool_directory(&name);
+            manager.register_tools_locked(&connection);
             tracing::info!(server = %name, "MCP tools refreshed for server");
         }));
     }
@@ -1032,6 +1274,16 @@ impl McpClientManager {
     /// 屏蔽整服务器）叠加注册表 allowlist——注册表管理的服务器仅放行已启用
     /// 条目，防止远端 `tools/list` 暴露未启用工具。
     fn is_tool_allowed(&self, server_name: &str, tool_name: &str) -> bool {
+        if !self.is_service_enabled(server_name) {
+            return false;
+        }
+        if let Some(parent) = &self.scope_parent
+            && !parent
+                .upgrade()
+                .is_some_and(|parent| parent.is_tool_allowed(server_name, tool_name))
+        {
+            return false;
+        }
         let channel_blocked = !self.channel_permissions.is_empty()
             && self
                 .channel_permissions
@@ -1421,6 +1673,21 @@ impl McpClientManager {
         if !self.is_current_connection(server_id, connection, generation) {
             return;
         }
+        if let Some(oauth) = &self.oauth {
+            match oauth.has_binding(server_id).await {
+                Ok(true) => {
+                    if self.restart_server(server_id).await.is_err() {
+                        connection.increment_reconnect_attempts();
+                    }
+                    return;
+                }
+                Ok(false) => {}
+                Err(_) => {
+                    connection.set_status(McpConnectionStatus::NeedsAuth);
+                    return;
+                }
+            }
+        }
         connection.connect().await;
         if !self.is_current_connection(server_id, connection, generation) {
             connection.close().await;
@@ -1464,6 +1731,11 @@ impl McpClientManager {
         self: &Arc<Self>,
         definition: &McpCapabilityDefinition,
     ) -> Result<Arc<McpServerConnection>, ManagerError> {
+        if !self.is_service_enabled(&definition.extract_server_key()) {
+            return Err(ManagerError::ServiceDisabled(
+                definition.extract_server_key(),
+            ));
+        }
         validate_capability_destination(definition)
             .await
             .map_err(|error| ManagerError::UnsafeCapabilityEndpoint(error.to_string()))?;
@@ -1478,7 +1750,7 @@ impl McpClientManager {
             tracing::info!(capability = %definition.id, "Auto-trusted registry capability");
         }
         let server_name = config.name.clone();
-        let connection = self.add_server(config).await?;
+        let connection = self.add_server_from(config, true).await?;
         lock(&self.registry_owned_servers).insert(server_name);
         Ok(connection)
     }
@@ -1686,6 +1958,214 @@ mod tests {
     use crate::tool_adapter::MCP_TOOL_MAX_EXECUTION;
     use crate::transport::{McpTransport, NotificationHandler};
 
+    #[derive(Default)]
+    struct MemoryPreferences {
+        values: Mutex<BTreeMap<String, bool>>,
+        fail_load: AtomicBool,
+        fail_save: AtomicBool,
+    }
+
+    impl McpServicePreferenceStore for MemoryPreferences {
+        fn load(&self) -> BoxFuture<'_, Result<BTreeMap<String, bool>, String>> {
+            Box::pin(async move {
+                if self.fail_load.load(Ordering::Acquire) {
+                    return Err("storage unavailable".into());
+                }
+                Ok(lock(&self.values).clone())
+            })
+        }
+        fn save(&self, values: BTreeMap<String, bool>) -> BoxFuture<'_, Result<(), String>> {
+            Box::pin(async move {
+                if self.fail_save.load(Ordering::Acquire) {
+                    return Err("disk full".into());
+                }
+                *lock(&self.values) = values;
+                Ok(())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn service_switch_persists_across_managers_and_rejects_all_reactivation_paths() {
+        let store = Arc::new(MemoryPreferences::default());
+        let approval = RecordingApproval::shared();
+        let sink = RecordingSink::shared();
+        let config = config_with("srv", McpTransportType::Sdk, McpConfigScope::User);
+        let manager = builder(&approval, &sink)
+            .service_preferences(store.clone())
+            .static_configs(vec![config.clone()])
+            .build();
+        running(&manager);
+        manager.load_service_preferences().await.unwrap();
+        let connection = add_trusted(&manager, &approval, config.clone()).await;
+        connection.set_tools(vec![tool_def("echo")]);
+        let stale = manager.discover_and_wrap_tools().remove(0);
+        manager.register_tools_from_connection(&connection);
+        let view = manager.set_service_enabled("srv", false).await.unwrap();
+        assert!(!view.enabled);
+        assert_eq!(view.status, "disabled");
+        assert_eq!(view.tool_count, 0);
+        assert!(manager.get_connection("srv").is_none());
+        assert!(manager.discover_and_wrap_tools().is_empty());
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let output = stale
+            .execute(
+                json!({}),
+                zk_tools::ToolContext::new(CancellationToken::new(), tx),
+            )
+            .await;
+        assert!(output.is_error);
+        assert!(output.content.contains("disabled"));
+        let published = sink.published().len();
+        connection.set_tools(vec![tool_def("late")]);
+        connection.notify_tools_changed();
+        assert_eq!(
+            sink.published().len(),
+            published,
+            "stale discovery may not resurrect tools"
+        );
+        assert!(matches!(
+            manager.add_server(config.clone()).await,
+            Err(ManagerError::ServiceDisabled(_))
+        ));
+        assert!(matches!(
+            manager.restart_server("srv").await,
+            Err(ManagerError::ServiceDisabled(_))
+        ));
+        let recovered = builder(&approval, &sink)
+            .service_preferences(store)
+            .static_configs(vec![config])
+            .build();
+        running(&recovered);
+        let views = recovered.list_services().await.unwrap();
+        assert!(
+            !views
+                .iter()
+                .find(|service| service.name == "srv")
+                .unwrap()
+                .enabled
+        );
+        recovered.initialize_static_configs().await;
+        assert!(recovered.get_connection("srv").is_none());
+    }
+
+    #[tokio::test]
+    async fn service_storage_errors_fail_closed_and_do_not_change_last_valid_state() {
+        let store = Arc::new(MemoryPreferences::default());
+        store.fail_load.store(true, Ordering::Release);
+        let approval = RecordingApproval::shared();
+        let sink = RecordingSink::shared();
+        let config = config_with("srv", McpTransportType::Sdk, McpConfigScope::User);
+        let manager = builder(&approval, &sink)
+            .service_preferences(store.clone())
+            .static_configs(vec![config.clone()])
+            .build();
+        assert_eq!(
+            manager.start().await,
+            Err(ManagerError::ServiceStorageUnavailable)
+        );
+        assert!(!manager.is_service_enabled("srv"));
+        assert_eq!(manager.connection_count(), 0);
+        store.fail_load.store(false, Ordering::Release);
+        manager.load_service_preferences().await.unwrap();
+        running(&manager);
+        let connection = add_trusted(&manager, &approval, config).await;
+        store.fail_save.store(true, Ordering::Release);
+        assert!(matches!(
+            manager.set_service_enabled("srv", false).await,
+            Err(ManagerError::ServiceStorageUnavailable)
+        ));
+        assert!(manager.is_service_enabled("srv"));
+        assert!(Arc::ptr_eq(
+            &manager.get_connection("srv").unwrap(),
+            &connection
+        ));
+        assert!(lock(&store.values).is_empty());
+    }
+
+    #[tokio::test]
+    async fn service_disable_cancels_an_inflight_real_http_connection() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let accepted = Arc::new(tokio::sync::Notify::new());
+        let signal = accepted.clone();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+            signal.notify_one();
+            std::future::pending::<()>().await;
+        });
+        let approval = RecordingApproval::shared();
+        let sink = RecordingSink::shared();
+        let manager = builder(&approval, &sink).build();
+        running(&manager);
+        let config = McpServerConfig::sse("slow", format!("http://{addr}/mcp"));
+        approval.record_approval(&config, "TEST");
+        let connecting_manager = manager.clone();
+        let connect = tokio::spawn(async move { connecting_manager.add_server(config).await });
+        tokio::time::timeout(Duration::from_secs(3), accepted.notified())
+            .await
+            .unwrap();
+        manager.set_service_enabled("slow", false).await.unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(3), connect)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(result, Err(ManagerError::ServiceDisabled(_))));
+        assert!(manager.get_connection("slow").is_none());
+        assert!(sink.registered().is_empty());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn capability_switch_revokes_retained_adapter_and_discovery_without_changing_service_preference()
+     {
+        let path = std::env::temp_dir().join(format!(
+            "zk-service-capabilities-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        let registry = Arc::new(McpCapabilityRegistry::new(path.clone()));
+        for name in ["first", "second"] {
+            let mut definition = McpCapabilityDefinition::new(name);
+            definition.server_key = Some("srv".into());
+            definition.tool_name = Some(name.into());
+            definition.enabled = true;
+            registry.add_capability(definition).unwrap();
+        }
+        let approval = RecordingApproval::shared();
+        let sink = RecordingSink::shared();
+        let manager = builder(&approval, &sink).registry(registry.clone()).build();
+        running(&manager);
+        let connection = add_trusted(
+            &manager,
+            &approval,
+            config_with("srv", McpTransportType::Sdk, McpConfigScope::User),
+        )
+        .await;
+        connection.set_tools(vec![tool_def("first"), tool_def("second")]);
+        let retained = manager.discover_and_wrap_tools().remove(0);
+        registry.toggle_enabled("first", false).unwrap();
+        manager.refresh_service_tools("srv");
+        assert!(manager.is_service_enabled("srv"));
+        assert_eq!(manager.discover_and_wrap_tools().len(), 1);
+        assert_eq!(sink.published().last().unwrap().1, vec!["second"]);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(
+            retained
+                .execute(
+                    json!({}),
+                    zk_tools::ToolContext::new(CancellationToken::new(), tx)
+                )
+                .await
+                .is_error
+        );
+        manager.set_service_enabled("srv", false).await.unwrap();
+        manager.set_service_enabled("srv", true).await.unwrap();
+        assert!(!registry.find_by_id("first").unwrap().enabled);
+        assert!(registry.find_by_id("second").unwrap().enabled);
+        registry.save();
+        std::fs::remove_file(path).unwrap();
+    }
+
     // ===== 端口替身 =====
 
     /// 记录式信任端口：`record_approval` 后该服务器即视为可信（对照
@@ -1840,8 +2320,7 @@ mod tests {
 
     // ===== 装配辅助 =====
 
-    /// `SDK` 传输在 `create_transport` 中无实现 → `connect()` 直接置
-    /// `CONNECTED` 且不持传输，是「已连接但 `is_alive() == false`」的理想替身。
+    /// Build a configuration without performing network or process I/O.
     fn config_with(
         name: &str,
         transport: McpTransportType,
@@ -1885,11 +2364,18 @@ mod tests {
         approval: &Arc<RecordingApproval>,
         config: McpServerConfig,
     ) -> Arc<McpServerConnection> {
+        let mock = config.transport == McpTransportType::Sdk;
         approval.record_approval(&config, "TEST");
-        manager
+        let connection = manager
             .add_server(config)
             .await
-            .expect("trusted test server")
+            .expect("trusted test server");
+        // Unsupported transports fail in production. These unit cases inject
+        // a connected fixture explicitly to exercise post-handshake behavior.
+        if mock {
+            connection.set_status(McpConnectionStatus::Connected);
+        }
+        connection
     }
 
     fn tool_def(name: &str) -> ToolDefinition {
@@ -2127,7 +2613,7 @@ mod tests {
         assert_eq!(sink.unregistered(), vec!["mcp__srv__".to_owned()]);
         assert_eq!(
             manager.get_connection("srv").map(|c| c.status()),
-            Some(McpConnectionStatus::Connected)
+            Some(McpConnectionStatus::Failed)
         );
     }
 
@@ -2450,13 +2936,14 @@ mod tests {
         manager.health_check().await;
         assert_eq!(connection.status(), McpConnectionStatus::Failed);
 
-        // SDK 传输的 connect() 恒置 CONNECTED，故重连必然成功并广播。
+        // The scheduled attempt executes after backoff, but an unsupported
+        // transport remains failed instead of fabricating a successful handshake.
         assert!(
-            wait_until(|| observer.saw("srv", McpConnectionStatus::Connected)).await,
-            "退避到期后应完成一次重连"
+            wait_until(|| connection.reconnect_attempts() > 0).await,
+            "backoff must trigger a real reconnect attempt"
         );
-        assert_eq!(connection.status(), McpConnectionStatus::Connected);
-        assert_eq!(connection.reconnect_attempts(), 0);
+        assert_eq!(connection.status(), McpConnectionStatus::Failed);
+        assert!(!observer.saw("srv", McpConnectionStatus::Connected));
         assert!(
             wait_until(|| lock(&manager.scheduled_reconnects).is_empty()
                 && lock(&manager.active_reconnects).is_empty())
@@ -2543,7 +3030,7 @@ mod tests {
         );
         assert_eq!(
             manager.get_connection("app-srv").map(|c| c.status()),
-            Some(McpConnectionStatus::Connected)
+            Some(McpConnectionStatus::Failed)
         );
 
         // 已存在同名连接时第二段不再处理（对照 `!connections.containsKey`）。

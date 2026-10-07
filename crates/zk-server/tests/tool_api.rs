@@ -15,13 +15,14 @@ use axum::http::StatusCode;
 use common::{app, call, json_body, local_get, local_patch, remote_get};
 
 /// 目录端点在测试装配（侧车关 + Agent/Worktree 冻结 + `AGENT_TRIGGERS`
-/// 关）下恒为基础族 33 件，字典序稳定。未验收的 Agent、Task 与
+/// 关）下恒为基础族 39 件，字典序稳定。未验收的 Agent、Task 与
 /// Worktree 工具不向模型暴露。
 ///
 /// Cron 三件受 `AGENT_TRIGGERS` **注册期**门控（出厂关），故不在此名单。
-const BASE_TOOLS: [&str; 33] = [
+const BASE_TOOLS: [&str; 39] = [
     "AskUserQuestion",
     "Bash",
+    "Brief",
     "Config",
     "CtxInspect",
     "Edit",
@@ -32,6 +33,7 @@ const BASE_TOOLS: [&str; 33] = [
     "GitStatus",
     "Glob",
     "Grep",
+    "HandoffRead",
     "ListDir",
     "ListMcpResources",
     "Memory",
@@ -44,6 +46,10 @@ const BASE_TOOLS: [&str; 33] = [
     "Sleep",
     "Snip",
     "SyntheticOutput",
+    "TaskGet",
+    "TaskList",
+    "TaskOutput",
+    "TaskStop",
     "TerminalCapture",
     "TodoWrite",
     "ToolSearch",
@@ -96,7 +102,7 @@ async fn tools_list_returns_registered_catalog() {
     }
     assert_eq!(
         names, BASE_TOOLS,
-        "33 frozen base tools in registry key order"
+        "39 base tools including scoped HandoffRead and owned background task controls in registry key order"
     );
 }
 

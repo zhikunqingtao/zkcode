@@ -76,21 +76,36 @@ pub(crate) async fn recognize(
     multipart: Result<Multipart, MultipartRejection>,
 ) -> Result<Json<AsrResponse>, ApiError> {
     let mut multipart = multipart.map_err(|error| map_multipart_rejection(&error))?;
+    let mut audio = None;
+    let mut context = None;
     while let Some(field) = multipart
         .next_field()
         .await
         .map_err(|error| map_multipart_error(&error))?
     {
-        if field.name() != Some("audio") {
+        let name = field.name().unwrap_or_default().to_owned();
+        let mime_type = field.content_type().map(ToString::to_string);
+        if name != "audio" && name != "context" {
             continue;
         }
-        let mime_type = field.content_type().map(ToString::to_string);
         let bytes = field
             .bytes()
             .await
             .map_err(|error| map_multipart_error(&error))?;
-        if bytes.is_empty() {
-            return Err(invalid_input("audio file must not be empty"));
+        if name == "context" {
+            if context.is_some() || bytes.len() > 32768 {
+                return Err(invalid_input("context must be unique and at most 32 KiB"));
+            }
+            context = Some(
+                String::from_utf8(bytes.to_vec())
+                    .map_err(|_| invalid_input("context must be UTF-8"))?,
+            );
+            continue;
+        }
+        if audio.is_some() || bytes.is_empty() {
+            return Err(invalid_input(
+                "exactly one nonempty audio field is required",
+            ));
         }
         if bytes.len() > MAX_AUDIO_BYTES {
             return Err(map_speech_error(SpeechError::PayloadTooLarge));
@@ -98,14 +113,20 @@ pub(crate) async fn recognize(
         let mime_type = mime_type
             .filter(|value| value.starts_with("audio/"))
             .ok_or_else(|| invalid_input("audio field must use an audio/* content type"))?;
-        let text = state
-            .speech()
-            .recognize(SpeechAudio { bytes, mime_type })
-            .await
-            .map_err(map_speech_error)?;
-        return Ok(Json(AsrResponse { text }));
+        audio = Some((bytes, mime_type));
     }
-    Err(invalid_input("audio multipart field is required"))
+    let (bytes, mime_type) =
+        audio.ok_or_else(|| invalid_input("audio multipart field is required"))?;
+    let text = state
+        .speech()
+        .recognize(SpeechAudio {
+            context,
+            bytes,
+            mime_type,
+        })
+        .await
+        .map_err(map_speech_error)?;
+    Ok(Json(AsrResponse { text }))
 }
 
 /// `GET /api/tts/status` — availability of the standard `DashScope` TTS model.

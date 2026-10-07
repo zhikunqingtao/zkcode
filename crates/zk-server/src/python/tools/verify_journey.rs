@@ -13,8 +13,9 @@ use zk_tools::{
     EvidenceReceiptVerdict, Tool, ToolContext, ToolOutput,
 };
 
+use super::journey_resources::JourneyResources;
 use super::{BROWSER_AUTOMATION, failure};
-use crate::python::client::{Correlation, HEAVY_READ_TIMEOUT, PythonClient};
+use crate::python::client::{Correlation, PythonClient};
 
 /// Browser-semantic `VerifyJourney`; engineering compile/test checks live in
 /// `VerifyPlanExecution` and `/api/verify/run-checks`.
@@ -24,6 +25,39 @@ pub struct BrowserVerifyJourneyTool {
 }
 
 impl BrowserVerifyJourneyTool {
+    async fn capture_failure_snapshot(
+        &self,
+        response: &mut Option<Value>,
+        browser_id: &str,
+        correlation: &Correlation,
+        ephemeral: bool,
+    ) {
+        if !response
+            .as_ref()
+            .is_some_and(|value| value["passed"] == false)
+        {
+            return;
+        }
+        let snapshot: Option<Value> = self
+            .client
+            .call_if_available_with_timeout(
+                BROWSER_AUTOMATION,
+                "/api/browser/snapshot-semantic",
+                &json!({"session_id":browser_id, "include_screenshot":false,"strict_session":true,"ephemeral_content":ephemeral}),
+                correlation,
+                Duration::from_secs(2),
+            )
+            .await;
+        if let Some(snapshot) = snapshot.filter(|value| value["success"] == true) {
+            let filtered = SensitiveDataFilter::filter(&snapshot.to_string());
+            if filtered.len() <= 64 * 1024
+                && let Ok(snapshot) = serde_json::from_str::<Value>(&filtered)
+                && let Some(response) = response.as_mut()
+            {
+                response["failure_snapshot"] = snapshot;
+            }
+        }
+    }
     /// Build the browser journey bridge with the shared Python client.
     #[must_use]
     pub fn new(client: Arc<PythonClient>, db: Db) -> Self {
@@ -32,6 +66,10 @@ impl BrowserVerifyJourneyTool {
 }
 
 impl Tool for BrowserVerifyJourneyTool {
+    fn produces_machine_evidence(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &'static str {
         "VerifyJourney"
     }
@@ -48,14 +86,17 @@ impl Tool for BrowserVerifyJourneyTool {
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
-            "required": ["base_url", "steps"],
+            "anyOf": [{"required":["steps"]}, {"required":["journey"]}],
             "properties": {
                 "base_url": {"type":"string", "description":"HTTP(S) application base URL"},
                 "steps": {
                     "type":"array", "minItems":1, "maxItems":50,
                     "items":{"type":"object"}
                 },
-                "record": {"type":"object"},
+                "journey": {"type":"array", "minItems":1, "maxItems":50, "items":{"type":"object"}},
+                "start_command": {"type":"string"},
+                "verification_mode": {"type":"string", "enum":["auto","browser","http_api"]},
+                "record": {"oneOf":[{"type":"object"},{"type":"boolean"}]},
                 "viewport": {
                     "type":"object",
                     "properties": {
@@ -74,106 +115,306 @@ impl Tool for BrowserVerifyJourneyTool {
     }
 
     fn timeout(&self) -> Duration {
-        HEAVY_READ_TIMEOUT + Duration::from_secs(5)
+        Duration::from_secs(280)
     }
 
     fn execute(&self, input: Value, ctx: ToolContext) -> BoxFuture<'_, ToolOutput> {
-        Box::pin(async move {
-            let Some(base_url) = input.get("base_url").and_then(Value::as_str) else {
-                return failure("VERIFY_BASE_URL_REQUIRED", "base_url is required");
-            };
-            if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
-                return failure("VERIFY_BASE_URL_INVALID", "base_url must use http or https");
-            }
-            let Some(steps) = input.get("steps").and_then(Value::as_array) else {
-                return failure("VERIFY_STEPS_REQUIRED", "steps must be an array");
-            };
-            if steps.is_empty() || steps.len() > 50 {
+        Box::pin(async move { self.run(input, ctx).await })
+    }
+}
+
+impl BrowserVerifyJourneyTool {
+    #[allow(clippy::too_many_lines)] // Keep the single resource lifetime visible around evidence persistence.
+    async fn run(&self, input: Value, ctx: ToolContext) -> ToolOutput {
+        let record_supplied = input.get("record").is_some();
+        let mut body = match normalize_request(input) {
+            Ok(body) => body,
+            Err((code, message)) => return failure(code, message),
+        };
+        let Some(session_id) = ctx.session_id() else {
+            return failure("VERIFY_CONTEXT_REQUIRED", "session context is required");
+        };
+        let Some(run_id) = ctx.run_id() else {
+            return failure("VERIFY_CONTEXT_REQUIRED", "run context is required");
+        };
+        let ephemeral = match self.db.session_retention(session_id).await {
+            Ok(retention) => retention == zk_db::content::ContentRetention::Ephemeral,
+            Err(_) => {
                 return failure(
-                    "VERIFY_STEPS_INVALID",
-                    "steps must contain between 1 and 50 entries",
+                    "VERIFY_RETENTION_UNAVAILABLE",
+                    "Session content policy unavailable",
                 );
             }
-            let mut body = input;
-            if let Some(object) = body.as_object_mut() {
-                let session_id = object
-                    .get("session_id")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-                    .or_else(|| ctx.session_id().map(str::to_owned))
-                    .unwrap_or_else(|| "verify-journey".to_owned());
-                object.insert("session_id".into(), json!(session_id));
+        };
+        if ephemeral {
+            if !record_supplied {
+                body["record"] = json!({"trace":false,"video":false,"har":false});
             }
-            let Some(session_id) = ctx.session_id() else {
-                return failure("VERIFY_CONTEXT_REQUIRED", "session context is required");
-            };
-            let Some(run_id) = ctx.run_id() else {
-                return failure("VERIFY_CONTEXT_REQUIRED", "run context is required");
-            };
-            let correlation = Correlation {
-                run_id: Some(run_id.to_owned()),
-                session_id: Some(session_id.to_owned()),
-            };
-            let response: Option<Value> = self
-                .client
-                .call_if_available_with_timeout(
-                    BROWSER_AUTOMATION,
-                    "/api/browser/journey/run",
-                    &body,
-                    &correlation,
-                    HEAVY_READ_TIMEOUT,
-                )
-                .await;
-            let Some(response) = response else {
-                return failure(
-                    "VERIFY_BROWSER_UNAVAILABLE",
-                    "Browser journey verification is unavailable",
-                );
-            };
-            let passed = response
-                .get("passed")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            let step_count = response
-                .get("step_results")
-                .and_then(Value::as_array)
-                .map_or(0, Vec::len);
-            let evidence = match build_journey_evidence_receipt(
-                &self.db,
-                session_id,
-                body.get("claim").and_then(Value::as_str),
-                &response,
-                passed,
-            )
-            .await
+            if body["record"]
+                .as_object()
+                .is_some_and(|options| options.values().any(|v| v != &Value::Bool(false)))
             {
-                Ok(evidence) => evidence,
+                return failure(
+                    "EPHEMERAL_RECORDING_UNSUPPORTED",
+                    "Temporary sessions cannot record trace, video or HAR; set record=false",
+                );
+            }
+            body["ephemeral_content"] = json!(true);
+        } else {
+            body["ephemeral_content"] = json!(false);
+        }
+        let http_mode = body["mode"] == "http_api";
+        let mut resources = JourneyResources::new(ctx.clone(), Arc::clone(&self.client));
+        if !http_mode {
+            let base_url = match resources.start_preview(&body).await {
+                Ok(url) => url,
                 Err(error) => {
-                    tracing::error!(%error, "browser journey evidence receipt failed");
-                    return failure(
-                        "VERIFY_EVIDENCE_STORE_FAILED",
-                        "Browser journey finished but its bounded evidence receipt could not be built",
-                    );
+                    resources.close().await;
+                    return failure("VERIFY_PREVIEW_FAILED", error);
                 }
             };
-            let mut structured_result = sanitize_structured_response(&response);
-            let Some(object) = structured_result.as_object_mut() else {
-                return failure(
-                    "VERIFY_RESPONSE_INVALID",
-                    "Browser journey returned a non-object response",
+            body["base_url"] = json!(base_url);
+            if let Err(error) = resources.reserve_browser().await {
+                resources.close().await;
+                return failure("VERIFY_RESOURCE_RESERVATION_FAILED", error);
+            }
+        }
+        body["session_id"] = json!(resources.browser_id);
+        body["deadline_epoch_ms"] = json!(crate::iso::now_millis() + 120_000);
+        let correlation = Correlation {
+            run_id: Some(run_id.to_owned()),
+            session_id: Some(session_id.to_owned()),
+        };
+        let (capability, endpoint) = if http_mode {
+            ("HTTP_API", "/api/http/journey/run")
+        } else {
+            (BROWSER_AUTOMATION, "/api/browser/journey/run")
+        };
+        let response: Result<Option<Value>, &str> = tokio::select! {
+            biased;
+            () = ctx.cancel.cancelled() => Ok(None),
+            result = self.client.call_journey_if_available(capability, endpoint, &body, &correlation, Duration::from_secs(130)) => result,
+        };
+        let mut response = match response {
+            Ok(response) => response,
+            Err(code) => {
+                resources.close().await;
+                let mut output = failure(
+                    code,
+                    "Journey refused or stopped; no automatic retry was performed",
                 );
-            };
-            object.insert("evidence".into(), json!(evidence));
-            ToolOutput {
-                content: format!(
-                    "Browser journey {} ({step_count} steps)",
+                output.metadata = Some(json!({"retryability":"NEVER","effectState":"UNKNOWN"}));
+                return output;
+            }
+        };
+        if !http_mode && !ctx.cancel.is_cancelled() {
+            self.capture_failure_snapshot(
+                &mut response,
+                &resources.browser_id,
+                &correlation,
+                ephemeral,
+            )
+            .await;
+        }
+        resources.close().await;
+        let Some(mut response) = response else {
+            return failure(
+                if ctx.cancel.is_cancelled() {
+                    "VERIFY_CANCELLED"
+                } else {
+                    "VERIFY_CAPABILITY_UNAVAILABLE"
+                },
+                "Journey did not return a confirmed result; do not automatically retry side effects",
+            );
+        };
+        response["verification_mode"] = body["mode"].clone();
+        let passed = response
+            .get("passed")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let step_count = response
+            .get("step_results")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        let Ok(evidence) = build_journey_evidence_receipt(
+            &self.db,
+            session_id,
+            body.get("claim").and_then(Value::as_str),
+            &response,
+            passed,
+        )
+        .await
+        else {
+            tracing::error!(
+                code = "VERIFY_EVIDENCE_STORE_FAILED",
+                "journey evidence receipt failed"
+            );
+            return failure(
+                "VERIFY_EVIDENCE_STORE_FAILED",
+                format!(
+                    "Journey {} but evidence could not be stored. Do not rerun automatically; side effects may have occurred.",
                     if passed { "passed" } else { "failed" }
                 ),
-                is_error: !passed,
-                metadata: Some(json!({"structuredResult": structured_result})),
+            );
+        };
+        let mut structured = sanitize_structured_response(&response);
+        let Some(object) = structured.as_object_mut() else {
+            return failure(
+                "VERIFY_RESPONSE_INVALID",
+                "Journey returned a non-object response",
+            );
+        };
+        if let Some(steps) = object.get_mut("step_results").and_then(Value::as_array_mut) {
+            for (step, item) in steps.iter_mut().zip(&evidence.items) {
+                step["screenshot_stored_as_evidence"] = json!(item.blob_sha256.is_some());
+                if let Some(hash) = &item.blob_sha256 {
+                    step["screenshot_sha256"] = json!(hash);
+                }
+                if let Some(reason) = item
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.get("screenshot_archive_error"))
+                {
+                    step["screenshot_archive_error"] = reason.clone();
+                }
             }
-        })
+        }
+        object.insert("evidence".into(), json!(evidence));
+        object.insert("verification_mode".into(), body["mode"].clone());
+        ToolOutput {
+            content: format!(
+                "Journey {} ({step_count} steps)",
+                if passed { "passed" } else { "failed" }
+            ),
+            is_error: !passed,
+            metadata: Some(json!({"structuredResult":structured})),
+        }
     }
+}
+
+#[allow(clippy::too_many_lines)] // One validation pass over both supported DSL spellings.
+fn normalize_request(mut input: Value) -> Result<Value, (&'static str, &'static str)> {
+    const BROWSER: &[&str] = &[
+        "navigate",
+        "click",
+        "type",
+        "wait_for",
+        "assert_text",
+        "assert_url",
+        "assert_no_console_error",
+        "screenshot",
+    ];
+    const HTTP: &[&str] = &[
+        "http_get",
+        "http_post",
+        "http_put",
+        "http_delete",
+        "assert_status",
+        "assert_json",
+        "assert_header",
+        "set_variable",
+    ];
+    let steps = input
+        .get("journey")
+        .or_else(|| input.get("steps"))
+        .and_then(Value::as_array)
+        .ok_or(("VERIFY_STEPS_REQUIRED", "journey or steps must be an array"))?;
+    if steps.is_empty() || steps.len() > 50 {
+        return Err((
+            "VERIFY_STEPS_INVALID",
+            "steps must contain between 1 and 50 entries",
+        ));
+    }
+    if input.get("journey").is_some()
+        && input.get("steps").is_some()
+        && input["journey"] != input["steps"]
+    {
+        return Err(("VERIFY_STEPS_CONFLICT", "journey and steps disagree"));
+    }
+    let mut browser = false;
+    let mut http = false;
+    for step in steps {
+        let action = step
+            .get("action")
+            .and_then(Value::as_str)
+            .ok_or(("VERIFY_STEP_INVALID", "Every step requires an action"))?;
+        if BROWSER.contains(&action) {
+            browser = true;
+        } else if HTTP.contains(&action) {
+            http = true;
+        } else {
+            return Err(("VERIFY_STEP_INVALID", "Unknown journey action"));
+        }
+    }
+    if browser && http {
+        return Err((
+            "VERIFY_MIXED_MODES",
+            "Browser and HTTP steps require separate journeys",
+        ));
+    }
+    let mode = input
+        .get("verification_mode")
+        .or_else(|| input.get("mode"))
+        .and_then(Value::as_str)
+        .unwrap_or("auto");
+    let mode = match mode {
+        "auto" => {
+            if http {
+                "http_api"
+            } else {
+                "browser"
+            }
+        }
+        "browser" if !http => "browser",
+        "http_api" if !browser => "http_api",
+        _ => return Err(("VERIFY_MODE_INVALID", "Mode must match the journey actions")),
+    };
+    if let Some(base) = input.get("base_url") {
+        let url = base
+            .as_str()
+            .and_then(|url| reqwest::Url::parse(url).ok())
+            .ok_or((
+                "VERIFY_BASE_URL_INVALID",
+                "base_url must be an absolute HTTP(S) URL",
+            ))?;
+        if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+            return Err(("VERIFY_BASE_URL_INVALID", "base_url must use http or https"));
+        }
+    } else if mode == "http_api" {
+        return Err((
+            "VERIFY_BASE_URL_REQUIRED",
+            "HTTP verification requires a running base_url",
+        ));
+    }
+    if mode == "http_api" && input.get("start_command").is_some() {
+        return Err((
+            "VERIFY_HTTP_START_FORBIDDEN",
+            "HTTP verification uses an already running service",
+        ));
+    }
+    if input.get("publication_path").is_some() || input.get("publication_runtime").is_some() {
+        return Err((
+            "VERIFY_PUBLICATION_UNSUPPORTED",
+            "Publication binding is not supported",
+        ));
+    }
+    let steps = steps.clone();
+    let record = match input.get("record") {
+        Some(Value::Bool(value)) => json!({"video":value,"trace":value,"har":value}),
+        Some(Value::Object(value)) => Value::Object(value.clone()),
+        None if input.get("journey").is_some() => json!({"video":true,"trace":true,"har":true}),
+        None => json!({}),
+        _ => {
+            return Err((
+                "VERIFY_RECORD_INVALID",
+                "record must be a boolean or recording options",
+            ));
+        }
+    };
+    input["steps"] = json!(steps);
+    input["mode"] = json!(mode);
+    input["record"] = record;
+    Ok(input)
 }
 
 async fn build_journey_evidence_receipt(
@@ -189,6 +430,7 @@ async fn build_journey_evidence_receipt(
         .ok_or("session not found")?;
     let workspace = std::path::PathBuf::from(session.working_dir);
     let mut items = Vec::new();
+    let mut screenshot_bytes = 0usize;
     for (sort_order, step) in response
         .get("step_results")
         .and_then(Value::as_array)
@@ -197,16 +439,9 @@ async fn build_journey_evidence_receipt(
         .enumerate()
     {
         let mut meta = step.clone();
-        let screenshot = meta
-            .as_object_mut()
-            .and_then(|object| object.remove("screenshot_base64"))
-            .and_then(|value| value.as_str().map(str::to_owned));
-        let blob_sha256 = if let Some(encoded) = screenshot {
-            let bytes = base64::engine::general_purpose::STANDARD.decode(encoded)?;
-            Some(crate::api::evidence::store_blob(workspace.clone(), bytes).await?)
-        } else {
-            None
-        };
+        let blob_sha256 =
+            archive_screenshot(db, session_id, &workspace, &mut meta, &mut screenshot_bytes)
+                .await?;
         let action = step
             .get("action")
             .and_then(Value::as_str)
@@ -218,20 +453,62 @@ async fn build_journey_evidence_receipt(
         };
         let error = step.get("error").and_then(Value::as_str).unwrap_or("");
         items.push(EvidenceReceiptItem {
-            item_type: "browser_journey_step".into(),
-            summary: Some(SensitiveDataFilter::filter(&format!(
-                "{action}: {status} {error}"
-            ))),
+            item_type: if response["verification_mode"] == "http_api" {
+                "http_journey_step"
+            } else {
+                "browser_journey_step"
+            }
+            .into(),
+            summary: Some(bounded_text(
+                &SensitiveDataFilter::filter(&format!("{action}: {status} {error}")),
+                8192,
+            )),
             blob_sha256,
-            meta: Some(meta),
+            meta: Some(bounded_step_meta(meta)),
             sort_order: u32::try_from(sort_order).unwrap_or(u32::MAX),
+        });
+    }
+    if db.session_retention(session_id).await? == zk_db::content::ContentRetention::Ephemeral {
+        if response
+            .get("artifacts")
+            .and_then(Value::as_object)
+            .is_some_and(|items| !items.is_empty())
+        {
+            return Err("EPHEMERAL_RECORDING_UNEXPECTED".into());
+        }
+    } else {
+        archive_recordings(db, session_id, &workspace, response, &mut items).await;
+    }
+    if let Some(snapshot) = response.get("failure_snapshot")
+        && items.len() < zk_tools::MAX_EVIDENCE_RECEIPT_ITEMS
+    {
+        let snapshot = SensitiveDataFilter::filter(&snapshot.to_string());
+        let digest = crate::api::evidence::store_blob(
+            db,
+            session_id,
+            workspace.clone(),
+            snapshot.into_bytes(),
+        )
+        .await?;
+        items.push(EvidenceReceiptItem {
+            item_type: "semantic_snapshot".into(),
+            summary: Some("Semantic snapshot after the failed journey".into()),
+            blob_sha256: Some(digest),
+            meta: Some(json!({"format":"json"})),
+            sort_order: u32::try_from(items.len()).unwrap_or(u32::MAX),
         });
     }
     let receipt = EvidenceReceipt {
         schema_version: EVIDENCE_RECEIPT_SCHEMA_VERSION,
-        kind: "browser_journey".into(),
-        claim: Some(SensitiveDataFilter::filter(
-            claim.unwrap_or("Browser journey verification"),
+        kind: if response["verification_mode"] == "http_api" {
+            "http_journey"
+        } else {
+            "browser_journey"
+        }
+        .into(),
+        claim: Some(bounded_text(
+            &SensitiveDataFilter::filter(claim.unwrap_or("Journey verification")),
+            4096,
         )),
         verdict: if passed {
             EvidenceReceiptVerdict::Verified
@@ -247,8 +524,92 @@ async fn build_journey_evidence_receipt(
     Ok(receipt)
 }
 
+fn bounded_text(text: &str, max_bytes: usize) -> String {
+    let mut end = max_bytes.min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_owned()
+}
+
+fn bounded_step_meta(meta: Value) -> Value {
+    let filtered = SensitiveDataFilter::filter(&meta.to_string());
+    if filtered.len() <= 4096 {
+        return serde_json::from_str(&filtered).unwrap_or(meta);
+    }
+    let mut bounded = json!({"details_truncated":true});
+    for key in [
+        "index",
+        "action",
+        "ok",
+        "duration_ms",
+        "method",
+        "warning",
+        "error",
+        "screenshot_error",
+        "screenshot_archive_error",
+    ] {
+        if let Some(value) = meta.get(key) {
+            bounded[key] = if let Some(text) = value.as_str() {
+                json!(bounded_text(&SensitiveDataFilter::filter(text), 512))
+            } else {
+                value.clone()
+            };
+        }
+    }
+    bounded
+}
+
+async fn archive_screenshot(
+    db: &Db,
+    session_id: &str,
+    workspace: &std::path::Path,
+    meta: &mut Value,
+    screenshot_bytes: &mut usize,
+) -> Result<Option<String>, crate::error::ApiError> {
+    let screenshot = meta
+        .as_object_mut()
+        .and_then(|object| object.remove("screenshot_base64"))
+        .and_then(|value| value.as_str().map(str::to_owned));
+    let blob_sha256 = if let Some(encoded) = screenshot {
+        let decoded = if encoded.len() > 4 * (5 * 1024 * 1024usize).div_ceil(3) {
+            Err("Screenshot exceeds 5 MiB")
+        } else {
+            base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .map_err(|_| "Screenshot is not valid base64")
+        };
+        match decoded {
+            Ok(bytes)
+                if bytes.len() <= 5 * 1024 * 1024
+                    && *screenshot_bytes + bytes.len() <= 20 * 1024 * 1024
+                    && crate::api::evidence::image_mime(&bytes).is_some() =>
+            {
+                *screenshot_bytes += bytes.len();
+                Some(
+                    crate::api::evidence::store_blob(db, session_id, workspace.to_owned(), bytes)
+                        .await?,
+                )
+            }
+            result => {
+                meta["screenshot_archive_error"] =
+                    json!(result.err().unwrap_or(
+                        "Screenshot is not PNG/JPEG or exceeds the journey image budget"
+                    ));
+                None
+            }
+        }
+    } else {
+        None
+    };
+    Ok(blob_sha256)
+}
+
 fn sanitize_structured_response(response: &Value) -> Value {
     let mut sanitized = response.clone();
+    if let Some(object) = sanitized.as_object_mut() {
+        object.remove("artifacts");
+    }
     if let Some(steps) = sanitized
         .get_mut("step_results")
         .and_then(Value::as_array_mut)
@@ -264,6 +625,91 @@ fn sanitize_structured_response(response: &Value) -> Value {
     sanitized
 }
 
+async fn archive_recordings(
+    db: &Db,
+    session_id: &str,
+    workspace: &std::path::Path,
+    response: &Value,
+    items: &mut Vec<EvidenceReceiptItem>,
+) {
+    let Some(artifacts) = response.get("artifacts").and_then(Value::as_object) else {
+        return;
+    };
+    let Ok(temp_root) = std::fs::canonicalize(std::env::temp_dir()) else {
+        return;
+    };
+    let mut remaining = 20 * 1024 * 1024u64;
+    for (key, prefix, extension) in [
+        ("trace_path", "rv-trace-", "zip"),
+        ("har_path", "rv-har-", "har"),
+        ("video_dir", "rv-video-", "webm"),
+    ] {
+        if items.len() >= zk_tools::MAX_EVIDENCE_RECEIPT_ITEMS {
+            if let Some(last) = items.last_mut().and_then(|item| item.meta.as_mut()) {
+                last["recordings_archive_error"] =
+                    json!("Recording omitted: receipt item limit reached");
+            }
+            break;
+        }
+        let Some(raw) = artifacts.get(key).and_then(Value::as_str) else {
+            continue;
+        };
+        let path = std::path::PathBuf::from(raw);
+        let path = if key == "video_dir" {
+            std::fs::read_dir(&path).ok().and_then(|entries| {
+                entries
+                    .flatten()
+                    .map(|entry| entry.path())
+                    .find(|file| file.extension().is_some_and(|ext| ext == extension))
+            })
+        } else {
+            Some(path)
+        };
+        let Some(path) = path.and_then(|path| std::fs::canonicalize(path).ok()) else {
+            continue;
+        };
+        if !path.starts_with(&temp_root)
+            || path.extension().is_none_or(|ext| ext != extension)
+            || path
+                .parent()
+                .and_then(std::path::Path::file_name)
+                .is_none_or(|name| !name.to_string_lossy().starts_with(prefix))
+        {
+            continue;
+        }
+        let size = tokio::fs::metadata(&path)
+            .await
+            .ok()
+            .map_or(u64::MAX, |metadata| metadata.len());
+        let stored = if size <= 10 * 1024 * 1024 && size <= remaining {
+            match tokio::fs::read(path).await {
+                Ok(bytes) => {
+                    crate::api::evidence::store_blob(db, session_id, workspace.to_owned(), bytes)
+                        .await
+                        .ok()
+                }
+                Err(_) => None,
+            }
+        } else {
+            None
+        };
+        if stored.is_some() {
+            remaining = remaining.saturating_sub(size);
+        }
+        items.push(EvidenceReceiptItem {
+            item_type: format!("journey_{key}"),
+            summary: Some(if stored.is_some() {
+                format!("Archived {key}")
+            } else {
+                format!("{key} was not archived: unavailable or recording byte budget exceeded")
+            }),
+            blob_sha256: stored,
+            meta: Some(json!({"format":extension})),
+            sort_order: u32::try_from(items.len()).unwrap_or(u32::MAX),
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -277,6 +723,48 @@ mod tests {
             .with_run_id("run")
     }
 
+    #[test]
+    fn new_and_legacy_journey_dsl_preserve_modes_and_recording() {
+        let new = normalize_request(json!({"journey":[{"action":"http_get","url":"/"}], "base_url":"http://localhost:80", "verification_mode":"auto", "record":false})).unwrap();
+        assert_eq!(new["mode"], "http_api");
+        assert_eq!(new["record"]["video"], false);
+        let old = normalize_request(json!({"steps":[{"action":"screenshot"}], "base_url":"http://localhost", "mode":"browser", "record":{"trace":true}})).unwrap();
+        assert_eq!(old["record"]["trace"], true);
+        assert!(
+            normalize_request(json!({"journey":[{"action":"http_get"},{"action":"click"}]}))
+                .is_err()
+        );
+        assert!(
+            normalize_request(json!({"journey":[{"action":"screenshot"}],"publication_path":"."}))
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn receipt_limits_preserve_failed_verdict_and_fifty_steps() {
+        let db = Db::open_in_memory().unwrap();
+        let workspace = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir_all(&workspace).unwrap();
+        let session = db
+            .create_session("model", workspace.to_str().unwrap())
+            .await
+            .unwrap();
+        let steps:Vec<Value> = (0..50).map(|index|json!({"index":index,"action":"screenshot","ok":false,"error":"錯".repeat(5000),"console_errors":["long".repeat(10000)]})).collect();
+        let receipt = build_journey_evidence_receipt(&db,&session.id,Some(&"claim".repeat(1000)),&json!({"step_results":steps,"failure_snapshot":{"session_id":"untrusted-sidecar-id","tree":"details"},"artifacts":{"trace_path":"unused"}}),false).await.unwrap();
+        assert!(receipt.is_valid());
+        assert_eq!(receipt.items.len(), 50);
+        assert_eq!(receipt.verdict, EvidenceReceiptVerdict::Failed);
+        assert_eq!(
+            receipt.items[0].meta.as_ref().unwrap()["details_truncated"],
+            true
+        );
+        let receipt = build_journey_evidence_receipt(&db,&session.id,None,&json!({"step_results":[{"index":0,"action":"click","ok":false}],"failure_snapshot":{"session_id":"sidecar","tree":"details"}}),false).await.unwrap();
+        assert!(receipt.is_valid());
+        assert_eq!(receipt.items[1].item_type, "semantic_snapshot");
+        assert!(receipt.items[1].blob_sha256.is_some());
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
     #[tokio::test]
     async fn validates_before_python_io() {
         let tool = BrowserVerifyJourneyTool::new(
@@ -284,13 +772,18 @@ mod tests {
             Db::open_in_memory().expect("db"),
         );
         assert_eq!(tool.name(), "VerifyJourney");
-        let output = tool.execute(json!({"steps": [{}]}), context()).await;
+        let output = tool
+            .execute(
+                json!({"steps": [{"action":"http_get","url":"/"}]}),
+                context(),
+            )
+            .await;
         assert!(output.is_error);
         assert!(output.content.starts_with("VERIFY_BASE_URL_REQUIRED:"));
 
         let output = tool
             .execute(
-                json!({"base_url":"file:///tmp/index.html","steps":[{}]}),
+                json!({"base_url":"file:///tmp/index.html","steps":[{"action":"screenshot"}]}),
                 context(),
             )
             .await;
@@ -310,7 +803,7 @@ mod tests {
         db.start_run("journey-run", &session.id, None, Some("query"), "model")
             .await
             .expect("run");
-        let screenshot = base64::engine::general_purpose::STANDARD.encode(b"png bytes");
+        let screenshot = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==";
         let response = json!({
             "passed": true,
             "step_results": [{

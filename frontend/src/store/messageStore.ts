@@ -114,6 +114,9 @@ function attachCompletedToolResults(messages: Message[]): Message[] {
 export interface MessageStoreState {
     // 状态
     messages: Message[];
+    steeringMessageIds: Record<string, string[]>;
+    markSteeringMessage: (sessionId: string, uuid: string) => void;
+    failAllRunningToolCalls: (errorMessage: string, partitionKey?: string) => void;
     streamingMessageId: string | null;
     streamingContent: string;
     thinkingContent: string;
@@ -136,7 +139,7 @@ export interface MessageStoreState {
     replaceActiveToolCalls: (calls: RecoveredToolCall[]) => void;
     restoreSessionSnapshot: (messages: Message[], calls: RecoveredToolCall[]) => void;
     reconcileCommittedRun: (replaceAfterMessageId: string | null, messages: Message[]) => boolean;
-    finalizeAssistantSegment: (partitionKey?: string) => void;
+    finalizeAssistantSegment: (messageOrPartition?: Extract<Message, {type:'assistant'}> | string, partitionKey?: string) => void;
     finalizeStream: (
         usage: Usage,
         partitionKey?: string,
@@ -153,6 +156,21 @@ export interface MessageStoreState {
 export const useMessageStore = create<MessageStoreState>()(
     subscribeWithSelector(immer((set) => ({
         messages: [],
+        steeringMessageIds: {},
+        markSteeringMessage: (sessionId, uuid) => set(d => {
+            const ids = d.steeringMessageIds[sessionId] ?? [];
+            if (!ids.includes(uuid)) d.steeringMessageIds[sessionId] = [...ids, uuid].slice(-1000);
+        }),
+        failAllRunningToolCalls: (errorMessage, partitionKey = ROOT_RUNTIME_PARTITION) => set(d => {
+            for (const call of d.activeToolCalls.values()) {
+                if ((call.runtimePartitionKey ?? ROOT_RUNTIME_PARTITION) !== partitionKey || isTerminalToolCall(call.status) || call.status === 'permission_needed') continue;
+                call.status = 'error'; call.error = errorMessage; call.result = {content: errorMessage, isError:true}; call.duration = Math.max(0, Date.now() - call.startTime);
+                for (const message of d.messages) {
+                    if (message.type !== 'assistant' || (d.messagePartitionKeys.get(message.uuid) ?? ROOT_RUNTIME_PARTITION) !== partitionKey) continue;
+                    for (const block of message.content) if (block.type === 'tool_use' && block.toolUseId === call.toolUseId && !block.result) block.result = call.result;
+                }
+            }
+        }),
         streamingMessageId: null,
         streamingContent: '',
         thinkingContent: '',
@@ -222,6 +240,7 @@ export const useMessageStore = create<MessageStoreState>()(
         startToolCall: (id, name, input, partitionKey = ROOT_RUNTIME_PARTITION) => set(d => {
             const key = toolCallKey(partitionKey, id);
             const existing = d.activeToolCalls.get(key);
+            if (d.messages.some(message => message.type === 'assistant' && (d.messagePartitionKeys.get(message.uuid) ?? ROOT_RUNTIME_PARTITION) === partitionKey && message.content.some(block => block.type === 'tool_use' && block.toolUseId === id && block.result))) return;
             // WS replay is at-least-once and a delayed `tool_use_start` must never
             // move an immutable terminal invocation back to preparing (ghost Running).
             if (existing && isTerminalToolCall(existing.status)) return;
@@ -244,6 +263,8 @@ export const useMessageStore = create<MessageStoreState>()(
                 d.messagePartitionKeys.set(messageId, partitionKey);
                 if (partitionKey === ROOT_RUNTIME_PARTITION) d.streamingMessageId = messageId;
             }
+            const message = d.messages.find(m => m.uuid === d.streamingPartitions.get(partitionKey)?.messageId);
+            if (message?.type === 'assistant' && !message.content.some(b => b.type === 'tool_use' && b.toolUseId === id)) message.content.push({type:'tool_use',toolUseId:id,toolName:name,input: input && typeof input === 'object' ? input as Record<string, unknown> : {}});
             d.activeToolCalls.set(key, {
                 toolUseId: id,
                 runtimePartitionKey: partitionKey,
@@ -267,6 +288,10 @@ export const useMessageStore = create<MessageStoreState>()(
                 startTime: Date.now(),
             };
             tc.input = input;
+            for (const message of d.messages) {
+                if (message.type !== 'assistant' || (d.messagePartitionKeys.get(message.uuid) ?? ROOT_RUNTIME_PARTITION) !== partitionKey) continue;
+                for (const block of message.content) if (block.type === 'tool_use' && block.toolUseId === id) block.input = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+            }
             tc.status = 'running';
             tc.startTime = Date.now();
             d.activeToolCalls.set(key, tc);
@@ -295,6 +320,10 @@ export const useMessageStore = create<MessageStoreState>()(
             };
             tc.status = result.isError ? 'error' : 'completed';
             tc.result = result;
+            for (const message of d.messages) {
+                if (message.type !== 'assistant' || (d.messagePartitionKeys.get(message.uuid) ?? ROOT_RUNTIME_PARTITION) !== partitionKey) continue;
+                for (const block of message.content) if (block.type === 'tool_use' && block.toolUseId === id && !block.result) block.result = result;
+            }
             tc.duration = Date.now() - tc.startTime;
             d.activeToolCalls.set(key, tc);
         }),
@@ -394,8 +423,30 @@ export const useMessageStore = create<MessageStoreState>()(
             }
             return reconciled;
         },
-        finalizeAssistantSegment: (partitionKey = ROOT_RUNTIME_PARTITION) => set(d => {
+        finalizeAssistantSegment: (messageOrPartition, explicitPartition) => set(d => {
+            const authoritative = typeof messageOrPartition === 'object' ? messageOrPartition : undefined;
+            const partitionKey = typeof messageOrPartition === 'string' ? messageOrPartition : explicitPartition ?? ROOT_RUNTIME_PARTITION;
             const partition = d.streamingPartitions.get(partitionKey);
+            if (authoritative) {
+                const existing = d.messages.findIndex(m => m.uuid === authoritative.uuid);
+                const previous = existing >= 0 ? d.messages[existing] : undefined;
+                const merged = { ...authoritative, content: authoritative.content.map(block => {
+                    if (block.type !== 'tool_use') return block;
+                    const saved = previous?.type === 'assistant'
+                        ? previous.content.find(item => item.type === 'tool_use' && item.toolUseId === block.toolUseId) : undefined;
+                    return { ...block, result: block.result
+                        ?? d.activeToolCalls.get(toolCallKey(partitionKey, block.toolUseId))?.result
+                        ?? (saved?.type === 'tool_use' ? saved.result : undefined) };
+                }) };
+                if (existing >= 0) { d.messages[existing] = merged; return; }
+                const provisional = d.messages.findIndex(m => m.uuid === partition?.messageId);
+                if (provisional >= 0) d.messages[provisional] = merged; else d.messages.push(merged);
+                if (partition) d.messagePartitionKeys.delete(partition.messageId);
+                d.messagePartitionKeys.set(authoritative.uuid, partitionKey);
+                d.streamingPartitions.delete(partitionKey);
+                if (partitionKey === ROOT_RUNTIME_PARTITION) { flushStreamingBuffer(); streamingStore.clear(); d.streamingMessageId = null; d.streamingContent = ''; d.thinkingContent = ''; }
+                return;
+            }
             if (!partition) return;
             const externalContent = partitionKey === ROOT_RUNTIME_PARTITION
                 ? (flushStreamingBuffer(), streamingStore.clear()) : '';
@@ -410,6 +461,7 @@ export const useMessageStore = create<MessageStoreState>()(
                     if (combinedContent) {
                         content.push({ type: 'text' as const, text: combinedContent });
                     }
+                    content.push(...msg.content.filter(block => block.type !== 'text' && block.type !== 'thinking'));
                     (msg as { content: unknown }).content = content;
                 }
             }
@@ -441,7 +493,8 @@ export const useMessageStore = create<MessageStoreState>()(
                         if (combinedContent) {
                             content.push({ type: 'text' as const, text: combinedContent });
                         }
-                        (msg as { content: unknown }).content = content;
+                        content.push(...msg.content.filter(block => block.type !== 'text' && block.type !== 'thinking'));
+                    (msg as { content: unknown }).content = content;
                     }
                 }
                 d.streamingPartitions.delete(partitionKey);

@@ -34,24 +34,57 @@
 mod activity;
 mod anomaly;
 mod artifact;
+mod artifact_terminal;
+pub use artifact_terminal::{ArtifactCheckCommit, TerminalArtifactCheck};
 mod checkpoint;
 mod config;
+pub mod content;
 mod cron;
 mod evidence;
+mod handoff_context;
+mod maintenance;
 mod memory;
+pub use maintenance::MaintenanceReport;
+mod session_merge;
+mod session_merge_budget;
+mod session_merge_summary;
+mod skill_state;
+pub use session_merge::{
+    HandoffQuery, MergePrimaryContext, MergeSummaryInput, SessionMergeOperation,
+    SessionMergeRequest,
+};
+pub use session_merge_summary::{MergeInputRef, MergeSummaryUnit, MergeUnitInput};
 mod message;
 mod project;
 mod project_context;
+mod query_request;
 mod research;
 mod restart_reconciliation;
 mod runtime_health;
 mod runtime_ledger;
 mod safe_recovery;
+mod service_session;
 mod session;
+mod session_fork;
+pub use session_fork::{SessionForkRequest, SessionForkResult};
+mod session_preferences;
+pub use session_preferences::SessionExecutionPreferences;
+mod external_tool_request;
+pub mod hook_resources;
 mod snapshot;
 mod swarm;
+mod task_inbox_consumer;
+mod team;
+pub mod tool_ceiling;
+pub use external_tool_request::{ExternalToolAdmission, ExternalToolFacts};
+mod cleanup_reconciliation;
+mod hook_projection;
+pub use hook_projection::HookPresentation;
+pub use team::{TeamDefinition, TeamWorkItem};
+mod task_boundary;
 mod task_budget;
 mod task_diagnostic;
+mod task_display;
 mod task_runtime;
 mod workbench;
 
@@ -63,8 +96,12 @@ pub mod run;
 pub mod time;
 
 pub use anomaly::AnomalyEventRecord;
-pub use artifact::{ArtifactEntryRecord, ArtifactManifestRecord, ProducedFileArtifactRecord};
+pub use artifact::{
+    ArtifactEntryRecord, ArtifactManifestRecord, ProducedFileArtifactRecord,
+    ProducedShellArtifactRecord,
+};
 pub use checkpoint::{AgentCheckpointRecord, new_agent_checkpoint};
+pub use cleanup_reconciliation::ExecutionResourceReleaseProof;
 pub use cron::{
     ClaimCronOccurrence, CronClaimOutcome, CronJobRecord, CronOccurrenceRecord, MAX_CRON_JOBS,
     NewCronJob,
@@ -73,7 +110,7 @@ pub use error::DbError;
 pub use evidence::{
     EvidenceBundleRecord, EvidenceItemRecord, EvidenceOrigin, EvidenceVerdictEventRecord,
 };
-pub use memory::{MemoryRecord, MemoryScope, MemoryTarget, MemoryUpsert};
+pub use memory::{MemoryRecord, MemoryScope, MemorySnapshot, MemoryTarget, MemoryUpsert};
 pub use message::MessageAttribution;
 pub use model::{
     ImageSource, MessagePage, MessageRecord, MessageRole, NewMessage, SessionDetail, SessionPage,
@@ -148,11 +185,13 @@ pub const LEGACY_WRITE_COMPATIBILITY: bool = false;
 const SCHEMA_METADATA_TABLE: &str = "zk_schema_metadata";
 const REFINERY_HISTORY_TABLE: &str = "refinery_schema_history";
 const FINAL_SCHEMA_TABLES: &[&str] = &[
+    "managed_worktrees",
     "activities",
     "agent_checkpoints",
     "anomaly_events",
     "artifact_entries",
     "artifact_manifests",
+    "artifact_terminal_checks",
     "auth_tokens",
     "config",
     "cron_jobs",
@@ -161,15 +200,30 @@ const FINAL_SCHEMA_TABLES: &[&str] = &[
     "evidence_items",
     "evidence_verdict_events",
     "execution_resources",
+    "external_tool_requests",
     "file_snapshots",
     "interaction_requests",
     "llm_calls",
     "memories",
+    "memory_scope_versions",
+    "skill_states",
+    "session_forks",
+    "session_fork_snapshots",
+    "session_merges",
+    "session_merge_units",
+    "session_merge_attempts",
+    "session_merge_assets",
+    "session_handoff_catalog",
+    "session_handoff_chunks",
+    "session_merge_sources",
+    "session_merge_locks",
     "messages",
     "permission_grants",
     "project_config",
     "project_context",
     "projects",
+    "query_requests",
+    "run_event_retention",
     "research_captures",
     "research_conflicts",
     "research_findings",
@@ -182,6 +236,11 @@ const FINAL_SCHEMA_TABLES: &[&str] = &[
     "run_event_log",
     "run_workbench_bindings",
     "sessions",
+    "team_run_closures",
+    "hook_result_presentations",
+    "team_definitions",
+    "team_work_items",
+    "team_broadcasts",
     "task_budget_reservations",
     "task_dependencies",
     "task_inbox_messages",
@@ -234,6 +293,8 @@ pub struct Db {
     writer: Arc<Mutex<Connection>>,
     /// 只读连接池；`None` = 内存库（读写共用 writer）。
     readers: Option<Arc<ReaderPool>>,
+    /// Bodies of live ephemeral executions; no persistence fallback exists.
+    content: Arc<content::MemoryContentStore>,
 }
 
 impl Db {
@@ -263,14 +324,19 @@ impl Db {
         Self::prepare_database_file(path)?;
         let mut writer = Connection::open(path)?;
         Self::init_writer(&mut writer)?;
+        let content = Arc::new(content::MemoryContentStore::default());
+        content::install(&writer, &content)?;
         Self::restrict_sqlite_files(path)?;
         let reader_count = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
         let mut conns = Vec::with_capacity(reader_count);
         for _ in 0..reader_count {
-            conns.push(Mutex::new(Self::open_reader(path)?));
+            let reader = Self::open_reader(path)?;
+            content::install(&reader, &content)?;
+            conns.push(Mutex::new(reader));
         }
         Self::restrict_sqlite_files(path)?;
         Ok(Self {
+            content,
             writer: Arc::new(Mutex::new(writer)),
             readers: Some(Arc::new(ReaderPool {
                 conns,
@@ -289,7 +355,10 @@ impl Db {
     pub fn open_in_memory() -> Result<Self, DbError> {
         let mut conn = Connection::open_in_memory()?;
         Self::init_writer(&mut conn)?;
+        let content = Arc::new(content::MemoryContentStore::default());
+        content::install(&conn, &content)?;
         Ok(Self {
+            content,
             writer: Arc::new(Mutex::new(conn)),
             readers: None,
         })

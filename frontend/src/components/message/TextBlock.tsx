@@ -11,6 +11,7 @@ import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
 import type { Components, UrlTransform } from 'react-markdown';
 import type { ElementContent } from 'hast';
 import remarkGfm from 'remark-gfm';
+import { Check, Square } from 'lucide-react';
 import CodeBlock from './CodeBlock';
 import ImageBlock from './ImageBlock';
 import MermaidBlock from '../visualization/shared/MermaidBlock';
@@ -115,14 +116,18 @@ const MarkdownImage: React.FC<{ src?: string; alt?: string; sourcePath?: string 
     if (browserLoadable) return <ImageBlock src={src} alt={alt} />;
     if (error || !sessionId) {
         return (
-            <span className="my-2 inline-flex items-center rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-sm text-amber-400">
+            <span className="my-2 inline-flex items-center rounded-[10px] border border-warn bg-warnsoft px-3 py-2 text-sm text-warn">
                 {error?.includes('403') ? '图片不在当前工作区范围内' : `图片加载失败 (${error ?? '无会话'})`}
-                {workspacePath && <span className="ml-2 text-xs text-[var(--text-muted)]">{workspacePath}</span>}
+                {workspacePath && (
+                    <span className="ml-2 text-[13px] text-[var(--v2-text-2)]">{workspacePath}</span>
+                )}
             </span>
         );
     }
     if (!objectUrl) {
-        return <span className="my-2 inline-block h-32 w-48 animate-pulse rounded-lg border border-[var(--border)] bg-[var(--bg-secondary)]" />;
+        return (
+            <span className="my-2 inline-block h-32 w-48 animate-pulse rounded-[10px] border border-[var(--v2-border-hairline)] bg-[var(--v2-bg-sunken)]" />
+        );
     }
     return <ImageBlock src={objectUrl} alt={alt} />;
 };
@@ -142,6 +147,15 @@ function containsImageElement(children: ElementContent[]): boolean {
         && (child.tagName === 'img' || containsImageElement(child.children)));
 }
 
+/** hast 节点 className 判定（properties.className 兼容数组与字符串形态） */
+function hasClass(node: unknown, cls: string): boolean {
+    const className = (node as { properties?: { className?: unknown } } | undefined)
+        ?.properties?.className;
+    if (Array.isArray(className)) return className.some(c => String(c) === cls);
+    if (typeof className === 'string') return className.split(' ').includes(cls);
+    return false;
+}
+
 const TextBlock: React.FC<TextBlockProps> = ({ text, streaming = false, sourcePath }) => {
     const components: Components = useMemo(() => ({
         code({ className, children, ...props }) {
@@ -153,7 +167,7 @@ const TextBlock: React.FC<TextBlockProps> = ({ text, streaming = false, sourcePa
             if (!match && !codeStr.includes('\n')) {
                 return (
                     <code
-                        className="px-1.5 py-0.5 rounded bg-[var(--code-bg)] text-sm font-mono text-[var(--text-primary)]"
+                        className="markdown-inline-code px-1.5 py-0.5 rounded-md bg-sunken2 text-[13px] max-md:text-sm font-mono text-t1"
                         {...props}
                     >
                         {children}
@@ -163,27 +177,53 @@ const TextBlock: React.FC<TextBlockProps> = ({ text, streaming = false, sourcePa
 
             // Mermaid diagram
             if (lang === 'mermaid') {
-                return <MermaidBlock code={codeStr} />;
+                return <div className="markdown-embed"><MermaidBlock code={codeStr} /></div>;
             }
 
             // Fenced code block
             return <CodeBlock code={codeStr} language={lang} />;
         },
-        // Headings
-        h1: ({ children }) => <h1 className="text-2xl font-bold mt-6 mb-3">{children}</h1>,
-        h2: ({ children }) => <h2 className="text-xl font-bold mt-5 mb-2">{children}</h2>,
-        h3: ({ children }) => <h3 className="text-lg font-semibold mt-4 mb-2">{children}</h3>,
-        // Paragraphs
-        p: ({ node, children }) => node && containsImageElement(node.children)
-            ? <div className="my-2 leading-relaxed">{children}</div>
-            : <p className="my-2 leading-relaxed">{children}</p>,
-        // Lists
-        ul: ({ children }) => <ul className="list-disc pl-6 my-2 space-y-1">{children}</ul>,
+        // Headings（视觉换肤 §1.6 字阶：h1 22 / h2 18 / h3 15，全部 600）
+        h1: ({ children }) => <h1 className="text-[22px] leading-snug font-semibold mt-6 mb-3">{children}</h1>,
+        h2: ({ children }) => <h2 className="text-[18px] leading-snug font-semibold mt-6 mb-2">{children}</h2>,
+        h3: ({ children }) => <h3 className="markdown-muted-heading text-[15px] leading-snug font-semibold mt-4 mb-2 text-t2">{children}</h3>,
+        // Paragraphs：含图片的段落改用 <div> 输出，避免 MarkdownImage/ImageBlock
+        // 的块级容器造成 p > div 非法嵌套（validateDOMNesting 告警）
+        p: ({ node, children }) => {
+            const hasImage = node ? containsImageElement(node.children) : false;
+            if (hasImage) {
+                return <div className="my-2 leading-[1.6]">{children}</div>;
+            }
+            return <p className="my-2 leading-[1.6]">{children}</p>;
+        },
+        // Lists（GFM 任务清单 contains-task-list → 去圆点，✓ 由 input 渲染器输出）
+        ul: ({ node, children }) => {
+            const isTaskList = hasClass(node, 'contains-task-list');
+            return (
+                <ul className={`${isTaskList ? 'list-none pl-5' : 'list-disc pl-6'} my-2 space-y-1`}>
+                    {children}
+                </ul>
+            );
+        },
         ol: ({ children }) => <ol className="list-decimal pl-6 my-2 space-y-1">{children}</ol>,
-        li: ({ children }) => <li className="leading-relaxed">{children}</li>,
+        li: ({ node, children }) => {
+            if (hasClass(node, 'task-list-item')) {
+                return <li className="leading-[1.6] flex items-start gap-1.5">{children}</li>;
+            }
+            return <li className="leading-[1.6]">{children}</li>;
+        },
+        // §7.2 ticks 清单：✓（ok 色 lucide Check）引导已勾选项；未勾选 = 空方框
+        input: ({ node: _node, ...props }) => {
+            if (props.type === 'checkbox') {
+                return props.checked
+                    ? <Check size={14} className="markdown-task-marker mt-1 shrink-0 text-ok" aria-label="已完成" />
+                    : <Square size={13} className="markdown-task-marker mt-1 shrink-0 text-t4" aria-label="未完成" />;
+            }
+            return <input {...props} />;
+        },
         // Blockquotes
         blockquote: ({ children }) => (
-            <blockquote className="border-l-4 border-blue-500 pl-4 my-3 text-[var(--text-secondary)] italic">
+            <blockquote className="markdown-quote border-l-4 border-accent2 pl-4 my-3 text-t2 italic">
                 {children}
             </blockquote>
         ),
@@ -193,7 +233,7 @@ const TextBlock: React.FC<TextBlockProps> = ({ text, streaming = false, sourcePa
                 href={href}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="text-blue-400 hover:text-blue-300 underline"
+                className="markdown-link text-accent2-ink hover:text-accent2-ink underline"
             >
                 {children}
             </a>
@@ -201,21 +241,21 @@ const TextBlock: React.FC<TextBlockProps> = ({ text, streaming = false, sourcePa
         // Tables
         table: ({ children }) => (
             <div className="overflow-x-auto my-3">
-                <table className="min-w-full border-collapse border border-[var(--border)] text-sm">
+                <table className="markdown-table min-w-full border-collapse text-sm">
                     {children}
                 </table>
             </div>
         ),
         th: ({ children }) => (
-            <th className="border border-[var(--border)] px-3 py-2 bg-[var(--bg-secondary)] text-left font-semibold">
+            <th className="border-b border-hairline px-3 py-2 bg-surface2 text-left font-semibold">
                 {children}
             </th>
         ),
         td: ({ children }) => (
-            <td className="border border-[var(--border)] px-3 py-2">{children}</td>
+            <td className="border-b border-hairline px-3 py-2">{children}</td>
         ),
         // Horizontal rule
-        hr: () => <hr className="my-4 border-[var(--border)]" />,
+        hr: () => <hr className="my-4 border-hairline" />,
         // Strong / Em
         strong: ({ children }) => <strong className="font-bold">{children}</strong>,
         em: ({ children }) => <em className="italic">{children}</em>,
@@ -223,10 +263,10 @@ const TextBlock: React.FC<TextBlockProps> = ({ text, streaming = false, sourcePa
     }), [sourcePath]);
 
     return (
-        <div className="text-block max-w-none text-sm text-[var(--text-primary)] leading-relaxed">
+        <div className="text-block max-w-none text-[15px] max-md:text-base max-md:leading-[1.6] text-t1 leading-[1.6]">
             <ReactMarkdown remarkPlugins={[remarkGfm]} components={components} urlTransform={urlTransform}>{text}</ReactMarkdown>
             {streaming && (
-                <span className="inline-block w-2 h-4 ml-0.5 bg-blue-400 animate-pulse rounded-sm" />
+                <span className="inline-block w-2 h-4 ml-0.5 bg-accent2 animate-pulse rounded-xs" />
             )}
         </div>
     );

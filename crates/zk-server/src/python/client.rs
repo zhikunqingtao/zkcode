@@ -314,6 +314,46 @@ impl PythonClient {
             .await
     }
 
+    /// Execute a journey exactly once, retaining only known lifecycle refusal
+    /// codes. Transport/HTTP response bodies never become user-facing errors.
+    ///
+    /// # Errors
+    /// Returns an allowlisted lifecycle refusal code from the sidecar.
+    pub async fn call_journey_if_available<T: DeserializeOwned>(
+        &self,
+        domain: &str,
+        endpoint: &str,
+        body: &serde_json::Value,
+        correlation: &Correlation,
+        timeout: Duration,
+    ) -> Result<Option<T>, &'static str> {
+        if !self.is_capability_available(domain).await {
+            return Ok(None);
+        }
+        let Ok(body) = serde_json::to_string(body) else {
+            return Ok(None);
+        };
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let response = uds::send(UdsRequest {
+            socket: &self.socket,
+            method: Method::POST,
+            path: endpoint,
+            headers: correlation_headers(correlation, &request_id, 1),
+            body: Some(body),
+            connect_timeout: CONNECT_TIMEOUT,
+            read_timeout: timeout,
+        })
+        .await;
+        match response {
+            Ok(response) if response.is_success() => Ok(serde_json::from_str(&response.body).ok()),
+            Ok(response) => match journey_refusal_code(&response.body) {
+                Some(code) => Err(code),
+                None => Ok(None),
+            },
+            Err(_) => Ok(None),
+        }
+    }
+
     /// 带指数退避的 POST（旧 `callWithRetry`；旧两个重载仅日志一行之差，
     /// 此处合一并以 `timeout` 参数区分）。
     ///
@@ -547,6 +587,21 @@ impl PythonClient {
     }
 }
 
+fn journey_refusal_code(body: &str) -> Option<&'static str> {
+    const CODES: &[&str] = &[
+        "BROWSER_CAPACITY_REACHED",
+        "BROWSER_SESSION_CONFLICT",
+        "BROWSER_CLEANUP_PENDING",
+        "BROWSER_NOT_RUNNING",
+        "JOURNEY_CANCELLED",
+        "JOURNEY_CLIENT_DISCONNECTED",
+        "JOURNEY_DEADLINE_EXCEEDED",
+    ];
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    let detail = value.get("detail")?.as_str()?;
+    CODES.iter().copied().find(|code| *code == detail)
+}
+
 /// 端点是否在只读白名单内（旧 `isReadOnlyEndpoint`：显式保守白名单，
 /// 未知端点一律不重试，避免对有副作用端点重复触发）。
 fn is_read_only_endpoint(endpoint: &str) -> bool {
@@ -632,6 +687,20 @@ fn is_safe_correlation_value(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn journey_errors_allow_only_stable_refusals_without_response_details() {
+        assert_eq!(
+            journey_refusal_code(r#"{"detail":"BROWSER_CLEANUP_PENDING"}"#),
+            Some("BROWSER_CLEANUP_PENDING")
+        );
+        assert_eq!(journey_refusal_code(r#"{"detail":"token=secret"}"#), None);
+        assert_eq!(
+            journey_refusal_code(r#"{"detail":{"error":"secret"}}"#),
+            None
+        );
+        assert_eq!(journey_refusal_code("not json"), None);
+    }
 
     /// 只读白名单逐条对齐旧 `isReadOnlyEndpoint`；未列入端点一律不可重试。
     #[test]

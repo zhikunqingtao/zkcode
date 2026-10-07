@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::content;
 use crate::{Db, DbError};
 
 use rusqlite::OptionalExtension;
@@ -156,8 +157,8 @@ impl Db {
                     &bundle.bundle_id,
                     &bundle.session_id,
                     &bundle.agent_id,
-                    &bundle.kind,
-                    &bundle.claim,
+                    content::store_text(&tx, &bundle.session_id, &bundle.kind)?,
+                    content::store_optional(&tx, &bundle.session_id, bundle.claim.as_deref())?,
                     bundle.origin.as_db(),
                     &bundle.producer_invocation_id,
                     &bundle.verdict,
@@ -175,10 +176,10 @@ impl Db {
                         &item.id,
                         &bundle.bundle_id,
                         &item.producer_invocation_id,
-                        &item.item_type,
-                        &item.summary,
-                        &item.blob_sha256,
-                        meta_json,
+                        content::store_text(&tx, &bundle.session_id, &item.item_type)?,
+                        content::store_optional(&tx, &bundle.session_id, item.summary.as_deref())?,
+                        content::store_optional(&tx, &bundle.session_id, item.blob_sha256.as_deref())?,
+                        content::store_optional(&tx, &bundle.session_id, meta_json.as_deref())?,
                         item.sort_order,
                     ],
                 )?;
@@ -201,6 +202,28 @@ impl Db {
         let bundle_id = bundle_id.to_owned();
         self.with_reader(move |conn| load_bundle(conn, &bundle_id))
             .await
+    }
+
+    /// Check exact evidence ownership before resolving a content-addressed blob.
+    /// The content digest is materialized only in memory for temporary Sessions.
+    ///
+    /// # Errors
+    /// Expired content and SQL failures propagate without widening access.
+    pub async fn evidence_owns_blob(
+        &self,
+        session_id: &str,
+        digest: &str,
+    ) -> Result<bool, DbError> {
+        let session_id = session_id.to_owned();
+        let digest = digest.to_owned();
+        self.with_reader(move |conn| {
+            let mut statement=conn.prepare("SELECT item.blob_sha256 FROM evidence_items item JOIN evidence_bundles bundle ON bundle.bundle_id=item.bundle_id WHERE bundle.session_id=?1 AND item.blob_sha256 IS NOT NULL")?;
+            let rows=statement.query_map([&session_id], |row|row.get::<_,String>(0))?;
+            for stored in rows {
+                if content::load_text(conn,&session_id,&stored?)? == digest { return Ok(true); }
+            }
+            Ok(false)
+        }).await
     }
 
     /// List all bundles owned by a session, newest first.
@@ -336,12 +359,13 @@ fn load_bundle_base(
     let Some(row) = rows.next()? else {
         return Ok(None);
     };
+    let session_id: String = row.get(1)?;
     let mut bundle = EvidenceBundleRecord {
         bundle_id: row.get(0)?,
-        session_id: row.get(1)?,
+        session_id: session_id.clone(),
         agent_id: row.get(2)?,
-        kind: row.get(3)?,
-        claim: row.get(4)?,
+        kind: content::load_row_text(conn, &session_id, row.get(3)?)?,
+        claim: content::load_optional(conn, &session_id, row.get(4)?)?,
         origin: EvidenceOrigin::from_db(&row.get::<_, String>(5)?)?,
         producer_invocation_id: row.get(6)?,
         verdict: row.get(7)?,
@@ -356,13 +380,13 @@ fn load_bundle_base(
          WHERE bundle_id=?1 ORDER BY sort_order ASC,id ASC",
     )?;
     let rows = item_stmt.query_map([bundle_id], |row| {
-        let meta_json: Option<String> = row.get(5)?;
+        let meta_json = content::load_optional(conn, &session_id, row.get(5)?)?;
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, Option<String>>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, Option<String>>(3)?,
-            row.get::<_, Option<String>>(4)?,
+            content::load_row_text(conn, &session_id, row.get(2)?)?,
+            content::load_optional(conn, &session_id, row.get(3)?)?,
+            content::load_optional(conn, &session_id, row.get(4)?)?,
             meta_json,
             row.get::<_, i64>(6)?,
         ))
@@ -398,11 +422,12 @@ fn load_latest_verdict_event(
 ) -> Result<Option<EvidenceVerdictEventRecord>, DbError> {
     conn.query_row(
         "SELECT event_id,bundle_id,version,supersedes_event_id,verdict,origin, \
-                effective_origin,reason,created_at \
+                effective_origin,reason,created_at, \
+                (SELECT session_id FROM evidence_bundles WHERE evidence_bundles.bundle_id=evidence_verdict_events.bundle_id) \
          FROM evidence_verdict_events WHERE bundle_id=?1 \
          ORDER BY version DESC LIMIT 1",
         [bundle_id],
-        map_verdict_event,
+        |row| map_verdict_event(conn, row),
     )
     .optional()
     .map_err(Into::into)
@@ -414,16 +439,18 @@ fn load_verdict_events(
 ) -> Result<Vec<EvidenceVerdictEventRecord>, DbError> {
     let mut statement = conn.prepare(
         "SELECT event_id,bundle_id,version,supersedes_event_id,verdict,origin, \
-                effective_origin,reason,created_at \
+                effective_origin,reason,created_at, \
+                (SELECT session_id FROM evidence_bundles WHERE evidence_bundles.bundle_id=evidence_verdict_events.bundle_id) \
          FROM evidence_verdict_events WHERE bundle_id=?1 ORDER BY version ASC",
     )?;
     statement
-        .query_map([bundle_id], map_verdict_event)?
+        .query_map([bundle_id], |row| map_verdict_event(conn, row))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(Into::into)
 }
 
 fn map_verdict_event(
+    conn: &rusqlite::Connection,
     row: &rusqlite::Row<'_>,
 ) -> Result<EvidenceVerdictEventRecord, rusqlite::Error> {
     let effective_origin = row.get::<_, String>(6)?;
@@ -438,7 +465,8 @@ fn map_verdict_event(
         verdict: row.get(4)?,
         origin: row.get(5)?,
         effective_origin,
-        reason: row.get(7)?,
+        reason: content::load_diagnostic(conn, &row.get::<_, String>(9)?, Some(row.get(7)?))?
+            .expect("non-null verdict reason"),
         created_at: row.get(8)?,
     })
 }
@@ -471,6 +499,11 @@ pub(crate) fn append_evidence_verdict_event_in_current_write(
         reason: reason.to_owned(),
         created_at: created_at.to_owned(),
     };
+    let session_id: String = conn.query_row(
+        "SELECT session_id FROM evidence_bundles WHERE bundle_id=?1",
+        [bundle_id],
+        |row| row.get(0),
+    )?;
     conn.execute(
         "INSERT INTO evidence_verdict_events \
          (event_id,bundle_id,version,supersedes_event_id,verdict,origin,effective_origin,reason,created_at) \
@@ -483,7 +516,7 @@ pub(crate) fn append_evidence_verdict_event_in_current_write(
             &event.verdict,
             &event.origin,
             event.effective_origin.as_db(),
-            &event.reason,
+            content::store_diagnostic(conn, &session_id, Some(&event.reason))?,
             &event.created_at,
         ],
     )?;
@@ -635,6 +668,9 @@ mod tests {
     )]
     async fn bundle_is_immutable_exact_retries_are_idempotent_and_reviews_append() {
         let db = Db::open_in_memory().expect("db");
+        db.create_session_with_permission("session-1", "fixture", "/tmp", Some("DEFAULT"))
+            .await
+            .expect("owned evidence session");
         let bundle = EvidenceBundleRecord {
             bundle_id: "bundle-1".into(),
             session_id: "session-1".into(),
@@ -752,6 +788,9 @@ mod tests {
     #[tokio::test]
     async fn evidence_tables_reject_update_and_delete() {
         let db = Db::open_in_memory().expect("db");
+        db.create_session_with_permission("session-1", "fixture", "/tmp", Some("DEFAULT"))
+            .await
+            .expect("owned evidence session");
         let bundle = EvidenceBundleRecord {
             bundle_id: "immutable-bundle".into(),
             session_id: "session-1".into(),

@@ -1,7 +1,7 @@
 /**
  * CoordinatorStore 单元测试 — 对应 Task3-5 方案 §11.11 资产 #9。
  *
- * MVP 5 用例，预备周补到 12 用例（coordinatorStore 核心动作全覆盖）。
+ * Native event projection, bounded retention and session lifecycle regression.
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
@@ -153,12 +153,53 @@ describe('CoordinatorStore', () => {
         });
     });
 
-    // 预备周补 7 条
-    it.skip('CS-06 completeAgentTask 把对应任务 status=completed 并写入 result', () => {});
-    it.skip('CS-07 updateAgentTask 写入 progress 字符串（对象序列化）', () => {});
-    it.skip('CS-08 isComplete && phaseIndex=-1 时清理 active 阶段为 completed', () => {});
-    it.skip('CS-09 clearCoordinatorEvents 仅清事件不动工作流', () => {});
-    it.skip('CS-10 addDelegationWarning 超 20 条 FIFO', () => {});
-    it.skip('CS-11 setPanelVisible(false) 手动收起面板', () => {});
-    it.skip('CS-12 clearAll 完全复位全部字段', () => {});
+    it('projects completion after progress without creating an unknown agent', () => {
+        const store = useCoordinatorStore.getState();
+        store.addAgentTask(spawnPayload());
+        store.updateAgentTask('t-1', 'Inspecting source');
+        store.completeAgentTask('unknown', 'must not appear');
+        store.completeAgentTask('t-1', 'Verified result');
+        expect(useCoordinatorStore.getState().agentTasks).toHaveLength(1);
+        expect(useCoordinatorStore.getState().agentTasks[0]).toMatchObject({
+            taskId: 't-1', progress: 'Inspecting source', status: 'completed', result: 'Verified result',
+        });
+    });
+
+    it('ends the active phase and clears private projections before another session', () => {
+        const store = useCoordinatorStore.getState();
+        store.updateWorkflowPhase(phaseUpdate());
+        store.addAgentTask(spawnPayload());
+        store.addDelegationWarning('Private warning');
+        store.addMailboxEvent({ from: 'a', to: 'b', contentType: 'task_spec', messageSize: 50, timestamp: 1 });
+        store.appendCoordinatorEvent({ type: 'coordinator_event', ts: 1, uuid: 'event', sessionId: 'old-session', workflowId: 'wf-1', eventType: 'phase_transition', payload: {} });
+        store.updateWorkflowPhase(phaseUpdate({ phaseIndex: -1, status: 'COMPLETED' }));
+        expect(useCoordinatorStore.getState().activeWorkflow?.phases[0]).toMatchObject({ status: 'completed', endTime: expect.any(Number) });
+        store.clearAll();
+        const cleared = useCoordinatorStore.getState();
+        expect(cleared.activeWorkflow).toBeNull();
+        expect(cleared.agentTasks).toEqual([]);
+        expect(cleared.delegationWarnings).toEqual([]);
+        expect(cleared.coordinatorEvents).toEqual([]);
+        expect(cleared.mailboxEvents).toEqual([]);
+        expect(cleared.swarms.size).toBe(0);
+        store.updateWorkflowPhase(phaseUpdate({ workflowId: 'new-session-workflow' }));
+        expect(useCoordinatorStore.getState().activeWorkflow?.workflowId).toBe('new-session-workflow');
+        expect(useCoordinatorStore.getState().agentTasks).toEqual([]);
+    });
+
+    it('bounds warning retention without retaining dismissed warnings', () => {
+        const store = useCoordinatorStore.getState();
+        for (let index = 0; index < 25; index++) store.addDelegationWarning(`warning-${index}`);
+        const warnings = useCoordinatorStore.getState().delegationWarnings;
+        expect(warnings).toHaveLength(20);
+        expect(warnings[0].message).toBe('warning-5');
+        expect(warnings[19].message).toBe('warning-24');
+        store.dismissWarning(warnings[0].id);
+        store.clearDismissedWarnings();
+        expect(useCoordinatorStore.getState().delegationWarnings).toHaveLength(19);
+        expect(useCoordinatorStore.getState().delegationWarnings[0].message).toBe('warning-6');
+    });
+    // Legacy clearCoordinatorEvents/panelVisible setters have no production consumer.
+    // Their empty reservations were removed; actual sidebar visibility and lifecycle
+    // behavior are verified by Sidebar/AppLayout and the mounted DAG tests.
 });

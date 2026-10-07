@@ -25,19 +25,6 @@ export default defineConfig({
   ],
   use: {
     baseURL: E2E_BASE_URL,
-    // The legacy suite exercises the full developer surface. Production still
-    // defaults to the simple workbench; dedicated workbench tests override this
-    // stored preference before the application boots.
-    storageState: {
-      cookies: [],
-      origins: [{
-        origin: E2E_BASE_URL,
-        localStorage: [{
-          name: 'zhikun.workbench.default-view',
-          value: 'development',
-        }],
-      }],
-    },
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
     video: 'retain-on-failure',

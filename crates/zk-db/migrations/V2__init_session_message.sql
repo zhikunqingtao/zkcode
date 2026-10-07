@@ -20,7 +20,7 @@ VALUES (1, 2, 'greenfieldFinal', 'greenfieldOnly', 0);
 CREATE TABLE IF NOT EXISTS sessions (
     id                    TEXT PRIMARY KEY,
     kind                  TEXT NOT NULL DEFAULT 'root'
-                              CHECK(kind IN ('root','internal')),
+                              CHECK(kind IN ('root','internal','merge_billing')),
     parent_session_id     TEXT REFERENCES sessions(id) ON DELETE CASCADE,
     parent_task_id        TEXT REFERENCES tasks(id) ON DELETE CASCADE
                               DEFERRABLE INITIALLY DEFERRED,
@@ -28,26 +28,46 @@ CREATE TABLE IF NOT EXISTS sessions (
     model                 TEXT NOT NULL,
     working_dir           TEXT NOT NULL,
     status                TEXT NOT NULL DEFAULT 'active',
+    permission_mode       TEXT CHECK(permission_mode IN ('DEFAULT','ACCEPT_EDITS','PLAN','DONT_ASK','AUTO_APPROVE')),
     total_input_tokens    INTEGER DEFAULT 0,
     total_output_tokens   INTEGER DEFAULT 0,
     total_cache_read      INTEGER DEFAULT 0,
     total_cache_create    INTEGER DEFAULT 0,
     total_cost_usd        REAL DEFAULT 0.0,
     summary               TEXT,
+    content_retention     TEXT NOT NULL DEFAULT 'persistent'
+                              CHECK(content_retention IN ('persistent','ephemeral')),
     metadata_json         TEXT,
     created_at            TEXT NOT NULL,
     updated_at            TEXT NOT NULL,
     CHECK((kind='root' AND parent_session_id IS NULL AND parent_task_id IS NULL)
-       OR (kind='internal' AND parent_session_id IS NOT NULL AND parent_task_id IS NOT NULL))
+       OR (kind='internal' AND parent_session_id IS NOT NULL AND parent_task_id IS NOT NULL)
+       OR (kind='merge_billing' AND parent_session_id IS NULL AND parent_task_id IS NULL))
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sessions_working_dir ON sessions(working_dir);
 CREATE INDEX IF NOT EXISTS idx_sessions_parent_task ON sessions(parent_task_id);
+CREATE TRIGGER sessions_retention_immutable BEFORE UPDATE OF content_retention ON sessions
+WHEN NEW.content_retention != OLD.content_retention
+BEGIN SELECT RAISE(ABORT, 'CONTENT_RETENTION_IMMUTABLE'); END;
+CREATE TRIGGER sessions_ephemeral_content_insert BEFORE INSERT ON sessions
+WHEN NEW.content_retention='ephemeral'
+ AND (NOT zk_ephemeral_ref_valid(NEW.id,NEW.title)
+      OR NOT zk_ephemeral_ref_valid(NEW.id,NEW.summary)
+      OR NOT zk_ephemeral_ref_valid(NEW.id,NEW.metadata_json))
+BEGIN SELECT RAISE(ABORT, 'EPHEMERAL_RAW_CONTENT_FORBIDDEN'); END;
+CREATE TRIGGER sessions_ephemeral_content_update BEFORE UPDATE OF title,summary,metadata_json ON sessions
+WHEN NEW.content_retention='ephemeral'
+ AND (NOT zk_ephemeral_ref_valid(NEW.id,NEW.title)
+      OR NOT zk_ephemeral_ref_valid(NEW.id,NEW.summary)
+      OR NOT zk_ephemeral_ref_valid(NEW.id,NEW.metadata_json))
+BEGIN SELECT RAISE(ABORT, 'EPHEMERAL_RAW_CONTENT_FORBIDDEN'); END;
 CREATE TABLE IF NOT EXISTS messages (
     id           TEXT PRIMARY KEY,
     session_id   TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     role         TEXT NOT NULL,
     content_json TEXT NOT NULL,
+    metadata_json TEXT,
     stop_reason  TEXT,
     input_tokens  INTEGER DEFAULT 0,
     output_tokens INTEGER DEFAULT 0,
@@ -66,6 +86,136 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, seq_num);
 CREATE INDEX IF NOT EXISTS idx_messages_task ON messages(task_id, seq_num);
 CREATE INDEX IF NOT EXISTS idx_messages_run ON messages(run_id, seq_num);
+-- Fail closed if a new writer forgets to use the content store. The guard runs
+-- before SQLite accepts body bytes into a table page, including on rollback.
+CREATE TRIGGER messages_ephemeral_insert BEFORE INSERT ON messages
+WHEN COALESCE((SELECT content_retention FROM sessions WHERE id=NEW.session_id),'ephemeral')='ephemeral'
+ AND (NOT zk_ephemeral_ref_valid(NEW.session_id,NEW.content_json)
+      OR NOT zk_ephemeral_ref_valid(NEW.session_id,NEW.metadata_json))
+BEGIN SELECT RAISE(ABORT, 'EPHEMERAL_RAW_CONTENT_FORBIDDEN'); END;
+CREATE TRIGGER messages_ephemeral_update BEFORE UPDATE OF content_json,metadata_json,session_id ON messages
+WHEN COALESCE((SELECT content_retention FROM sessions WHERE id=NEW.session_id),'ephemeral')='ephemeral'
+ AND (NOT zk_ephemeral_ref_valid(NEW.session_id,NEW.content_json)
+      OR NOT zk_ephemeral_ref_valid(NEW.session_id,NEW.metadata_json))
+BEGIN SELECT RAISE(ABORT, 'EPHEMERAL_RAW_CONTENT_FORBIDDEN'); END;
+
+-- Fork request tombstones survive target deletion, preventing idempotent replay
+-- from unexpectedly recreating a deleted conversation. Content follows the target.
+CREATE TABLE session_forks (
+    request_id TEXT PRIMARY KEY,
+    request_json TEXT NOT NULL CHECK(json_valid(request_json)),
+    target_session_id TEXT NOT NULL UNIQUE,
+    result_json TEXT NOT NULL CHECK(json_valid(result_json)),
+    created_at TEXT NOT NULL
+);
+CREATE TABLE session_fork_snapshots (
+    request_id TEXT PRIMARY KEY REFERENCES session_forks(request_id),
+    target_session_id TEXT NOT NULL UNIQUE REFERENCES sessions(id) ON DELETE CASCADE,
+    snapshot_json TEXT NOT NULL CHECK(json_valid(snapshot_json)),
+    snapshot_sha256 TEXT NOT NULL CHECK(length(snapshot_sha256)=64)
+);
+CREATE TRIGGER session_fork_snapshot_immutable BEFORE UPDATE ON session_fork_snapshots BEGIN
+    SELECT RAISE(ABORT,'FORK_SNAPSHOT_IMMUTABLE');
+END;
+CREATE TRIGGER session_fork_request_immutable BEFORE UPDATE ON session_forks BEGIN
+    SELECT RAISE(ABORT,'FORK_REQUEST_IMMUTABLE');
+END;
+
+CREATE TABLE session_merges (
+    id TEXT PRIMARY KEY,
+    idempotency_key TEXT NOT NULL UNIQUE,
+    request_json TEXT NOT NULL,
+    resume_model TEXT,
+    summary_body TEXT,
+    summary_overview_json TEXT,
+    summary_overview_hash TEXT,
+    summary_hash TEXT,
+    target_session_id TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL CHECK(status IN ('preparing','paused','completed','failed','cancelled')),
+    stage TEXT NOT NULL,
+    run_epoch INTEGER NOT NULL DEFAULT 1 CHECK(run_epoch >= 1),
+    snapshot_sealed INTEGER NOT NULL DEFAULT 0 CHECK(snapshot_sealed IN (0,1)),
+    error TEXT,
+    result_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    CHECK(status != 'completed' OR (snapshot_sealed = 1 AND
+        summary_body IS NOT NULL AND summary_overview_json IS NOT NULL AND
+        summary_hash IS NOT NULL AND length(summary_hash) = 64 AND
+        summary_overview_hash IS NOT NULL AND length(summary_overview_hash) = 64))
+);
+CREATE TABLE session_merge_sources (
+    operation_id TEXT NOT NULL REFERENCES session_merges(id),
+    source_session_id TEXT NOT NULL,
+    ordinal INTEGER NOT NULL,
+    snapshot_json TEXT NOT NULL,
+    snapshot_hash TEXT NOT NULL,
+    PRIMARY KEY(operation_id,source_session_id)
+);
+CREATE TRIGGER session_merge_snapshot_immutable BEFORE UPDATE ON session_merge_sources BEGIN
+    SELECT RAISE(ABORT,'MERGE_SNAPSHOT_IMMUTABLE');
+END;
+CREATE TABLE session_merge_units (
+    operation_id TEXT NOT NULL REFERENCES session_merges(id) ON DELETE CASCADE,
+    unit_id TEXT NOT NULL, stage TEXT NOT NULL, ordinal INTEGER NOT NULL,
+    input_json TEXT NOT NULL, input_hash TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','split','completed')),
+    result_json TEXT, result_hash TEXT,
+    model TEXT NOT NULL, PRIMARY KEY(operation_id,unit_id),
+    CHECK(state != 'completed' OR (result_json IS NOT NULL AND
+        result_hash IS NOT NULL AND length(result_hash) = 64))
+);
+CREATE TABLE session_merge_attempts (
+    operation_id TEXT NOT NULL REFERENCES session_merges(id) ON DELETE CASCADE,
+    attempt_id TEXT PRIMARY KEY, unit_id TEXT NOT NULL, run_epoch INTEGER NOT NULL,
+    task_id TEXT NOT NULL, run_id TEXT NOT NULL, state TEXT NOT NULL, error TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE session_merge_assets (
+    operation_id TEXT NOT NULL REFERENCES session_merges(id) ON DELETE CASCADE,
+    reference TEXT NOT NULL, source_session_id TEXT NOT NULL, original_path TEXT NOT NULL,
+    status TEXT NOT NULL, reason TEXT, sha256 TEXT, mime_type TEXT,
+    size INTEGER NOT NULL DEFAULT 0, content BLOB,
+    PRIMARY KEY(operation_id,reference)
+);
+CREATE TRIGGER session_merge_assets_immutable BEFORE UPDATE ON session_merge_assets BEGIN
+    SELECT RAISE(ABORT,'MERGE_ASSET_IMMUTABLE');
+END;
+CREATE TABLE session_handoff_catalog (
+    operation_id TEXT NOT NULL REFERENCES session_merges(id) ON DELETE CASCADE,
+    reference TEXT NOT NULL, ordinal INTEGER NOT NULL, source_id TEXT NOT NULL,
+    sha256 TEXT NOT NULL, total_bytes INTEGER NOT NULL CHECK(total_bytes>=0),
+    sections_json TEXT NOT NULL, manifest_hash TEXT NOT NULL,
+    PRIMARY KEY(operation_id,reference), UNIQUE(operation_id,ordinal)
+);
+CREATE TABLE session_handoff_chunks (
+    operation_id TEXT NOT NULL, reference TEXT NOT NULL, start_byte INTEGER NOT NULL,
+    content BLOB NOT NULL, sha256 TEXT NOT NULL,
+    PRIMARY KEY(operation_id,reference,start_byte),
+    FOREIGN KEY(operation_id,reference) REFERENCES session_handoff_catalog(operation_id,reference) ON DELETE CASCADE
+);
+CREATE TRIGGER session_handoff_catalog_immutable BEFORE UPDATE ON session_handoff_catalog BEGIN
+    SELECT RAISE(ABORT,'HANDOFF_CATALOG_IMMUTABLE');
+END;
+CREATE TRIGGER session_handoff_chunks_immutable BEFORE UPDATE ON session_handoff_chunks BEGIN
+    SELECT RAISE(ABORT,'HANDOFF_CHUNK_IMMUTABLE');
+END;
+CREATE TABLE session_merge_locks (
+    session_id TEXT PRIMARY KEY REFERENCES sessions(id),
+    operation_id TEXT NOT NULL REFERENCES session_merges(id)
+);
+CREATE TRIGGER session_merge_blocks_delete BEFORE DELETE ON sessions
+WHEN EXISTS(SELECT 1 FROM session_merge_locks WHERE session_id=OLD.id) BEGIN
+    SELECT RAISE(ABORT,'SESSION_MERGE_LOCKED');
+END;
+CREATE TRIGGER session_merge_blocks_child_session BEFORE INSERT ON sessions
+WHEN NEW.kind='internal' AND EXISTS(SELECT 1 FROM session_merge_locks WHERE session_id=NEW.parent_session_id) BEGIN
+    SELECT RAISE(ABORT,'SESSION_MERGE_LOCKED');
+END;
+CREATE TRIGGER session_merge_blocks_messages BEFORE INSERT ON messages
+WHEN EXISTS(SELECT 1 FROM session_merge_locks WHERE session_id=NEW.session_id) BEGIN
+    SELECT RAISE(ABORT,'SESSION_MERGE_LOCKED');
+END;
 -- S7b：单行 KV 配置表（旧系统 global.db 的 global_config 表形状照抄，
 -- 落入 D6 单库；key='user_config'，value=UserConfig JSON）。依照绿地单
 -- schema 原则直接在本基线文件追加最终态表（不加迁移链）；既有开发库
@@ -97,10 +247,21 @@ CREATE TABLE IF NOT EXISTS file_snapshots (
     message_id   TEXT,
     file_path    TEXT NOT NULL,
     content      BLOB,
+    original_bytes BLOB,
     operation    TEXT NOT NULL DEFAULT 'edit',
     created_at   TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_file_snapshots_session ON file_snapshots(session_id, file_path);
+CREATE TRIGGER file_snapshots_ephemeral_insert BEFORE INSERT ON file_snapshots
+WHEN COALESCE((SELECT content_retention FROM sessions WHERE id=NEW.session_id),'ephemeral')='ephemeral'
+ AND (NOT zk_ephemeral_ref_valid(NEW.session_id,CAST(NEW.content AS TEXT))
+      OR NOT zk_ephemeral_ref_valid(NEW.session_id,CAST(NEW.original_bytes AS TEXT)))
+BEGIN SELECT RAISE(ABORT,'EPHEMERAL_RAW_CONTENT_FORBIDDEN'); END;
+CREATE TRIGGER file_snapshots_ephemeral_update BEFORE UPDATE OF content,original_bytes,session_id ON file_snapshots
+WHEN COALESCE((SELECT content_retention FROM sessions WHERE id=NEW.session_id),'ephemeral')='ephemeral'
+ AND (NOT zk_ephemeral_ref_valid(NEW.session_id,CAST(NEW.content AS TEXT))
+      OR NOT zk_ephemeral_ref_valid(NEW.session_id,CAST(NEW.original_bytes AS TEXT)))
+BEGIN SELECT RAISE(ABORT,'EPHEMERAL_RAW_CONTENT_FORBIDDEN'); END;
 
 -- 统一 TaskRuntime 逻辑任务。Task 身份跨 Run attempt 保持稳定；
 -- output/error 不做可变投影，不可变正文由 task_results 承载。
@@ -118,13 +279,14 @@ CREATE TABLE IF NOT EXISTS tasks (
     description           TEXT NOT NULL,
     prompt                TEXT,
     task_type             TEXT NOT NULL DEFAULT 'agent'
-                               CHECK(task_type IN ('agent','team','swarm','cron')),
+                               CHECK(task_type IN ('agent','shell','team','swarm','cron','mcp','repl')),
     status                TEXT NOT NULL DEFAULT 'queued'
                                CHECK(status IN ('queued','running','waitingDependencies',
                                    'waitingInteraction','cancelling','needsAttention',
                                    'succeeded','partial','failed','cancelled')),
     reason                TEXT,
     plan_json             TEXT,
+    display_output        TEXT,
     execution_config_json TEXT NOT NULL DEFAULT '{}',
     lifecycle_policy      TEXT NOT NULL DEFAULT 'attached'
                                CHECK(lifecycle_policy IN ('attached','detached')),
@@ -164,8 +326,15 @@ CREATE TABLE IF NOT EXISTS tasks (
        OR (parent_task_id IS NOT NULL))
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_session ON tasks(session_id, status);
+CREATE TRIGGER session_merge_blocks_tasks BEFORE INSERT ON tasks
+WHEN EXISTS(SELECT 1 FROM session_merge_locks WHERE session_id=NEW.session_id) BEGIN
+    SELECT RAISE(ABORT,'SESSION_MERGE_LOCKED');
+END;
 CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_task_id, ordinal);
 CREATE INDEX IF NOT EXISTS idx_tasks_root_status ON tasks(root_task_id, status, created_at);
+CREATE UNIQUE INDEX uq_session_repl_service ON tasks(session_id)
+    WHERE task_type='repl' AND (status NOT IN ('succeeded','partial','failed','cancelled')
+                               OR cleanup_status NOT IN ('notRequired','confirmed'));
 CREATE UNIQUE INDEX IF NOT EXISTS uq_tasks_submission
     ON tasks(creator_run_id, creator_tool_use_id, ordinal)
     WHERE creator_run_id IS NOT NULL AND creator_tool_use_id IS NOT NULL;
@@ -286,6 +455,12 @@ CREATE TABLE IF NOT EXISTS run_event_log (
 );
 CREATE INDEX IF NOT EXISTS idx_run_events_run_seq ON run_event_log(run_id, seq);
 CREATE INDEX IF NOT EXISTS idx_run_events_type ON run_event_log(event_type);
+CREATE INDEX IF NOT EXISTS idx_run_events_retention ON run_event_log(ts,id);
+CREATE TABLE run_event_retention (
+    run_id TEXT PRIMARY KEY REFERENCES run_envelopes(id) ON DELETE CASCADE,
+    through_event_id INTEGER NOT NULL CHECK(through_event_id>0),
+    through_seq INTEGER NOT NULL CHECK(through_seq>0)
+);
 
 -- Task 之间的持久依赖。v1 只创建 attached 边，schema 保留
 -- detached 类型以便未来审批后开放；required 与 lifecycle 正交。
@@ -352,14 +527,17 @@ CREATE TABLE IF NOT EXISTS task_results (
     inline_text TEXT,
     blob_sha256 TEXT REFERENCES task_result_blobs(sha256),
     byte_len INTEGER NOT NULL CHECK(byte_len >= 0 AND byte_len <= 16777216),
-    content_sha256 TEXT NOT NULL CHECK(length(content_sha256)=64),
+    content_sha256 TEXT CHECK(content_sha256 IS NULL OR length(content_sha256)=64),
+    ephemeral_content_ref TEXT,
     media_type TEXT NOT NULL DEFAULT 'text/markdown',
     error_code TEXT,
     final_message_id TEXT REFERENCES messages(id) ON DELETE RESTRICT,
     created_at TEXT NOT NULL,
     UNIQUE(task_id, result_version),
-    CHECK((inline_text IS NOT NULL AND blob_sha256 IS NULL AND length(CAST(inline_text AS BLOB))=byte_len)
-       OR (inline_text IS NULL AND blob_sha256 IS NOT NULL)),
+    CHECK((ephemeral_content_ref IS NULL AND content_sha256 IS NOT NULL AND
+           ((inline_text IS NOT NULL AND blob_sha256 IS NULL AND length(CAST(inline_text AS BLOB))=byte_len)
+             OR (inline_text IS NULL AND blob_sha256 IS NOT NULL)))
+       OR (ephemeral_content_ref IS NOT NULL AND content_sha256 IS NULL AND inline_text IS NULL AND blob_sha256 IS NULL)),
     CHECK(status!='complete' OR final_message_id IS NOT NULL)
 );
 CREATE INDEX IF NOT EXISTS idx_task_results_task_version
@@ -373,7 +551,7 @@ CREATE TABLE IF NOT EXISTS task_result_receipts (
     producer_task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
     result_version INTEGER NOT NULL CHECK(result_version >= 1),
     message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
-    result_sha256 TEXT NOT NULL CHECK(length(result_sha256)=64),
+    result_sha256 TEXT CHECK(result_sha256 IS NULL OR length(result_sha256)=64),
     created_at TEXT NOT NULL,
     UNIQUE(consumer_task_id, producer_task_id, result_version),
     FOREIGN KEY(producer_task_id, result_version)
@@ -408,6 +586,7 @@ CREATE INDEX IF NOT EXISTS idx_task_inbox_delivery
 -- 物理工具调用账本；preparing 表示参数尚未闭合，running 只允许
 -- 在完整 input_json 持久化之后进入。
 CREATE TABLE IF NOT EXISTS tool_invocations (
+    invocation_kind TEXT NOT NULL DEFAULT 'tool' CHECK(invocation_kind IN ('tool','runtimeScope')),
     invocation_id TEXT PRIMARY KEY,
     task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
     run_id TEXT NOT NULL REFERENCES run_envelopes(id) ON DELETE CASCADE,
@@ -478,7 +657,7 @@ CREATE TABLE IF NOT EXISTS research_captures (
     query TEXT CHECK(query IS NULL OR
         length(CAST(query AS BLOB)) BETWEEN 1 AND 4096),
     fetched_at TEXT NOT NULL CHECK(length(fetched_at) BETWEEN 1 AND 64),
-    receipt_sha256 TEXT NOT NULL CHECK(length(receipt_sha256)=64),
+    receipt_sha256 TEXT NOT NULL,
     created_at TEXT NOT NULL,
     CHECK((capture_kind='webSearch' AND query IS NOT NULL)
        OR (capture_kind='webFetch' AND query IS NULL))
@@ -825,6 +1004,7 @@ WHEN NOT EXISTS(
     SELECT 1 FROM tasks t JOIN sessions s ON s.id=NEW.session_id
     WHERE t.id=NEW.task_id AND (
         (s.kind='root' AND s.id=t.session_id)
+        OR (s.kind='merge_billing' AND s.id=t.session_id AND t.parent_task_id IS NULL AND t.root_task_id=t.id)
         OR (s.kind='internal' AND s.parent_session_id=t.session_id AND s.parent_task_id=t.id)
     )
 )
@@ -1177,6 +1357,17 @@ CREATE TABLE IF NOT EXISTS agent_checkpoints (
 );
 CREATE INDEX IF NOT EXISTS idx_checkpoints_run ON agent_checkpoints(run_id, seq DESC);
 CREATE INDEX IF NOT EXISTS idx_checkpoints_agent ON agent_checkpoints(agent_id);
+CREATE INDEX IF NOT EXISTS idx_checkpoints_retention ON agent_checkpoints(created_at,id);
+CREATE TRIGGER agent_checkpoints_ephemeral_insert BEFORE INSERT ON agent_checkpoints
+WHEN COALESCE((SELECT content_retention FROM sessions WHERE id=NEW.session_id),'ephemeral')='ephemeral'
+ AND (NOT zk_ephemeral_ref_valid(NEW.session_id,NEW.messages_json)
+      OR NOT zk_ephemeral_ref_valid(NEW.session_id,NEW.file_state_json))
+BEGIN SELECT RAISE(ABORT,'EPHEMERAL_RAW_CONTENT_FORBIDDEN'); END;
+CREATE TRIGGER agent_checkpoints_ephemeral_update BEFORE UPDATE OF messages_json,file_state_json,session_id ON agent_checkpoints
+WHEN COALESCE((SELECT content_retention FROM sessions WHERE id=NEW.session_id),'ephemeral')='ephemeral'
+ AND (NOT zk_ephemeral_ref_valid(NEW.session_id,NEW.messages_json)
+      OR NOT zk_ephemeral_ref_valid(NEW.session_id,NEW.file_state_json))
+BEGIN SELECT RAISE(ABORT,'EPHEMERAL_RAW_CONTENT_FORBIDDEN'); END;
 
 -- data：Run 产物清单（V017 V2 重建版，替代 V013；run_id UNIQUE 一对一）。
 CREATE TABLE IF NOT EXISTS artifact_manifests (
@@ -1189,6 +1380,16 @@ CREATE TABLE IF NOT EXISTS artifact_manifests (
     updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_artifact_manifest_run ON artifact_manifests(run_id);
+
+-- An idempotent terminal integrity projection, never a command/test execution receipt.
+CREATE TABLE artifact_terminal_checks (
+    manifest_id TEXT PRIMARY KEY REFERENCES artifact_manifests(manifest_id) ON DELETE CASCADE,
+    run_id TEXT NOT NULL REFERENCES run_envelopes(id) ON DELETE CASCADE,
+    status TEXT NOT NULL CHECK(status IN ('verified','failed','unavailable')),
+    diagnostic_code TEXT CHECK(diagnostic_code IN ('ARTIFACT_INTEGRITY_FAILED','ARTIFACT_CONTENT_UNAVAILABLE')),
+    checked_at TEXT NOT NULL
+);
+
 
 -- data：产物条目（V017 V2；declared 态 sealed_hash 必空表级 CHECK）。
 CREATE TABLE IF NOT EXISTS artifact_entries (
@@ -1349,6 +1550,14 @@ CREATE TABLE IF NOT EXISTS run_acceptance_criteria (
     UNIQUE(root_run_id, ordinal)
 );
 CREATE INDEX IF NOT EXISTS idx_run_acceptance_root ON run_acceptance_criteria(root_run_id, ordinal);
+CREATE TRIGGER acceptance_criteria_ephemeral_insert BEFORE INSERT ON run_acceptance_criteria
+WHEN COALESCE((SELECT s.content_retention FROM sessions s JOIN run_envelopes r ON r.session_id=s.id WHERE r.id=NEW.root_run_id),'ephemeral')='ephemeral'
+ AND NOT zk_ephemeral_ref_valid((SELECT session_id FROM run_envelopes WHERE id=NEW.root_run_id),NEW.source_text)
+BEGIN SELECT RAISE(ABORT, 'EPHEMERAL_RAW_CONTENT_FORBIDDEN'); END;
+CREATE TRIGGER acceptance_criteria_ephemeral_update BEFORE UPDATE OF source_text,root_run_id ON run_acceptance_criteria
+WHEN COALESCE((SELECT s.content_retention FROM sessions s JOIN run_envelopes r ON r.session_id=s.id WHERE r.id=NEW.root_run_id),'ephemeral')='ephemeral'
+ AND NOT zk_ephemeral_ref_valid((SELECT session_id FROM run_envelopes WHERE id=NEW.root_run_id),NEW.source_text)
+BEGIN SELECT RAISE(ABORT, 'EPHEMERAL_RAW_CONTENT_FORBIDDEN'); END;
 
 -- data：长期记忆。SQLite 是唯一权威；项目作用域是默认且必须携带项目路径，
 -- global 作用域只能由调用方显式选择且不得携带项目路径。
@@ -1363,6 +1572,7 @@ CREATE TABLE IF NOT EXISTS memories (
     created_at   TEXT NOT NULL,
     updated_at   TEXT NOT NULL,
     source       TEXT NOT NULL DEFAULT 'USER',
+    document_order INTEGER NOT NULL DEFAULT 0,
     CHECK(
         (scope = 'project' AND project_path IS NOT NULL AND trim(project_path) <> '')
         OR (scope = 'global' AND project_path IS NULL)
@@ -1372,6 +1582,34 @@ CREATE INDEX IF NOT EXISTS idx_memories_scope_project_updated
     ON memories(scope, project_path, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category);
 CREATE INDEX IF NOT EXISTS idx_memories_source ON memories(source);
+
+-- Every entry writer (REST, tools, document editor) participates in scope CAS.
+CREATE TABLE memory_scope_versions (
+    scope TEXT NOT NULL CHECK(scope IN ('project','global')),
+    project_key TEXT NOT NULL,
+    revision INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(scope, project_key)
+);
+CREATE TRIGGER memories_revision_insert AFTER INSERT ON memories BEGIN
+    INSERT INTO memory_scope_versions VALUES(NEW.scope, COALESCE(NEW.project_path,''), 1, NEW.updated_at)
+    ON CONFLICT(scope,project_key) DO UPDATE SET revision=revision+1, updated_at=excluded.updated_at;
+END;
+CREATE TRIGGER memories_revision_update AFTER UPDATE ON memories BEGIN
+    INSERT INTO memory_scope_versions VALUES(NEW.scope, COALESCE(NEW.project_path,''), 1, NEW.updated_at)
+    ON CONFLICT(scope,project_key) DO UPDATE SET revision=revision+1, updated_at=excluded.updated_at;
+END;
+CREATE TRIGGER memories_revision_delete AFTER DELETE ON memories BEGIN
+    INSERT INTO memory_scope_versions VALUES(OLD.scope, COALESCE(OLD.project_path,''), 1, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    ON CONFLICT(scope,project_key) DO UPDATE SET revision=revision+1, updated_at=excluded.updated_at;
+END;
+
+-- Global skill switches are independent of project and file discovery.
+CREATE TABLE skill_states (
+    name TEXT PRIMARY KEY,
+    enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),
+    updated_at TEXT NOT NULL
+);
 
 -- global：用户批准的项目根目录（V020）。
 CREATE TABLE IF NOT EXISTS projects (
@@ -1445,3 +1683,359 @@ CREATE INDEX IF NOT EXISTS idx_cron_occurrences_job
 CREATE INDEX IF NOT EXISTS idx_cron_occurrences_active
     ON cron_occurrences(status, updated_at_ms)
     WHERE status IN ('submitted','running');
+
+-- Captured worktree identity and explicit delivery state (SQLite authority).
+CREATE TABLE IF NOT EXISTS managed_worktrees (
+    path TEXT PRIMARY KEY,
+    record_json TEXT NOT NULL CHECK(json_valid(record_json))
+);
+
+-- Logical teams own queue policy only. Task/Run/Result rows remain the sole
+-- execution lifecycle; a queue binding never claims that work has completed.
+CREATE TABLE team_definitions (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    config_json TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('open','stopping','shutdown')),
+    revision INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE team_work_items (
+    id TEXT PRIMARY KEY,
+    team_id TEXT NOT NULL REFERENCES team_definitions(id) ON DELETE CASCADE,
+    request_id TEXT NOT NULL,
+    ordinal INTEGER NOT NULL,
+    payload_json TEXT NOT NULL,
+    parent_task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    parent_run_id TEXT NOT NULL REFERENCES run_envelopes(id) ON DELETE CASCADE,
+    status TEXT NOT NULL CHECK(status IN ('queued','claimed','bound','rejected','cancelled','interrupted')),
+    claim_id TEXT,
+    claim_epoch INTEGER,
+    task_id TEXT UNIQUE REFERENCES tasks(id) ON DELETE CASCADE,
+    error_code TEXT,
+    created_at TEXT NOT NULL,
+    UNIQUE(team_id, request_id, ordinal),
+    CHECK((status='queued' AND claim_id IS NULL AND task_id IS NULL)
+        OR (status='claimed' AND claim_id IS NOT NULL AND task_id IS NULL)
+        OR (status='bound' AND claim_id IS NOT NULL AND task_id IS NOT NULL)
+        OR status IN ('rejected','cancelled','interrupted'))
+);
+CREATE INDEX idx_team_queue ON team_work_items(team_id,status,created_at,id);
+CREATE TABLE team_broadcasts (
+    team_id TEXT NOT NULL REFERENCES team_definitions(id) ON DELETE CASCADE,
+    request_id TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    receivers_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(team_id,request_id)
+);
+
+-- Atomic natural-completion fence against late team dispatch into a closing Run.
+CREATE TABLE team_run_closures (
+    run_id TEXT PRIMARY KEY REFERENCES run_envelopes(id) ON DELETE CASCADE
+);
+
+-- Ephemeral execution bodies are RAM references. These guards are a fail-closed
+-- boundary for future writers; durable ownership and accounting columns remain normal.
+CREATE TRIGGER tasks_ephemeral_insert BEFORE INSERT ON tasks
+WHEN COALESCE((SELECT content_retention FROM sessions WHERE id=NEW.session_id),'ephemeral')='ephemeral'
+ AND (NOT zk_ephemeral_ref_valid(NEW.session_id,NEW.description) OR NOT zk_ephemeral_ref_valid(NEW.session_id,NEW.prompt) OR NOT zk_ephemeral_ref_valid(NEW.session_id,NEW.plan_json) OR NOT zk_ephemeral_ref_valid(NEW.session_id,NEW.display_output) OR NOT zk_ephemeral_ref_valid(NEW.session_id,NEW.execution_config_json))
+BEGIN SELECT RAISE(ABORT, 'EPHEMERAL_RAW_CONTENT_FORBIDDEN'); END;
+CREATE TRIGGER tasks_ephemeral_update BEFORE UPDATE OF description,prompt,plan_json,display_output,execution_config_json,session_id ON tasks
+WHEN COALESCE((SELECT content_retention FROM sessions WHERE id=NEW.session_id),'ephemeral')='ephemeral'
+ AND (((NEW.session_id IS NOT OLD.session_id OR NEW.description IS NOT OLD.description) AND NOT zk_ephemeral_ref_valid(NEW.session_id,NEW.description))
+      OR ((NEW.session_id IS NOT OLD.session_id OR NEW.prompt IS NOT OLD.prompt) AND NOT zk_ephemeral_ref_valid(NEW.session_id,NEW.prompt))
+      OR ((NEW.session_id IS NOT OLD.session_id OR NEW.plan_json IS NOT OLD.plan_json) AND NOT zk_ephemeral_ref_valid(NEW.session_id,NEW.plan_json))
+      OR ((NEW.session_id IS NOT OLD.session_id OR NEW.display_output IS NOT OLD.display_output) AND NOT zk_ephemeral_ref_valid(NEW.session_id,NEW.display_output))
+      OR ((NEW.session_id IS NOT OLD.session_id OR NEW.execution_config_json IS NOT OLD.execution_config_json) AND NOT zk_ephemeral_ref_valid(NEW.session_id,NEW.execution_config_json)))
+BEGIN SELECT RAISE(ABORT, 'EPHEMERAL_RAW_CONTENT_FORBIDDEN'); END;
+CREATE TRIGGER run_event_log_ephemeral_insert BEFORE INSERT ON run_event_log
+WHEN COALESCE((SELECT content_retention FROM sessions WHERE id=(SELECT session_id FROM run_envelopes WHERE id=NEW.run_id)),'ephemeral')='ephemeral'
+ AND NOT (zk_ephemeral_ref_valid((SELECT session_id FROM run_envelopes WHERE id=NEW.run_id),NEW.event_data)
+          OR (NEW.event_data='{"$zkEphemeralUnavailable":true}' AND NEW.event_type IN ('run_status_changed','task_needs_attention','task_cancelling','run_cleanup_unconfirmed','ws_task_update','verification_stale','interaction_terminal','task_inbox_closed','run_cleanup_confirmed')))
+BEGIN SELECT RAISE(ABORT, 'EPHEMERAL_RAW_CONTENT_FORBIDDEN'); END;
+CREATE TRIGGER run_event_log_ephemeral_update BEFORE UPDATE OF event_data,run_id ON run_event_log
+WHEN COALESCE((SELECT content_retention FROM sessions WHERE id=(SELECT session_id FROM run_envelopes WHERE id=NEW.run_id)),'ephemeral')='ephemeral'
+ AND NOT (zk_ephemeral_ref_valid((SELECT session_id FROM run_envelopes WHERE id=NEW.run_id),NEW.event_data)
+          OR (NEW.event_data='{"$zkEphemeralUnavailable":true}' AND NEW.event_type IN ('run_status_changed','task_needs_attention','task_cancelling','run_cleanup_unconfirmed','ws_task_update','verification_stale','interaction_terminal','task_inbox_closed','run_cleanup_confirmed')))
+BEGIN SELECT RAISE(ABORT, 'EPHEMERAL_RAW_CONTENT_FORBIDDEN'); END;
+CREATE TRIGGER task_inbox_messages_ephemeral_insert BEFORE INSERT ON task_inbox_messages
+WHEN COALESCE((SELECT content_retention FROM sessions WHERE id=(SELECT session_id FROM tasks WHERE id=NEW.task_id)),'ephemeral')='ephemeral'
+ AND (NOT zk_ephemeral_ref_valid((SELECT session_id FROM tasks WHERE id=NEW.task_id),NEW.content) OR NOT zk_ephemeral_diagnostic_valid((SELECT session_id FROM tasks WHERE id=NEW.task_id),NEW.rejection_reason))
+BEGIN SELECT RAISE(ABORT, 'EPHEMERAL_RAW_CONTENT_FORBIDDEN'); END;
+CREATE TRIGGER task_inbox_messages_ephemeral_update BEFORE UPDATE OF content,rejection_reason,task_id ON task_inbox_messages
+WHEN COALESCE((SELECT content_retention FROM sessions WHERE id=(SELECT session_id FROM tasks WHERE id=NEW.task_id)),'ephemeral')='ephemeral'
+ AND (((NEW.task_id IS NOT OLD.task_id OR NEW.content IS NOT OLD.content) AND NOT zk_ephemeral_ref_valid((SELECT session_id FROM tasks WHERE id=NEW.task_id),NEW.content))
+      OR ((NEW.task_id IS NOT OLD.task_id OR NEW.rejection_reason IS NOT OLD.rejection_reason) AND NOT zk_ephemeral_diagnostic_valid((SELECT session_id FROM tasks WHERE id=NEW.task_id),NEW.rejection_reason)))
+BEGIN SELECT RAISE(ABORT, 'EPHEMERAL_RAW_CONTENT_FORBIDDEN'); END;
+CREATE TRIGGER task_results_ephemeral_insert BEFORE INSERT ON task_results
+WHEN COALESCE((SELECT s.content_retention FROM run_envelopes r JOIN sessions s ON s.id=r.session_id WHERE r.id=NEW.run_id),'ephemeral')='ephemeral'
+ AND (NEW.content_sha256 IS NOT NULL OR NEW.inline_text IS NOT NULL OR NEW.blob_sha256 IS NOT NULL
+      OR NEW.ephemeral_content_ref IS NULL
+      OR NOT zk_ephemeral_ref_valid((SELECT session_id FROM run_envelopes WHERE id=NEW.run_id),NEW.ephemeral_content_ref))
+BEGIN SELECT RAISE(ABORT, 'EPHEMERAL_RESULT_CONTENT_FORBIDDEN'); END;
+CREATE TRIGGER task_receipts_ephemeral_insert BEFORE INSERT ON task_result_receipts
+WHEN COALESCE((SELECT s.content_retention FROM tasks t JOIN sessions s ON s.id=t.session_id WHERE t.id=NEW.consumer_task_id),'ephemeral')='ephemeral'
+ AND NEW.result_sha256 IS NOT NULL
+BEGIN SELECT RAISE(ABORT, 'EPHEMERAL_RESULT_HASH_FORBIDDEN'); END;
+CREATE TRIGGER runs_ephemeral_prompt_hash_insert BEFORE INSERT ON run_envelopes
+WHEN COALESCE((SELECT content_retention FROM sessions WHERE id=NEW.session_id),'ephemeral')='ephemeral'
+ AND NEW.prompt_hash IS NOT NULL
+BEGIN SELECT RAISE(ABORT, 'EPHEMERAL_PROMPT_HASH_FORBIDDEN'); END;
+CREATE TRIGGER runs_ephemeral_prompt_hash_update BEFORE UPDATE OF prompt_hash ON run_envelopes
+WHEN COALESCE((SELECT content_retention FROM sessions WHERE id=NEW.session_id),'ephemeral')='ephemeral'
+ AND NEW.prompt_hash IS NOT NULL
+BEGIN SELECT RAISE(ABORT, 'EPHEMERAL_PROMPT_HASH_FORBIDDEN'); END;
+
+-- Trusted display notes cannot modify canonical tool outputs or their evidence hashes.
+CREATE TABLE hook_result_presentations (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    invocation_id TEXT NOT NULL UNIQUE REFERENCES tool_invocations(invocation_id) ON DELETE CASCADE,
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    run_id TEXT NOT NULL REFERENCES run_envelopes(id) ON DELETE CASCADE,
+    tool_use_id TEXT NOT NULL,
+    text TEXT NOT NULL,
+    UNIQUE(run_id,tool_use_id)
+);
+CREATE INDEX idx_hook_presentations_session ON hook_result_presentations(session_id,sequence);
+CREATE TRIGGER hook_presentation_owned_insert BEFORE INSERT ON hook_result_presentations
+WHEN NOT EXISTS(SELECT 1 FROM tool_invocations i JOIN run_envelopes r ON r.id=i.run_id
+    WHERE i.invocation_id=NEW.invocation_id AND i.run_id=NEW.run_id AND i.tool_use_id=NEW.tool_use_id
+    AND r.session_id=NEW.session_id AND i.status IN ('succeeded','failed','cancelled','interrupted'))
+BEGIN SELECT RAISE(ABORT,'HOOK_PRESENTATION_NOT_OWNED'); END;
+CREATE TRIGGER hook_presentation_owned_update BEFORE UPDATE ON hook_result_presentations
+WHEN NEW.invocation_id<>OLD.invocation_id OR NEW.session_id<>OLD.session_id OR NEW.run_id<>OLD.run_id OR NEW.tool_use_id<>OLD.tool_use_id
+BEGIN SELECT RAISE(ABORT,'HOOK_PRESENTATION_OWNER_IMMUTABLE'); END;
+CREATE TRIGGER hook_presentation_content_insert BEFORE INSERT ON hook_result_presentations
+WHEN COALESCE((SELECT content_retention FROM sessions WHERE id=NEW.session_id),'ephemeral')='ephemeral'
+    AND NOT zk_ephemeral_ref_valid(NEW.session_id,NEW.text)
+BEGIN SELECT RAISE(ABORT,'EPHEMERAL_RAW_CONTENT_FORBIDDEN'); END;
+CREATE TRIGGER hook_presentation_content_update BEFORE UPDATE ON hook_result_presentations
+WHEN NEW.text IS NOT OLD.text AND COALESCE((SELECT content_retention FROM sessions WHERE id=NEW.session_id),'ephemeral')='ephemeral'
+    AND NOT zk_ephemeral_ref_valid(NEW.session_id,NEW.text)
+BEGIN SELECT RAISE(ABORT,'EPHEMERAL_RAW_CONTENT_FORBIDDEN'); END;
+
+-- Only diagnostic projections can outlive body storage; they never authorize replay.
+CREATE TRIGGER tasks_ephemeral_reason_insert BEFORE INSERT ON tasks
+WHEN (SELECT content_retention FROM sessions WHERE id=NEW.session_id)='ephemeral'
+ AND NOT zk_ephemeral_reason_valid(NEW.session_id,NEW.reason)
+BEGIN SELECT RAISE(ABORT,'EPHEMERAL_RAW_DIAGNOSTIC_FORBIDDEN'); END;
+CREATE TRIGGER tasks_ephemeral_reason_update BEFORE UPDATE OF reason,session_id ON tasks
+WHEN (SELECT content_retention FROM sessions WHERE id=NEW.session_id)='ephemeral'
+ AND (NEW.reason IS NOT OLD.reason OR NEW.session_id IS NOT OLD.session_id)
+ AND NOT zk_ephemeral_reason_valid(NEW.session_id,NEW.reason)
+BEGIN SELECT RAISE(ABORT,'EPHEMERAL_RAW_DIAGNOSTIC_FORBIDDEN'); END;
+CREATE TRIGGER runs_ephemeral_diagnostic_insert BEFORE INSERT ON run_envelopes
+WHEN (SELECT content_retention FROM sessions WHERE id=NEW.session_id)='ephemeral'
+ AND (NOT zk_ephemeral_diagnostic_valid(NEW.session_id,NEW.error_summary)
+      OR NOT zk_ephemeral_reason_valid(NEW.session_id,NEW.waiting_reason))
+BEGIN SELECT RAISE(ABORT,'EPHEMERAL_RAW_DIAGNOSTIC_FORBIDDEN'); END;
+CREATE TRIGGER runs_ephemeral_diagnostic_update BEFORE UPDATE OF error_summary,waiting_reason,session_id ON run_envelopes
+WHEN (SELECT content_retention FROM sessions WHERE id=NEW.session_id)='ephemeral'
+ AND (((NEW.error_summary IS NOT OLD.error_summary OR NEW.session_id IS NOT OLD.session_id)
+        AND NOT zk_ephemeral_diagnostic_valid(NEW.session_id,NEW.error_summary))
+      OR ((NEW.waiting_reason IS NOT OLD.waiting_reason OR NEW.session_id IS NOT OLD.session_id)
+        AND NOT zk_ephemeral_reason_valid(NEW.session_id,NEW.waiting_reason)))
+BEGIN SELECT RAISE(ABORT,'EPHEMERAL_RAW_DIAGNOSTIC_FORBIDDEN'); END;
+
+CREATE TRIGGER ephemeral_tool_invocations_body_insert BEFORE INSERT ON tool_invocations
+WHEN (SELECT content_retention FROM sessions WHERE id=(SELECT session_id FROM run_envelopes WHERE id=NEW.run_id))='ephemeral' AND ((NEW.input_json IS NOT NULL AND NOT zk_ephemeral_ref_valid((SELECT session_id FROM run_envelopes WHERE id=NEW.run_id),NEW.input_json)) OR (NEW.output_ref IS NOT NULL AND NOT zk_ephemeral_ref_valid((SELECT session_id FROM run_envelopes WHERE id=NEW.run_id),NEW.output_ref)))
+BEGIN SELECT RAISE(ABORT,'EPHEMERAL_RAW_CONTENT_FORBIDDEN'); END;
+
+CREATE TRIGGER ephemeral_tool_invocations_body_update BEFORE UPDATE ON tool_invocations
+WHEN (SELECT content_retention FROM sessions WHERE id=(SELECT session_id FROM run_envelopes WHERE id=NEW.run_id))='ephemeral' AND ((NEW.input_json IS NOT OLD.input_json AND NEW.input_json IS NOT NULL AND NOT zk_ephemeral_ref_valid((SELECT session_id FROM run_envelopes WHERE id=NEW.run_id),NEW.input_json)) OR (NEW.output_ref IS NOT OLD.output_ref AND NEW.output_ref IS NOT NULL AND NOT zk_ephemeral_ref_valid((SELECT session_id FROM run_envelopes WHERE id=NEW.run_id),NEW.output_ref)))
+BEGIN SELECT RAISE(ABORT,'EPHEMERAL_RAW_CONTENT_FORBIDDEN'); END;
+
+CREATE TRIGGER ephemeral_tool_result_postprocessing_body_insert BEFORE INSERT ON tool_result_postprocessing
+WHEN (SELECT content_retention FROM sessions WHERE id=(SELECT session_id FROM run_envelopes WHERE id=NEW.run_id))='ephemeral' AND ((NEW.payload_json IS NOT NULL AND NOT zk_ephemeral_ref_valid((SELECT session_id FROM run_envelopes WHERE id=NEW.run_id),NEW.payload_json)))
+BEGIN SELECT RAISE(ABORT,'EPHEMERAL_RAW_CONTENT_FORBIDDEN'); END;
+
+CREATE TRIGGER ephemeral_tool_result_postprocessing_body_update BEFORE UPDATE ON tool_result_postprocessing
+WHEN (SELECT content_retention FROM sessions WHERE id=(SELECT session_id FROM run_envelopes WHERE id=NEW.run_id))='ephemeral' AND ((NEW.payload_json IS NOT OLD.payload_json AND NEW.payload_json IS NOT NULL AND NOT zk_ephemeral_ref_valid((SELECT session_id FROM run_envelopes WHERE id=NEW.run_id),NEW.payload_json)))
+BEGIN SELECT RAISE(ABORT,'EPHEMERAL_RAW_CONTENT_FORBIDDEN'); END;
+
+CREATE TRIGGER ephemeral_llm_calls_body_insert BEFORE INSERT ON llm_calls
+WHEN (SELECT content_retention FROM sessions WHERE id=(SELECT session_id FROM run_envelopes WHERE id=NEW.run_id))='ephemeral' AND ((NEW.route IS NOT NULL AND NEW.route<>'{"$zkEphemeralUnavailable":true}' AND NOT zk_ephemeral_ref_valid((SELECT session_id FROM run_envelopes WHERE id=NEW.run_id),NEW.route)) OR (NEW.provider_request_id IS NOT NULL AND NEW.provider_request_id<>'{"$zkEphemeralUnavailable":true}' AND NOT zk_ephemeral_ref_valid((SELECT session_id FROM run_envelopes WHERE id=NEW.run_id),NEW.provider_request_id)) OR (NEW.error_code IS NOT NULL AND NEW.error_code NOT IN ('STREAM_DROPPED','SERVICE_RESTART') AND NEW.error_code<>'{"$zkEphemeralUnavailable":true}' AND NOT zk_ephemeral_ref_valid((SELECT session_id FROM run_envelopes WHERE id=NEW.run_id),NEW.error_code)))
+BEGIN SELECT RAISE(ABORT,'EPHEMERAL_RAW_CONTENT_FORBIDDEN'); END;
+
+CREATE TRIGGER ephemeral_llm_calls_body_update BEFORE UPDATE ON llm_calls
+WHEN (SELECT content_retention FROM sessions WHERE id=(SELECT session_id FROM run_envelopes WHERE id=NEW.run_id))='ephemeral' AND ((NEW.route IS NOT OLD.route AND NEW.route IS NOT NULL AND NEW.route<>'{"$zkEphemeralUnavailable":true}' AND NOT zk_ephemeral_ref_valid((SELECT session_id FROM run_envelopes WHERE id=NEW.run_id),NEW.route)) OR (NEW.provider_request_id IS NOT OLD.provider_request_id AND NEW.provider_request_id IS NOT NULL AND NEW.provider_request_id<>'{"$zkEphemeralUnavailable":true}' AND NOT zk_ephemeral_ref_valid((SELECT session_id FROM run_envelopes WHERE id=NEW.run_id),NEW.provider_request_id)) OR (NEW.error_code IS NOT OLD.error_code AND NEW.error_code IS NOT NULL AND NEW.error_code NOT IN ('STREAM_DROPPED','SERVICE_RESTART') AND NEW.error_code<>'{"$zkEphemeralUnavailable":true}' AND NOT zk_ephemeral_ref_valid((SELECT session_id FROM run_envelopes WHERE id=NEW.run_id),NEW.error_code)))
+BEGIN SELECT RAISE(ABORT,'EPHEMERAL_RAW_CONTENT_FORBIDDEN'); END;
+
+CREATE TRIGGER ephemeral_tool_error_insert BEFORE INSERT ON tool_invocations
+WHEN (SELECT content_retention FROM sessions WHERE id=(SELECT session_id FROM run_envelopes WHERE id=NEW.run_id))='ephemeral'
+AND NEW.error_code IS NOT NULL AND NEW.error_code NOT IN ('STREAM_DROPPED','SERVICE_RESTART') AND NEW.error_code<>'{"$zkEphemeralUnavailable":true}'
+AND NOT zk_ephemeral_ref_valid((SELECT session_id FROM run_envelopes WHERE id=NEW.run_id),NEW.error_code)
+BEGIN SELECT RAISE(ABORT,'EPHEMERAL_RAW_CONTENT_FORBIDDEN'); END;
+
+CREATE TRIGGER ephemeral_tool_error_update BEFORE UPDATE ON tool_invocations
+WHEN (SELECT content_retention FROM sessions WHERE id=(SELECT session_id FROM run_envelopes WHERE id=NEW.run_id))='ephemeral'
+AND NEW.error_code IS NOT OLD.error_code AND NEW.error_code IS NOT NULL AND NEW.error_code NOT IN ('STREAM_DROPPED','SERVICE_RESTART') AND NEW.error_code<>'{"$zkEphemeralUnavailable":true}'
+AND NOT zk_ephemeral_ref_valid((SELECT session_id FROM run_envelopes WHERE id=NEW.run_id),NEW.error_code)
+BEGIN SELECT RAISE(ABORT,'EPHEMERAL_RAW_CONTENT_FORBIDDEN'); END;
+
+-- Retrying a POST must never recreate its side effects, including after restart.
+-- Deliberately no input, input hash, CLI arguments or connection configuration.
+CREATE TABLE query_requests (
+    request_id TEXT PRIMARY KEY,
+    status TEXT NOT NULL CHECK(status IN ('claimed','cancelled')),
+    session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+    created_at_ms INTEGER NOT NULL
+);
+
+CREATE TRIGGER ephemeral_interaction_requests_body_insert BEFORE INSERT ON interaction_requests
+WHEN (SELECT content_retention FROM sessions WHERE id=NEW.session_id)='ephemeral' AND ((NEW.correlation_key IS NOT NULL AND NOT zk_ephemeral_ref_valid(NEW.session_id,NEW.correlation_key)) OR (NEW.prompt_json IS NOT NULL AND NOT zk_ephemeral_ref_valid(NEW.session_id,NEW.prompt_json)) OR (NEW.allowed_decisions_json IS NOT NULL AND NOT zk_ephemeral_ref_valid(NEW.session_id,NEW.allowed_decisions_json)) OR (NEW.scope_options_json IS NOT NULL AND NOT zk_ephemeral_ref_valid(NEW.session_id,NEW.scope_options_json)) OR (NEW.response_json IS NOT NULL AND NOT zk_ephemeral_ref_valid(NEW.session_id,NEW.response_json)) OR (NEW.authorization_context_json IS NOT NULL AND NOT zk_ephemeral_ref_valid(NEW.session_id,NEW.authorization_context_json)) OR (NEW.terminal_reason IS NOT NULL AND NEW.terminal_reason NOT IN ('service_restart','delivery_not_dispatched','delivery_not_acknowledged','decision_deadline_exceeded','{"$zkEphemeralUnavailable":true}') AND NOT zk_ephemeral_ref_valid(NEW.session_id,NEW.terminal_reason)))
+BEGIN SELECT RAISE(ABORT,'EPHEMERAL_RAW_CONTENT_FORBIDDEN'); END;
+
+CREATE TRIGGER ephemeral_interaction_requests_body_update BEFORE UPDATE ON interaction_requests
+WHEN (SELECT content_retention FROM sessions WHERE id=NEW.session_id)='ephemeral' AND ((NEW.correlation_key IS NOT OLD.correlation_key AND NEW.correlation_key IS NOT NULL AND NOT zk_ephemeral_ref_valid(NEW.session_id,NEW.correlation_key)) OR (NEW.prompt_json IS NOT OLD.prompt_json AND NEW.prompt_json IS NOT NULL AND NOT zk_ephemeral_ref_valid(NEW.session_id,NEW.prompt_json)) OR (NEW.allowed_decisions_json IS NOT OLD.allowed_decisions_json AND NEW.allowed_decisions_json IS NOT NULL AND NOT zk_ephemeral_ref_valid(NEW.session_id,NEW.allowed_decisions_json)) OR (NEW.scope_options_json IS NOT OLD.scope_options_json AND NEW.scope_options_json IS NOT NULL AND NOT zk_ephemeral_ref_valid(NEW.session_id,NEW.scope_options_json)) OR (NEW.response_json IS NOT OLD.response_json AND NEW.response_json IS NOT NULL AND NOT zk_ephemeral_ref_valid(NEW.session_id,NEW.response_json)) OR (NEW.authorization_context_json IS NOT OLD.authorization_context_json AND NEW.authorization_context_json IS NOT NULL AND NOT zk_ephemeral_ref_valid(NEW.session_id,NEW.authorization_context_json)) OR (NEW.terminal_reason IS NOT OLD.terminal_reason AND NEW.terminal_reason IS NOT NULL AND NEW.terminal_reason NOT IN ('service_restart','delivery_not_dispatched','delivery_not_acknowledged','decision_deadline_exceeded','{"$zkEphemeralUnavailable":true}') AND NOT zk_ephemeral_ref_valid(NEW.session_id,NEW.terminal_reason)))
+BEGIN SELECT RAISE(ABORT,'EPHEMERAL_RAW_CONTENT_FORBIDDEN'); END;
+
+CREATE TRIGGER ephemeral_activities_body_insert BEFORE INSERT ON activities
+WHEN (SELECT content_retention FROM sessions WHERE id=NEW.session_id)='ephemeral' AND ((NEW.summary IS NOT NULL AND NOT zk_ephemeral_ref_valid(NEW.session_id,NEW.summary)) OR (NEW.tool_result_json IS NOT NULL AND NOT zk_ephemeral_ref_valid(NEW.session_id,NEW.tool_result_json)) OR (NEW.changed_files_json IS NOT NULL AND NOT zk_ephemeral_ref_valid(NEW.session_id,NEW.changed_files_json)) OR (NEW.insight_json IS NOT NULL AND NOT zk_ephemeral_ref_valid(NEW.session_id,NEW.insight_json)))
+BEGIN SELECT RAISE(ABORT,'EPHEMERAL_RAW_CONTENT_FORBIDDEN'); END;
+
+CREATE TRIGGER ephemeral_activities_body_update BEFORE UPDATE ON activities
+WHEN (SELECT content_retention FROM sessions WHERE id=NEW.session_id)='ephemeral' AND ((NEW.summary IS NOT OLD.summary AND NEW.summary IS NOT NULL AND NOT zk_ephemeral_ref_valid(NEW.session_id,NEW.summary)) OR (NEW.tool_result_json IS NOT OLD.tool_result_json AND NEW.tool_result_json IS NOT NULL AND NOT zk_ephemeral_ref_valid(NEW.session_id,NEW.tool_result_json)) OR (NEW.changed_files_json IS NOT OLD.changed_files_json AND NEW.changed_files_json IS NOT NULL AND NOT zk_ephemeral_ref_valid(NEW.session_id,NEW.changed_files_json)) OR (NEW.insight_json IS NOT OLD.insight_json AND NEW.insight_json IS NOT NULL AND NOT zk_ephemeral_ref_valid(NEW.session_id,NEW.insight_json)))
+BEGIN SELECT RAISE(ABORT,'EPHEMERAL_RAW_CONTENT_FORBIDDEN'); END;
+
+CREATE TRIGGER ephemeral_permission_grant_insert BEFORE INSERT ON permission_grants
+WHEN EXISTS(SELECT 1 FROM sessions s WHERE s.content_retention='ephemeral' AND (
+ s.id=NEW.root_session_id OR s.id=(SELECT session_id FROM run_envelopes WHERE id=NEW.actor_run_id)
+ OR s.id=(SELECT session_id FROM run_envelopes WHERE id=NEW.root_run_id)
+ OR s.id=(SELECT session_id FROM interaction_requests WHERE interaction_id=NEW.created_by_interaction_id)))
+BEGIN SELECT RAISE(ABORT,'EPHEMERAL_OPERATION_UNSUPPORTED'); END;
+
+CREATE TRIGGER artifact_entries_ephemeral_insert BEFORE INSERT ON artifact_entries
+WHEN COALESCE((SELECT content_retention FROM sessions WHERE id=(SELECT session_id FROM artifact_manifests WHERE manifest_id=NEW.manifest_id)),'ephemeral')='ephemeral'
+ AND (NOT zk_ephemeral_ref_valid((SELECT session_id FROM artifact_manifests WHERE manifest_id=NEW.manifest_id),NEW.sealed_hash) OR NOT zk_ephemeral_ref_valid((SELECT session_id FROM artifact_manifests WHERE manifest_id=NEW.manifest_id),NEW.actual_hash) OR NOT zk_ephemeral_ref_valid((SELECT session_id FROM artifact_manifests WHERE manifest_id=NEW.manifest_id),NEW.required_validator_id) OR NOT zk_ephemeral_ref_valid((SELECT session_id FROM artifact_manifests WHERE manifest_id=NEW.manifest_id),NEW.validator_result_json) OR NOT zk_ephemeral_diagnostic_valid((SELECT session_id FROM artifact_manifests WHERE manifest_id=NEW.manifest_id),NEW.failure_code))
+BEGIN SELECT RAISE(ABORT,'EPHEMERAL_ARTIFACT_BODY_FORBIDDEN'); END;
+
+CREATE TRIGGER artifact_entries_ephemeral_update BEFORE UPDATE OF sealed_hash,actual_hash,required_validator_id,validator_result_json,failure_code,manifest_id ON artifact_entries
+WHEN COALESCE((SELECT content_retention FROM sessions WHERE id=(SELECT session_id FROM artifact_manifests WHERE manifest_id=NEW.manifest_id)),'ephemeral')='ephemeral'
+ AND (((NEW.sealed_hash IS NOT OLD.sealed_hash OR NEW.manifest_id IS NOT OLD.manifest_id) AND NOT zk_ephemeral_ref_valid((SELECT session_id FROM artifact_manifests WHERE manifest_id=NEW.manifest_id),NEW.sealed_hash)) OR ((NEW.actual_hash IS NOT OLD.actual_hash OR NEW.manifest_id IS NOT OLD.manifest_id) AND NOT zk_ephemeral_ref_valid((SELECT session_id FROM artifact_manifests WHERE manifest_id=NEW.manifest_id),NEW.actual_hash)) OR ((NEW.required_validator_id IS NOT OLD.required_validator_id OR NEW.manifest_id IS NOT OLD.manifest_id) AND NOT zk_ephemeral_ref_valid((SELECT session_id FROM artifact_manifests WHERE manifest_id=NEW.manifest_id),NEW.required_validator_id)) OR ((NEW.validator_result_json IS NOT OLD.validator_result_json OR NEW.manifest_id IS NOT OLD.manifest_id) AND NOT zk_ephemeral_ref_valid((SELECT session_id FROM artifact_manifests WHERE manifest_id=NEW.manifest_id),NEW.validator_result_json)) OR ((NEW.failure_code IS NOT OLD.failure_code OR NEW.manifest_id IS NOT OLD.manifest_id) AND NOT zk_ephemeral_diagnostic_valid((SELECT session_id FROM artifact_manifests WHERE manifest_id=NEW.manifest_id),NEW.failure_code)))
+BEGIN SELECT RAISE(ABORT,'EPHEMERAL_ARTIFACT_BODY_FORBIDDEN'); END;
+
+CREATE TRIGGER research_captures_ephemeral_insert BEFORE INSERT ON research_captures
+WHEN COALESCE((SELECT content_retention FROM sessions WHERE id=(SELECT session_id FROM tasks WHERE id=NEW.root_task_id)),'ephemeral')='ephemeral'
+ AND (NOT zk_ephemeral_ref_valid((SELECT session_id FROM tasks WHERE id=NEW.root_task_id),NEW.query) OR NOT zk_ephemeral_ref_valid((SELECT session_id FROM tasks WHERE id=NEW.root_task_id),NEW.receipt_sha256))
+BEGIN SELECT RAISE(ABORT,'EPHEMERAL_RESEARCH_BODY_FORBIDDEN'); END;
+
+CREATE TRIGGER research_captures_ephemeral_update BEFORE UPDATE OF query,receipt_sha256,root_task_id ON research_captures
+WHEN COALESCE((SELECT content_retention FROM sessions WHERE id=(SELECT session_id FROM tasks WHERE id=NEW.root_task_id)),'ephemeral')='ephemeral'
+ AND (((NEW.query IS NOT OLD.query OR NEW.root_task_id IS NOT OLD.root_task_id) AND NOT zk_ephemeral_ref_valid((SELECT session_id FROM tasks WHERE id=NEW.root_task_id),NEW.query)) OR ((NEW.receipt_sha256 IS NOT OLD.receipt_sha256 OR NEW.root_task_id IS NOT OLD.root_task_id) AND NOT zk_ephemeral_ref_valid((SELECT session_id FROM tasks WHERE id=NEW.root_task_id),NEW.receipt_sha256)))
+BEGIN SELECT RAISE(ABORT,'EPHEMERAL_RESEARCH_BODY_FORBIDDEN'); END;
+
+CREATE TRIGGER research_sources_ephemeral_insert BEFORE INSERT ON research_sources
+WHEN COALESCE((SELECT content_retention FROM sessions WHERE id=(SELECT session_id FROM tasks WHERE id=NEW.root_task_id)),'ephemeral')='ephemeral'
+ AND (NOT zk_ephemeral_ref_valid((SELECT session_id FROM tasks WHERE id=NEW.root_task_id),NEW.url) OR NOT zk_ephemeral_ref_valid((SELECT session_id FROM tasks WHERE id=NEW.root_task_id),NEW.title) OR NOT zk_ephemeral_ref_valid((SELECT session_id FROM tasks WHERE id=NEW.root_task_id),NEW.provider) OR NOT zk_ephemeral_ref_valid((SELECT session_id FROM tasks WHERE id=NEW.root_task_id),NEW.content_type))
+BEGIN SELECT RAISE(ABORT,'EPHEMERAL_RESEARCH_BODY_FORBIDDEN'); END;
+
+CREATE TRIGGER research_sources_ephemeral_update BEFORE UPDATE OF url,title,provider,content_type,root_task_id ON research_sources
+WHEN COALESCE((SELECT content_retention FROM sessions WHERE id=(SELECT session_id FROM tasks WHERE id=NEW.root_task_id)),'ephemeral')='ephemeral'
+ AND (((NEW.url IS NOT OLD.url OR NEW.root_task_id IS NOT OLD.root_task_id) AND NOT zk_ephemeral_ref_valid((SELECT session_id FROM tasks WHERE id=NEW.root_task_id),NEW.url)) OR ((NEW.title IS NOT OLD.title OR NEW.root_task_id IS NOT OLD.root_task_id) AND NOT zk_ephemeral_ref_valid((SELECT session_id FROM tasks WHERE id=NEW.root_task_id),NEW.title)) OR ((NEW.provider IS NOT OLD.provider OR NEW.root_task_id IS NOT OLD.root_task_id) AND NOT zk_ephemeral_ref_valid((SELECT session_id FROM tasks WHERE id=NEW.root_task_id),NEW.provider)) OR ((NEW.content_type IS NOT OLD.content_type OR NEW.root_task_id IS NOT OLD.root_task_id) AND NOT zk_ephemeral_ref_valid((SELECT session_id FROM tasks WHERE id=NEW.root_task_id),NEW.content_type)))
+BEGIN SELECT RAISE(ABORT,'EPHEMERAL_RESEARCH_BODY_FORBIDDEN'); END;
+
+CREATE TRIGGER research_findings_ephemeral_insert BEFORE INSERT ON research_findings
+WHEN COALESCE((SELECT content_retention FROM sessions WHERE id=(SELECT session_id FROM tasks WHERE id=NEW.root_task_id)),'ephemeral')='ephemeral'
+ AND (NOT zk_ephemeral_ref_valid((SELECT session_id FROM tasks WHERE id=NEW.root_task_id),NEW.excerpt))
+BEGIN SELECT RAISE(ABORT,'EPHEMERAL_RESEARCH_BODY_FORBIDDEN'); END;
+
+CREATE TRIGGER research_findings_ephemeral_update BEFORE UPDATE OF excerpt,root_task_id ON research_findings
+WHEN COALESCE((SELECT content_retention FROM sessions WHERE id=(SELECT session_id FROM tasks WHERE id=NEW.root_task_id)),'ephemeral')='ephemeral'
+ AND (((NEW.excerpt IS NOT OLD.excerpt OR NEW.root_task_id IS NOT OLD.root_task_id) AND NOT zk_ephemeral_ref_valid((SELECT session_id FROM tasks WHERE id=NEW.root_task_id),NEW.excerpt)))
+BEGIN SELECT RAISE(ABORT,'EPHEMERAL_RESEARCH_BODY_FORBIDDEN'); END;
+
+CREATE TRIGGER research_conflicts_ephemeral_insert BEFORE INSERT ON research_conflicts
+WHEN COALESCE((SELECT content_retention FROM sessions WHERE id=(SELECT session_id FROM tasks WHERE id=NEW.root_task_id)),'ephemeral')='ephemeral'
+ AND (NOT zk_ephemeral_ref_valid((SELECT session_id FROM tasks WHERE id=NEW.root_task_id),NEW.summary) OR NOT zk_ephemeral_ref_valid((SELECT session_id FROM tasks WHERE id=NEW.root_task_id),NEW.resolution))
+BEGIN SELECT RAISE(ABORT,'EPHEMERAL_RESEARCH_BODY_FORBIDDEN'); END;
+
+CREATE TRIGGER research_conflicts_ephemeral_update BEFORE UPDATE OF summary,resolution,root_task_id ON research_conflicts
+WHEN COALESCE((SELECT content_retention FROM sessions WHERE id=(SELECT session_id FROM tasks WHERE id=NEW.root_task_id)),'ephemeral')='ephemeral'
+ AND (((NEW.summary IS NOT OLD.summary OR NEW.root_task_id IS NOT OLD.root_task_id) AND NOT zk_ephemeral_ref_valid((SELECT session_id FROM tasks WHERE id=NEW.root_task_id),NEW.summary)) OR ((NEW.resolution IS NOT OLD.resolution OR NEW.root_task_id IS NOT OLD.root_task_id) AND NOT zk_ephemeral_ref_valid((SELECT session_id FROM tasks WHERE id=NEW.root_task_id),NEW.resolution)))
+BEGIN SELECT RAISE(ABORT,'EPHEMERAL_RESEARCH_BODY_FORBIDDEN'); END;
+
+CREATE TRIGGER research_open_questions_ephemeral_insert BEFORE INSERT ON research_open_questions
+WHEN COALESCE((SELECT content_retention FROM sessions WHERE id=(SELECT session_id FROM tasks WHERE id=NEW.root_task_id)),'ephemeral')='ephemeral'
+ AND (NOT zk_ephemeral_ref_valid((SELECT session_id FROM tasks WHERE id=NEW.root_task_id),NEW.question) OR NOT zk_ephemeral_ref_valid((SELECT session_id FROM tasks WHERE id=NEW.root_task_id),NEW.resolution))
+BEGIN SELECT RAISE(ABORT,'EPHEMERAL_RESEARCH_BODY_FORBIDDEN'); END;
+
+CREATE TRIGGER research_open_questions_ephemeral_update BEFORE UPDATE OF question,resolution,root_task_id ON research_open_questions
+WHEN COALESCE((SELECT content_retention FROM sessions WHERE id=(SELECT session_id FROM tasks WHERE id=NEW.root_task_id)),'ephemeral')='ephemeral'
+ AND (((NEW.question IS NOT OLD.question OR NEW.root_task_id IS NOT OLD.root_task_id) AND NOT zk_ephemeral_ref_valid((SELECT session_id FROM tasks WHERE id=NEW.root_task_id),NEW.question)) OR ((NEW.resolution IS NOT OLD.resolution OR NEW.root_task_id IS NOT OLD.root_task_id) AND NOT zk_ephemeral_ref_valid((SELECT session_id FROM tasks WHERE id=NEW.root_task_id),NEW.resolution)))
+BEGIN SELECT RAISE(ABORT,'EPHEMERAL_RESEARCH_BODY_FORBIDDEN'); END;
+
+CREATE TRIGGER research_requirement_coverage_ephemeral_insert BEFORE INSERT ON research_requirement_coverage
+WHEN COALESCE((SELECT content_retention FROM sessions WHERE id=(SELECT session_id FROM tasks WHERE id=NEW.root_task_id)),'ephemeral')='ephemeral'
+ AND (NOT zk_ephemeral_ref_valid((SELECT session_id FROM tasks WHERE id=NEW.root_task_id),NEW.requirement_key) OR NOT zk_ephemeral_ref_valid((SELECT session_id FROM tasks WHERE id=NEW.root_task_id),NEW.requirement_text) OR NOT zk_ephemeral_ref_valid((SELECT session_id FROM tasks WHERE id=NEW.root_task_id),NEW.notes))
+BEGIN SELECT RAISE(ABORT,'EPHEMERAL_RESEARCH_BODY_FORBIDDEN'); END;
+
+CREATE TRIGGER research_requirement_coverage_ephemeral_update BEFORE UPDATE OF requirement_key,requirement_text,notes,root_task_id ON research_requirement_coverage
+WHEN COALESCE((SELECT content_retention FROM sessions WHERE id=(SELECT session_id FROM tasks WHERE id=NEW.root_task_id)),'ephemeral')='ephemeral'
+ AND (((NEW.requirement_key IS NOT OLD.requirement_key OR NEW.root_task_id IS NOT OLD.root_task_id) AND NOT zk_ephemeral_ref_valid((SELECT session_id FROM tasks WHERE id=NEW.root_task_id),NEW.requirement_key)) OR ((NEW.requirement_text IS NOT OLD.requirement_text OR NEW.root_task_id IS NOT OLD.root_task_id) AND NOT zk_ephemeral_ref_valid((SELECT session_id FROM tasks WHERE id=NEW.root_task_id),NEW.requirement_text)) OR ((NEW.notes IS NOT OLD.notes OR NEW.root_task_id IS NOT OLD.root_task_id) AND NOT zk_ephemeral_ref_valid((SELECT session_id FROM tasks WHERE id=NEW.root_task_id),NEW.notes)))
+BEGIN SELECT RAISE(ABORT,'EPHEMERAL_RESEARCH_BODY_FORBIDDEN'); END;
+
+CREATE TRIGGER research_capture_persistent_digest BEFORE INSERT ON research_captures
+WHEN (SELECT s.content_retention FROM tasks t JOIN sessions s ON s.id=t.session_id WHERE t.id=NEW.root_task_id)='persistent'
+ AND (length(NEW.receipt_sha256)<>64 OR NEW.receipt_sha256 GLOB '*[^0-9a-f]*')
+BEGIN SELECT RAISE(ABORT,'RESEARCH_RECEIPT_HASH_INVALID'); END;
+
+CREATE TRIGGER evidence_bundles_ephemeral_insert BEFORE INSERT ON evidence_bundles
+WHEN (SELECT content_retention FROM sessions WHERE id=NEW.session_id)='ephemeral' AND (NOT zk_ephemeral_ref_valid(NEW.session_id,NEW.kind) OR NOT zk_ephemeral_ref_valid(NEW.session_id,NEW.claim))
+BEGIN SELECT RAISE(ABORT,'EPHEMERAL_EVIDENCE_BODY_FORBIDDEN'); END;
+
+CREATE TRIGGER evidence_items_ephemeral_insert BEFORE INSERT ON evidence_items
+WHEN (SELECT content_retention FROM sessions WHERE id=(SELECT session_id FROM evidence_bundles WHERE bundle_id=NEW.bundle_id))='ephemeral' AND (NOT zk_ephemeral_ref_valid((SELECT session_id FROM evidence_bundles WHERE bundle_id=NEW.bundle_id),NEW.type) OR NOT zk_ephemeral_ref_valid((SELECT session_id FROM evidence_bundles WHERE bundle_id=NEW.bundle_id),NEW.summary) OR NOT zk_ephemeral_ref_valid((SELECT session_id FROM evidence_bundles WHERE bundle_id=NEW.bundle_id),NEW.blob_sha256) OR NOT zk_ephemeral_ref_valid((SELECT session_id FROM evidence_bundles WHERE bundle_id=NEW.bundle_id),NEW.meta_json))
+BEGIN SELECT RAISE(ABORT,'EPHEMERAL_EVIDENCE_BODY_FORBIDDEN'); END;
+
+CREATE TRIGGER evidence_verdict_ephemeral_insert BEFORE INSERT ON evidence_verdict_events
+WHEN (SELECT content_retention FROM sessions WHERE id=(SELECT session_id FROM evidence_bundles WHERE bundle_id=NEW.bundle_id))='ephemeral'
+AND NOT zk_ephemeral_diagnostic_valid((SELECT session_id FROM evidence_bundles WHERE bundle_id=NEW.bundle_id),NEW.reason)
+BEGIN SELECT RAISE(ABORT,'EPHEMERAL_EVIDENCE_BODY_FORBIDDEN'); END;
+
+CREATE TRIGGER task_result_ephemeral_diagnostic BEFORE INSERT ON task_results
+WHEN (SELECT s.content_retention FROM run_envelopes r JOIN sessions s ON s.id=r.session_id WHERE r.id=NEW.run_id)='ephemeral'
+ AND NOT zk_ephemeral_diagnostic_valid((SELECT session_id FROM run_envelopes WHERE id=NEW.run_id),NEW.error_code)
+BEGIN SELECT RAISE(ABORT,'EPHEMERAL_RESULT_DIAGNOSTIC_FORBIDDEN'); END;
+
+CREATE TRIGGER invocation_kind_immutable BEFORE UPDATE OF invocation_kind ON tool_invocations
+WHEN NEW.invocation_kind<>OLD.invocation_kind
+BEGIN SELECT RAISE(ABORT,'INVOCATION_KIND_IMMUTABLE'); END;
+CREATE TRIGGER runtime_scope_identity BEFORE INSERT ON tool_invocations
+WHEN NEW.invocation_kind='runtimeScope' AND (NEW.tool_name<>'RunToolScope' OR NEW.side_effect_class<>'write' OR NEW.directory_generation IS NOT NULL OR NEW.connection_generation IS NOT NULL)
+BEGIN SELECT RAISE(ABORT,'RUN_SCOPE_INVOCATION_INVALID'); END;
+
+-- Stable operation identity is independent of reusable JSON-RPC transport IDs.
+CREATE TABLE IF NOT EXISTS external_tool_requests (
+    run_id TEXT NOT NULL REFERENCES run_envelopes(id) ON DELETE CASCADE,
+    operation_id TEXT NOT NULL,
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    tool_name TEXT NOT NULL,
+    input_json TEXT NOT NULL,
+    tool_use_id TEXT NOT NULL,
+    result_message_id TEXT REFERENCES messages(id) ON DELETE RESTRICT,
+    PRIMARY KEY(run_id,operation_id),
+    UNIQUE(run_id,tool_use_id)
+);
+CREATE TRIGGER IF NOT EXISTS external_tool_input_ephemeral_insert
+BEFORE INSERT ON external_tool_requests
+WHEN (SELECT content_retention FROM sessions WHERE id=NEW.session_id)='ephemeral'
+ AND zk_ephemeral_ref_valid(NEW.session_id,NEW.input_json)<>1
+BEGIN SELECT RAISE(ABORT,'EPHEMERAL_CONTENT_REQUIRED'); END;
+CREATE TRIGGER IF NOT EXISTS external_tool_request_identity_immutable
+BEFORE UPDATE ON external_tool_requests
+WHEN NEW.run_id<>OLD.run_id OR NEW.operation_id<>OLD.operation_id
+ OR NEW.session_id<>OLD.session_id OR NEW.tool_name<>OLD.tool_name
+ OR NEW.input_json<>OLD.input_json OR NEW.tool_use_id<>OLD.tool_use_id
+ OR (OLD.result_message_id IS NOT NULL AND NEW.result_message_id IS NOT OLD.result_message_id)
+BEGIN SELECT RAISE(ABORT,'EXTERNAL_OPERATION_IMMUTABLE'); END;
+
+CREATE TRIGGER IF NOT EXISTS external_tool_operation_owner_insert
+BEFORE INSERT ON external_tool_requests
+WHEN NOT EXISTS (
+    SELECT 1 FROM run_envelopes r JOIN tasks t ON t.id=r.task_id
+    WHERE r.id=NEW.run_id AND r.session_id=NEW.session_id
+      AND t.session_id=NEW.session_id AND t.current_run_id=r.id AND t.task_type='mcp'
+)
+BEGIN SELECT RAISE(ABORT,'EXTERNAL_OPERATION_OWNER_MISMATCH'); END;

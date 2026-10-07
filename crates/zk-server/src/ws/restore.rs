@@ -52,9 +52,16 @@ pub(crate) fn build_session_restored(
     ServerMessage::SessionRestored {
         messages,
         metadata: SessionMetadata {
+            purpose: detail.purpose,
             session_id: detail.session_id,
             model: detail.model,
-            permission_mode: permission_mode.as_str().to_owned(),
+            permission_mode: if detail.purpose == zk_protocol::SessionPurpose::Mcp {
+                PermissionMode::Default
+            } else {
+                permission_mode
+            }
+            .as_str()
+            .to_owned(),
             status: detail.status,
         },
         activities: None,
@@ -98,6 +105,7 @@ mod tests {
     /// 最小 `SessionDetail` 构造（消息与状态可注入）。
     fn detail(messages: Vec<MessageRecord>, status: &str) -> SessionDetail {
         SessionDetail {
+            purpose: zk_protocol::SessionPurpose::Chat,
             session_id: "s-1".to_owned(),
             model: "qwen3.8-max-0902".to_owned(),
             working_dir: "/tmp".to_owned(),
@@ -140,8 +148,22 @@ mod tests {
     }
 
     #[test]
+    fn dedicated_mcp_restore_projects_trusted_purpose_and_fixed_default_policy() {
+        let mut saved = detail(Vec::new(), "active");
+        saved.purpose = zk_protocol::SessionPurpose::Mcp;
+        saved
+            .config
+            .insert("purpose".into(), serde_json::json!("chat"));
+        let restored = build_session_restored(runtime(saved), None, 1, PermissionMode::AutoApprove);
+        let value = serde_json::to_value(restored).unwrap();
+        assert_eq!(value["metadata"]["purpose"], "mcp");
+        assert_eq!(value["metadata"]["permissionMode"], "DEFAULT");
+    }
+
+    #[test]
     fn storage_blocks_map_to_ws_shape() {
         let record = MessageRecord {
+            meta: None,
             id: "m-1".to_owned(),
             session_id: "s-1".to_owned(),
             role: MessageRole::Assistant,
@@ -210,6 +232,7 @@ mod tests {
     #[test]
     fn url_image_blocks_restore_with_url_only() {
         let record = MessageRecord {
+            meta: None,
             id: "m-url".to_owned(),
             session_id: "s-1".to_owned(),
             role: MessageRole::User,
@@ -252,6 +275,7 @@ mod tests {
     #[test]
     fn assistant_without_tokens_omits_usage_and_system_joins_text() {
         let assistant = MessageRecord {
+            meta: None,
             id: "m-2".to_owned(),
             session_id: "s-1".to_owned(),
             role: MessageRole::Assistant,
@@ -265,6 +289,7 @@ mod tests {
             created_at: 2_000,
         };
         let system = MessageRecord {
+            meta: None,
             id: "m-3".to_owned(),
             session_id: "s-1".to_owned(),
             role: MessageRole::System,

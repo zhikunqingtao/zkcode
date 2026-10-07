@@ -174,6 +174,18 @@ impl AddServerRequest {
 /// `@ExceptionHandler(Exception.class)` → 500 `INTERNAL_ERROR`。
 pub(crate) fn manager_error(error: &ManagerError) -> ApiError {
     match error {
+        ManagerError::OAuth(error) => {
+            ApiError::validation_with_code("MCP_OAUTH_FAILED", &error.to_string())
+        }
+        ManagerError::ServiceDisabled(_) => ApiError::validation_with_code(
+            "MCP_SERVICE_DISABLED",
+            "MCP service is disabled; enable the service first",
+        ),
+        ManagerError::ServiceStorageUnavailable => ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "MCP_SERVICE_STORAGE_UNAVAILABLE".into(),
+            message: "MCP service preferences could not be loaded or saved".into(),
+        },
         ManagerError::ServerNotFound(_) | ManagerError::UnsafeCapabilityEndpoint(_) => {
             ApiError::validation(error.to_string())
         }
@@ -763,6 +775,99 @@ pub(crate) async fn reconnect_server(
             "success": status == McpConnectionStatus::Connected,
         })),
     ))
+}
+
+/// List service intent and actual connection state without disclosing credentials.
+#[utoipa::path(get, path = "/api/mcp/services/{name}/oauth", tag = "mcp", params(("name" = String, Path, description = "Service key")), responses((status = 200, description = "OAuth state without credentials")))]
+pub(crate) async fn oauth_status(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+) -> Result<Json<zk_mcp::oauth::OAuthStatus>, ApiError> {
+    Ok(Json(
+        state
+            .mcp()
+            .oauth_status(&name)
+            .await
+            .map_err(|error| manager_error(&error))?,
+    ))
+}
+
+/// Begin user consent. The result contains a browser URL, never a PKCE verifier.
+#[utoipa::path(post, path = "/api/mcp/services/{name}/oauth/authorize", tag = "mcp", params(("name" = String, Path, description = "Service key")), request_body = Value, responses((status = 200, description = "Browser authorization URL and verified resource identity")))]
+pub(crate) async fn oauth_authorize(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+    Json(options): Json<zk_mcp::oauth::OAuthOptions>,
+) -> Result<Json<zk_mcp::oauth::OAuthStart>, ApiError> {
+    Ok(Json(
+        state
+            .mcp()
+            .begin_oauth(&name, options)
+            .await
+            .map_err(|error| manager_error(&error))?,
+    ))
+}
+
+/// Disconnect and delete the local credential; report remote revocation truthfully.
+#[utoipa::path(post, path = "/api/mcp/services/{name}/oauth/logout", tag = "mcp", params(("name" = String, Path, description = "Service key")), responses((status = 200, description = "Local logout and actual remote revocation outcome")))]
+pub(crate) async fn oauth_logout(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+) -> Result<Json<Value>, ApiError> {
+    let revoked = state
+        .mcp()
+        .logout_oauth(&name)
+        .await
+        .map_err(|error| manager_error(&error))?;
+    Ok(Json(json!({"loggedOut":true,"remoteRevoked":revoked})))
+}
+
+/// List service intent and actual connection state without disclosing credentials.
+#[utoipa::path(get, path = "/api/mcp/services", tag = "mcp", responses((status = 200, description = "Service preferences and actual connection status")))]
+pub(crate) async fn list_services(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let services = state
+        .mcp()
+        .list_services()
+        .await
+        .map_err(|e| manager_error(&e))?;
+    Ok(Json(json!({"services": services})))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ServiceToggleRequest {
+    enabled: bool,
+}
+
+/// Persist and apply an explicit service switch without changing tool preferences.
+#[utoipa::path(patch, path = "/api/mcp/services/{name}", tag = "mcp", params(("name" = String, Path, description = "Service key")), request_body = Value, responses((status = 200, description = "Persisted service preference and observed state")))]
+pub(crate) async fn toggle_service(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+    Json(request): Json<ServiceToggleRequest>,
+) -> Result<Json<zk_mcp::McpServiceView>, ApiError> {
+    let view = state
+        .mcp()
+        .set_service_enabled(&name, request.enabled)
+        .await
+        .map_err(|e| manager_error(&e))?;
+    Ok(Json(view))
+}
+
+/// Source-compatible query-shaped toggle entry point.
+#[utoipa::path(patch, path = "/api/mcp/services/{name}/toggle", tag = "mcp", params(("name" = String, Path, description = "Service key"), ("enabled" = bool, Query, description = "Required service preference")), responses((status = 200, description = "Persisted service preference and observed state")))]
+pub(crate) async fn toggle_service_compat(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Json<zk_mcp::McpServiceView>, ApiError> {
+    let enabled = crate::api::http_params::require_spring_bool(&query, "enabled")?;
+    let view = state
+        .mcp()
+        .set_service_enabled(&name, enabled)
+        .await
+        .map_err(|e| manager_error(&e))?;
+    Ok(Json(view))
 }
 
 #[cfg(test)]

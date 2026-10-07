@@ -8,23 +8,32 @@
  * - ToolCallBlock (工具调用卡片)
  * - ImageBlock (图片内容块)
  *
+ * §7.2 AI 消息（Demo-A 卡式）：渐变 accent 方块头像（30px rounded-[10px]）+
+ * Card 容器（bg-surfacev2 + border-hairline + rounded-panel + shadow-e2，
+ * padding 18×20，行高 1.75）。
+ * 运行状态（§7.2/§10.2）：呼吸点 animate-accent-pulse + 文本 + tabular-nums 计时，
+ * 容器 aria-live="polite"，reduced-motion 静态呈现。
+ *
  * 流式更新: 当消息正在流式接收时，显示 streamingContent/thinkingContent
  * 并附加闪烁光标。完成后从 message.content 渲染最终内容。
  */
 
-import React, { useMemo } from 'react';
-import { Bot } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { BrandLogo } from '@/components/ui/BrandLogo';
 import type { Message, ContentBlock, ToolCallState } from '@/types';
 import TextBlock from './TextBlock';
 import ThinkingBlock from './ThinkingBlock';
-import ToolCallBlock from './ToolCallBlock';
 import GroupedToolUseBlock from './GroupedToolUseBlock';
-import ImageBlock from './ImageBlock';
-import TtsPlayButton from './TtsPlayButton';
+import { resolveToolCallState } from './toolCallState';
+import ToolCallBlock from './ToolCallBlock';
+import AssistantMessageActions from './AssistantMessageActions';
+import { AssistantBlockRenderer } from './assistantBlockRenderer';
 import { useStreamingText } from '@/hooks/useStreamingText';
-import { useTtsAvailability } from '@/hooks/useTtsAvailability';
 
 interface AssistantMessageProps {
+    /** 嵌入整轮助手卡片时，仅渲染正文与操作行。 */
+    embedded?: boolean;
+    hideActions?: boolean;
     message: Extract<Message, { type: 'assistant' }>;
     /** 是否正在流式接收此消息 */
     isStreaming?: boolean;
@@ -39,46 +48,65 @@ interface AssistantMessageProps {
 const AssistantMessage: React.FC<AssistantMessageProps> = ({
     message,
     isStreaming = false,
+    embedded = false,
+    hideActions = false,
     streamingContent,
     thinkingContent,
     activeToolCalls,
 }) => {
-    const ttsAvailable = useTtsAvailability();
-    const speakableText = useMemo(() => message.content
-        .filter((block): block is Extract<ContentBlock, { type: 'text' }> => block.type === 'text')
-        .map(block => block.text)
-        .join('\n')
-        .trim(), [message.content]);
-
     return (
-        <div className="assistant-message flex gap-3 px-4 py-3">
-            {/* Avatar */}
-            <div className="flex-shrink-0 w-7 h-7 rounded-full bg-purple-600 flex items-center justify-center">
-                <Bot size={14} className="text-white" />
-            </div>
+        <div className={embedded ? "assistant-message group min-w-0" : "assistant-message group flex gap-3 px-4 py-3"}>
+            {!embedded && <BrandLogo className="h-8 w-8" />}
 
-            {/* Content */}
-            <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-1 text-xs text-[var(--text-secondary)] mb-1 font-medium">
-                    <span>Assistant</span>
-                    {ttsAvailable && !isStreaming && speakableText && (
-                        <TtsPlayButton messageId={message.uuid} text={speakableText} />
+            {/* Card 容器（§7.2：surface + hairline + rounded-panel + shadow-e2，px-18/py-20） */}
+            <div className={embedded ? "min-w-0" : "flex-1 min-w-0 rounded-panel border border-hairline bg-surfacev2 shadow-e1 px-[18px] py-5"}>
+                {!embedded && <div className="flex items-center gap-1.5 mb-2 text-[13px] text-t3 font-medium">
+                    <span>zkcode</span>
+                </div>}
+
+                <div className="text-sm text-t1 leading-[1.75]">
+                    {isStreaming ? (
+                        <StreamingContent
+                            since={message.timestamp}
+                            streamingContent={streamingContent}
+                            thinkingContent={thinkingContent}
+                            activeToolCalls={activeToolCalls && new Map(
+                                [...activeToolCalls].filter(([id]) => message.content.some(
+                                    block => block.type === 'tool_use' && block.toolUseId === id)),
+                            )}
+                        />
+                    ) : (
+                        <FinalizedContent
+                            messageId={message.uuid}
+                            blocks={message.content}
+                            activeToolCalls={activeToolCalls}
+                        />
                     )}
                 </div>
 
-                {isStreaming ? (
-                    <StreamingContent
-                        streamingContent={streamingContent}
-                        thinkingContent={thinkingContent}
-                        activeToolCalls={activeToolCalls}
-                    />
-                ) : (
-                    <FinalizedContent
-                        blocks={message.content}
-                        activeToolCalls={activeToolCalls}
-                    />
-                )}
+                {/* 操作行（TTS + 复制 + 时间戳；与轮次分组路径共享 AssistantMessageActions） */}
+                {!hideActions && <AssistantMessageActions message={message} isStreaming={isStreaming} />}
             </div>
+        </div>
+    );
+};
+
+// ==================== 运行状态指示（§7.2 呼吸点 + 文本 + 计时） ====================
+
+const RunningIndicator: React.FC<{ label: string; since: number }> = ({ label, since }) => {
+    const [now, setNow] = useState(() => Date.now());
+    useEffect(() => {
+        const timer = window.setInterval(() => setNow(Date.now()), 1000);
+        return () => window.clearInterval(timer);
+    }, []);
+    const elapsed = Math.max(0, Math.floor((now - since) / 1000));
+    const mm = String(Math.floor(elapsed / 60)).padStart(2, '0');
+    const ss = String(elapsed % 60).padStart(2, '0');
+    return (
+        <div className="flex items-center gap-2 text-sm text-t3" aria-live="polite">
+            <span className="inline-block h-2 w-2 rounded-full bg-accent2 animate-accent-pulse motion-reduce:animate-none" />
+            <span>{label}</span>
+            <span className="tabular-nums text-t4">{mm}:{ss}</span>
         </div>
     );
 };
@@ -86,12 +114,14 @@ const AssistantMessage: React.FC<AssistantMessageProps> = ({
 // ==================== Streaming Mode ====================
 
 interface StreamingContentProps {
+    since: number;
     streamingContent?: string;
     thinkingContent?: string;
     activeToolCalls?: Map<string, ToolCallState>;
 }
 
 const StreamingContent: React.FC<StreamingContentProps> = ({
+    since,
     streamingContent,
     thinkingContent,
     activeToolCalls,
@@ -99,13 +129,9 @@ const StreamingContent: React.FC<StreamingContentProps> = ({
     // 使用外部高性能 streaming store 获取实时文本（绕过 Immer 开销）
     const externalStreamingText = useStreamingText();
     const displayText = externalStreamingText || streamingContent;
-    const groupedToolCalls = useMemo(
-        () => Object.fromEntries(activeToolCalls?.entries() ?? []),
-        [activeToolCalls],
-    );
 
     return (
-    <div className="text-sm text-[var(--text-primary)]">
+    <>
         {/* Thinking (streaming) */}
         {thinkingContent && (
             <ThinkingBlock content={thinkingContent} streaming />
@@ -119,29 +145,29 @@ const StreamingContent: React.FC<StreamingContentProps> = ({
         {/* Active tool calls */}
         {activeToolCalls && activeToolCalls.size > 0 && (
             <div className="mt-1">
-                <GroupedToolUseBlock toolCalls={groupedToolCalls} />
+                {Array.from(activeToolCalls.entries()).map(([id, tc]) => (
+                    <ToolCallBlock key={id} toolUseId={id} toolCall={tc} />
+                ))}
             </div>
         )}
 
-        {/* Show waiting indicator if nothing visible yet */}
+        {/* 运行状态：呼吸点 + 文本 + tabular-nums 计时（禁止无文案裸转圈） */}
         {!displayText && !thinkingContent && (!activeToolCalls || activeToolCalls.size === 0) && (
-            <div className="flex items-center gap-2 text-[var(--text-muted)] text-sm">
-                <span className="inline-block w-2 h-4 bg-purple-400 animate-pulse rounded-sm" />
-                <span>Thinking...</span>
-            </div>
+            <RunningIndicator label="Thinking..." since={since} />
         )}
-    </div>
+    </>
     );
 };
 
 // ==================== Finalized Mode ====================
 
 interface FinalizedContentProps {
+    messageId: string;
     blocks: ContentBlock[];
     activeToolCalls?: Map<string, ToolCallState>;
 }
 
-const FinalizedContent: React.FC<FinalizedContentProps> = ({ blocks, activeToolCalls }) => {
+const FinalizedContent: React.FC<FinalizedContentProps> = ({ blocks, activeToolCalls, messageId }) => {
     const rendered: React.ReactNode[] = [];
     for (let index = 0; index < blocks.length;) {
         const block = blocks[index];
@@ -150,6 +176,7 @@ const FinalizedContent: React.FC<FinalizedContentProps> = ({ blocks, activeToolC
                 <AssistantBlockRenderer
                     key={`${block.type}-${index}`}
                     block={block}
+                    messageId={messageId}
                     activeToolCalls={activeToolCalls}
                 />,
             );
@@ -161,7 +188,7 @@ const FinalizedContent: React.FC<FinalizedContentProps> = ({ blocks, activeToolC
         const firstIndex = index;
         while (index < blocks.length && blocks[index].type === 'tool_use') {
             const toolBlock = blocks[index] as Extract<ContentBlock, { type: 'tool_use' }>;
-            toolCalls[toolBlock.toolUseId] = toolCallState(toolBlock, activeToolCalls);
+            toolCalls[toolBlock.toolUseId] = resolveToolCallState({ ...toolBlock, presentationMessageId: messageId }, activeToolCalls);
             index += 1;
         }
         rendered.push(
@@ -173,66 +200,6 @@ const FinalizedContent: React.FC<FinalizedContentProps> = ({ blocks, activeToolC
     }
 
     return <div className="text-sm text-[var(--text-primary)]">{rendered}</div>;
-};
-
-function toolCallState(
-    block: Extract<ContentBlock, { type: 'tool_use' }>,
-    activeToolCalls?: Map<string, ToolCallState>,
-): ToolCallState {
-    return activeToolCalls?.get(block.toolUseId) ?? {
-        toolUseId: block.toolUseId,
-        toolName: block.toolName,
-        input: block.input,
-        status: block.result?.isError ? 'error' : 'completed',
-        result: block.result,
-        startTime: 0,
-    };
-}
-
-// ==================== Block Router ====================
-
-interface AssistantBlockRendererProps {
-    block: ContentBlock;
-    activeToolCalls?: Map<string, ToolCallState>;
-}
-
-const AssistantBlockRenderer: React.FC<AssistantBlockRendererProps> = ({ block, activeToolCalls }) => {
-    switch (block.type) {
-        case 'text':
-            return <TextBlock text={block.text} />;
-        case 'thinking':
-            return <ThinkingBlock content={block.thinking} />;
-        case 'redacted_thinking':
-            return <ThinkingBlock content="" redacted />;
-        case 'tool_use': {
-            return <ToolCallBlock
-                toolUseId={block.toolUseId}
-                toolCall={toolCallState(block, activeToolCalls)}
-            />;
-        }
-        case 'tool_result': {
-            // Tool results are displayed within their ToolCallBlock
-            // Standalone rendering for cases where tool_use block is not adjacent
-            const tc: ToolCallState = {
-                toolName: 'Tool',
-                input: {},
-                status: block.isError ? 'error' : 'completed',
-                result: { content: block.content, isError: block.isError, metadata: block.metadata },
-                startTime: 0,
-            };
-            return <ToolCallBlock toolUseId={block.toolUseId} toolCall={tc} />;
-        }
-        case 'image':
-            return <ImageBlock base64Data={block.base64Data} src={block.url} mediaType={block.mediaType} />;
-        case 'server_tool_use':
-            return (
-                <div className="text-xs text-gray-500 italic my-1">
-                    Server tool: {block.toolName}
-                </div>
-            );
-        default:
-            return null;
-    }
 };
 
 export default React.memo(AssistantMessage);

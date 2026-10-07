@@ -19,6 +19,7 @@ const READERS: usize = 16;
 /// user 文本消息便捷构造。
 fn user_msg(content: &str) -> NewMessage {
     NewMessage {
+        meta: None,
         role: MessageRole::User,
         content: vec![StoredBlock::Text {
             text: content.to_owned(),

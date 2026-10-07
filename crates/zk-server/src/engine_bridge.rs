@@ -6,6 +6,15 @@
 //! → `Engine::handle_client_message`（每 run 一 spawn，同步入口不阻塞
 //! WS 读循环）。
 
+#[cfg(test)]
+#[path = "agent_worktree_acceptance.rs"]
+mod agent_worktree_acceptance;
+#[cfg(test)]
+#[path = "background_bash_acceptance.rs"]
+mod background_bash_acceptance;
+#[path = "shell_task.rs"]
+mod shell_task;
+
 use std::sync::{Arc, OnceLock};
 
 use futures::future::BoxFuture;
@@ -35,7 +44,7 @@ use zk_tools::{
     TaskOutputQuery, TaskOutputTool, TaskPortError, TaskSnapshot, TaskStopReceipt, TaskStopTool,
     TaskUpdateTool, TerminalCaptureTool, TodoWriteTool, ToolDescriptor, ToolRegistry,
     ToolSearchTool, VerifyPlanExecutionTool, VisualizationTool, WebFetchTool, WebSearchTool,
-    WorktreeTool, WriteFileTool,
+    WriteFileTool,
 };
 
 use crate::api::browser_replay::BrowserReplayStore;
@@ -61,6 +70,19 @@ use crate::ws::{EngineHook, WsHub};
 struct HubSink {
     hub: WsHub,
     db: zk_db::Db,
+}
+
+fn independent_compact_summarizer(
+    state: &AppState,
+) -> Arc<dyn zk_engine::context::compact::Summarizer> {
+    let name = std::env::var("LLM_COMPACT_PROVIDER").unwrap_or_else(|_| "deepseek".into());
+    let model = std::env::var("LLM_COMPACT_MODEL").unwrap_or_else(|_| "deepseek-flash".into());
+    if let Some(registry) = state.providers.load().isolated_provider(&name, &model) {
+        Arc::new(LlmSummarizer::from_summary_env(Arc::new(registry)))
+    } else {
+        tracing::info!(provider=%name, model=%model, "independent summarizer unavailable; using local compaction");
+        Arc::new(zk_engine::context::compact::NoopSummarizer)
+    }
 }
 
 /// Build the process-wide durable task runtime before any transport or tool
@@ -135,10 +157,11 @@ pub fn wire_engine(state: &AppState) -> Arc<Engine> {
     let lightweight_model = select_lightweight_model(
         &state.providers.load(),
         std::env::var("ZK_LIGHTWEIGHT_MODEL").ok().as_deref(),
+        configured_fast_model().as_deref(),
     );
     let llm_summarizer = Arc::new(LlmSummarizer::new(Arc::clone(&provider), lightweight_model));
     let compact_summarizer: Arc<dyn zk_engine::context::compact::Summarizer> =
-        llm_summarizer.clone();
+        independent_compact_summarizer(state);
     let tool_summarizer: Arc<dyn zk_engine::LightModelSummarizer> = llm_summarizer;
     // Phase A7：剪贴板图片 URL 信任校验策略（旧 `OssPublishProperties.
     // isTrustedClipboardImageUrl`）。OSS 未配置时策略恒拒绝——url 附件在
@@ -163,11 +186,18 @@ pub fn wire_engine(state: &AppState) -> Arc<Engine> {
         )
         .with_execution_supervisor(&state.execution_supervisor)
         .with_task_runtime(Arc::clone(&state.task_runtime))
+        .with_run_tool_scopes(Arc::clone(&state.run_tool_scopes))
         .with_coordinator(Arc::clone(&state.coordinator))
         .with_run_cancellation(state.authz.terminations.clone())
         .with_root_task_budget_policy(state.config.root_task_budget_policy.clone())
         .with_startup_epoch(state.startup_epoch())
         .with_summarizers(compact_summarizer, tool_summarizer)
+        .with_visualization_router(crate::auxiliary::visualization_router(Arc::clone(
+            &state.providers,
+        )))
+        .with_memory_retriever(crate::auxiliary::memory_retriever(Arc::clone(
+            &state.providers,
+        )))
         .with_cost_tracker(cost_tracker)
         // Batch 5 Step 5：回合事务边界端口。实例上提到 `AppState`，与
         // `/api/sessions/{id}/history/*` 端点同源——否则端点侧读不到引擎
@@ -178,7 +208,13 @@ pub fn wire_engine(state: &AppState) -> Arc<Engine> {
         .with_hooks(state.hooks.clone())
         .with_observability(Arc::clone(&state.observability))
         .with_trusted_image_url(trusted_image_url)
-        .with_vision_provider_view(vision_providers),
+        .with_vision_provider_view(vision_providers)
+        .with_conversation_preferences(Arc::new(
+            crate::api::execution_preferences::ChatPreferences {
+                db: state.db.clone(),
+                providers: Arc::clone(&state.providers),
+            },
+        )),
     );
     state.hub.set_engine(Arc::new(EngineBridge {
         engine: Arc::clone(&engine),
@@ -190,12 +226,26 @@ pub fn wire_engine(state: &AppState) -> Arc<Engine> {
     engine
 }
 
+pub(crate) fn configured_fast_model() -> Option<String> {
+    std::env::var("ZK_FAST_MODEL")
+        .ok()
+        .filter(|model| !model.trim().is_empty())
+        .or_else(|| std::env::var("LLM_FAST_MODEL").ok())
+}
+
 fn select_lightweight_model(
     providers: &zk_llm::ProviderRegistry,
     configured: Option<&str>,
+    fast_model: Option<&str>,
 ) -> String {
     if let Some(configured) = configured.filter(|model| !model.trim().is_empty()) {
         return configured.trim().to_owned();
+    }
+    if let Some(model) = fast_model
+        .map(str::trim)
+        .filter(|model| providers.supports_model(model))
+    {
+        return model.to_owned();
     }
     providers
         .models()
@@ -486,8 +536,8 @@ fn resolve_agent_model(
 /// `TaskCoordinatorPort` 的生产实现——所有 Agent/TaskCreate 操作进入同一个
 /// DB-authoritative [`TaskRuntime`]。
 struct TaskCoordinatorBridge {
+    shell: Arc<ShellTaskCoordinatorBridge>,
     runtime: Arc<TaskRuntime>,
-    terminations: Arc<crate::run_termination::RunTerminationCoordinator>,
     executor: Arc<SubAgentExecutor>,
     db: zk_db::Db,
     providers: Arc<zk_llm::SwappableProvider>,
@@ -511,6 +561,20 @@ impl TaskCoordinatorBridge {
         &self,
         invocation: AgentInvocation,
         caller_cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<TaskSnapshot, TaskPortError> {
+        self.submit_agent_with_lifecycle(invocation, caller_cancel, "attached")
+            .await
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Validate, persist and dispatch under one Task lifecycle boundary."
+    )]
+    async fn submit_agent_with_lifecycle(
+        &self,
+        invocation: AgentInvocation,
+        caller_cancel: tokio_util::sync::CancellationToken,
+        lifecycle: &str,
     ) -> Result<TaskSnapshot, TaskPortError> {
         if invocation.isolation == "worktree" && !self.worktree_enabled {
             return Err(TaskPortError::new(
@@ -564,6 +628,7 @@ impl TaskCoordinatorBridge {
             || {
                 READ_ONLY_CHILD_TOOLS
                     .iter()
+                    .chain(std::iter::once(&"TaskUpdate"))
                     .map(|name| (*name).to_owned())
                     .collect::<Vec<_>>()
             },
@@ -574,7 +639,7 @@ impl TaskCoordinatorBridge {
             "subagentType": invocation.subagent_type,
             "model": model,
             "waitMode": invocation.wait_mode,
-            "lifecycle": "attached",
+            "lifecycle": lifecycle,
             "allowWriteTools": allow_write_tools,
             "allowedTools": persisted_allowed_tools,
             "permissionPolicyVersion": 1,
@@ -697,13 +762,159 @@ impl TaskCoordinatorBridge {
     }
 }
 
+/// Shell ownership and task control are independent of Agent/Swarm feature flags.
+struct ShellTaskCoordinatorBridge {
+    shell_engine: Arc<Engine>,
+    runtime: Arc<TaskRuntime>,
+    terminations: Arc<crate::run_termination::RunTerminationCoordinator>,
+    db: zk_db::Db,
+    startup_epoch: i64,
+}
+
+impl zk_tools::bash::BackgroundShellPort for ShellTaskCoordinatorBridge {
+    fn submit(
+        &self,
+        invocation: TaskInvocation,
+    ) -> BoxFuture<'_, Result<TaskSnapshot, TaskPortError>> {
+        Box::pin(async move { self.submit_shell(invocation).await })
+    }
+}
+
+impl ShellTaskCoordinatorBridge {
+    async fn submit_shell(
+        &self,
+        invocation: TaskInvocation,
+    ) -> Result<TaskSnapshot, TaskPortError> {
+        if self.startup_epoch <= 0 {
+            return Err(TaskPortError::new(
+                "STARTUP_EPOCH_NOT_READY",
+                "durable process startup has not completed",
+                true,
+            ));
+        }
+        let command = invocation
+            .command
+            .as_ref()
+            .filter(|command| !command.trim().is_empty())
+            .cloned()
+            .ok_or_else(|| {
+                TaskPortError::new("SHELL_COMMAND_EMPTY", "shell tasks require command", false)
+            })?;
+        let parent = self
+            .runtime
+            .resolve_parent_task(&invocation.session_id, &invocation.parent_run_id)
+            .await
+            .map_err(port_error)?;
+        let run = self
+            .db
+            .find_run_by_id(&invocation.parent_run_id)
+            .await
+            .map_err(|error| TaskPortError::new("TASK_STORAGE_ERROR", error.to_string(), true))?
+            .ok_or_else(|| {
+                TaskPortError::new("PARENT_RUN_NOT_FOUND", "parent Run missing", false)
+            })?;
+        // Reuse the same canonical session/workspace ancestry validation as Agent.
+        let probe = AgentInvocation {
+            prompt: command.clone(),
+            description: invocation.description.clone(),
+            subagent_type: None,
+            model_override: None,
+            isolation: "readOnly".to_owned(),
+            wait_mode: "background".to_owned(),
+            parent_session_id: invocation.session_id.clone(),
+            parent_run_id: invocation.parent_run_id.clone(),
+            working_directory: invocation.working_directory.clone(),
+            tool_use_id: invocation.tool_use_id.clone(),
+            allowed_tools: None,
+        };
+        validate_agent_invocation(&self.db, &probe).await?;
+        let working_directory =
+            inherited_shell_directory(&invocation.session_id, &invocation.working_directory)?;
+        if invocation
+            .authorized_shell_cwd
+            .as_ref()
+            .is_some_and(|authorized| authorized != &working_directory)
+        {
+            return Err(TaskPortError::new(
+                "BASH_WORKING_DIRECTORY_CHANGED",
+                "Shell cwd changed after authorization; authorize the command again",
+                false,
+            ));
+        }
+        let mut submission = ChildTaskSubmission::attached(
+            &invocation.session_id,
+            parent.id,
+            &invocation.parent_run_id,
+            &invocation.tool_use_id,
+            &invocation.description,
+            &command,
+            run.model,
+            working_directory.to_string_lossy(),
+        );
+        "shell".clone_into(&mut submission.task_type);
+        submission.startup_epoch = self.startup_epoch;
+        if let Some(timeout) = invocation.timeout_ms {
+            submission.timeout =
+                std::time::Duration::from_millis(timeout.min(zk_tools::bash::BASH_MAX_TIMEOUT_MS));
+        }
+        submission.execution_config_json=serde_json::json!({"timeoutMs":invocation.timeout_ms,"lifecycle":invocation.lifecycle,"command":command,"isolation":"sharedWorkspace","allowedTools":["Bash"],"permissionPolicyVersion":1}).to_string();
+        let engine = Arc::clone(&self.shell_engine);
+        let working_directory = working_directory.to_string_lossy().into_owned();
+        let receipt = self
+            .runtime
+            .submit_child(submission, move |execution| async move {
+                engine
+                    .run_shell_task(execution, command, working_directory)
+                    .await
+            })
+            .await
+            .map_err(port_error)?;
+        runtime_snapshot(&self.db, receipt.task).await
+    }
+}
+
+fn inherited_shell_directory(
+    session_id: &str,
+    original: &std::path::Path,
+) -> Result<std::path::PathBuf, TaskPortError> {
+    let root = std::fs::canonicalize(original).map_err(|_| {
+        TaskPortError::new(
+            "SHELL_WORKSPACE_UNAVAILABLE",
+            "Authorized workspace is unavailable",
+            false,
+        )
+    })?;
+    let tracked = zk_tools::bash::shell_state::ShellStateManager::resolve_working_directory(
+        session_id,
+        &original.to_string_lossy(),
+    );
+    let directory = std::fs::canonicalize(tracked).map_err(|_| {
+        TaskPortError::new(
+            "SHELL_CWD_UNAVAILABLE",
+            "Parent shell directory is unavailable",
+            false,
+        )
+    })?;
+    if !directory.starts_with(root) {
+        return Err(TaskPortError::new(
+            "SHELL_CWD_OUTSIDE_WORKSPACE",
+            "Parent shell directory is outside the authorized workspace",
+            false,
+        ));
+    }
+    Ok(directory)
+}
+
 impl TaskCoordinatorPort for TaskCoordinatorBridge {
     fn submit_task(
         &self,
         invocation: TaskInvocation,
     ) -> BoxFuture<'_, Result<TaskSnapshot, TaskPortError>> {
         Box::pin(async move {
-            self.submit_agent(
+            if invocation.task_type == "shell" {
+                return self.shell.submit_shell(invocation).await;
+            }
+            self.submit_agent_with_lifecycle(
                 AgentInvocation {
                     prompt: invocation.prompt,
                     description: invocation.description,
@@ -718,11 +929,86 @@ impl TaskCoordinatorPort for TaskCoordinatorBridge {
                     allowed_tools: None,
                 },
                 tokio_util::sync::CancellationToken::new(),
+                &invocation.lifecycle,
             )
             .await
         })
     }
 
+    fn cancel_task(
+        &self,
+        task_id: String,
+        session_id: String,
+        reason: String,
+    ) -> BoxFuture<'_, Result<TaskStopReceipt, TaskPortError>> {
+        self.shell.cancel_task(task_id, session_id, reason)
+    }
+    fn get_task(
+        &self,
+        task_id: String,
+        session_id: String,
+    ) -> BoxFuture<'_, Result<Option<TaskSnapshot>, TaskPortError>> {
+        self.shell.get_task(task_id, session_id)
+    }
+    fn list_tasks(
+        &self,
+        session_id: String,
+        filter_status: Option<String>,
+    ) -> BoxFuture<'_, Result<Vec<TaskSnapshot>, TaskPortError>> {
+        self.shell.list_tasks(session_id, filter_status)
+    }
+    fn update_task(
+        &self,
+        task_id: String,
+        session_id: String,
+        description: Option<String>,
+        plan: Option<String>,
+        reported_progress: Option<f64>,
+        output: Option<String>,
+    ) -> BoxFuture<'_, Result<TaskSnapshot, TaskPortError>> {
+        self.shell.update_task(
+            task_id,
+            session_id,
+            description,
+            plan,
+            reported_progress,
+            output,
+        )
+    }
+    fn read_output(
+        &self,
+        query: TaskOutputQuery,
+    ) -> BoxFuture<'_, Result<TaskOutputPage, TaskPortError>> {
+        self.shell.read_output(query)
+    }
+    fn update_own_output(
+        &self,
+        task_id: Option<String>,
+        session_id: String,
+        run_id: String,
+        output: String,
+    ) -> BoxFuture<'_, Result<TaskSnapshot, TaskPortError>> {
+        self.shell
+            .update_own_output(task_id, session_id, run_id, output)
+    }
+}
+
+impl TaskCoordinatorPort for ShellTaskCoordinatorBridge {
+    fn submit_task(
+        &self,
+        invocation: TaskInvocation,
+    ) -> BoxFuture<'_, Result<TaskSnapshot, TaskPortError>> {
+        Box::pin(async move {
+            if invocation.task_type != "shell" {
+                return Err(TaskPortError::new(
+                    "AGENT_DISABLED",
+                    "Only shell tasks are available",
+                    false,
+                ));
+            }
+            self.submit_shell(invocation).await
+        })
+    }
     fn cancel_task(
         &self,
         task_id: String,
@@ -811,6 +1097,7 @@ impl TaskCoordinatorPort for TaskCoordinatorBridge {
         description: Option<String>,
         plan: Option<String>,
         reported_progress: Option<f64>,
+        output: Option<String>,
     ) -> BoxFuture<'_, Result<TaskSnapshot, TaskPortError>> {
         Box::pin(async move {
             let task = self
@@ -821,6 +1108,7 @@ impl TaskCoordinatorPort for TaskCoordinatorBridge {
                     description.as_deref(),
                     plan.as_deref(),
                     reported_progress,
+                    output.as_deref(),
                 )
                 .await
                 .map_err(port_error)?;
@@ -875,6 +1163,23 @@ impl TaskCoordinatorPort for TaskCoordinatorBridge {
             })
         })
     }
+
+    fn update_own_output(
+        &self,
+        task_id: Option<String>,
+        session_id: String,
+        run_id: String,
+        output: String,
+    ) -> BoxFuture<'_, Result<TaskSnapshot, TaskPortError>> {
+        Box::pin(async move {
+            let task = self
+                .runtime
+                .update_own_display_output(&session_id, &run_id, task_id.as_deref(), &output)
+                .await
+                .map_err(port_error)?;
+            runtime_snapshot(&self.db, task).await
+        })
+    }
 }
 
 fn port_error(error: TaskRuntimeError) -> TaskPortError {
@@ -901,7 +1206,9 @@ fn parse_task_status(value: &str) -> Result<zk_db::TaskStatus, TaskPortError> {
     }
 }
 
-fn agent_result_to_task_result(result: zk_engine::agent::AgentResult) -> TaskExecutionResult {
+pub(crate) fn agent_result_to_task_result(
+    result: zk_engine::agent::AgentResult,
+) -> TaskExecutionResult {
     let error_code = result.error_code;
     let content = result.result.unwrap_or_default();
     if error_code.as_deref() == Some("SUBAGENT_STOPPED_PARTIAL") {
@@ -1025,6 +1332,8 @@ async fn runtime_snapshot_with_result(
         },
     );
     Ok(TaskSnapshot {
+        task_type: task.task_type,
+        lifecycle: task.lifecycle_policy,
         task_id: task.id,
         session_id: task.session_id,
         parent_task_id: task.parent_task_id,
@@ -1033,6 +1342,7 @@ async fn runtime_snapshot_with_result(
         reason: task.reason,
         description: Some(task.description),
         output,
+        display_output: task.display_output,
         error,
         result_version,
         partial,
@@ -1100,7 +1410,22 @@ fn build_tool_registry_with_search_endpoint(
     registry.register(Arc::new(ListDirectoryTool));
     registry.register(Arc::new(GlobTool));
     registry.register(Arc::new(GrepTool));
-    registry.register(Arc::new(BashTool));
+    let shell_port = Arc::new(ShellTaskCoordinatorBridge {
+        shell_engine: shell_task::build_engine(state),
+        runtime: Arc::clone(&state.task_runtime),
+        terminations: Arc::clone(&state.authz.terminations),
+        db: state.db.clone(),
+        startup_epoch: state.startup_epoch(),
+    });
+    registry.register(Arc::new(BashTool::with_background_backend(
+        shell_port.clone(),
+    )));
+    registry.register(Arc::new(zk_tools::BriefTool));
+    let shell_controls: Arc<dyn TaskCoordinatorPort> = shell_port.clone();
+    registry.register(Arc::new(TaskListTool::new(Arc::clone(&shell_controls))));
+    registry.register(Arc::new(TaskGetTool::new(Arc::clone(&shell_controls))));
+    registry.register(Arc::new(TaskOutputTool::new(Arc::clone(&shell_controls))));
+    registry.register(Arc::new(TaskStopTool::new(shell_controls)));
     registry.register(Arc::new(GitDiffTool));
     registry.register(Arc::new(GitLogTool));
     registry.register(Arc::new(GitStatusTool));
@@ -1126,7 +1451,9 @@ fn build_tool_registry_with_search_endpoint(
     registry.register(Arc::new(EnterPlanModeTool));
     registry.register(Arc::new(ExitPlanModeTool));
     registry.register(Arc::new(SnipTool));
-    registry.register(Arc::new(CtxInspectTool::new(None)));
+    registry.register(Arc::new(CtxInspectTool::new(Some(Arc::new(
+        crate::context_info::DbContextInfo(state.db.clone()),
+    )))));
     registry.register(Arc::new(VerifyPlanExecutionTool));
     registry.register(Arc::new(NotebookEditTool::with_snapshot_sink(
         snapshot_sink,
@@ -1142,6 +1469,18 @@ fn build_tool_registry_with_search_endpoint(
     let search_backend = select_search_backend(search_endpoint, Arc::clone(&safe_http), mcp_slot);
     registry.register(Arc::new(WebSearchTool::new(search_backend)));
     let mut skill_fork_backend: Option<Arc<dyn AgentToolBackend>> = None;
+    if state.config.worktree_enabled && !state.config.agent_enabled {
+        let manager = WorktreeManager::for_repo(
+            &state.config.workspace_default_root,
+            Arc::new(SystemGitCommandRunner),
+        )
+        .expect("validated workspace_default_root for WorktreeManager")
+        .with_runtime(state.db.clone(), Arc::clone(&state.execution_supervisor));
+        registry.register(Arc::new(zk_tools::worktree::ManagedWorktreeTool(Arc::new(
+            manager,
+        ))));
+    }
+
     // 子代理与 Task 在安全冻结解除前不进入生产目录。启用 Agent 但尚未启用
     // 写能力时，工厂在注册期裁掉 Write/Edit/Bash。
     if state.config.agent_enabled {
@@ -1162,10 +1501,11 @@ fn build_tool_registry_with_search_endpoint(
             select_lightweight_model(
                 &state.providers.load(),
                 std::env::var("ZK_LIGHTWEIGHT_MODEL").ok().as_deref(),
+                configured_fast_model().as_deref(),
             ),
         ));
         let child_compact_summarizer: Arc<dyn zk_engine::context::compact::Summarizer> =
-            child_llm_summarizer.clone();
+            independent_compact_summarizer(state);
         let child_tool_summarizer: Arc<dyn zk_engine::LightModelSummarizer> = child_llm_summarizer;
         let factory = RealSubAgentEngineFactory::new_with_production_services(
             state.db.clone(),
@@ -1183,7 +1523,12 @@ fn build_tool_registry_with_search_endpoint(
             Arc::clone(&state.execution_supervisor),
             child_compact_summarizer,
             child_tool_summarizer,
-        );
+        )
+        .with_visualization_router(crate::auxiliary::visualization_router(Arc::clone(
+            &state.providers,
+        )))
+        .with_vision_provider_view(state.providers.clone());
+        let factory = factory.with_run_tool_scopes(Arc::clone(&state.run_tool_scopes));
         let executor = Arc::new(SubAgentExecutor::new_with_mailbox_router(
             Arc::new(AgentConcurrencyController::default()),
             Arc::new(factory),
@@ -1191,7 +1536,8 @@ fn build_tool_registry_with_search_endpoint(
                 &state.config.workspace_default_root,
                 Arc::new(SystemGitCommandRunner),
             )
-            .expect("validated workspace_default_root for WorktreeManager"),
+            .expect("validated workspace_default_root for WorktreeManager")
+            .with_runtime(state.db.clone(), Arc::clone(&state.execution_supervisor)),
             AgentTimeoutConfig::default(),
             Arc::clone(&mailbox_router),
         ));
@@ -1201,9 +1547,15 @@ fn build_tool_registry_with_search_endpoint(
             tasks: Arc::clone(&runtime),
         });
         state.set_agent_runtime(agent_runtime);
+        if state.config.worktree_enabled {
+            registry.register(Arc::new(zk_tools::worktree::ManagedWorktreeTool(
+                executor.worktree_manager(),
+            )));
+        }
+
         let task_port = Arc::new(TaskCoordinatorBridge {
+            shell: shell_port,
             runtime: Arc::clone(&runtime),
-            terminations: Arc::clone(&state.authz.terminations),
             executor: Arc::clone(&executor),
             db: state.db.clone(),
             providers: Arc::clone(&state.providers),
@@ -1228,10 +1580,7 @@ fn build_tool_registry_with_search_endpoint(
         let port: Arc<dyn TaskCoordinatorPort> = task_port;
         registry.register(Arc::new(TaskCreateTool::new(Arc::clone(&port))));
         registry.register(Arc::new(TaskUpdateTool::new(Arc::clone(&port))));
-        registry.register(Arc::new(TaskListTool::new(Arc::clone(&port))));
-        registry.register(Arc::new(TaskGetTool::new(Arc::clone(&port))));
-        registry.register(Arc::new(TaskOutputTool::new(Arc::clone(&port))));
-        registry.register(Arc::new(TaskStopTool::new(port)));
+
         // Cron is a gated adapter over this exact TaskRuntime/Executor pair.
         // Registering inside the successfully assembled Agent branch prevents
         // the model from seeing schedule tools that cannot execute jobs.
@@ -1249,17 +1598,16 @@ fn build_tool_registry_with_search_endpoint(
     // 每注册表一个 `ReplManager`：会话表随注册表生命周期，`Drop` 时子进程
     // 经 `kill_on_drop` 回收（旧 `@PreDestroy → destroyAll()` 的等价物）。
     registry.register(Arc::new(REPLTool::new(Arc::new(ReplManager::new()))));
-    if state.config.worktree_enabled {
-        registry.register(Arc::new(WorktreeTool));
-    }
+    // Managed Worktree is registered with the shared Agent runtime above.
     registry.register(Arc::new(TerminalCaptureTool));
+    registry.register(Arc::new(crate::handoff::HandoffReadTool(state.db.clone())));
     let mut skill_known_tools = registry.names();
     // 技能声明在能力暂时不可用时仍可加载；真正执行时，引擎目录只提供当前
     // 动态注册的交集，不会绕过 Python 能力门。
     skill_known_tools.extend(["WebBrowser", "CodeIntel", "Git"].map(str::to_owned));
     skill_known_tools.push("Skill".to_owned());
-    registry.register(Arc::new(SkillTool::new(
-        Arc::clone(&state.skills),
+    registry.register(Arc::new(SkillTool::with_catalog(
+        Arc::clone(&state.skill_catalog),
         Arc::clone(&state.providers),
         state.db.clone(),
         skill_known_tools,
@@ -1274,6 +1622,8 @@ fn build_tool_registry_with_search_endpoint(
     registry.register(Arc::new(ToolSearchTool::new(Arc::new(
         StaticToolCatalog::new(descriptors),
     ))));
+    // Skill visibility is contextual: the Run scope filters this exact binding
+    // after the owning session has selected its project view.
     registry
 }
 
@@ -1368,6 +1718,31 @@ pub(crate) fn refresh_tool_search_catalog(registry: &ToolRegistry) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn shell_task_inherits_parent_current_directory_without_expanding_workspace() {
+        use zk_tools::bash::shell_state::ShellStateManager;
+        let session = format!("shell-inheritance-{}", uuid::Uuid::new_v4());
+        let workspace = std::env::temp_dir().join(&session);
+        std::fs::create_dir(&workspace).unwrap();
+        let workspace = workspace.canonicalize().unwrap();
+        let nested = workspace.join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let _manager = ShellStateManager::new();
+        ShellStateManager::reset_cwd(&session, nested.to_str().unwrap());
+        assert_eq!(
+            super::inherited_shell_directory(&session, &workspace).unwrap(),
+            nested
+        );
+        ShellStateManager::reset_cwd(&session, workspace.parent().unwrap().to_str().unwrap());
+        assert_eq!(
+            super::inherited_shell_directory(&session, &workspace)
+                .unwrap_err()
+                .code,
+            "SHELL_CWD_OUTSIDE_WORKSPACE"
+        );
+        std::fs::remove_file(ShellStateManager::cwd_tracking_path(&session)).unwrap();
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
     use std::collections::BTreeMap;
     use std::sync::{Arc, OnceLock};
     use std::time::Duration;
@@ -1464,6 +1839,7 @@ mod tests {
             [
                 "AskUserQuestion",
                 "Bash",
+                "Brief",
                 "Config",
                 "CtxInspect",
                 "Edit",
@@ -1474,6 +1850,7 @@ mod tests {
                 "GitStatus",
                 "Glob",
                 "Grep",
+                "HandoffRead",
                 "ListDir",
                 "ListMcpResources",
                 "Memory",
@@ -1486,6 +1863,10 @@ mod tests {
                 "Sleep",
                 "Snip",
                 "SyntheticOutput",
+                "TaskGet",
+                "TaskList",
+                "TaskOutput",
+                "TaskStop",
                 "TerminalCapture",
                 "TodoWrite",
                 "ToolSearch",
@@ -1566,7 +1947,7 @@ mod tests {
         let digest = format!("{:x}", Sha256::digest(encoded));
         assert_eq!(
             digest,
-            "c755caa676a8ecb5ed332ba1ba9577e410ea4f0932058768a3f3dfa6b29b5f9b"
+            "9cf070a498aea955528188ea7b15fa1fd77a706ca30cb975b3d5d316c770a95c"
         );
     }
 
@@ -1652,6 +2033,7 @@ mod tests {
             [
                 "AskUserQuestion",
                 "Bash",
+                "Brief",
                 "CodeIntel",
                 "Config",
                 "CtxInspect",
@@ -1664,6 +2046,7 @@ mod tests {
                 "GitStatus",
                 "Glob",
                 "Grep",
+                "HandoffRead",
                 "ListDir",
                 "ListMcpResources",
                 "Memory",
@@ -1676,6 +2059,10 @@ mod tests {
                 "Sleep",
                 "Snip",
                 "SyntheticOutput",
+                "TaskGet",
+                "TaskList",
+                "TaskOutput",
+                "TaskStop",
                 "TerminalCapture",
                 "TodoWrite",
                 "ToolSearch",
@@ -1687,7 +2074,7 @@ mod tests {
                 "WebSearch",
                 "Write",
             ],
-            "33 frozen base tools + 3 python bridge tools"
+            "39 base tools + 3 python bridge tools"
         );
         for name in ["WebBrowser", "CodeIntel", "Git"] {
             let tool = registry.get(name).expect("python bridge tool registered");
@@ -1726,11 +2113,7 @@ mod tests {
             false,
         );
         let names = registry.names();
-        assert_eq!(
-            names.len(),
-            34,
-            "33 frozen base tools + CodeIntel (flag-less)"
-        );
+        assert_eq!(names.len(), 40, "39 base tools + CodeIntel (flag-less)");
         assert!(names.contains(&"CodeIntel".to_owned()));
         assert!(registry.get("WebBrowser").is_none());
         assert!(registry.get("Git").is_none());
@@ -1770,7 +2153,7 @@ mod tests {
     #[test]
     fn disabled_sidecar_leaves_base_family_intact() {
         let registry = build_tool_registry(&state_with_python(false, true, true));
-        assert_eq!(registry.names().len(), 33);
+        assert_eq!(registry.names().len(), 39);
         for name in ["WebBrowser", "CodeIntel", "Git"] {
             assert!(registry.get(name).is_none(), "{name} must not register");
         }
@@ -2389,6 +2772,8 @@ mod tests {
     #[test]
     fn needs_attention_child_is_returned_as_an_immediate_stable_error() {
         let snapshot = TaskSnapshot {
+            task_type: "agent".into(),
+            lifecycle: "attached".into(),
             task_id: uuid::Uuid::new_v4().to_string(),
             session_id: uuid::Uuid::new_v4().to_string(),
             parent_task_id: Some(uuid::Uuid::new_v4().to_string()),
@@ -2397,6 +2782,7 @@ mod tests {
             reason: Some("durable terminal commit failed".to_owned()),
             description: None,
             output: None,
+            display_output: None,
             error: None,
             result_version: None,
             partial: false,
@@ -2412,5 +2798,42 @@ mod tests {
         assert_eq!(error.code, "AGENT_TASK_NEEDS_ATTENTION");
         assert_eq!(error.message, "durable terminal commit failed");
         assert!(!error.retryable);
+    }
+}
+
+#[cfg(test)]
+mod fast_routing_tests {
+    use super::select_lightweight_model;
+    use std::sync::Arc;
+
+    #[test]
+    fn optional_fast_route_preserves_explicit_auxiliary_and_unconfigured_defaults() {
+        let config = zk_llm::ProviderConfig::new(
+            "fixture",
+            "http://127.0.0.1:9/v1",
+            zk_llm::ApiKey::new("fixture"),
+            "main",
+            vec!["main".into(), "fast".into(), "light".into()],
+        );
+        let provider = Arc::new(zk_llm::OpenAiCompatProvider::new(config).unwrap());
+        let mut registry = zk_llm::ProviderRegistry::new().with_default_model("main");
+        registry.register(
+            "fixture",
+            provider,
+            vec!["main".into(), "fast".into(), "light".into()],
+        );
+        assert_eq!(
+            select_lightweight_model(&registry, Some(" custom "), Some("fast")),
+            "custom"
+        );
+        assert_eq!(
+            select_lightweight_model(&registry, None, Some(" fast ")),
+            "fast"
+        );
+        assert_eq!(select_lightweight_model(&registry, None, None), "light");
+        assert_eq!(
+            select_lightweight_model(&registry, None, Some("unavailable")),
+            "light"
+        );
     }
 }

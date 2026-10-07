@@ -50,6 +50,8 @@ export default defineConfig({
       url: `http://127.0.0.1:${serverPort}/api/health/live`,
       reuseExistingServer: false,
       timeout: 240_000,
+      stdout: 'pipe',
+      gracefulShutdown: { signal: 'SIGTERM', timeout: 30_000 },
     },
     {
       command: `VITE_API_URL=http://127.0.0.1:${serverPort} npm run dev -- --host 127.0.0.1 --port ${frontendPort} --strictPort`,

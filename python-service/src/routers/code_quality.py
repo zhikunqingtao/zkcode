@@ -1,85 +1,42 @@
-"""Code quality analysis routes (F3: Complexity Treemap)."""
-
-import logging
+"""Scoped, killable code-complexity analysis; metrics are advisory, not verification."""
 import time
-from typing import Optional, List
+from typing import Literal, Optional
 
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, HTTPException, Request
+from pydantic import Field
+from routers.analysis import AnalysisControl
 from workspace_paths import WorkspacePathError, resolve_workspace_path
 
-logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Code Quality"])
 
 
-# ── Pydantic 请求模型 ──
-
-
-class ComplexityRequest(BaseModel):
-    project_root: str = Field(..., description="项目根目录绝对路径")
-    target_path: Optional[str] = Field(None, description="可选子目录路径")
-    languages: Optional[List[str]] = Field(
-        None, description="分析语言列表，默认 python/java/typescript/javascript"
-    )
-
-
-# ── Service 延迟初始化 ──
-
-_analyzer = None
-
-
-def _get_analyzer(languages: Optional[List[str]] = None):
-    global _analyzer
-    if _analyzer is None or languages is not None:
-        from services.complexity_analyzer import ComplexityAnalyzer
-        if languages is not None:
-            return ComplexityAnalyzer(languages=languages)
-        _analyzer = ComplexityAnalyzer()
-    return _analyzer
-
-
-# ── 路由端点 ──
+class ComplexityRequest(AnalysisControl):
+    project_root: str
+    target_path: Optional[str] = None
+    languages: Optional[list[Literal["python", "java", "typescript", "javascript"]]] = Field(None, max_length=4)
 
 
 @router.get("/health")
 async def health():
-    """Health check for code quality service."""
     return {"status": "ok", "service": "code-quality"}
 
 
 @router.post("/complexity")
-async def analyze_complexity(request: ComplexityRequest):
-    """F3 代码复杂度分析 — 返回项目级 Treemap 数据"""
-    start = time.time()
-
+async def analyze_complexity(request: ComplexityRequest, http_request: Request = None):
     try:
-        project_root_path = resolve_workspace_path(
-            request.project_root, require_directory=True)
-        target_path_obj = None
-        if request.target_path:
-            target_path_obj = resolve_workspace_path(
-                request.target_path, base=project_root_path)
+        root = resolve_workspace_path(request.project_root, require_directory=True)
+        target = resolve_workspace_path(request.target_path, base=root) if request.target_path else None
     except WorkspacePathError as error:
-        raise HTTPException(status_code=400, detail=str(error)) from error
+        raise HTTPException(400, "Complexity target is outside the authorized project or unavailable") from error
+    request = request.model_copy(update={"project_root": str(root), "target_path": str(target) if target else None})
+    from analysis_jobs import run
+    return await run("complexity", request.job_payload(), http_request, 30)
 
-    project_root = str(project_root_path)
-    target_path = str(target_path_obj) if target_path_obj is not None else None
 
-    try:
-        analyzer = _get_analyzer(request.languages)
-        result = await analyzer.analyze(project_root, target_path)
-        elapsed_ms = int((time.time() - start) * 1000)
-
-        return {
-            "success": True,
-            "data": {
-                "root": result.root.model_dump(exclude_none=True),
-                "stats": result.stats.model_dump(),
-            },
-            "elapsed_ms": elapsed_ms,
-        }
-    except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
-        logger.error(f"Complexity analysis failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Analysis error: {str(e)}")
+def analyze_complexity_sync(payload: dict) -> dict:
+    from services.complexity_analyzer import ComplexityAnalyzer
+    start = time.monotonic()
+    result = ComplexityAnalyzer(payload.get("languages"))._analyze_sync(payload["project_root"], payload.get("target_path"))
+    elapsed = int((time.monotonic() - start) * 1000)
+    result.stats.analysis_time_ms = elapsed
+    return {"success": True, "data": {**result.model_dump(exclude_none=True), "analysis_kind": "heuristic", "is_verification_evidence": False}, "elapsed_ms": elapsed}

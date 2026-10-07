@@ -139,6 +139,18 @@ impl ApiError {
 impl From<DbError> for ApiError {
     fn from(err: DbError) -> Self {
         match err {
+            DbError::Conflict(code) if code == "RUNTIME_CURSOR_EXPIRED" => Self {
+                status: StatusCode::CONFLICT,
+                code,
+                message: "Runtime events have expired; fetch a current snapshot before resuming"
+                    .into(),
+            },
+            DbError::Conflict(message) => Self {
+                status: StatusCode::CONFLICT,
+                code: "REVISION_CONFLICT".into(),
+                message,
+            },
+            DbError::Validation(message) => Self::validation(message),
             // FK 违例归一产物（zk-db map_fk_violation）：映射 404。
             DbError::SessionNotFound(id) => Self::session_not_found(&id),
             // UNIQUE 违例归一产物（zk-db map_unique_violation）：映射 409，
@@ -148,9 +160,12 @@ impl From<DbError> for ApiError {
                 code: "PROJECT_PATH_DUPLICATE".into(),
                 message: "A Project already uses this workspace".into(),
             },
-            // 其余（Sqlite/Migration/Join/Json/Io/Invalid）：500，细节只进日志。
+            // SQL/JSON/IO diagnostics may contain private content. Log only the fixed category.
             other => {
-                tracing::error!(error = %other, "internal database failure");
+                tracing::error!(
+                    error_code = other.diagnostic_code(),
+                    "internal database failure"
+                );
                 Self::internal()
             }
         }

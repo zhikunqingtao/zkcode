@@ -262,6 +262,12 @@ fn count_messages_core(
             if let Some(thinking) = message.thinking.as_deref() {
                 tokens = tokens.saturating_add(encoded_len(encoder, thinking));
             }
+            if let Some(state) = &message.provider_state {
+                tokens = tokens.saturating_add(encoded_len(
+                    encoder,
+                    &serde_json::to_string(state).unwrap_or_default(),
+                ));
+            }
             for call in &message.tool_calls {
                 tokens = tokens
                     .saturating_add(encoded_len(encoder, &call.name))

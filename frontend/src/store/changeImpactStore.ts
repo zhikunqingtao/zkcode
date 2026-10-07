@@ -4,7 +4,8 @@
  */
 
 import { create } from 'zustand';
-import { ensurePythonPanelResponse } from '@/api/pythonServiceError';
+import { AnalysisRequest, isAnalysisCancelled } from '@/api/analysisClient';
+import { useSessionStore } from './sessionStore';
 import { immer } from 'zustand/middleware/immer';
 import { subscribeWithSelector } from 'zustand/middleware';
 import type { AggregatedFileChange, RiskSummary } from '@/types/apos';
@@ -43,6 +44,9 @@ export interface ChangeImpactResult {
   impact_nodes: ChangeImpactNode[];
   impact_edges: ChangeImpactEdge[];
   summary: ChangeImpactSummary;
+  analysis_kind?: 'advisory';
+  is_verification_evidence?: false;
+  truncated?: boolean;
 }
 
 interface ApiResponse<T = unknown> {
@@ -70,6 +74,8 @@ export interface ChangeImpactState {
   reset: () => void;
 }
 
+let impactRequest: AnalysisRequest | null = null;
+
 export const useChangeImpactStore = create<ChangeImpactState>()(
   subscribeWithSelector(immer((set) => ({
     impactData: null,
@@ -80,31 +86,24 @@ export const useChangeImpactStore = create<ChangeImpactState>()(
     lastHint: null,
 
     fetchChangeImpact: async (filePath, changedLines, projectRoot, depth = 3) => {
-      set(d => { d.isLoading = true; d.error = null; });
+      cancelPendingChangeImpactAnalysis();
+      set(d => { d.isLoading = true; d.error = null; d.impactData = null; d.selectedNode = null; d.elapsedMs = null; });
+      let request: AnalysisRequest | null = null;
       try {
-        const resp = await fetch('/api/analysis/change-impact', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            file_path: filePath,
-            changed_lines: changedLines,
-            project_root: projectRoot,
-            depth,
-          }),
-        });
-        await ensurePythonPanelResponse(resp);
-        const json: ApiResponse<ChangeImpactResult> = await resp.json();
-        if (!json.success) throw new Error(json.error_message ?? 'Analysis failed');
-        set(d => {
-          d.impactData = json.data as ChangeImpactResult;
-          d.elapsedMs = json.elapsed_ms ?? null;
-          d.isLoading = false;
-        });
-      } catch (e) {
-        set(d => {
-          d.error = e instanceof Error ? e.message : String(e);
-          d.isLoading = false;
-        });
+        request = new AnalysisRequest(projectRoot);
+        impactRequest = request;
+        const json = await request.post<ApiResponse<ChangeImpactResult>>('/api/analysis/change-impact', { filePath, changedLines, depth });
+        if (impactRequest !== request) return;
+        const data = json.data;
+        if (!json.success || !data || !Array.isArray(data.impact_nodes) || !Array.isArray(data.impact_edges) || !Array.isArray(data.changed_lines) || !data.summary || data.analysis_kind !== 'advisory' || data.is_verification_evidence !== false) {
+          throw new Error(json.error_message ?? '分析服务返回无效的辅助分析结果');
+        }
+        set(d => { d.impactData = data; d.elapsedMs = json.elapsed_ms ?? null; d.isLoading = false; });
+      } catch (error) {
+        if (request && impactRequest !== request) return;
+        set(d => { d.error = isAnalysisCancelled(error) ? null : error instanceof Error ? error.message : String(error); d.isLoading = false; });
+      } finally {
+        if (impactRequest === request) impactRequest = null;
       }
     },
 
@@ -112,16 +111,27 @@ export const useChangeImpactStore = create<ChangeImpactState>()(
 
     applyVisualizationHint: (props) => set(d => { d.lastHint = props ?? null; }),
 
-    reset: () => set(d => {
+    reset: () => { cancelPendingChangeImpactAnalysis(); set(d => {
       d.impactData = null;
       d.isLoading = false;
       d.error = null;
       d.selectedNode = null;
       d.elapsedMs = null;
       d.lastHint = null;
-    }),
+    }); },
   })))
 );
+
+export function cancelPendingChangeImpactAnalysis(): void {
+  impactRequest?.cancel();
+  impactRequest = null;
+  useChangeImpactStore.setState({ isLoading: false });
+}
+
+const unsubscribeSession = useSessionStore.subscribe((state, previous) => {
+  if (state.sessionId !== previous.sessionId) useChangeImpactStore.getState().reset();
+});
+if (import.meta.hot) import.meta.hot.dispose(unsubscribeSession);
 
 // ══════════════════════════════════════════════════════════════
 // Phase 2: 聚合变更影响 Store — 会话级文件变更聚合与风险评估

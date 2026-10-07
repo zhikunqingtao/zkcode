@@ -17,15 +17,11 @@
 //!   （[`VisualizationPayload::to_envelope`]），出站由 [`crate::tool::ToolOutput`]
 //!   的 `metadata` 随工具结果上抛，组合根/前端按 `viewType` 分派——与旧
 //!   「独立消息路线」相比少一跳单播，可观察数据同构。
-//! - 旧分类器第三步调 fast-model（`SideQueryService`）判别意图；本移植取
-//!   **纯启发式**关键词表（[`classifier::DiagramKind::keywords`]），无 LLM
-//!   往返、无 API 成本，故旧「开关闸门」（`visualization.auto-routing.enabled`
-//!   默认 false 的零开销直返）不需要——启发式本身即零成本。
-//! - 旧 `viewType` 白名单是 7 个前端组件名（`git-timeline` / `schema-viewer`
-//!   / …）；本移植的 `diagram_type` 是三种**渲染载体**（`mermaid` /
-//!   `plantuml` / `d3_json`），图表**种类**（流程 / 序列 / 类 / ER / 饼 /
-//!   甘特）落在 [`classifier::DiagramKind`]——载体与种类分离，旧的 `mermaid`
-//!   分支得以承载全部六种 mermaid 图。
+//! - Explicit `/visualize` keeps the free heuristic template helper. Optional paid
+//!   intent classification lives in `zk-engine::auto_visualization`, defaults off,
+//!   and invokes this native tool through normal permissions and accounting.
+//! - Both existing three-carrier arguments and the source seven-view contract are
+//!   supported; automatically classified views are marked as unexecuted suggestions.
 
 pub mod classifier;
 pub mod router;

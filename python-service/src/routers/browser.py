@@ -12,6 +12,7 @@
 import logging
 
 from fastapi import APIRouter
+from services.content_privacy import ephemeral_request, require_body_free_browser_logging
 
 from services.browser_service import BrowserNavigationRejected, BrowserService
 from services.browser_models import (
@@ -48,9 +49,24 @@ async def shutdown_browser():
     await browser_service.shutdown()
 
 
+@router.post("/recover_failed_cleanup")
+async def recover_failed_cleanup() -> BrowserResponse:
+    """Explicit maintenance action; refuses to interrupt healthy/active sessions."""
+    try:
+        if not await browser_service.recover_failed_cleanup():
+            return BrowserResponse(success=False, error_code="BROWSER_RECOVERY_NOT_READY",
+                                   error_message="Active sessions/creation exist or no failed cleanup remains")
+        return BrowserResponse(success=True, data={"recovered": True})
+    except Exception:
+        logger.warning("Browser recovery could not confirm resource release or restart")
+        return BrowserResponse(success=False, error_code="BROWSER_RECOVERY_FAILED",
+                               error_message="Browser recovery incomplete; resource ownership retained")
+
+
 # ═══ 端点 ═══
 
 @router.post("/navigate")
+@ephemeral_request
 async def navigate(req: NavigateRequest) -> BrowserResponse:
     try:
         data = await browser_service.navigate(
@@ -68,6 +84,7 @@ async def navigate(req: NavigateRequest) -> BrowserResponse:
 
 
 @router.post("/screenshot")
+@ephemeral_request
 async def screenshot(req: ScreenshotRequest) -> BrowserResponse:
     try:
         data = await browser_service.screenshot(
@@ -84,6 +101,7 @@ async def screenshot(req: ScreenshotRequest) -> BrowserResponse:
 
 
 @router.post("/click")
+@ephemeral_request
 async def click(req: ClickRequest) -> BrowserResponse:
     try:
         data = await browser_service.click(
@@ -92,8 +110,13 @@ async def click(req: ClickRequest) -> BrowserResponse:
             no_wait_after=req.no_wait_after,
             force=req.force,
         )
-        if not data.get("success", True) is True and "error_code" in data:
-            return BrowserResponse(success=False, error_code=data["error_code"], error_message=data["error_message"])
+        if data.get("success") is False or data.get("clicked") is False:
+            return BrowserResponse(
+                success=False,
+                data=data,
+                error_code=data.get("error_code") or "BROWSER_CLICK_FAILED",
+                error_message=data.get("error_message") or data.get("error") or "Browser click failed",
+            )
         return BrowserResponse(success=True, data=data)
     except Exception as e:
         return BrowserResponse(
@@ -102,14 +125,20 @@ async def click(req: ClickRequest) -> BrowserResponse:
 
 
 @router.post("/type")
+@ephemeral_request
 async def type_text(req: TypeRequest) -> BrowserResponse:
     try:
         data = await browser_service.type_text(
             req.session_id, req.selector, req.text, req.timeout,
             strict_session=req.strict_session,
         )
-        if not data.get("success", True) is True and "error_code" in data:
-            return BrowserResponse(success=False, error_code=data["error_code"], error_message=data["error_message"])
+        if data.get("success") is False:
+            return BrowserResponse(
+                success=False,
+                data=data,
+                error_code=data.get("error_code") or "BROWSER_TYPE_FAILED",
+                error_message=data.get("error_message") or data.get("error") or "Browser type failed",
+            )
         return BrowserResponse(success=True, data=data)
     except Exception as e:
         return BrowserResponse(
@@ -118,6 +147,7 @@ async def type_text(req: TypeRequest) -> BrowserResponse:
 
 
 @router.post("/evaluate")
+@ephemeral_request
 async def evaluate(req: EvaluateRequest) -> BrowserResponse:
     try:
         data = await browser_service.evaluate(
@@ -137,6 +167,7 @@ async def evaluate(req: EvaluateRequest) -> BrowserResponse:
 
 
 @router.post("/extract_text")
+@ephemeral_request
 async def extract_text(req: ExtractRequest) -> BrowserResponse:
     try:
         data = await browser_service.extract_text(
@@ -153,6 +184,7 @@ async def extract_text(req: ExtractRequest) -> BrowserResponse:
 
 
 @router.post("/extract_html")
+@ephemeral_request
 async def extract_html(req: ExtractRequest) -> BrowserResponse:
     try:
         data = await browser_service.extract_html(
@@ -169,6 +201,7 @@ async def extract_html(req: ExtractRequest) -> BrowserResponse:
 
 
 @router.post("/wait_for")
+@ephemeral_request
 async def wait_for(req: WaitForRequest) -> BrowserResponse:
     try:
         data = await browser_service.wait_for(
@@ -192,6 +225,7 @@ async def wait_for(req: WaitForRequest) -> BrowserResponse:
 
 
 @router.post("/select_option")
+@ephemeral_request
 async def select_option(req: SelectOptionRequest) -> BrowserResponse:
     try:
         data = await browser_service.select_option(
@@ -208,6 +242,7 @@ async def select_option(req: SelectOptionRequest) -> BrowserResponse:
 
 
 @router.post("/handle_dialog")
+@ephemeral_request
 async def handle_dialog(req: DialogRequest) -> BrowserResponse:
     try:
         data = await browser_service.handle_dialog(
@@ -224,6 +259,7 @@ async def handle_dialog(req: DialogRequest) -> BrowserResponse:
 
 
 @router.post("/get_cookies")
+@ephemeral_request
 async def get_cookies(req: CookieRequest) -> BrowserResponse:
     try:
         data = await browser_service.get_cookies(
@@ -240,6 +276,7 @@ async def get_cookies(req: CookieRequest) -> BrowserResponse:
 
 
 @router.post("/set_cookie")
+@ephemeral_request
 async def set_cookie(req: SetCookieRequest) -> BrowserResponse:
     try:
         data = await browser_service.set_cookie(
@@ -256,6 +293,7 @@ async def set_cookie(req: SetCookieRequest) -> BrowserResponse:
 
 
 @router.post("/close_session")
+@ephemeral_request
 async def close_session(req: CloseSessionRequest) -> BrowserResponse:
     try:
         closed = await browser_service.close_session(req.session_id)
@@ -279,6 +317,7 @@ async def delete_session(session_id: str) -> BrowserResponse:
 
 
 @router.post("/get_js_errors")
+@ephemeral_request
 async def get_js_errors(req: JsErrorsRequest) -> BrowserResponse:
     """Return collected JS errors for a given session."""
     try:
@@ -291,6 +330,7 @@ async def get_js_errors(req: JsErrorsRequest) -> BrowserResponse:
 
 
 @router.post("/snapshot-semantic")
+@ephemeral_request
 async def snapshot_semantic(req: SemanticSnapshotRequest) -> BrowserResponse:
     """语义快照 — zkcode v1.5 升级项 A MVP。
 
@@ -317,3 +357,63 @@ async def snapshot_semantic(req: SemanticSnapshotRequest) -> BrowserResponse:
         return BrowserResponse(
             success=False, error_code=type(e).__name__, error_message=str(e)
         )
+
+
+# Run-owned temporary contexts use only host-generated opaque IDs. Model-provided
+# browser aliases are resolved in Rust and never become sidecar context names.
+from typing import Any, Literal
+from pydantic import BaseModel, Field, ValidationError
+
+
+class OwnedBrowserCreate(BaseModel):
+    session_id: str = Field(pattern=r"^owned-[0-9a-f-]{36}$")
+    ephemeral_content: Literal[True] = True
+
+
+class OwnedBrowserAction(OwnedBrowserCreate):
+    action: str
+    parameters: dict[str, Any] = Field(default_factory=dict)
+
+
+@router.post("/owned/create")
+@ephemeral_request
+async def create_owned(req: OwnedBrowserCreate) -> BrowserResponse:
+    require_body_free_browser_logging()
+    try:
+        await browser_service.create_owned_ephemeral_session(req.session_id)
+        return BrowserResponse(success=True, data={"created": True})
+    except Exception as exc:
+        return BrowserResponse(success=False, error_code=type(exc).__name__,
+                               error_message="Temporary browser context creation failed")
+
+
+@router.post("/owned/action")
+@ephemeral_request
+async def owned_action(req: OwnedBrowserAction) -> BrowserResponse:
+    require_body_free_browser_logging()
+    actions = {
+        "navigate": (NavigateRequest, navigate), "screenshot": (ScreenshotRequest, screenshot),
+        "click": (ClickRequest, click), "type": (TypeRequest, type_text),
+        "evaluate": (EvaluateRequest, evaluate), "extract_text": (ExtractRequest, extract_text),
+        "extract_html": (ExtractRequest, extract_html), "wait_for": (WaitForRequest, wait_for),
+        "select_option": (SelectOptionRequest, select_option), "handle_dialog": (DialogRequest, handle_dialog),
+        "get_cookies": (CookieRequest, get_cookies), "set_cookie": (SetCookieRequest, set_cookie),
+        "get_js_errors": (JsErrorsRequest, get_js_errors),
+        "snapshot-semantic": (SemanticSnapshotRequest, snapshot_semantic),
+    }
+    action = actions.get(req.action)
+    if action is None:
+        return BrowserResponse(success=False, error_code="INVALID_ACTION", error_message="Unsupported browser action")
+    try:
+        # Exact existing temporary lookup; ordinary session creation cannot run
+        # inside this ContextVar scope, including after a concurrent close.
+        await browser_service.get_or_create_session(req.session_id)
+        body = {**req.parameters, "session_id": req.session_id,
+                "strict_session": True, "ephemeral_content": True}
+        model, handler = action
+        return await handler(model.model_validate(body))
+    except ValidationError:
+        return BrowserResponse(success=False, error_code="INVALID_PARAMS", error_message="Invalid browser action parameters")
+    except Exception as exc:
+        return BrowserResponse(success=False, error_code=type(exc).__name__,
+                               error_message="Temporary browser action failed")

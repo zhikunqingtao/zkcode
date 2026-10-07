@@ -32,19 +32,28 @@ const server = http.createServer((request, response) => {
       writeJson(response, 400, { error: { message: 'invalid JSON request' } });
       return;
     }
-    if (body.model !== 'qwen3.8-max-0902' || body.stream !== true
+    if (!['qwen3.8-max-0902', 'deepseek-flash'].includes(body.model) || body.stream !== true
         || !Array.isArray(body.messages)) {
       writeJson(response, 422, { error: { message: 'unexpected fixture request shape' } });
       return;
     }
 
+    const isEffortProbe = body.messages.some(message => message.role === 'user' && JSON.stringify(message.content).includes('effort-wire-regression'));
+    if (isEffortProbe && (body.model !== 'deepseek-flash' || body.reasoning_effort !== 'low' || body.thinking?.type !== 'enabled')) {
+      writeJson(response, 422, { error: { message: 'explicit low effort must reach the supported DeepSeek wire' } }); return;
+    }
+    const isSummary = body.messages.some(message => message.role === 'system' && typeof message.content === 'string' && message.content.includes('历史交接整理器'));
+    if (isSummary && body.tools?.length) { writeJson(response, 422, { error: { message: 'summary must be tool-free' } }); return; }
+    const isVisual = body.messages.some(message => message.role === 'user' && JSON.stringify(message.content).includes('visual-regression-chart'));
+    const visualAnswer = '图表与公式回归\n\n```mermaid\nflowchart LR\n A[输入] --> B["$$x^2$$"] --> C[完成]\n```';
+    const output = isSummary ? JSON.stringify({ schemaVersion: 2, items: [{ section: 'changes', content: '脚本 Provider 验证的历史摘要', status: 'recorded', evidence: ['i1'] }] }) : isVisual ? visualAnswer : answer;
     response.writeHead(200, {
       'cache-control': 'no-cache',
       'content-type': 'text/event-stream; charset=utf-8',
       connection: 'keep-alive',
     });
     response.write(`data: ${JSON.stringify({
-      choices: [{ delta: { content: answer }, finish_reason: null }],
+      choices: [{ delta: { content: output }, finish_reason: null }],
     })}\n\n`);
     response.write(`data: ${JSON.stringify({
       choices: [{ delta: {}, finish_reason: 'stop' }],

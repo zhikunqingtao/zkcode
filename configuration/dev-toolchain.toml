@@ -6,3 +6,12 @@ rust = "1.97.1"
 node = ">=22.0.0,<23.0.0"
 npm = ">=10.0.0,<11.0.0"
 python = ">=3.11.0,<3.12.0"
+
+# Native document, PDF, media, diagram and Chinese OCR capabilities.
+document_formulas = "ffmpeg imagemagick poppler qpdf graphviz pandoc tesseract fontconfig"
+document_casks = "libreoffice font-noto-sans-cjk-sc"
+
+# Same official fast Chinese models used by native Tesseract language packages.
+ocr_model_version = "4.1.0"
+ocr_chi_sim_sha256 = "a5fcb6f0db1e1d6d8522f39db4e848f05984669172e584e8d76b6b3141e1f730"
+ocr_chi_tra_sha256 = "529c5b5797d64b126065cd55f2bb4c7fd7b15790798091b1ff259941a829330b"

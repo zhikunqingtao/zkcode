@@ -7,6 +7,57 @@ use base64::Engine as _;
 use common::{call, json_body, local_with_headers};
 
 #[tokio::test]
+async fn image_preview_requires_authorization_and_detects_blob_corruption() {
+    let (mut app, db) = common::app_with_db();
+    let workspace = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
+    std::fs::create_dir_all(&workspace).unwrap();
+    let session = db
+        .create_session("test", workspace.to_str().unwrap())
+        .await
+        .unwrap();
+    let bytes = base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==").unwrap();
+    let body = serde_json::json!({"sessionId":session.id,"kind":"test","items":[{"type":"image","blobBase64":base64::engine::general_purpose::STANDARD.encode(&bytes)}]});
+    let (status, _, response) = call(
+        &mut app,
+        local_with_headers(
+            "/api/evidence",
+            Method::POST,
+            Some(body.to_string()),
+            &[("X-Session-Id", &session.id)],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let evidence = json_body(&response);
+    let hash = evidence["items"][0]["blobSha256"].as_str().unwrap();
+    let path = format!("/api/evidence/blob/{hash}?preview=true");
+    let (status, headers, response) = call(
+        &mut app,
+        local_with_headers(&path, Method::GET, None, &[("X-Session-Id", &session.id)]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["content-type"], "image/png");
+    assert_eq!(headers["x-content-type-options"], "nosniff");
+    assert_eq!(&response[..], bytes.as_slice());
+    let (status, _, _) = call(&mut app, common::local_get(&path)).await;
+    assert!(!status.is_success());
+    std::fs::write(
+        workspace.join(".zk/blobs").join(&hash[..2]).join(hash),
+        b"corrupt",
+    )
+    .unwrap();
+    let (status, _, response) = call(
+        &mut app,
+        local_with_headers(&path, Method::GET, None, &[("X-Session-Id", &session.id)]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(json_body(&response)["code"], "EVIDENCE_BLOB_CORRUPT");
+    std::fs::remove_dir_all(workspace).unwrap();
+}
+
+#[tokio::test]
 #[allow(clippy::too_many_lines)] // One authorization fixture covers metadata, blobs, and isolation.
 async fn evidence_bundle_and_blob_round_trip_with_session_authorization() {
     let (mut app, db) = common::app_with_db();
@@ -216,4 +267,90 @@ async fn evidence_blob_store_rejects_symlink_escape() {
 
     std::fs::remove_dir_all(&workspace).expect("remove workspace");
     std::fs::remove_dir_all(&outside).expect("remove outside");
+}
+
+#[tokio::test]
+async fn temporary_blob_preview_is_exactly_owned_and_never_creates_a_disk_blob() {
+    use zk_server::{config::Config, routes::build_router, state::AppState};
+    let root = std::env::temp_dir().join(format!(
+        "zk-ephemeral-evidence-api-{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir(&root).unwrap();
+    let db = zk_db::Db::open(root.join("evidence.sqlite")).unwrap();
+    let (session, lease) = db
+        .create_ephemeral_session("fixture", root.to_str().unwrap(), "DEFAULT")
+        .await
+        .unwrap();
+    let other = db
+        .create_session("fixture", root.to_str().unwrap())
+        .await
+        .unwrap();
+    let marker = format!("temporary-evidence-body-{}", uuid::Uuid::new_v4());
+    let encoded = base64::engine::general_purpose::STANDARD.encode(marker.as_bytes());
+    let state = AppState::new(db.clone(), Config::test_config());
+    let mut app = build_router(state);
+    let request = serde_json::json!({"sessionId":session,"kind":"log","claim":marker,"items":[{"type":"log","blobBase64":encoded,"summary":marker,"meta":{"body":marker}}]});
+    let (status, _, body) = call(
+        &mut app,
+        local_with_headers(
+            "/api/evidence",
+            Method::POST,
+            Some(request.to_string()),
+            &[("X-Session-Id", &session)],
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    let bundle = json_body(&body);
+    let digest = bundle["items"][0]["blobSha256"].as_str().unwrap();
+    let path = format!("/api/evidence/blob/{digest}");
+    let (status, _, body) = call(
+        &mut app,
+        local_with_headers(&path, Method::GET, None, &[("X-Session-Id", &session)]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body.as_ref(), marker.as_bytes());
+    let (status, _, _) = call(
+        &mut app,
+        local_with_headers(&path, Method::GET, None, &[("X-Session-Id", &other.id)]),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a shared workspace does not authorize the other session's blob"
+    );
+    assert!(!root.join(".zk").exists());
+    for entry in std::fs::read_dir(&root).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_file() {
+            let bytes = std::fs::read(&path).unwrap();
+            for needle in [marker.as_str(), digest, encoded.as_str()] {
+                assert!(
+                    !bytes
+                        .windows(needle.len())
+                        .any(|part| part == needle.as_bytes()),
+                    "temporary body/hash leaked to {}",
+                    path.display()
+                );
+            }
+        }
+    }
+    drop(lease);
+    let (status, _, _) = call(
+        &mut app,
+        local_with_headers(&path, Method::GET, None, &[("X-Session-Id", &session)]),
+    )
+    .await;
+    assert!(!status.is_success());
+    drop(app);
+    drop(db);
+    std::fs::remove_dir_all(root).unwrap();
 }

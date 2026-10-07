@@ -52,62 +52,7 @@ const BLOCKED_DEVICE_PATHS: &[&str] = &[
 
 // ===== Layer 2: 危险文件黑名单 =====
 // 对照 `PathSecurityService.java:52-65`。
-const DANGEROUS_FILES: &[&str] = &[
-    ".gitconfig",
-    ".gitmodules",
-    ".bashrc",
-    ".bash_profile",
-    ".bash_login",
-    ".bash_logout",
-    ".zshrc",
-    ".zprofile",
-    ".zshenv",
-    ".zlogin",
-    ".profile",
-    ".login",
-    ".ripgreprc",
-    ".env",
-    ".env.local",
-    ".env.production",
-    ".mcp.json",
-    zk_core::paths::CONFIG_FILE_NAME,
-    // 遗留保护面（#65）：迁移是**拷贝**而非移动，旧配置文件仍留在盘上，
-    // 把它从名单里删掉等于让旧文件失去授权门禁——保护面只许单调扩张。
-    zk_core::paths::LEGACY_CONFIG_FILE_NAME,
-    ".npmrc",
-    ".yarnrc",
-    "id_rsa",
-    "id_ed25519",
-    "id_ecdsa",
-    "known_hosts",
-    "authorized_keys",
-    ".pgpass",
-    ".my.cnf",
-    ".netrc",
-    ".curlrc",
-    "credentials",
-    "token.json",
-];
-
-// ===== Layer 2: 危险目录黑名单 =====
-// 对照 `PathSecurityService.java:68-74`。
-const DANGEROUS_DIRECTORIES: &[&str] = &[
-    ".git",
-    ".vscode",
-    ".idea",
-    zk_core::paths::CONFIG_DIR_NAME,
-    // 遗留保护面（#65），理由同 `DANGEROUS_FILES`。
-    zk_core::paths::LEGACY_CONFIG_DIR_NAME,
-    ".ai-code-assistant",
-    ".ssh",
-    ".gnupg",
-    ".aws",
-    ".config",
-    ".local",
-    ".kube",
-    ".docker",
-    "node_modules",
-];
+use zk_core::protected_paths::{DANGEROUS_DIRECTORIES, DANGEROUS_FILES};
 
 /// 直接读取这些目录会暴露凭据或仓库控制状态，因此永远需要一次新的批准。
 ///

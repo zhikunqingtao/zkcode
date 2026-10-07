@@ -18,6 +18,8 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub use super::memory_state::ShellMemoryScopeFactory;
+
 /// 旧源 `SHELL_STATE_DIR`（L32-33：`java.io.tmpdir` / `ai-code-shells`）。
 static SHELL_STATE_DIR: LazyLock<PathBuf> =
     LazyLock::new(|| std::env::temp_dir().join("ai-code-shells"));
@@ -64,6 +66,9 @@ impl ShellStateManager {
     /// 时回退 `originalCwd`；读失败同样回退（旧源 `catch (IOException ignored)`）。
     #[must_use]
     pub fn tracked_cwd(session_id: &str, original_cwd: &str) -> String {
+        if let Some(cwd) = super::memory_state::tracked(session_id) {
+            return cwd;
+        }
         let cwd_file = Self::cwd_tracking_path(session_id);
         if cwd_file.exists()
             && let Ok(tracked) = fs::read_to_string(&cwd_file)
@@ -89,7 +94,7 @@ impl ShellStateManager {
     #[must_use]
     pub fn wrap_command(user_command: &str, session_id: &str) -> String {
         let cwd_file = Self::cwd_tracking_path(session_id);
-        let cwd_file = cwd_file.to_string_lossy();
+        let cwd_file = cwd_file.to_string_lossy().replace('\'', "'\"'\"'");
         let delimiter = if user_command.contains(HEREDOC_DELIMITER) {
             format!("__ZHIKUN_EOF_{}__", nano_time())
         } else {
@@ -98,10 +103,12 @@ impl ShellStateManager {
         format!(
             "umask 077\n\
              shopt -u extglob 2>/dev/null || true\n\
-             __zhikun_cmd=$(mktemp)\n\
-             __zhikun_cwd=$(mktemp '{cwd_file}.XXXXXX')\n\
+             __zhikun_cmd=''\n\
+             __zhikun_cwd=''\n\
              trap 'rm -f \"$__zhikun_cmd\" \"$__zhikun_cwd\"' EXIT\n\
-             cat > \"$__zhikun_cmd\" <<'{delimiter}'\n\
+             __zhikun_cmd=$(mktemp '{cwd_file}.cmd.XXXXXX') || {{ echo 'Shell initialization failed: command file' >&2; exit 1; }}\n\
+             __zhikun_cwd=$(mktemp '{cwd_file}.XXXXXX') || {{ echo 'Shell initialization failed: CWD file' >&2; exit 1; }}\n\
+             cat > \"$__zhikun_cmd\" <<'{delimiter}' || {{ echo 'Shell initialization failed: cannot write command file' >&2; exit 1; }}\n\
              {user_command}\n\
              {delimiter}\n\
              source \"$__zhikun_cmd\"\n\
@@ -122,6 +129,9 @@ impl ShellStateManager {
 
     /// 旧源 `resetCwd(sessionId, originalCwd)`（L112-118）。
     pub fn reset_cwd(session_id: &str, original_cwd: &str) {
+        if super::memory_state::reset(session_id, original_cwd) {
+            return;
+        }
         if let Err(error) =
             write_private_file_atomically(&Self::cwd_tracking_path(session_id), original_cwd)
         {
@@ -344,7 +354,8 @@ mod tests {
     fn wrapped_command_keeps_baseline_script_skeleton() {
         let wrapped = ShellStateManager::wrap_command("cd /tmp", "s-2");
         assert!(wrapped.starts_with("umask 077\nshopt -u extglob 2>/dev/null || true\n"));
-        assert!(wrapped.contains("cat > \"$__zhikun_cmd\" <<'__ZHIKUN_EOF__'\ncd /tmp\n"));
+        assert!(wrapped.contains("cat > \"$__zhikun_cmd\" <<'__ZHIKUN_EOF__' ||"));
+        assert!(wrapped.contains("\ncd /tmp\n"));
         assert!(wrapped.contains("source \"$__zhikun_cmd\"\n__zhikun_exit=$?\n"));
         assert!(wrapped.contains("pwd > \"$__zhikun_cwd\"\nchmod 600 \"$__zhikun_cwd\"\n"));
         assert!(wrapped.ends_with("exit $__zhikun_exit"));
@@ -358,5 +369,47 @@ mod tests {
             "/tmp",
         );
         assert_eq!(resolved, "/tmp");
+    }
+    #[test]
+    fn private_wrapper_ignores_tmpdir_and_escapes_quotes() {
+        let _manager = ShellStateManager::new();
+        let session = format!("wrapper-quote-{}'literal", uuid::Uuid::new_v4());
+        let output = std::process::Command::new("bash")
+            .args([
+                "-c",
+                &ShellStateManager::wrap_command("printf executed", &session),
+            ])
+            .env("TMPDIR", "/nonexistent-ignored-temp-directory")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, b"executed");
+        assert!(ShellStateManager::cwd_tracking_path(&session).exists());
+        std::fs::remove_file(ShellStateManager::cwd_tracking_path(&session)).unwrap();
+    }
+
+    #[test]
+    fn wrapper_initialization_failure_never_executes_user_command() {
+        let _manager = ShellStateManager::new();
+        for failing in ["mktemp() { return 1; }", "cat() { return 1; }"] {
+            let session = format!("wrapper-fail-{}", uuid::Uuid::new_v4());
+            let script = format!(
+                "{failing}\n{}",
+                ShellStateManager::wrap_command("printf must-not-execute", &session)
+            );
+            let output = std::process::Command::new("bash")
+                .args(["-c", &script])
+                .output()
+                .unwrap();
+            assert!(!output.status.success());
+            assert!(output.stdout.is_empty());
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("Shell initialization failed")
+            );
+        }
     }
 }

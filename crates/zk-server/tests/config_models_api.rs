@@ -31,7 +31,7 @@ async fn models_shape_matches_sample() {
             .collect()
     };
     let ids = ids(&body);
-    assert_eq!(ids.len(), 21);
+    assert_eq!(ids.len(), 30);
     assert_eq!(
         ids.iter().collect::<std::collections::HashSet<_>>().len(),
         ids.len(),
@@ -39,6 +39,10 @@ async fn models_shape_matches_sample() {
     );
     for expected in [
         "qwen3.8-max-0902",
+        "deepseek-flash",
+        "deepseek-v4.1-flash",
+        "bailian/glm-5.3",
+        "openrouter/anthropic/claude-fable-5.1",
         "deepseek-v4-pro-0813",
         "deepseek-v4-flash-0731",
         "deepseek-v4-flash-vision-exp",
@@ -98,7 +102,7 @@ async fn models_expose_registered_deepseek_metadata() {
         ("deepseek-v4-flash-0731", "DeepSeek V4 Flash 0731（百炼）"),
         (
             "deepseek-v4-flash-vision-exp",
-            "DeepSeek V4 Flash Vision Exp",
+            "DeepSeek V4 Flash Vision Exp（旧版）",
         ),
     ] {
         let model = body["models"]
@@ -123,7 +127,7 @@ async fn models_known_model_id_passes() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         json_body(&body)["models"].as_array().expect("arr").len(),
-        21
+        30
     );
 }
 
@@ -268,4 +272,40 @@ async fn openapi_document_covers_phase1_endpoints() {
             "missing {method} {path} in openapi paths"
         );
     }
+}
+
+#[tokio::test]
+async fn editor_preferences_persist_and_reject_unsafe_bindings_without_losing_other_settings() {
+    let mut router = app();
+    let preferences =
+        json!({"vimEnabled": true, "keybindings": {"chat:commandPalette": "ctrl+k ctrl+g"}});
+    let (status, _, body) = call(
+        &mut router,
+        local_put(
+            "/api/config",
+            Some(json!({"theme":"light", "editorPreferences": preferences}).to_string()),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json_body(&body)["config"]["editorPreferences"], preferences);
+    for invalid in [
+        json!({"vimEnabled":false,"keybindings":{"chat:focus":"ctrl+c"}}),
+        json!({"vimEnabled":true,"keybindings":{"chat:focus":"ctrl+k ctrl+g"}}),
+        json!({"vimEnabled":"true","keybindings":{}}),
+    ] {
+        let (status, _, _) = call(
+            &mut router,
+            local_put(
+                "/api/config",
+                Some(json!({"editorPreferences":invalid}).to_string()),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+    let (_, _, body) = call(&mut router, local_get("/api/config")).await;
+    let saved = json_body(&body);
+    assert_eq!(saved["editorPreferences"], preferences);
+    assert_eq!(saved["theme"], "light");
 }

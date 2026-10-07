@@ -11,6 +11,7 @@
 
 use futures::future::BoxFuture;
 use serde_json::json;
+use tokio::io::AsyncReadExt;
 
 use crate::atomic::sha256_hex;
 use crate::file_state::{self, ReadObservation, session_key};
@@ -25,9 +26,6 @@ pub const MAX_READ_OUTPUT_LINES: usize = 10_000;
 
 /// 输出内容字节上限（交付判据：1 MiB 截断）。
 pub const MAX_READ_OUTPUT_BYTES: usize = 1024 * 1024;
-
-/// 二进制嗅探窗口（首 8 KiB 内出现 NUL 即判定二进制）。
-const BINARY_SNIFF_BYTES: usize = 8 * 1024;
 
 /// 行号列宽（旧 `String.format("%6d\t%s", …)`）。
 const LINE_NUMBER_WIDTH: usize = 6;
@@ -55,8 +53,8 @@ impl Tool for ReadFileTool {
     }
 
     fn description(&self) -> &'static str {
-        "Read a text file from the local filesystem with line numbers. \
-         Supports reading a line range via offset/limit for large files."
+        "Read a local text file with line numbers, or inspect a PNG/JPEG/GIF/WebP/BMP image. \
+         Text supports 1-based offset/limit. Images are bounded to 10 MiB and 40 million pixels."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -74,7 +72,8 @@ impl Tool for ReadFileTool {
                 "limit": {
                     "type": "integer",
                     "description": "Maximum number of lines to read (default 10000)."
-                }
+                },
+                "encoding": { "type": "string", "enum": ["UTF-8", "UTF-16LE", "UTF-16BE", "GB18030", "ISO-8859-1"], "description": "Explicit encoding. Unmarked non-UTF-8 defaults to a read-only Latin-1 preview; specify the actual encoding to allow editing." }
             },
             "required": ["file_path"]
         })
@@ -82,6 +81,10 @@ impl Tool for ReadFileTool {
 
     /// 只读工具（旧 `FileReadTool.java:115` `isReadOnly` → `true`）。
     fn is_read_only(&self, _input: &serde_json::Value) -> bool {
+        true
+    }
+
+    fn produces_trusted_images(&self) -> bool {
         true
     }
 
@@ -97,15 +100,26 @@ async fn run(input: serde_json::Value, ctx: ToolContext) -> ToolOutput {
         Err(output) => return output,
     };
     let path = resolve_path(raw_path, &ctx);
+    if crate::image_read::is_image_path(&path) {
+        return crate::image_read::read(path, ctx).await;
+    }
     let display = path.display().to_string();
-    let metadata = match tokio::fs::metadata(&path).await {
+    let mut options = tokio::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(nix::fcntl::OFlag::O_NONBLOCK.bits());
+    let file = match options.open(&path).await {
+        Ok(file) => file,
+        Err(error) => return failure("FILE_NOT_FOUND", format!("{display}: {error}")),
+    };
+    let metadata = match file.metadata().await {
         Ok(metadata) => metadata,
         Err(error) => {
             return failure("FILE_NOT_FOUND", format!("{display}: {error}"));
         }
     };
-    if metadata.is_dir() {
-        return failure("FILE_NOT_FOUND", format!("{display} is a directory"));
+    if !metadata.is_file() {
+        return failure("FILE_NOT_FOUND", format!("{display} is not a regular file"));
     }
     if metadata.len() > MAX_READ_FILE_BYTES {
         return failure(
@@ -116,18 +130,37 @@ async fn run(input: serde_json::Value, ctx: ToolContext) -> ToolOutput {
             ),
         );
     }
-    let bytes = match tokio::fs::read(&path).await {
-        Ok(bytes) => bytes,
-        Err(error) => return failure("FILE_READ_IO_FAILED", format!("{display}: {error}")),
-    };
-    if bytes.iter().take(BINARY_SNIFF_BYTES).any(|byte| *byte == 0) {
-        return failure(
-            "FILE_BINARY_UNSUPPORTED",
-            format!("{display} looks like a binary file"),
-        );
+    let mut bytes = Vec::new();
+    if let Err(error) = file
+        .take(MAX_READ_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .await
+    {
+        return failure("FILE_READ_IO_FAILED", format!("{display}: {error}"));
     }
+    if bytes.len() as u64 > MAX_READ_FILE_BYTES {
+        return failure("FILE_TOO_LARGE", "File grew beyond the read limit");
+    }
+    let encoding = match input.get("encoding") {
+        None => None,
+        Some(serde_json::Value::String(value)) => Some(value.as_str()),
+        Some(_) => {
+            return failure(
+                "FILE_ENCODING_UNSUPPORTED",
+                "encoding must be a supported string",
+            );
+        }
+    };
     let content_sha256 = sha256_hex(&bytes);
-    let text = String::from_utf8_lossy(&bytes).into_owned();
+    let text = match crate::text_encoding::decode(&bytes, encoding) {
+        Ok(text) => text,
+        Err(code) => {
+            return failure(
+                code,
+                "File cannot be decoded safely with the selected encoding",
+            );
+        }
+    };
     finish(&display, &text, &content_sha256, &input, &ctx)
 }
 
@@ -135,11 +168,12 @@ async fn run(input: serde_json::Value, ctx: ToolContext) -> ToolOutput {
 /// metadata 七元组）。
 fn finish(
     display: &str,
-    text: &str,
+    decoded: &crate::text_encoding::DecodedText,
     content_sha256: &str,
     input: &serde_json::Value,
     ctx: &ToolContext,
 ) -> ToolOutput {
+    let text = &decoded.text;
     let total_lines = text.lines().count();
     let start_line = optional_usize(input, "offset").unwrap_or(1).max(1);
     let limit = optional_usize(input, "limit")
@@ -151,7 +185,8 @@ fn finish(
     // Only a complete read starting at line one may authorize a later full-file
     // overwrite. Ranged or byte/line-limited views intentionally carry no hash.
     let is_partial = start_line != 1 || slice.truncated || has_more;
-    file_state::global().mark_read_with_hash(
+    let overwrite_eligible = !is_partial && !decoded.fallback && decoded.reversible;
+    file_state::global().mark_text_read(
         session_key(ctx.session_id()),
         display,
         &slice.raw,
@@ -159,22 +194,39 @@ fn finish(
             offset: Some(start_line),
             limit: Some(limit),
             is_partial,
-            content_sha256: (!is_partial).then(|| content_sha256.to_owned()),
+            content_sha256: overwrite_eligible.then(|| content_sha256.to_owned()),
         },
+        decoded.format,
     );
-    let mut output = ToolOutput::ok(slice.body);
+    let body = if decoded.fallback {
+        format!(
+            "Encoding fallback: ISO-8859-1 preview only; encoding was not identified. Read again with the actual encoding (for example GB18030) before editing.\n{}",
+            slice.body
+        )
+    } else if !decoded.reversible {
+        format!(
+            "Encoding is not byte-reversible; this view does not authorize an overwrite.\n{}",
+            slice.body
+        )
+    } else {
+        slice.body
+    };
+    let mut output = ToolOutput::ok(body);
     output.metadata = Some(json!({
         "structuredResult": {
             "filePath": display,
             "numLines": slice.lines,
             "startLine": start_line,
             "totalLines": total_lines,
-            "encoding": "UTF-8",
+            "encoding": decoded.format.encoding.name(),
+            "encodingFallback": decoded.fallback,
+            "encodingReversible": decoded.reversible,
+            "bom": decoded.format.bom,
             "truncated": slice.truncated,
             "hasMore": has_more,
             "nextOffset": if has_more { Some(next_offset) } else { None },
             "contentSha256": content_sha256,
-            "overwriteEligible": !is_partial,
+            "overwriteEligible": overwrite_eligible,
         }
     }));
     output

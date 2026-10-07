@@ -6,7 +6,7 @@
 //! `scope_options` 空、`source = "direct"`、无子会话）→ [`DurableInteractionService::await_terminal`]
 //! 阻塞等待 → 重读终态行取 `response_json` → 按终态四路映射
 //! （`ANSWERED → Success`、`CANCELLED`/`DENIED → Cancelled`、
-//! `EXPIRED`/`UNDELIVERABLE → Timeout`、其余 → `Error`）。
+//! `EXPIRED → Timeout`、`UNDELIVERABLE → Undeliverable`、其余 → `Error`）。
 //! 数据库是唯一决策权威——本适配不持任何进程内待决表。
 //!
 //! 差异（留痕 docs/compatibility.md §9）：旧 `catch (Exception e)` 回传
@@ -53,6 +53,7 @@ impl DurableElicitationSink {
             kind: InteractionType::Elicitation,
             prompt: json!({
                 "question": request.question,
+                "multiSelect": request.multi_select,
                 "options": options_json(&request.options),
             }),
             allowed_decisions: vec!["answer".to_owned(), "cancel".to_owned()],
@@ -77,9 +78,18 @@ impl DurableElicitationSink {
             InteractionStatus::Cancelled | InteractionStatus::Denied => {
                 ElicitationOutcome::Cancelled
             }
-            InteractionStatus::Expired | InteractionStatus::Undeliverable => {
-                ElicitationOutcome::Timeout
-            }
+            InteractionStatus::Expired => ElicitationOutcome::Timeout,
+            InteractionStatus::Undeliverable => match self.interactions.find_by_id(&record.interaction_id).await {
+                Ok(Some(terminal)) => ElicitationOutcome::Undeliverable(
+                    if terminal.first_dispatched_at.is_none() {
+                        "Question could not be dispatched before the delivery deadline."
+                    } else {
+                        "Question delivery was attempted, but the client did not acknowledge receipt."
+                    }.into()
+                ),
+                Ok(None) => ElicitationOutcome::Error("Interaction disappeared after delivery failure".into()),
+                Err(error) => ElicitationOutcome::Error(error.to_string()),
+            },
             InteractionStatus::Pending => {
                 ElicitationOutcome::Error(format!("Unexpected interaction state: {status}"))
             }
@@ -166,6 +176,7 @@ mod tests {
 
     fn request(run_id: &str) -> ElicitationRequest {
         ElicitationRequest {
+            multi_select: false,
             session_id: "s1".to_owned(),
             run_id: Some(run_id.to_owned()),
             question: "Which language?".to_owned(),

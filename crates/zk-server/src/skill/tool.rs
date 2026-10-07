@@ -17,7 +17,7 @@ const MAX_SKILL_TOKEN_BUDGET: usize = 32 * 1024;
 
 /// Skill registry adapter exposed to the LLM tool catalog.
 pub struct SkillTool {
-    skills: Arc<SkillRegistry>,
+    catalog: Arc<super::catalog::SkillCatalog>,
     providers: Arc<SwappableProvider>,
     db: Db,
     known_tools: BTreeSet<String>,
@@ -44,8 +44,25 @@ impl SkillTool {
         known_tools: impl IntoIterator<Item = String>,
         fork_backend: Option<Arc<dyn AgentToolBackend>>,
     ) -> Self {
+        Self::with_catalog(
+            Arc::new(super::catalog::SkillCatalog::new(skills, db.clone())),
+            providers,
+            db,
+            known_tools,
+            fork_backend,
+        )
+    }
+
+    /// Share the same project views used by REST, slash commands and discovery.
+    pub fn with_catalog(
+        catalog: Arc<super::catalog::SkillCatalog>,
+        providers: Arc<SwappableProvider>,
+        db: Db,
+        known_tools: impl IntoIterator<Item = String>,
+        fork_backend: Option<Arc<dyn AgentToolBackend>>,
+    ) -> Self {
         Self {
-            skills,
+            catalog,
             providers,
             db,
             known_tools: known_tools.into_iter().collect(),
@@ -79,6 +96,10 @@ impl SkillTool {
 }
 
 impl Tool for SkillTool {
+    fn produces_skill_directives(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &'static str {
         "Skill"
     }
@@ -111,18 +132,16 @@ impl Tool for SkillTool {
     #[allow(clippy::too_many_lines)] // resolution, policy, prompt, provider and persistence boundary
     fn execute(&self, input: Value, ctx: ToolContext) -> BoxFuture<'_, ToolOutput> {
         Box::pin(async move {
-            let Some(name) = input.get("name").and_then(Value::as_str).map(str::trim) else {
+            let Some(name) = input.get("name").and_then(Value::as_str) else {
                 return error("SKILL_NAME_INVALID", "name is required");
             };
-            if name.is_empty()
+            if name.trim().is_empty()
                 || name.chars().count() > MAX_SKILL_NAME_CHARS
-                || !name.chars().all(|character| {
-                    character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
-                })
+                || name.contains('\0')
             {
                 return error(
                     "SKILL_NAME_INVALID",
-                    "skill name may contain only ASCII letters, digits, '-' and '_'",
+                    "skill name must identify a registered skill and fit the 128-character limit",
                 );
             }
             let arguments = input
@@ -144,7 +163,24 @@ impl Tool for SkillTool {
                     format!("token_budget must be between 1 and {MAX_SKILL_TOKEN_BUDGET}"),
                 );
             }
-            let Some(skill) = self.skills.resolve(name) else {
+            let Ok(view) = self.catalog.for_tool(&ctx).await else {
+                return error(
+                    "SKILL_SCOPE_UNAVAILABLE",
+                    "The authorized Skill scope is unavailable",
+                );
+            };
+            let Some(skill) = view.resolve(name) else {
+                if let Some(code) = view.state_error()
+                    && matches!(
+                        code.as_str(),
+                        "SKILL_SOURCE_UNAUTHORIZED" | "SKILL_SCAN_FAILED" | "SKILL_READ_FAILED"
+                    )
+                {
+                    return error(
+                        &code,
+                        "The requested Skill source is unavailable or no longer authorized",
+                    );
+                }
                 return error("SKILL_NOT_FOUND", format!("Skill not found: {name}"));
             };
             if skill.frontmatter.disable_model_invocation {
@@ -290,7 +326,7 @@ mod tests {
         registry.register(SkillDefinition::from_markdown(
             "demo.md",
             raw,
-            SkillSource::Project,
+            SkillSource::User,
             None,
         ));
         SkillTool::new(
@@ -302,6 +338,88 @@ mod tests {
             tools.iter().map(|tool| (*tool).to_owned()),
             None,
         )
+    }
+
+    #[tokio::test]
+    async fn retained_builtins_execute_with_registered_names_and_global_switches() {
+        let db = Db::open_in_memory().unwrap();
+        let skills = Arc::new(SkillRegistry::with_persisted_state(db.clone()));
+        let tool = SkillTool::new(
+            skills.clone(),
+            Arc::new(SwappableProvider::new(
+                ProviderRegistry::new().with_default_model("model-a"),
+            )),
+            db,
+            ["Bash", "Read", "Grep", "Glob", "Edit", "Write", "Memory"]
+                .into_iter()
+                .map(str::to_owned),
+            None,
+        );
+        for name in [
+            "fix",
+            "stuck",
+            "remember",
+            "csv-data-summarizer",
+            "software-architecture",
+            "prompt-engineering",
+        ] {
+            let output = tool.execute(json!({"name":name}), context()).await;
+            assert!(!output.is_error, "{name}: {}", output.content);
+            assert!(!output.content.is_empty());
+            skills.set_enabled(name, false).await.unwrap();
+            assert!(tool.execute(json!({"name":name}), context()).await.is_error);
+        }
+    }
+
+    #[tokio::test]
+    async fn production_catalog_tracks_global_switches_and_bundled_review_keeps_literal_scope() {
+        let state = crate::state::AppState::for_tests();
+        let registry = state
+            .skill_catalog
+            .global_view()
+            .filter_tools(Arc::new(crate::engine_bridge::build_tool_registry(&state)));
+        let tool = registry.get("Skill").unwrap();
+        let scope = "commit=abc  排除 docs/**\n只查 \"src/a b.rs\" x=y C:\\repo $value {{args}} {{review_scope}}";
+        let expected = state
+            .skills
+            .resolve("review")
+            .unwrap()
+            .content
+            .replace("{{review_scope}}", scope);
+        let result = tool
+            .execute(json!({"name":"/REVIEW","arguments":scope}), context())
+            .await;
+        assert!(!result.is_error, "{}", result.content);
+        assert_eq!(result.content, expected);
+        for skill in state.skills.manage_skills() {
+            state.skills.set_enabled(&skill.name, false).await.unwrap();
+        }
+        assert!(registry.get("Skill").is_none());
+        assert!(!registry.specs().iter().any(|tool| tool.name == "Skill"));
+        let search = registry.get("ToolSearch").unwrap();
+        for query in ["select:Skill", "workflow", "+Skill"] {
+            let hidden = search
+                .execute(
+                    json!({"query":query}),
+                    context().with_tool_catalog(Arc::new(registry.specs())),
+                )
+                .await;
+            assert!(!hidden.content.contains("**Skill**"));
+        }
+        assert!(
+            tool.execute(json!({"name":"review"}), context())
+                .await
+                .is_error
+        );
+        state.skills.set_enabled("review", true).await.unwrap();
+        assert!(registry.get("Skill").is_some());
+        let visible = search
+            .execute(
+                json!({"query":"select:Skill"}),
+                context().with_tool_catalog(Arc::new(registry.specs())),
+            )
+            .await;
+        assert!(visible.content.contains("**Skill**"));
     }
 
     #[derive(Default)]
@@ -317,6 +435,8 @@ mod tests {
         ) -> BoxFuture<'_, Result<TaskSnapshot, TaskPortError>> {
             self.seen.lock().expect("seen").push(invocation);
             Box::pin(futures::future::ready(Ok(TaskSnapshot {
+                lifecycle: "attached".into(),
+                task_type: "agent".into(),
                 task_id: "550e8400-e29b-41d4-a716-446655440000".into(),
                 session_id: "internal-session".into(),
                 parent_task_id: Some("root-task".into()),
@@ -325,6 +445,7 @@ mod tests {
                 reason: Some("modelFinished".into()),
                 description: Some("skill".into()),
                 output: Some("fork result".into()),
+                display_output: None,
                 error: None,
                 result_version: Some(1),
                 partial: false,
@@ -344,6 +465,7 @@ mod tests {
             "---\narguments:\n  - target\nallowed-tools:\n  - Read\nversion: 2\n---\nInspect {{target}}",
             &["Read", "Skill"],
         );
+        assert!(tool.produces_skill_directives());
         let output = tool
             .execute(
                 json!({ "name": "demo", "arguments": "src/lib.rs", "token_budget": 100 }),
@@ -403,7 +525,7 @@ mod tests {
         registry.register(SkillDefinition::from_markdown(
             "demo.md",
             "---\nversion: 7\n---\nInspect",
-            SkillSource::Project,
+            SkillSource::User,
             None,
         ));
         let tool = SkillTool::new(
@@ -432,7 +554,7 @@ mod tests {
         assert_eq!(event["toolUseId"], "skill-call-1");
         assert_eq!(event["data"]["skill"], "demo");
         assert_eq!(event["data"]["version"], "7");
-        assert_eq!(event["data"]["source"], "PROJECT");
+        assert_eq!(event["data"]["source"], "USER");
     }
 
     #[tokio::test]
@@ -441,22 +563,27 @@ mod tests {
         registry.register(SkillDefinition::from_markdown(
             "forked.md",
             "---\ncontext: fork\nallowed-tools:\n  - Read\nmodel: default\nagent: explore\n---\nInspect safely",
-            SkillSource::Project,
+            SkillSource::User,
             None,
         ));
+        let db = Db::open_in_memory().expect("db");
+        let session = db.create_session("model-a", "/tmp").await.unwrap();
+        db.start_run("parent-run", &session.id, None, Some("query"), "model-a")
+            .await
+            .unwrap();
         let backend = Arc::new(RecordingAgentBackend::default());
         let tool = SkillTool::new(
             registry,
             Arc::new(SwappableProvider::new(
                 ProviderRegistry::new().with_default_model("model-a"),
             )),
-            Db::open_in_memory().expect("db"),
+            db,
             ["Read".to_owned(), "Skill".to_owned()],
             Some(Arc::clone(&backend) as Arc<dyn AgentToolBackend>),
         );
         let (tx, _rx) = mpsc::unbounded_channel();
         let ctx = ToolContext::new(CancellationToken::new(), tx)
-            .with_session_id("parent-session")
+            .with_session_id(&session.id)
             .with_run_id("parent-run")
             .with_tool_use_id("skill-call")
             .with_working_dir("/tmp");
@@ -467,7 +594,7 @@ mod tests {
         assert_eq!(seen.len(), 1);
         assert_eq!(seen[0].model_override.as_deref(), Some("model-a"));
         assert_eq!(seen[0].subagent_type.as_deref(), Some("explore"));
-        assert_eq!(seen[0].parent_session_id, "parent-session");
+        assert_eq!(seen[0].parent_session_id, session.id);
         assert_eq!(
             seen[0].allowed_tools,
             Some(std::collections::BTreeSet::from(["Read".to_owned()]))

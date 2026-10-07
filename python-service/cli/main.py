@@ -18,6 +18,7 @@ import ipaddress
 import os
 import signal
 import sys
+import uuid
 from pathlib import Path
 from typing import Optional
 from enum import Enum
@@ -29,17 +30,18 @@ import httpx
 from rich.console import Console
 from rich.markdown import Markdown
 
-from .client import ZkcodeClient, StreamEvent
+from .client import ZkcodeClient, StreamProtocolError
 from .session import SessionCache
 
 app = typer.Typer(
     name="zkcode",
     help="zkcode CLI — 通过管道和脚本调用 AI 编程助手",
-    no_args_is_help=True,
+    no_args_is_help=False,
     add_completion=True,
 )
 console = Console(stderr=True)   # 元信息输出到 stderr
 stdout_console = Console()       # LLM 内容输出到 stdout
+_active_query: Optional[tuple[ZkcodeClient, str]] = None
 
 
 def _version_callback(value: bool):
@@ -70,7 +72,14 @@ class EffortLevel(str, Enum):
     low = "low"
     medium = "medium"
     high = "high"
+    xhigh = "xhigh"
     max = "max"
+
+
+class ThinkingMode(str, Enum):
+    adaptive = "adaptive"
+    enabled = "enabled"
+    disabled = "disabled"
 
 
 def _is_loopback_server(server: str) -> bool:
@@ -153,7 +162,13 @@ def _resolve_local_project(
 
 
 def _handle_sigint(signum, frame):
-    """Ctrl+C → exit 130"""
+    """Stop the owned request, not a newer query in the same session."""
+    if _active_query is not None:
+        client, request_id = _active_query
+        try:
+            client.cancel_query(request_id)
+        except (httpx.HTTPError, ValueError):
+            console.print("[yellow]Stop request could not be confirmed; check the task in zkcode.[/yellow]")
     console.print("\n[dim]Interrupted[/dim]")
     sys.exit(130)
 
@@ -174,7 +189,8 @@ def main(
     verbose: bool = typer.Option(False, "--verbose", help="详细输出"),
     quiet: bool = typer.Option(False, "--quiet", "-q", help="静默模式"),
     # 模型与行为
-    model: Optional[str] = typer.Option(None, "--model", "-m", help="指定模型"),
+    model: Optional[str] = typer.Option(None, "--model", "-m", envvar=["ZK_MODEL", "AICA_MODEL"], help="指定模型"),
+    thinking: Optional[ThinkingMode] = typer.Option(None, "--thinking", help="思考模式；effort 单独控制强度"),
     effort: Optional[EffortLevel] = typer.Option(
         None, "--effort", help="推理努力等级"),
     fallback_model: Optional[str] = typer.Option(
@@ -186,14 +202,14 @@ def main(
     append_system_prompt: Optional[str] = typer.Option(
         None, "--append-system-prompt", help="追加系统提示"),
     max_turns: Optional[int] = typer.Option(
-        None, "--max-turns", help="最大轮次"),
+        None, "--max-turns", min=1, help="最大轮次"),
     max_budget: Optional[float] = typer.Option(
-        None, "--max-budget", help="预算上限 USD"),
+        None, "--max-budget", min=0.000000001, help="预算上限 USD"),
     json_schema: Optional[str] = typer.Option(
         None, "--json-schema", help="JSON Schema 约束输出结构"),
     # 权限
-    permission_mode: PermissionMode = typer.Option(
-        PermissionMode.dont_ask, "--permission-mode", help="权限模式"),
+    permission_mode: Optional[PermissionMode] = typer.Option(
+        None, "--permission-mode", help="权限模式；未指定时新建默认 DONT_ASK，续接沿用会话权限"),
     # 工具
     allowed_tools: Optional[str] = typer.Option(
         None, "--allowed-tools", help="工具白名单(逗号分隔)"),
@@ -219,10 +235,10 @@ def main(
         False, "--no-session", help="不持久化会话"),
     # 连接
     server: str = typer.Option(
-        "http://127.0.0.1:8082", "--server", "-s", help="后端地址"),
+        "http://127.0.0.1:8082", "--server", "-s", envvar=["ZK_SERVER", "AICA_SERVER"], help="后端地址"),
     token: Optional[str] = typer.Option(
         None, "--token", help="认证 Token"),
-    timeout: int = typer.Option(90, "--timeout", help="超时秒数"),
+    timeout: int = typer.Option(300, "--timeout", min=1, help="任务总期限秒数"),
     # MCP
     mcp_config: Optional[str] = typer.Option(
         None, "--mcp-config", help="MCP 配置文件"),
@@ -239,12 +255,30 @@ def main(
     """
     signal.signal(signal.SIGINT, _handle_sigint)
 
+    if input_format not in ("text", "stream-json"):
+        raise typer.BadParameter("input-format must be text or stream-json")
+    if include_partial_messages and output_format != OutputFormat.stream_json:
+        raise typer.BadParameter("--include-partial-messages requires --output-format stream-json")
+    if no_session and (session_id or continue_session or resume or fork_session):
+        raise typer.BadParameter("--no-session cannot resume, continue, or fork a saved session")
+    if thinking == ThinkingMode.disabled and effort is not None:
+        raise typer.BadParameter("--effort cannot be used with --thinking disabled")
+    if sum(bool(value) for value in (continue_session, resume, session_id)) > 1:
+        raise typer.BadParameter("Choose only one of --continue, --resume, or --session-id")
+
     # 1. 读取 stdin（如果是管道）
     stdin_content = None
     if not sys.stdin.isatty():
-        stdin_content = sys.stdin.read(1024 * 1024)  # 最大 1MB
-        if len(stdin_content) >= 1024 * 1024:
-            console.print("[yellow]Warning: stdin truncated at 1MB[/yellow]")
+        stdin_content = sys.stdin.read(1024 * 1024 + 1)
+        if len(stdin_content.encode("utf-8")) > 1024 * 1024:
+            raise typer.BadParameter("stdin exceeds the 1 MiB limit; input was not submitted")
+    input_messages = _parse_jsonl_users(stdin_content or "") if input_format == "stream-json" else None
+    if input_messages is not None:
+        stdin_content = None
+    schema = _parse_json_option(json_schema, "json-schema") if json_schema is not None else None
+    run_mcp_config = _parse_mcp_config(mcp_config) if mcp_config is not None else None
+    if schema is not None and not isinstance(schema, (dict, bool)):
+        raise typer.BadParameter("json-schema must be an object or boolean schema")
 
     # 2. 从文件读取系统提示
     effective_system_prompt = system_prompt
@@ -252,13 +286,13 @@ def main(
         effective_system_prompt = system_prompt_file.read_text(encoding="utf-8")
 
     # 3. 验证输入
-    if not prompt and not stdin_content:
+    if not prompt and not stdin_content and not input_messages:
         console.print("[red]Error: No prompt or stdin input[/red]")
         raise typer.Exit(code=2)
 
     # 4. 解析权限模式
     # 权限模式只控制授权决策；任何模式都不能绕过系统安全不变量。
-    perm = permission_mode.value.upper()
+    perm = permission_mode.value.upper() if permission_mode is not None else None
 
     if working_dir is not None and not _is_loopback_server(server):
         console.print(
@@ -283,6 +317,10 @@ def main(
         resolved_sid = cache.get_last_session(wd)
     elif resume and not resolved_sid:
         resolved_sid = resume
+    if continue_session and not resolved_sid:
+        raise typer.BadParameter("No previous session exists for this directory")
+    if fork_session and not resolved_sid:
+        raise typer.BadParameter("--fork-session requires an existing session")
     if resolved_sid and project_id:
         console.print(
             "[red]Error: --project-id cannot be combined "
@@ -293,45 +331,53 @@ def main(
     client = ZkcodeClient(server=server, token=token, timeout=timeout)
 
     response_sid = None
+    request_id = str(uuid.uuid4())
+    global _active_query
     try:
         effective_project_id = project_id
         if (
-            working_dir is not None
-            and not resolved_sid
+            not resolved_sid
             and not effective_project_id
             and _is_loopback_server(server)
         ):
             effective_project_id = _resolve_local_project(client, wd)
+        if not resolved_sid and not effective_project_id:
+            raise typer.BadParameter("A remote backend requires --project-id for a new session")
 
         request_body: dict = {
-            "prompt": prompt,
+            "prompt": prompt or "",
+            "requestId": request_id,
             "model": model,
             "effort": effort.value if effort else None,
+            "thinking": thinking.value if thinking else None,
             "fallbackModel": fallback_model,
             "systemPrompt": effective_system_prompt,
             "appendSystemPrompt": append_system_prompt,
             "permissionMode": perm,
-            "maxTurns": max_turns if max_turns is not None else 4,
+            "maxTurns": max_turns if max_turns is not None else 99,
             "maxBudgetUsd": max_budget,
-            "allowedTools": allowed_tools.split(",") if allowed_tools else None,
-            "disallowedTools": (
-                disallowed_tools.split(",") if disallowed_tools else None
-            ),
-            "tools": tools.split(",") if tools else None,
+            "allowedTools": _tool_names(allowed_tools) if allowed_tools is not None else None,
+            "disallowedTools": _tool_names(disallowed_tools) if disallowed_tools is not None else None,
+            "tools": _tool_names(tools) if tools is not None else None,
             "projectId": effective_project_id,
             "sessionId": resolved_sid,
             "forkSession": fork_session or None,
             "name": name,
             "timeoutSeconds": timeout,
-            "jsonSchema": json_schema,
+            "jsonSchema": schema,
+            "mcpConfig": run_mcp_config,
+            "messages": input_messages,
             "includePartialMessages": include_partial_messages or None,
             "context": {"stdin": stdin_content} if stdin_content else None,
+            "noSession": no_session or None,
         }
         request_body = {
             key: value
             for key, value in request_body.items()
             if value is not None
         }
+
+        _active_query = (client, request_id)
 
         if output_format == OutputFormat.stream_json:
             response_sid = _stream_query(client, request_body, verbose)
@@ -343,11 +389,29 @@ def main(
         console.print(f"[red]Error: Backend not reachable at {server}[/red]")
         raise typer.Exit(code=3)
     except httpx.HTTPStatusError as e:
+        if e.response.status_code == 409:
+            try:
+                body = e.response.json()
+            except ValueError:
+                body = {}
+            error = body.get("error", body) if isinstance(body, dict) else None
+            if isinstance(error, dict) and error.get("code") in ("PERMISSION_MODE_MISMATCH", "PERMISSION_MODE_CONFLICT"):
+                console.print("[red]Error: 指定权限与会话权限不一致；请先在页面修改会话权限，或省略 --permission-mode 沿用当前设置。[/red]")
+                raise typer.Exit(code=1)
         if e.response.status_code in (401, 403):
             console.print("[red]Error: Authentication failed[/red]")
             raise typer.Exit(code=4)
         console.print(f"[red]Error: HTTP {e.response.status_code}[/red]")
         raise typer.Exit(code=1)
+    except (StreamProtocolError, httpx.TimeoutException, httpx.RemoteProtocolError) as error:
+        try:
+            client.cancel_query(request_id)
+        except (httpx.HTTPError, ValueError):
+            pass
+        console.print(f"[red]Error: {error}[/red]")
+        raise typer.Exit(code=1)
+    finally:
+        _active_query = None
 
     # 7. 更新本地会话缓存（优先使用后端响应中的 sessionId）
     final_sid = response_sid or resolved_sid or ""
@@ -358,11 +422,29 @@ def main(
 def _stream_query(client: ZkcodeClient, body: dict, verbose: bool) -> Optional[str]:
     """SSE 流式查询 — POST /api/query/stream"""
     response_session_id = None
+    terminal_error = None
+    completed = False
     for event in client.stream_query(body):
+        event_name = event.get("event", event.get("type"))
+        if event_name in ("text", "thinking", "stream_delta", "thinking_delta", "tool_input_delta") and not body.get("includePartialMessages"):
+            continue
         print(json.dumps(event, ensure_ascii=False), flush=True)
         # 从 message_complete 事件中提取 sessionId
         if isinstance(event, dict) and event.get("sessionId"):
             response_session_id = event["sessionId"]
+        if event_name == "error":
+            terminal_error = event.get("code", "QUERY_FAILED")
+        elif event_name in ("result", "message_complete"):
+            terminal_error = event.get("error")
+            completed = True
+        elif event_name == "complete":
+            completed = True
+            if event.get("success") is False:
+                terminal_error = terminal_error or "QUERY_FAILED"
+    if not completed:
+        raise StreamProtocolError("No terminal query result was received")
+    if terminal_error:
+        raise typer.Exit(code=1)
     return response_session_id
 
 
@@ -370,6 +452,8 @@ def _sync_query_json(client: ZkcodeClient, body: dict) -> Optional[str]:
     """同步查询 JSON 输出"""
     data = client.sync_query(body)
     print(json.dumps(data, ensure_ascii=False, indent=2))
+    if data.get("error"):
+        raise typer.Exit(code=1)
     return data.get("sessionId")
 
 
@@ -379,6 +463,9 @@ def _sync_query_text(client: ZkcodeClient, body: dict,
     if not quiet:
         console.print("[dim]Thinking...[/dim]")
     data = client.sync_query(body)
+    if data.get("error"):
+        console.print(f"[red]Error: {data['error']}[/red]")
+        raise typer.Exit(code=1)
     result = data.get("result", "")
 
     if sys.stdout.isatty():
@@ -396,6 +483,67 @@ def _sync_query_text(client: ZkcodeClient, body: dict,
         )
 
     return data.get("sessionId")
+
+
+def _tool_names(value: str) -> list[str]:
+    return list(dict.fromkeys(name.strip() for name in value.split(",") if name.strip()))
+
+
+def _parse_json_option(value: str, name: str):
+    def invalid_constant(_value: str):
+        raise ValueError("non-finite JSON number")
+    try:
+        return json.loads(value, parse_constant=invalid_constant)
+    except (ValueError, RecursionError) as error:
+        # Do not echo source text: MCP configuration and prompts may contain secrets.
+        raise typer.BadParameter(f"{name} is not valid JSON") from error
+
+
+def _parse_mcp_config(value: str) -> dict:
+    if value.lstrip().startswith("{"):
+        raw = value.encode("utf-8")
+    else:
+        try:
+            with Path(value).expanduser().open("rb") as source:
+                raw = source.read(256 * 1024 + 1)
+        except OSError as error:
+            raise typer.BadParameter("mcp-config file cannot be read") from error
+    if len(raw) > 256 * 1024:
+        raise typer.BadParameter("mcp-config exceeds the 256 KiB limit")
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeError as error:
+        raise typer.BadParameter("mcp-config must use UTF-8") from error
+    config = _parse_json_option(text, "mcp-config")
+    if not isinstance(config, dict) or not config:
+        raise typer.BadParameter("mcp-config must be a non-empty object")
+    return config
+
+
+def _parse_jsonl_users(value: str) -> list[dict]:
+    messages = []
+    for number, line in enumerate(value.splitlines(), start=1):
+        if not line.strip():
+            continue
+        item = _parse_json_option(line, f"JSONL line {number}")
+        if isinstance(item, dict) and item.get("type") == "user":
+            if set(item) != {"type", "message"}:
+                raise typer.BadParameter(f"JSONL line {number} contains unsupported control fields")
+            item = item["message"]
+        if not isinstance(item, dict) or set(item) != {"role", "content"} or item["role"] != "user":
+            raise typer.BadParameter(f"JSONL line {number} must be a user message")
+        content = item["content"]
+        if isinstance(content, list):
+            if not content or any(not isinstance(block, dict) or set(block) != {"type", "text"}
+                                  or block["type"] != "text" or not isinstance(block["text"], str) for block in content):
+                raise typer.BadParameter(f"JSONL line {number} supports text content only")
+            content = "\n".join(block["text"] for block in content)
+        if not isinstance(content, str) or not content.strip():
+            raise typer.BadParameter(f"JSONL line {number} requires non-empty user text")
+        messages.append({"role": "user", "content": content})
+        if len(messages) > 256:
+            raise typer.BadParameter("JSONL exceeds the 256-message limit")
+    return messages
 
 
 if __name__ == "__main__":

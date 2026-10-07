@@ -19,10 +19,12 @@ KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 ALLOWED_PREFIXES = (
     "ZK_",
     "LLM_PROVIDER_",
+    "LLM_COMPACT_",
     "FEATURE_",
 )
 ALLOWED_EXACT = {
     "ALL_PROXY",
+    "ASR_CORRECTIONS",
     "BROWSER_CHANNEL",
     "BROWSER_HEADLESS",
     "BROWSER_TYPE",

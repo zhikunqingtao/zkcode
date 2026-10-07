@@ -3,6 +3,29 @@ import { expect, test } from '@playwright/test';
 const MODEL = 'qwen3.8-max-0902';
 const ANSWER = '来自脚本 Provider 的持久化回复';
 
+test('real backend: legacy simple preference opens the developer UI and retains diagram and math rendering', async ({ page, request }) => {
+  const create = await request.post('/api/sessions', { data: { model: MODEL } });
+  const { sessionId } = await create.json();
+  await page.addInitScript(id => {
+    window.sessionStorage.setItem('zkcode.activeSessionId', id);
+    window.localStorage.setItem('zhikun.workbench.enabled', 'true');
+    window.localStorage.setItem('zhikun.workbench.default-view', 'simple');
+    window.localStorage.setItem(`zhikun.workbench.session-view.${id}`, 'simple');
+    window.localStorage.setItem('zhikun.turn-view.v1', JSON.stringify({ state: { density: 'detailed', expandOverrides: {} }, version: 2 }));
+  }, sessionId);
+  await page.goto('/');
+  await expect(page.getByRole('button', { name: '查看会话详情' })).toContainText('已连接');
+  await expect(page.getByRole('tablist', { name: '工作台视图' })).toHaveCount(0);
+  await expect(page.getByRole('tab', { name: '简洁工作台' })).toHaveCount(0);
+  await expect(page.getByRole('textbox', { name: '输入消息' })).toHaveAttribute('placeholder', /\/ 查看命令/);
+  await expect(page.getByRole('tablist', { name: '显示方式' }).getByRole('tab', { name: '完整过程', exact: true })).toHaveAttribute('aria-selected', 'true');
+  await page.getByRole('textbox', { name: '输入消息' }).fill('visual-regression-chart');
+  await page.getByRole('button', { name: '发送消息' }).click();
+  await expect(page.getByTestId('mermaid-block').locator('svg.flowchart')).toBeVisible({ timeout: 60_000 });
+  await expect(page.locator('.katex').first()).toBeVisible();
+  await page.screenshot({ path: test.info().outputPath('diagram-math.png'), fullPage: true });
+});
+
 test('real backend: browser chat is durable before message_complete', async ({ page, request }) => {
   const create = await request.post('/api/sessions', {
     data: { model: MODEL },
@@ -13,7 +36,6 @@ test('real backend: browser chat is durable before message_complete', async ({ p
 
   await page.addInitScript(sessionId => {
     window.sessionStorage.setItem('zkcode.activeSessionId', sessionId);
-    window.localStorage.setItem('zhikun.workbench.default-view', 'development');
   }, created.sessionId);
 
   const frames: Array<Record<string, unknown>> = [];
@@ -30,7 +52,7 @@ test('real backend: browser chat is durable before message_complete', async ({ p
   });
 
   await page.goto('/');
-  await expect(page.locator('[title="已连接"]').first()).toBeVisible();
+  await expect(page.getByRole('button', { name: '查看会话详情' })).toContainText('已连接');
   await expect.poll(
     () => frames.some(frame => frame.type === 'session_restored'),
   ).toBe(true);
@@ -57,11 +79,15 @@ test('real backend: browser chat is durable before message_complete', async ({ p
   const transcript = await messagesResponse.json() as {
     messages: Array<{ type: string; content: Array<{ type: string; text?: string }> }>;
   };
-  expect(transcript.messages).toHaveLength(2);
-  expect(transcript.messages[0].type).toBe('user');
-  expect(transcript.messages[0].content.some(block => block.text?.includes(nonce))).toBe(true);
-  expect(transcript.messages[1].type).toBe('assistant');
-  expect(transcript.messages[1].content.some(block => block.text === ANSWER)).toBe(true);
+  expect(transcript.messages).toHaveLength(3);
+  expect(transcript.messages[0]).toMatchObject({ type: 'system', subtype: 'task_boundary' });
+  expect(frames.some(frame => frame.type === 'task_boundary')).toBe(true);
+  const conversation = transcript.messages.filter(message => message.type !== 'system');
+  expect(conversation).toHaveLength(2);
+  expect(conversation[0].type).toBe('user');
+  expect(conversation[0].content.some(block => block.text?.includes(nonce))).toBe(true);
+  expect(conversation[1].type).toBe('assistant');
+  expect(conversation[1].content.some(block => block.text === ANSWER)).toBe(true);
 
   const runsResponse = await request.get(
     `/api/runs/session/${encodeURIComponent(created.sessionId)}?limit=10`,
@@ -94,7 +120,184 @@ test('real backend: browser chat is durable before message_complete', async ({ p
   expect(diagnostic.results[0].finalMessageId).toBeTruthy();
 
   await page.reload();
-  await expect(page.locator('[title="已连接"]').first()).toBeVisible();
+  await expect(page.getByRole('button', { name: '查看会话详情' })).toContainText('已连接');
   await expect(page.getByText(ANSWER).first()).toBeVisible();
-  await expect(page.getByText(nonce).first()).toBeVisible();
+  await expect(page.getByRole('main').getByText(nonce).filter({ visible: true }).first()).toBeVisible();
+  await expect(page.locator('.turn-card')).toHaveCount(1);
+  await page.screenshot({ path: test.info().outputPath('chat-durable.png'), fullPage: true });
+});
+
+test('real backend: settings, Skill management, and revisioned memory use native contracts', async ({ page, request }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: '外观设置', exact: true }).click();
+  const settings = page.getByRole('dialog', { name: '设置', exact: true });
+  await expect(settings.getByRole('tab', { name: 'API Keys' })).toBeVisible();
+  await expect(settings.getByRole('checkbox', { name: /语音识别使用最近/ })).not.toBeChecked();
+  await settings.getByRole('button', { name: '跟随系统', exact: true }).click();
+  await expect(settings.getByLabel('当前会话模型')).toBeVisible();
+  await expect(settings.getByLabel('新会话默认模型')).toBeVisible();
+  await settings.getByRole('button', { name: '关闭设置' }).click();
+  await expect(page.getByRole('button', { name: '外观设置', exact: true })).toContainText('跟随系统');
+
+  const skillResponse = page.waitForResponse(response => response.url().includes('/api/skills/manage') && response.request().method() === 'GET');
+  await page.getByRole('button', { name: 'Skill 管理', exact: true }).click();
+  const skills = await skillResponse;
+  expect(skills.ok()).toBe(true);
+  expect(Array.isArray(await skills.json())).toBe(true);
+  await expect(page.getByRole('dialog', { name: 'Skill 管理' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '刷新 Skill 列表' })).toBeEnabled();
+  await page.getByRole('button', { name: '关闭 Skill 管理' }).click();
+
+  const initialResponse = await request.get('/api/memory/document?scope=global');
+  expect(initialResponse.ok()).toBe(true);
+  const initial = await initialResponse.json() as { revision: number };
+  await page.getByRole('button', { name: '记忆', exact: true }).click();
+  await page.getByRole('button', { name: '新增条目' }).click();
+  const content = `SQLite memory ${Date.now()}`;
+  await page.getByRole('textbox', { name: '记忆条目 1 内容' }).fill(content);
+  const savedResponse = page.waitForResponse(response => response.url().endsWith('/api/memory/document/entries') && response.request().method() === 'PUT');
+  await page.getByRole('button', { name: '保存记忆' }).filter({ visible: true }).click();
+  const saved = await savedResponse;
+  expect(saved.ok(), await saved.text()).toBe(true);
+  await expect(page.getByText('已保存', { exact: true })).toBeVisible();
+  const stale = await request.put('/api/memory/document', { data: { scope: 'global', expectedRevision: initial.revision, content: 'stale overwrite' } });
+  expect(stale.status()).toBe(409);
+  await page.getByRole('button', { name: '关闭记忆页面' }).click();
+  await page.reload();
+  await page.getByRole('button', { name: '记忆', exact: true }).click();
+  await expect(page.getByRole('textbox', { name: '记忆条目 1 内容' })).toHaveValue(content);
+});
+
+test('real backend: merge UI produces a charged, durable handoff and inherits primary permission', async ({ page, request }) => {
+  for (let index = 0; index < 2; index++) {
+    const response = await request.post('/api/sessions', { data: { model: MODEL, permissionMode: 'DONT_ASK' } });
+    expect(response.status()).toBe(201);
+  }
+  await page.goto('/');
+  await page.getByRole('button', { name: '合并为新会话', exact: true }).first().click();
+  const dialog = page.getByRole('dialog', { name: '合并为新会话' });
+  await expect(dialog.getByText('新会话继承主会话的权限模式', { exact: true })).toBeVisible();
+  await dialog.getByRole('group', { name: '选择来源会话' }).getByRole('button').first().click();
+  await dialog.getByLabel('新会话标题').fill('SQLite handoff integration');
+  const creating = page.waitForResponse(response => response.url().endsWith('/api/sessions/merge') && response.request().method() === 'POST');
+  await dialog.getByRole('button', { name: '开始合并', exact: true }).click();
+  const response = await creating;
+  expect(response.status()).toBe(202);
+  const operation = await response.json() as { operationId: string; targetSessionId: string };
+  const idempotencyKey = response.request().headers()['idempotency-key'];
+  const replay = await request.post('/api/sessions/merge', { headers: { 'Idempotency-Key': idempotencyKey }, data: response.request().postDataJSON() });
+  expect((await replay.json()).operationId).toBe(operation.operationId);
+  await expect.poll(async () => {
+    const progress = await request.get(`/api/session-merges/${operation.operationId}`);
+    return (await progress.json()).status;
+  }, { timeout: 60_000 }).toBe('completed');
+  const result = await (await request.get(`/api/session-merges/${operation.operationId}`)).json();
+  expect(result.targetAvailable).toBe(true);
+  expect(result.progress.completedUnits).toBe(result.progress.knownUnits);
+  expect(result.result.handoffStorage).toBe('sqlite');
+  expect(result.usage.usageComplete).toBe(true);
+  expect(result.usage.tokens).toBeGreaterThan(0);
+  expect(result.usage.costNanosUsd).toBeGreaterThan(0);
+  const targetListing = await (await request.get('/api/sessions?q=SQLite%20handoff%20integration')).json();
+  expect(targetListing.sessions.find((session: { id: string }) => session.id === operation.targetSessionId).permissionMode).toBe('DONT_ASK');
+  await expect(page.getByRole('button', { name: '查看会话详情' })).toContainText(operation.targetSessionId.slice(0, 8));
+  await page.reload();
+  await expect(page.getByRole('button', { name: '查看会话详情' })).toContainText(operation.targetSessionId.slice(0, 8));
+  const transcript = await (await request.get(`/api/sessions/${operation.targetSessionId}/messages?limit=20`)).json();
+  expect(transcript.messages.some((message: { content: unknown }) => JSON.stringify(message.content).includes('历史参考'))).toBe(true);
+  await expect(page.getByText('合并交接已就绪')).toBeVisible();
+  await page.getByText('查看交接摘要与来源记录').click();
+  await expect(page.getByRole('region', { name: '合并交接' })).toContainText('历史参考');
+  await page.screenshot({ path: test.info().outputPath('merge-handoff.png'), fullPage: true });
+});
+
+test('real backend: persisted editor chords, Vim and session execution controls are functional', async ({ page, request }) => {
+  const effortModel = 'deepseek-flash';
+  const create = await request.post('/api/sessions', { data: { model: effortModel } });
+  expect(create.status()).toBe(201);
+  const { sessionId } = await create.json();
+  const editorPreferences = { vimEnabled: true, keybindings: { 'chat:commandPalette': 'ctrl+k ctrl+g' } };
+  const saved = await request.put('/api/config', { data: { editorPreferences } });
+  expect(saved.ok(), await saved.text()).toBe(true);
+  await page.addInitScript(id => {
+    sessionStorage.setItem('zkcode.activeSessionId', id);
+  }, sessionId);
+  await page.goto('/');
+  await expect(page.getByRole('button', { name: '查看会话详情' })).toContainText('已连接');
+  const composer = page.getByRole('textbox', { name: '输入消息' });
+  await expect(page.getByText('VIM · INSERT', { exact: true })).toBeVisible();
+  await composer.fill('hello world');
+  await composer.press('Home');
+  await composer.press('Escape');
+  await composer.press('d'); await composer.press('w');
+  await expect(composer).toHaveValue('world');
+  await composer.press('u'); await expect(composer).toHaveValue('hello world');
+  await composer.press('Control+k');
+  await expect(page.getByText(/等待和弦下一键/)).toBeVisible();
+  await composer.press('Control+g');
+  await expect(page.getByPlaceholder('Type a command...')).toBeVisible();
+  await page.getByPlaceholder('Type a command...').press('Escape');
+  await composer.fill('/vim off');
+  await page.getByRole('button', { name: '发送消息' }).click();
+  await expect.poll(async () => (await (await request.get('/api/config')).json()).editorPreferences.vimEnabled).toBe(false);
+  await expect(page.getByText(/VIM ·/)).toHaveCount(0);
+
+  await page.getByRole('button', { name: '外观设置', exact: true }).click();
+  const settings = page.getByRole('dialog', { name: '设置', exact: true });
+  const effort = settings.getByRole('combobox', { name: '当前会话推理强度' });
+  await expect(effort).toBeEnabled();
+  const headers = { 'X-Session-Id': sessionId };
+  const before = await (await request.get(`/api/sessions/${sessionId}/execution-preferences`, { headers })).json();
+  const unsupportedCreate = await request.post('/api/sessions', { data: { model: MODEL } });
+  expect(unsupportedCreate.status()).toBe(201);
+  const unsupportedId = (await unsupportedCreate.json()).sessionId;
+  const unsupportedHeaders = { 'X-Session-Id': unsupportedId };
+  const unsupported = await (await request.get(`/api/sessions/${unsupportedId}/execution-preferences`, { headers: unsupportedHeaders })).json();
+  expect(unsupported.supportedEfforts).toEqual([]);
+  const rejected = await request.patch(`/api/sessions/${unsupportedId}/execution-preferences`, { headers: unsupportedHeaders, data: { revision: unsupported.revision, effort: 'low' } });
+  expect(rejected.status()).toBe(400);
+  expect((await rejected.json()).code).toBe('SESSION_EXECUTION_OPTIONS_UNSUPPORTED');
+  expect((await (await request.get(`/api/sessions/${unsupportedId}/execution-preferences`, { headers: unsupportedHeaders })).json()).effort).toBe('auto');
+  expect(before.fast).toBe(false);
+  expect(before.effort).toBe('auto');
+  expect(before.supportedEfforts).toContain('low');
+  await effort.selectOption('low');
+  await expect.poll(async () => (await (await request.get(`/api/sessions/${sessionId}/execution-preferences`, { headers })).json()).effort).toBe('low');
+  await settings.getByRole('button', { name: '关闭设置' }).click();
+  await composer.fill('effort-wire-regression');
+  await page.getByRole('button', { name: '发送消息' }).click();
+  await expect(page.getByText(ANSWER, { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: '发送消息' })).toBeVisible();
+  await composer.fill('/effort auto');
+  await page.getByRole('button', { name: '发送消息' }).click();
+  await expect.poll(async () => (await (await request.get(`/api/sessions/${sessionId}/execution-preferences`, { headers })).json()).effort).toBe('auto');
+  const session = await (await request.get(`/api/sessions/${sessionId}`)).json();
+  expect(session.model).toBe(effortModel);
+  const another = await request.post('/api/sessions', { data: { model: effortModel } });
+  const { sessionId: otherId } = await another.json();
+  const untouched = await (await request.get(`/api/sessions/${otherId}/execution-preferences`, { headers: { 'X-Session-Id': otherId } })).json();
+  expect(untouched.effort).toBe('auto'); expect(untouched.fast).toBe(false);
+  const reset = await request.put('/api/config', { data: { editorPreferences: { vimEnabled: false, keybindings: {} } } });
+  expect(reset.ok()).toBe(true);
+});
+
+test('real backend: browser replay panel is reachable and uses exact session access', async ({ page, request }) => {
+  const created = await request.post('/api/sessions', { data: { model: MODEL } });
+  expect(created.status()).toBe(201);
+  const { sessionId } = await created.json() as { sessionId: string };
+  await page.addInitScript(id => {
+    window.sessionStorage.setItem('zkcode.activeSessionId', id);
+  }, sessionId);
+  await page.goto('/');
+  await expect(page.getByRole('button', { name: '查看会话详情' })).toContainText('已连接');
+  const replay = page.waitForResponse(response => response.url().endsWith(`/api/browser/replay/${sessionId}`));
+  await page.getByRole('combobox', { name: '侧栏面板' }).selectOption('browser');
+  const result = await replay;
+  expect(result.request().headers()['x-session-id']).toBe(sessionId);
+  expect(result.status()).toBe(404);
+  expect(await result.json()).toMatchObject({ code: 'REPLAY_NOT_FOUND' });
+  await expect(page.getByRole('region', { name: '浏览器快照时间线' })).toContainText('暂无快照');
+  const denied = await request.get(`/api/browser/replay/${sessionId}`, { headers: { 'X-Session-Id': 'foreign-session' } });
+  expect(denied.status()).toBe(404);
+  expect(await denied.json()).toMatchObject({ code: 'SESSION_NOT_FOUND' });
 });

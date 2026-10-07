@@ -32,27 +32,27 @@ const PhaseStep: React.FC<PhaseStepProps> = ({ phase, isLast }) => {
         switch (phase.status) {
             case 'completed':
                 return {
-                    circle: 'bg-emerald-500 text-white ring-2 ring-emerald-200',
-                    label: 'text-emerald-700 dark:text-emerald-400 font-medium',
-                    line: 'bg-emerald-500',
+                    circle: 'bg-ok text-white dark:text-app2 ring-2 ring-oksoft',
+                    label: 'text-ok dark:text-ok font-medium',
+                    line: 'bg-ok',
                 };
             case 'active':
                 return {
-                    circle: 'bg-blue-500 text-white ring-4 ring-blue-200 dark:ring-blue-900 animate-pulse',
-                    label: 'text-blue-700 dark:text-blue-300 font-semibold',
-                    line: 'bg-gradient-to-r from-emerald-500 to-blue-300',
+                    circle: 'bg-accent2 text-white ring-4 ring-accent2-ring animate-pulse',
+                    label: 'text-accent2-ink dark:text-accent2-ink font-semibold',
+                    line: 'bg-gradient-to-r from-ok to-accent2',
                 };
             case 'skipped':
                 return {
-                    circle: 'bg-amber-400 text-white ring-2 ring-amber-200',
-                    label: 'text-amber-600 dark:text-amber-400',
-                    line: 'bg-amber-300',
+                    circle: 'bg-warn text-white dark:text-app2 ring-2 ring-warnsoft',
+                    label: 'text-warn dark:text-warn',
+                    line: 'bg-warnsoft',
                 };
             default: // pending
                 return {
-                    circle: 'bg-gray-200 dark:bg-gray-700 text-gray-500 dark:text-gray-400',
-                    label: 'text-gray-500 dark:text-gray-500',
-                    line: 'bg-gray-200 dark:bg-gray-700',
+                    circle: 'bg-sunken2 text-t2',
+                    label: 'text-t2 dark:text-t2',
+                    line: 'bg-sunken2',
                 };
         }
     }, [phase.status]);
@@ -70,7 +70,7 @@ const PhaseStep: React.FC<PhaseStepProps> = ({ phase, isLast }) => {
             {/* Phase circle + label */}
             <div className="flex flex-col items-center min-w-[72px]">
                 <div
-                    className={`w-10 h-10 rounded-full flex items-center justify-center text-sm transition-all duration-300 ${statusStyles.circle}`}
+                    className={`w-10 h-10 rounded-full flex items-center justify-center text-sm transition-[width] duration-slow ${statusStyles.circle}`}
                     title={`${phase.name}: ${phase.prompt || phaseLabels[phase.name]}`}
                 >
                     {phase.status === 'completed' ? (
@@ -81,11 +81,11 @@ const PhaseStep: React.FC<PhaseStepProps> = ({ phase, isLast }) => {
                         <span className="text-base">{phaseIcons[phase.name]}</span>
                     )}
                 </div>
-                <span className={`mt-1.5 text-xs leading-tight text-center ${statusStyles.label}`}>
+                <span className={`mt-1.5 text-[13px] leading-tight text-center ${statusStyles.label}`}>
                     {phaseLabels[phase.name]}
                 </span>
                 {elapsed && (
-                    <span className="text-[10px] text-gray-400 dark:text-gray-500 mt-0.5">
+                    <span className="text-[13px] text-t2 mt-0.5">
                         {elapsed}
                     </span>
                 )}
@@ -94,7 +94,7 @@ const PhaseStep: React.FC<PhaseStepProps> = ({ phase, isLast }) => {
             {/* Connector line */}
             {!isLast && (
                 <div className="flex-1 mx-1.5 h-0.5 min-w-[24px]">
-                    <div className={`h-full rounded-full transition-all duration-500 ${statusStyles.line}`} />
+                    <div className={`h-full rounded-full transition-[width] duration-sheet ${statusStyles.line}`} />
                 </div>
             )}
         </div>
@@ -116,38 +116,38 @@ export const WorkflowPhaseIndicator: React.FC = () => {
     })();
 
     const statusColor = (() => {
-        if (!workflow) return 'text-gray-500';
+        if (!workflow) return 'text-t2';
         switch (workflow.status) {
-            case 'RUNNING': return 'text-blue-600 dark:text-blue-400';
-            case 'COMPLETED': return 'text-emerald-600 dark:text-emerald-400';
-            case 'FAILED': return 'text-red-600 dark:text-red-400';
-            case 'CANCELLED': return 'text-gray-500';
-            default: return 'text-gray-500';
+            case 'RUNNING': return 'text-accent2-ink';
+            case 'COMPLETED': return 'text-ok dark:text-ok';
+            case 'FAILED': return 'text-err';
+            case 'CANCELLED': return 'text-t2';
+            default: return 'text-t2';
         }
     })();
 
     if (!workflow) return null;
 
     return (
-        <div className="px-4 py-3 bg-white/80 dark:bg-gray-900/80 backdrop-blur-sm border border-gray-200 dark:border-gray-700 rounded-xl shadow-sm">
+        <div className="px-4 py-3 bg-surfacev2 backdrop-blur-xs border border-border-hairline rounded-[14px] shadow-e1">
             {/* Header */}
             <div className="flex items-center justify-between mb-3">
                 <div className="flex items-center gap-2">
-                    <span className="text-sm font-semibold text-gray-800 dark:text-gray-200">
+                    <span className="text-sm font-semibold text-t1">
                         Coordinator 工作流
                     </span>
-                    <span className={`text-xs px-2 py-0.5 rounded-full bg-gray-100 dark:bg-gray-800 ${statusColor}`}>
+                    <span className={`text-[13px] px-2 py-0.5 rounded-full bg-sunken2 ${statusColor}`}>
                         {statusLabel}
                     </span>
                 </div>
-                <span className="text-[11px] text-gray-400 dark:text-gray-500 font-mono">
+                <span className="text-[13px] text-t2 font-mono">
                     {workflow.workflowId}
                 </span>
             </div>
 
             {/* Objective */}
             {workflow.objective && (
-                <p className="text-xs text-gray-500 dark:text-gray-400 mb-3 truncate" title={workflow.objective}>
+                <p className="text-[13px] text-t2 mb-3 truncate" title={workflow.objective}>
                     目标: {workflow.objective}
                 </p>
             )}

@@ -45,20 +45,20 @@ const CollapsedReadSearchBlock: React.FC<CollapsedReadSearchBlockProps> = ({
     const preview = lines.slice(0, previewLines).join('\n');
 
     return (
-        <div className="collapsed-read-search rounded-lg border border-gray-700 bg-gray-900/30 overflow-hidden">
+        <div className="collapsed-read-search rounded-[14px] border border-hairline bg-sunken2 overflow-hidden">
             {/* Header */}
             <button
                 onClick={toggle}
-                className="flex items-center gap-2 w-full px-3 py-1.5 hover:bg-gray-800/30 transition-colors text-left"
+                className="panel-control flex items-center gap-2 w-full px-3 py-1.5 hover:bg-sunken2 transition-colors text-left"
             >
                 <ChevronRight
                     size={12}
-                    className={`text-gray-500 transition-transform duration-200 ${expanded ? 'rotate-90' : ''}`}
+                    className={`text-t2 transition-transform duration-base ${expanded ? 'rotate-90' : ''}`}
                 />
-                <Icon size={14} className="text-gray-500" />
-                <span className="text-xs text-gray-400">{label}</span>
+                <Icon size={14} className="text-t2" />
+                <span className="text-[13px] text-t2">{label}</span>
                 {!expanded && (
-                    <span className="text-xs text-gray-600 ml-auto">click to expand</span>
+                    <span className="text-[13px] text-t2 ml-auto">click to expand</span>
                 )}
             </button>
 
@@ -69,7 +69,7 @@ const CollapsedReadSearchBlock: React.FC<CollapsedReadSearchBlockProps> = ({
                 ) : (
                     <div className="relative">
                         <CodeBlock code={preview + '\n...'} language="text" showLineNumbers={false} maxHeight={200} />
-                        <div className="absolute bottom-0 left-0 right-0 h-8 bg-gradient-to-t from-gray-900/80 to-transparent pointer-events-none" />
+                        <div className="absolute bottom-0 left-0 right-0 h-8 bg-gradient-to-t from-overlay2 to-transparent pointer-events-none" />
                     </div>
                 )}
             </div>

@@ -5,8 +5,10 @@
  * 支持 base64 和 URL 两种图片源，响应式展示 + 点击放大。
  */
 
-import React, { useState, useCallback, useEffect } from 'react';
-import { ZoomIn, X } from 'lucide-react';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
+import { createPortal } from 'react-dom';
+import { ZoomIn, X, Copy, Check } from 'lucide-react';
+import { copyImageToClipboard } from '@/utils/messageContent';
 
 interface ImageBlockProps {
     /** base64 编码数据 (不含 data: 前缀) */
@@ -26,6 +28,13 @@ const ImageBlock: React.FC<ImageBlockProps> = ({
 }) => {
     const [zoomed, setZoomed] = useState(false);
     const [loadError, setLoadError] = useState(false);
+    const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
+    const copyTimerRef = useRef<number | null>(null);
+
+    // 卸载时清理复制状态重置定时器，避免组件销毁后 setState
+    useEffect(() => () => {
+        if (copyTimerRef.current !== null) window.clearTimeout(copyTimerRef.current);
+    }, []);
 
     const imageSrc = base64Data
         ? `data:${mediaType};base64,${base64Data}`
@@ -38,9 +47,28 @@ const ImageBlock: React.FC<ImageBlockProps> = ({
 
     const toggleZoom = useCallback(() => setZoomed(prev => !prev), []);
 
+    // 复制图片到剪贴板：base64 直接转 Blob，URL 由工具内部 fetch；
+    // 剪贴板图片写入不支持/失败时工具内部会降级为复制 URL 文本——
+    // base64 与 src 双有时必须把 src 一并传入，否则降级链断在"复制失败"
+    const copyImage = useCallback(async (event: React.MouseEvent) => {
+        event.stopPropagation();
+        try {
+            await copyImageToClipboard(
+                base64Data
+                    ? { base64Data, mediaType, url: src }
+                    : { url: imageSrc, mediaType },
+            );
+            setCopyState('copied');
+        } catch {
+            setCopyState('failed');
+        }
+        if (copyTimerRef.current !== null) window.clearTimeout(copyTimerRef.current);
+        copyTimerRef.current = window.setTimeout(() => setCopyState('idle'), 2000);
+    }, [base64Data, imageSrc, mediaType, src]);
+
     if (!imageSrc) {
         return (
-            <div className="flex items-center justify-center h-32 rounded-lg border border-gray-700 bg-gray-800 text-gray-500 text-sm">
+            <div className="flex items-center justify-center h-32 rounded-[14px] border border-hairline bg-surfacev2 text-t2 text-sm">
                 No image data
             </div>
         );
@@ -48,7 +76,7 @@ const ImageBlock: React.FC<ImageBlockProps> = ({
 
     if (loadError) {
         return (
-            <div className="flex items-center justify-center h-32 rounded-lg border border-red-700/50 bg-red-900/20 text-red-400 text-sm">
+            <div className="flex items-center justify-center h-32 rounded-[14px] border border-err bg-errsoft text-err text-sm">
                 Failed to load image
             </div>
         );
@@ -61,7 +89,7 @@ const ImageBlock: React.FC<ImageBlockProps> = ({
                 <img
                     src={imageSrc}
                     alt={alt}
-                    className="max-w-full max-h-80 rounded-lg border border-gray-700 cursor-pointer"
+                    className="max-w-full max-h-80 rounded-[10px] border border-hairline cursor-pointer"
                     onClick={toggleZoom}
                     onError={() => setLoadError(true)}
                     loading="lazy"
@@ -69,38 +97,52 @@ const ImageBlock: React.FC<ImageBlockProps> = ({
                 />
                 <button
                     onClick={toggleZoom}
-                    className="absolute top-2 right-2 p-1 rounded bg-black/50 text-white opacity-0 group-hover:opacity-100 transition-opacity"
+                    className="panel-control absolute top-2 right-2 p-1 rounded-sm bg-black/50 text-white opacity-0 group-hover:opacity-100 transition-opacity"
                     aria-label="Zoom image"
                 >
                     <ZoomIn size={16} />
                 </button>
             </div>
 
-            {/* Full-screen overlay */}
-            {zoomed && (
+            {/* Portal keeps transformed/filtered message ancestors from containing the fixed overlay. */}
+            {zoomed && createPortal(
                 <div
-                    className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm"
+                    className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-xs"
                     onClick={toggleZoom}
                 >
-                    <button
-                        onClick={(event) => {
-                            event.stopPropagation();
-                            setZoomed(false);
-                        }}
-                        className="absolute top-4 right-4 p-2 rounded-full bg-gray-800 text-white hover:bg-gray-700"
-                        aria-label="Close zoom"
-                        type="button"
-                    >
-                        <X size={20} />
-                    </button>
+                    <div className="absolute top-4 right-4 flex items-center gap-2">
+                        <button
+                            onClick={copyImage}
+                            className={`panel-control p-2 rounded-full bg-surfacev2 hover:bg-sunken2 ${
+                                copyState === 'copied' ? 'text-ok' : copyState === 'failed' ? 'text-err' : 'text-t1'
+                            }`}
+                            aria-label={copyState === 'copied' ? 'Image copied' : copyState === 'failed' ? 'Copy image failed' : 'Copy image'}
+                            title={copyState === 'copied' ? '已复制' : copyState === 'failed' ? '复制失败' : '复制图片'}
+                            type="button"
+                        >
+                            {copyState === 'copied' ? <Check size={20} /> : <Copy size={20} />}
+                        </button>
+                        <button
+                            onClick={(event) => {
+                                event.stopPropagation();
+                                setZoomed(false);
+                            }}
+                            className="panel-control p-2 rounded-full bg-surfacev2 text-t1 hover:bg-sunken2"
+                            aria-label="Close zoom"
+                            type="button"
+                        >
+                            <X size={20} />
+                        </button>
+                    </div>
                     <img
                         src={imageSrc}
                         alt={alt}
-                        className="max-w-[90vw] max-h-[90vh] rounded-lg"
+                        className="max-w-[90vw] max-h-[90vh] rounded-[10px]"
                         referrerPolicy="no-referrer"
                         onClick={(e) => e.stopPropagation()}
                     />
-                </div>
+                </div>,
+                document.body,
             )}
         </>
     );

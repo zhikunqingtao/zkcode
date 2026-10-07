@@ -1,18 +1,23 @@
-import React from 'react';
+import React, { useEffect } from 'react';
+import { useSessionStore } from '@/store/sessionStore';
 import { Loader2, Mic, Square, X } from 'lucide-react';
 import { useVoiceRecorder } from '@/hooks/useVoiceRecorder';
 
 interface VoiceInputButtonProps {
     onTranscript: (text: string) => void;
     disabled?: boolean;
+    compact?: boolean;
+    disabledReason?: string;
 }
 
 function formatTime(seconds: number): string {
     return `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
 }
 
-const VoiceInputButton: React.FC<VoiceInputButtonProps> = ({ onTranscript, disabled = false }) => {
+const VoiceInputButton: React.FC<VoiceInputButtonProps> = ({ onTranscript, disabled = false, disabledReason }) => {
     const { state, elapsedSeconds, error, startRecording, stopRecording, cancelRecording } = useVoiceRecorder(onTranscript);
+    const sessionId = useSessionStore(s => s.sessionId);
+    useEffect(() => { cancelRecording(); }, [sessionId, cancelRecording]);
     const recording = state === 'recording';
     const busy = state === 'requesting' || state === 'transcribing';
     const title = recording
@@ -21,7 +26,7 @@ const VoiceInputButton: React.FC<VoiceInputButtonProps> = ({ onTranscript, disab
             ? '取消麦克风权限请求'
             : state === 'transcribing'
                 ? '取消语音识别'
-                : error ?? '语音输入';
+                : disabledReason ?? error ?? '语音输入';
 
     return (
         <div className="relative flex items-center gap-1">
@@ -53,7 +58,7 @@ const VoiceInputButton: React.FC<VoiceInputButtonProps> = ({ onTranscript, disab
                 </>
             )}
             {state === 'error' && error && (
-                <span role="alert" className="absolute bottom-full right-0 mb-2 whitespace-nowrap rounded bg-red-950 px-2 py-1 text-xs text-red-300">
+                <span role="alert" className="absolute bottom-full right-0 mb-2 whitespace-nowrap rounded-sm bg-red-950 px-2 py-1 text-xs text-red-300">
                     {error}
                 </span>
             )}

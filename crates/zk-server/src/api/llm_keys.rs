@@ -57,6 +57,8 @@ fn provider_label(name: &str) -> &'static str {
         "dashscope-token-plan" => "DashScope (百炼订阅)",
         "deepseek" => "DeepSeek",
         "moonshot" => "Moonshot (Kimi)",
+        "kimi-code" => "Kimi Code",
+        "openrouter" => "OpenRouter",
         "zhipu" => "智谱 (GLM)",
         "minimax" => "MiniMax",
         "zenmux" => "ZenMux",
@@ -929,5 +931,61 @@ mod tests {
                 .expect("provenance read succeeds")
                 .is_empty()
         );
+    }
+    #[test]
+    fn key_save_and_delete_rebuilds_keep_priority_paid_opt_in_and_routing() {
+        let config = Config::test_config();
+        let catalog = crate::demo_credentials::load_catalog(&config.demo_credentials_path).unwrap();
+        let raw = "sk-ss-v1-private-sub,sk-ai-v1-private-paid";
+        let mut saved = BTreeMap::from([("zenmux".to_owned(), raw.to_owned())]);
+        let rebuild = |keys: &BTreeMap<String, String>, paid: bool, strategy: &str| {
+            let env = BTreeMap::from([
+                ("LLM_PROVIDER_ZENMUX_API_KEY", raw.to_owned()),
+                ("LLM_PROVIDER_ZENMUX_ALLOW_PAID_FAILOVER", paid.to_string()),
+                (
+                    "LLM_PROVIDER_ZENMUX_KEY_SELECTION_STRATEGY",
+                    strategy.to_owned(),
+                ),
+                (
+                    "LLM_PROVIDER_ZENMUX_BASE_URL",
+                    "https://custom.invalid/v1".to_owned(),
+                ),
+                ("LLM_PROVIDER_ZENMUX_MODELS", "openai/gpt-5.4".to_owned()),
+            ]);
+            build_merged_provider_configs_with_lookup(&config, &catalog, keys, |name| {
+                env.get(name).cloned()
+            })
+            .into_iter()
+            .find(|provider| provider.name == "zenmux")
+            .unwrap()
+        };
+        for after_delete in [false, true] {
+            if after_delete {
+                saved.remove("zenmux");
+            }
+            let gated = rebuild(&saved, false, "PRIORITY_FAILOVER");
+            assert_eq!(gated.api_keys.len(), 1);
+            assert_eq!(gated.base_url, "https://custom.invalid/v1");
+            assert_eq!(gated.models, ["openai/gpt-5.4"]);
+            let opted = rebuild(&saved, true, "PRIORITY_FAILOVER");
+            assert_eq!(opted.api_keys.len(), 2);
+            assert_eq!(
+                opted.api_keys.next_key().unwrap().expose(),
+                "sk-ss-v1-private-sub"
+            );
+            assert_eq!(
+                opted.api_keys.next_key().unwrap().expose(),
+                "sk-ss-v1-private-sub"
+            );
+            let round_robin = rebuild(&saved, true, "ROUND_ROBIN");
+            assert_eq!(
+                round_robin.api_keys.next_key().unwrap().expose(),
+                "sk-ss-v1-private-sub"
+            );
+            assert_eq!(
+                round_robin.api_keys.next_key().unwrap().expose(),
+                "sk-ai-v1-private-paid"
+            );
+        }
     }
 }

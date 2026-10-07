@@ -8,6 +8,15 @@
 
 ### 新增
 
+- 同步 ZhikunCode `3e536438..053adf90` 范围的适用能力：新供应商与模型、独立摘要、
+  轮次视图及新主题、会话合并与 HandoffRead、全局 Skill 开关、可编辑记忆、
+  Shell attached/detached 任务、ASR 热词和可选上下文、原生 Office/OCR 工具链。
+- 会话与交互增加持久化权限、requestId 确认、多选、分阶段期限；现有 V4 事件归属和重放机制保留。
+- 合并采用幂等键、epoch、不可变快照和事务创建目标；支持再次合并、取消与恢复，
+  历史授权不转化为新授权。旧会话数据库不迁移。
+- 保留 Rust 原生预算、文件授权、Python/Node/Ruby REPL、两种工作台与现有配置。
+  不纳入新增 OSS/Meoo/flyai、装饰导出、删除验证码、三个 TaskCreate 兼容别名及非 macOS 部署。
+
 - 增加全新 Apple Silicon Mac 的一键安装命令：安装受支持工具链与锁定依赖、处理
   本机版本冲突、限时启动全部服务并自动打开浏览器。
 - 增加 GFM 与工作区 Markdown 图片渲染、DashScope ASR/TTS 语音交互。
@@ -32,7 +41,7 @@
   文本，上游 ZhikunCode 的 MIT 声明完整保留于 THIRD_PARTY_NOTICES.md，
   贡献条款（CONTRIBUTING.md）同步更新。
 - WebSocket 协议从 v3 一次性切换至 v4，旧版客户端不再兼容。
-- `ZK_AGENT_WRITE_ENABLED` 与 `ZK_SWARM_ENABLED` 默认关闭；新增根任务预算、
+- 通过真实 Git／写 Agent 验收后，`ZK_AGENT_WRITE_ENABLED` 与 `ZK_WORKTREE_ENABLED` 的未配置默认值改为开启，显式关闭仍生效；`ZK_SWARM_ENABLED` 保持原有默认关闭。新增根任务预算、
   shared workspace、自动恢复和 Cron 的显式配置项。
 - 顶层 Coordinator 改为默认关闭的进程级显式模式；
   `ZHIKUN_COORDINATOR_MODE` 仅接受 `0` / `1`，配置变更需重启，并与

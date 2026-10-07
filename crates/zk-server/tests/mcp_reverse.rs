@@ -33,7 +33,11 @@ async fn reverse_mcp_is_wired_through_the_real_router() {
         .expect("tool list")
         .clone();
     assert!(tools.iter().any(|tool| tool["name"] == "ReadMcpResource"));
-    assert!(tools.iter().any(|tool| tool["name"] == "Write"));
+    assert!(tools.iter().any(|tool| tool["name"] == "Read"));
+    assert!(
+        !tools.iter().any(|tool| tool["name"] == "Write"),
+        "ungranted MCP clients must not discover a write capability"
+    );
 }
 
 #[tokio::test]

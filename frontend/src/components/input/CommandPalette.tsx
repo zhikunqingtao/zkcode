@@ -1,3 +1,4 @@
+import { GlassMaterial } from '@/components/theme/GlassMaterial';
 /**
  * CommandPalette — Slash 命令面板
  *
@@ -12,11 +13,24 @@
 import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import type { Command } from '@/types';
 import { Search } from 'lucide-react';
+import { Kbd } from '@/components/ui';
+import { useTurnViewStore, type TurnDensity } from '@/store/turnViewStore';
+import { useSessionStore } from '@/store/sessionStore';
+
+/** 本地显示方式命令控制消息展示；精简档默认折叠问题、过程与回复。命名与 DensitySwitch / 手机导航三端统一。 */
+const VIEW_DENSITY_COMMANDS: Array<Command & { density: TurnDensity }> = [
+    { name: '视图：精简', description: '问题、过程与回复默认折叠，可分别展开', group: '视图', density: 'compact' },
+    { name: '视图：标准', description: '按任务分节展示过程，展开查看步骤摘要', group: '视图', density: 'balanced' },
+    { name: '视图：完整过程', description: '按任务分节展示完整过程与工具详情', group: '视图', density: 'detailed' },
+];
+
+/** 命令名 → 目标密度（本地命令命中判定） */
+const VIEW_DENSITY_BY_NAME = new Map(VIEW_DENSITY_COMMANDS.map(c => [c.name, c.density]));
 
 interface CommandPaletteProps {
     commands: Command[];
     filter: string;
-    onSelect: (command: string) => void;
+    onSelect: (command: string, skillId?: string) => void;
     onClose: () => void;
     /** 是否为全局命令面板模式 (Ctrl+K) */
     isGlobal?: boolean;
@@ -36,15 +50,33 @@ const CommandPalette: React.FC<CommandPaletteProps> = ({
 
     const query = isGlobal ? searchInput : filter;
 
+    // 外部命令 + 本地视图密度命令，合并后统一过滤/分组渲染
+    const allCommands = useMemo(() => [...commands, ...VIEW_DENSITY_COMMANDS], [commands]);
+
     const filtered = useMemo(() => {
         const q = query.toLowerCase();
-        return commands
+        return allCommands
             .filter(c => !c.hidden)
             .filter(c =>
                 c.name.toLowerCase().includes(q) ||
                 c.description.toLowerCase().includes(q),
             );
-    }, [commands, query]);
+    }, [allCommands, query]);
+
+    // 命中分发：本地视图密度命令 → 直接 setDensity + 关闭；其余 → 上送 onSelect
+    const handleSelect = useCallback((cmd: Command) => {
+        const density = VIEW_DENSITY_BY_NAME.get(cmd.name);
+        if (density) {
+            useTurnViewStore.getState().setDensity(
+                density,
+                useSessionStore.getState().sessionId ?? undefined,
+            );
+            onClose();
+            return;
+        }
+        if (cmd.skillId !== undefined) onSelect(cmd.name, cmd.skillId);
+        else onSelect(cmd.name);
+    }, [onSelect, onClose]);
 
     // Reset index when filter changes
     useEffect(() => { setSelectedIndex(0); }, [query]);
@@ -73,7 +105,7 @@ const CommandPalette: React.FC<CommandPaletteProps> = ({
             case 'Enter':
                 e.preventDefault();
                 if (filtered[selectedIndex]) {
-                    onSelect(filtered[selectedIndex].name);
+                    handleSelect(filtered[selectedIndex]);
                 }
                 break;
             case 'Escape':
@@ -81,7 +113,7 @@ const CommandPalette: React.FC<CommandPaletteProps> = ({
                 onClose();
                 break;
         }
-    }, [filtered, selectedIndex, onSelect, onClose]);
+    }, [filtered, selectedIndex, handleSelect, onClose]);
 
     // Group commands by group
     const grouped = useMemo(() => {
@@ -99,42 +131,45 @@ const CommandPalette: React.FC<CommandPaletteProps> = ({
     return (
         <div
             className={`${isGlobal
-                ? 'fixed inset-0 z-50 flex items-start justify-center pt-[15vh] bg-black/50'
+                ? 'fixed inset-0 z-50 flex items-start justify-center pt-[15vh] bg-overlay2 backdrop-blur-[3px]'
                 : 'absolute bottom-full left-0 w-full mb-1'}`}
             onClick={isGlobal ? onClose : undefined}
             onKeyDown={handleKeyDown}
         >
             <div
-                className={`bg-gray-900 border border-gray-700 rounded-xl shadow-2xl overflow-hidden
+                className={`glass-menu glass-surface relative bg-surfacev2 border border-hairline rounded-panel shadow-e4 overflow-hidden
                     ${isGlobal ? 'w-full max-w-lg mx-4' : 'w-full'}`}
                 onClick={e => e.stopPropagation()}
             >
+                <GlassMaterial kind="overlay" />
                 {/* Search input (global mode) */}
                 {isGlobal && (
-                    <div className="flex items-center gap-2 px-3 py-2.5 border-b border-gray-700">
-                        <Search size={16} className="text-gray-500 flex-shrink-0" />
+                    <div className="flex items-center gap-2 px-3 py-2.5 border-b border-hairline">
+                        <Search size={16} className="text-t3 shrink-0" />
                         <input
                             ref={inputRef}
                             value={searchInput}
                             onChange={e => setSearchInput(e.target.value)}
                             onKeyDown={handleKeyDown}
                             placeholder="Type a command..."
-                            className="flex-1 bg-transparent text-sm text-gray-200 outline-none placeholder-gray-500"
+                            role="combobox"
+                            aria-expanded="true"
+                            className="flex-1 bg-transparent text-sm text-t1 outline-hidden placeholder:text-t4"
                         />
                     </div>
                 )}
 
                 {/* Command list */}
-                <div ref={listRef} className="max-h-64 overflow-y-auto py-1">
+                <div ref={listRef} className="max-h-64 overflow-y-auto py-1" role="listbox">
                     {filtered.length === 0 ? (
-                        <div className="px-3 py-4 text-sm text-gray-500 text-center">
+                        <div className="px-3 py-4 text-sm text-t3 text-center">
                             No commands found
                         </div>
                     ) : (
                         Array.from(grouped.entries()).map(([group, cmds]) => (
                             <div key={group}>
                                 {grouped.size > 1 && (
-                                    <div className="px-3 py-1 text-xs text-gray-600 font-medium uppercase tracking-wider">
+                                    <div className="px-3 py-1 text-[13px] text-t3 font-semibold uppercase tracking-[0.08em]">
                                         {group}
                                     </div>
                                 )}
@@ -142,16 +177,18 @@ const CommandPalette: React.FC<CommandPaletteProps> = ({
                                     const idx = flatIndex++;
                                     return (
                                         <button
-                                            key={cmd.name}
-                                            onClick={() => onSelect(cmd.name)}
-                                            className={`w-full text-left px-3 py-2 flex items-center justify-between
+                                            key={cmd.skillId !== undefined ? `skill:${cmd.skillId}` : `command:${cmd.name}`}
+                                            onClick={() => handleSelect(cmd)}
+                                            className={`panel-control w-full text-left px-3 py-2 flex items-center justify-between
                                                 text-sm transition-colors
                                                 ${idx === selectedIndex
-                                                    ? 'bg-blue-600/20 text-blue-300'
-                                                    : 'text-gray-300 hover:bg-gray-800'}`}
+                                                    ? 'bg-accent2-soft text-accent2-ink'
+                                                    : 'text-t2 hover:bg-hover2'}`}
+                                            role="option"
+                                            aria-selected={idx === selectedIndex}
                                         >
-                                            <span className="font-mono text-xs">/{cmd.name}</span>
-                                            <span className="text-xs text-gray-500 truncate ml-3 max-w-[60%]">
+                                            <span className="font-mono text-[13px]">/{cmd.name}</span>
+                                            <span className="text-[13px] text-t3 truncate ml-3 max-w-[60%]">
                                                 {cmd.description}
                                             </span>
                                         </button>
@@ -163,10 +200,10 @@ const CommandPalette: React.FC<CommandPaletteProps> = ({
                 </div>
 
                 {/* Footer hint */}
-                <div className="px-3 py-1.5 border-t border-gray-700/50 text-xs text-gray-600 flex gap-3">
-                    <span>↑↓ Navigate</span>
-                    <span>↵ Select</span>
-                    <span>Esc Close</span>
+                <div data-testid="command-palette-footer" className="px-3 py-1.5 border-t border-hairline text-[13px] text-t3 flex items-center gap-3">
+                    <span className="flex items-center gap-1"><Kbd>↑↓</Kbd> 选择</span>
+                    <span className="flex items-center gap-1"><Kbd>↵</Kbd> 确认</span>
+                    <span className="flex items-center gap-1"><Kbd>Esc</Kbd> 关闭</span>
                 </div>
             </div>
         </div>

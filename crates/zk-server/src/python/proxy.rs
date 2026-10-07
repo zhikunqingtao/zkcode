@@ -54,19 +54,14 @@ static SESSION_ID_HEADER: HeaderName = HeaderName::from_static("x-session-id");
 /// 可代理前缀白名单——与 [`crate::routes::build_router`] 注册的通配路由一一
 /// 对应。handler 内再复核一遍：将来若有人把通配路由注册宽了，本 handler 也
 /// 不会退化成「任意 Python 端点开放代理」。
-const FORWARDABLE_PREFIXES: [&str; 5] = [
-    "/api/tokenizer/",
-    "/api/code-quality/",
-    "/api/files/analysis/",
-    "/api/analysis/",
-    "/api/git/",
-];
+const FORWARDABLE_PREFIXES: [&str; 3] =
+    ["/api/tokenizer/", "/api/files/analysis/", "/api/analysis/"];
 
 /// 可代理的精确路径——文件树面板的 `POST /api/files/tree`（Python
 /// `routers/file_processing.py` 的 `/tree`，不落在 `analysis` 子前缀下）。
 /// 刻意不放开整个 `/api/files/`：`/api/files/search` 是会话感知的后端能力，
 /// 不能被代理抢走。
-const FORWARDABLE_PATHS: [&str; 1] = ["/api/files/tree"];
+const FORWARDABLE_PATHS: [&str; 2] = ["/api/files/tree", "/api/code-quality/health"];
 
 /// 通用 Python 侧车反向代理：将请求原样转发到 Python 侧对应路径。
 ///
@@ -206,14 +201,11 @@ mod tests {
     fn allow_listed_targets_pass() {
         for target in [
             "/api/tokenizer/count",
-            "/api/code-quality/complexity",
             "/api/code-quality/health",
             "/api/files/analysis/summary",
             "/api/analysis/openapi/merged",
             "/api/files/tree",
             "/api/files/tree?depth=2",
-            "/api/git/diff",
-            "/api/git/log?limit=20",
         ] {
             assert!(is_forwardable_target(target), "{target} must be proxied");
         }
@@ -229,6 +221,10 @@ mod tests {
             "/api/files/safe-read",
             "/api/tokenizer",
             "/api/git",
+            "/api/git/log/detail",
+            "/api/git/diff",
+            "/api/code-quality/complexity",
+            "/api/code-quality/broken",
             "/api/git/../health",
             "/api/tokenizer/../../etc/passwd",
             "",

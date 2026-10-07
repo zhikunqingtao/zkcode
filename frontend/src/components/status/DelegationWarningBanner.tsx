@@ -64,17 +64,13 @@ export const DelegationWarningBanner: React.FC = () => {
             {visibleWarnings.map((warning) => (
                 <div
                     key={warning.id}
-                    className="flex items-start gap-3 px-4 py-2.5
-                               bg-amber-50 dark:bg-amber-950/30
-                               border border-amber-300 dark:border-amber-700
-                               rounded-lg shadow-sm
-                               animate-in slide-in-from-top-2 duration-300"
+                    className="flex items-start gap-3 px-4 py-2.5\n                               bg-warnsoft\n                               border border-warn\n                               rounded-[14px] shadow-e1\n                               animate-in slide-in-from-top-2 duration-slow"
                     role="alert"
                 >
                     {/* Warning icon */}
-                    <div className="flex-shrink-0 mt-0.5">
+                    <div className="shrink-0 mt-0.5">
                         <svg
-                            className="w-4.5 h-4.5 text-amber-500 dark:text-amber-400"
+                            className="w-4.5 h-4.5 text-warn dark:text-warn"
                             fill="none" stroke="currentColor" viewBox="0 0 24 24"
                         >
                             <path
@@ -88,13 +84,13 @@ export const DelegationWarningBanner: React.FC = () => {
 
                     {/* Warning content */}
                     <div className="flex-1 min-w-0">
-                        <p className="text-xs font-medium text-amber-800 dark:text-amber-200">
+                        <p className="text-[13px] font-medium text-warn dark:text-warn">
                             委派质量警告
                         </p>
-                        <p className="text-xs text-amber-700 dark:text-amber-300 mt-0.5 break-words">
+                        <p className="text-[13px] text-warn dark:text-warn mt-0.5 break-words">
                             {warning.message}
                         </p>
-                        <span className="text-[10px] text-amber-500 dark:text-amber-500 mt-1 block">
+                        <span className="text-[13px] text-warn dark:text-warn mt-1 block">
                             {new Date(warning.timestamp).toLocaleTimeString()}
                         </span>
                     </div>
@@ -102,12 +98,12 @@ export const DelegationWarningBanner: React.FC = () => {
                     {/* Dismiss button */}
                     <button
                         onClick={() => handleDismiss(warning.id)}
-                        className="flex-shrink-0 w-5 h-5 rounded flex items-center justify-center
-                                   hover:bg-amber-200 dark:hover:bg-amber-800 transition-colors"
+                        className="panel-control shrink-0 w-5 h-5 rounded-sm flex items-center justify-center
+                                   hover:bg-warnsoft transition-colors"
                         title="关闭警告"
                     >
                         <svg
-                            className="w-3 h-3 text-amber-600 dark:text-amber-400"
+                            className="w-3 h-3 text-warn dark:text-warn"
                             fill="none" stroke="currentColor" viewBox="0 0 24 24"
                         >
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
@@ -121,8 +117,8 @@ export const DelegationWarningBanner: React.FC = () => {
                 <div className="flex justify-end">
                     <button
                         onClick={handleDismissAll}
-                        className="text-[11px] text-amber-600 dark:text-amber-400
-                                   hover:text-amber-800 dark:hover:text-amber-200
+                        className="panel-control text-[13px] text-warn dark:text-warn
+                                   hover:text-warn dark:hover:text-warn
                                    transition-colors px-2 py-0.5"
                     >
                         全部关闭

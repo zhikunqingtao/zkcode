@@ -108,6 +108,8 @@ pub struct CommitToolInvocationResult {
 pub struct CommittedToolInvocationResult {
     pub invocation: ToolInvocationRecord,
     pub message: MessageRecord,
+    /// Todo transitions committed atomically with their successful tool result.
+    pub task_boundaries: Vec<MessageRecord>,
 }
 
 /// CAS outcome for an invocation/result terminal transaction.
@@ -136,7 +138,8 @@ const TOOL_COLUMNS: &str = "invocation_id,task_id,run_id,tool_use_id,tool_name,s
     input_json,output_ref,error_code,side_effect_class,cleanup_status,directory_generation,
     connection_generation,version,started_at,terminal_at,created_at,updated_at";
 
-fn map_tool(row: &Row<'_>) -> rusqlite::Result<ToolInvocationRecord> {
+fn map_tool(conn: &Connection, row: &Row<'_>) -> rusqlite::Result<ToolInvocationRecord> {
+    let session = crate::content::run_session(conn, &row.get::<_, String>(2)?)?;
     Ok(ToolInvocationRecord {
         invocation_id: row.get(0)?,
         task_id: row.get(1)?,
@@ -144,9 +147,9 @@ fn map_tool(row: &Row<'_>) -> rusqlite::Result<ToolInvocationRecord> {
         tool_use_id: row.get(3)?,
         tool_name: row.get(4)?,
         status: row.get(5)?,
-        input_json: row.get(6)?,
-        output_ref: row.get(7)?,
-        error_code: row.get(8)?,
+        input_json: crate::content::load_optional(conn, &session, row.get(6)?)?,
+        output_ref: crate::content::load_optional(conn, &session, row.get(7)?)?,
+        error_code: load_ledger_diagnostic(conn, &session, row.get(8)?)?,
         side_effect_class: row.get(9)?,
         cleanup_status: row.get(10)?,
         directory_generation: row.get(11)?,
@@ -163,6 +166,61 @@ impl Db {
     pub async fn create_tool_invocation(
         &self,
         record: &NewToolInvocation,
+    ) -> Result<ToolInvocationRecord, DbError> {
+        self.create_invocation(record, "tool").await
+    }
+
+    /// Register a managed Run-lifetime resource owner, never an assistant tool call.
+    /// This dedicated constructor prevents a model-selected name from bypassing
+    /// conversation safe-boundary checks.
+    pub async fn create_run_scope_invocation(
+        &self,
+        record: &NewToolInvocation,
+    ) -> Result<ToolInvocationRecord, DbError> {
+        if record.tool_name != "RunToolScope"
+            || record.directory_generation.is_some()
+            || record.connection_generation.is_some()
+            || record.side_effect_class != "write"
+        {
+            return Err(DbError::Invalid("RUN_SCOPE_INVOCATION_INVALID".into()));
+        }
+        self.create_invocation(record, "runtimeScope").await
+    }
+
+    /// Close only an internally typed scope without reading or rewriting a body.
+    /// Cleanup and settlement remain possible after a temporary content lease ends.
+    pub async fn finish_run_scope_invocation(
+        &self,
+        invocation: &str,
+        expected_version: i64,
+        target: ToolInvocationStatus,
+        error_code: Option<&str>,
+        cleanup: CleanupStatus,
+    ) -> Result<CasOutcome, DbError> {
+        if !target.is_terminal() {
+            return Err(DbError::Invalid("RUN_SCOPE_TERMINAL_REQUIRED".into()));
+        }
+        let (invocation, error_code) = (invocation.to_owned(), error_code.map(str::to_owned));
+        self.with_writer(move |conn| {
+            let record:Option<(String,String,i64)>=conn.query_row("SELECT run_id,status,version FROM tool_invocations WHERE invocation_id=?1 AND invocation_kind='runtimeScope'",[&invocation],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional()?;
+            let Some((run,status,version))=record else {return Ok(CasOutcome::NotFound);};
+            if matches!(status.as_str(),"succeeded"|"failed"|"cancelled"|"interrupted") {return Ok(CasOutcome::InvalidTransition);}
+            if version!=expected_version {return Ok(CasOutcome::VersionConflict);}
+            if cleanup==CleanupStatus::Confirmed && conn.query_row("SELECT EXISTS(SELECT 1 FROM execution_resources WHERE invocation_id=?1 AND status<>'released')",[&invocation],|row|row.get::<_,bool>(0))? {
+                return Err(DbError::Invalid("RUN_SCOPE_CLEANUP_UNCONFIRMED".into()));
+            }
+            let session=crate::content::run_session(conn,&run)?;
+            let error_code=store_ledger_diagnostic(conn,&session,error_code.as_deref())?;
+            let now=format_rfc3339_micros(now_millis());
+            let changed=conn.execute("UPDATE tool_invocations SET status=?1,error_code=?2,cleanup_status=?3,terminal_at=?4,updated_at=?4,version=version+1 WHERE invocation_id=?5 AND version=?6 AND invocation_kind='runtimeScope'",params![target.as_db(),error_code,cleanup.as_db(),now,invocation,expected_version])?;
+            Ok(if changed==1 {CasOutcome::Applied} else {CasOutcome::VersionConflict})
+        }).await
+    }
+
+    async fn create_invocation(
+        &self,
+        record: &NewToolInvocation,
+        kind: &'static str,
     ) -> Result<ToolInvocationRecord, DbError> {
         let record = record.clone();
         if !matches!(
@@ -185,29 +243,35 @@ impl Db {
             if owned != 1 {
                 return Err(DbError::Invalid("TOOL_RUN_NOT_OWNED".to_owned()));
             }
+            let session = crate::content::run_session(conn, &record.run_id)?;
+            let input_json =
+                crate::content::store_optional(conn, &session, record.input_json.as_deref())?;
             let now = format_rfc3339_micros(now_millis());
             conn.execute(
                 "INSERT INTO tool_invocations
                     (invocation_id,task_id,run_id,tool_use_id,tool_name,status,input_json,
                      side_effect_class,cleanup_status,directory_generation,connection_generation,
-                     created_at,updated_at)
-                 VALUES(?1,?2,?3,?4,?5,'preparing',?6,?7,'notRequired',?8,?9,?10,?10)",
+                     created_at,updated_at,invocation_kind)
+                 VALUES(?1,?2,?3,?4,?5,'preparing',?6,?7,'notRequired',?8,?9,?10,?10,?11)",
                 params![
                     record.invocation_id,
                     record.task_id,
                     record.run_id,
                     record.tool_use_id,
                     record.tool_name,
-                    record.input_json,
+                    input_json,
                     record.side_effect_class,
                     record.directory_generation,
                     record.connection_generation,
                     now,
+                    kind,
                 ],
             )?;
             let sql = format!("SELECT {TOOL_COLUMNS} FROM tool_invocations WHERE invocation_id=?1");
-            conn.query_row(&sql, params![record.invocation_id], map_tool)
-                .map_err(Into::into)
+            conn.query_row(&sql, params![record.invocation_id], |row| {
+                map_tool(conn, row)
+            })
+            .map_err(Into::into)
         })
         .await
     }
@@ -260,6 +324,15 @@ impl Db {
                 return Ok(CasOutcome::VersionConflict);
             }
             let now = format_rfc3339_micros(now_millis());
+            let run: String = conn.query_row(
+                "SELECT run_id FROM tool_invocations WHERE invocation_id=?1",
+                [&invocation_id],
+                |row| row.get(0),
+            )?;
+            let session = crate::content::run_session(conn, &run)?;
+            let input_json = crate::content::store_optional(conn, &session, input_json.as_deref())?;
+            let output_ref = crate::content::store_optional(conn, &session, output_ref.as_deref())?;
+            let error_code = store_ledger_diagnostic(conn, &session, error_code.as_deref())?;
             let terminal_at = target.is_terminal().then_some(now.as_str());
             let started_at = matches!(
                 target,
@@ -385,6 +458,7 @@ impl Db {
             }
 
             let message = NewMessage {
+                meta: None,
                 role: MessageRole::User,
                 content: vec![StoredBlock::ToolResult {
                     tool_use_id: current.tool_use_id.clone(),
@@ -414,6 +488,14 @@ impl Db {
                 || format!("message:{message_id}"),
                 |hash| format!("message:{message_id}#sha256:{hash}"),
             );
+            let output_ref = crate::content::store_text(&tx, &request.session_id, &output_ref)?;
+            let input_json = crate::content::store_optional(
+                &tx,
+                &request.session_id,
+                request.input_json.as_deref(),
+            )?;
+            let error_code =
+                store_ledger_diagnostic(&tx, &request.session_id, request.error_code.as_deref())?;
             let now = format_rfc3339_micros(now_millis());
             let started_at =
                 (request.target == ToolInvocationStatus::Succeeded).then_some(now.as_str());
@@ -426,9 +508,9 @@ impl Db {
                    AND status NOT IN ('succeeded','failed','cancelled','interrupted')",
                 params![
                     request.target.as_db(),
-                    request.input_json,
+                    input_json,
                     output_ref,
-                    request.error_code,
+                    error_code,
                     request.cleanup_status.as_db(),
                     started_at,
                     now,
@@ -440,6 +522,8 @@ impl Db {
                 return Ok(CommitToolInvocationResultOutcome::VersionConflict);
             }
             if let Some(payload_json) = postprocessing_json {
+                let payload_json =
+                    crate::content::store_text(&tx, &request.session_id, &payload_json)?;
                 tx.execute(
                     "INSERT INTO tool_result_postprocessing
                         (invocation_id,task_id,run_id,result_message_id,payload_json,status,
@@ -456,12 +540,29 @@ impl Db {
                 )?;
             }
             let sql = format!("SELECT {TOOL_COLUMNS} FROM tool_invocations WHERE invocation_id=?1");
-            let invocation = tx.query_row(&sql, params![request.invocation_id], map_tool)?;
+            let invocation = tx.query_row(&sql, params![request.invocation_id], |row| {
+                map_tool(&tx, row)
+            })?;
+            let task_boundaries = if invocation.tool_name == "TodoWrite"
+                && request.target == ToolInvocationStatus::Succeeded
+                && !request.is_error
+            {
+                crate::task_boundary::append_todo_boundaries(
+                    &tx,
+                    &request.session_id,
+                    &current.task_id,
+                    &current.run_id,
+                    &request.content,
+                )?
+            } else {
+                Vec::new()
+            };
             tx.commit()?;
             Ok(CommitToolInvocationResultOutcome::Committed(Box::new(
                 CommittedToolInvocationResult {
                     invocation,
                     message: inserted,
+                    task_boundaries,
                 },
             )))
         })
@@ -596,6 +697,8 @@ impl Db {
                 return Ok(CasOutcome::VersionConflict);
             }
             let now = format_rfc3339_micros(now_millis());
+            let session = crate::content::run_session(conn, &invocation_run)?;
+            let input_json = crate::content::store_text(conn, &session, &input_json)?;
             let changed = conn.execute(
                 "UPDATE tool_invocations
                  SET status='running',input_json=?1,side_effect_class=?2,
@@ -669,15 +772,34 @@ mod tests {
 
     #[tokio::test]
     async fn timeout_unknown_usage_allows_only_unbounded_cleaned_descendants() {
-        for (bounded, call_status, call_error, allowed) in [
-            (false, "cancelled", Some("STREAM_DROPPED"), true),
-            (true, "cancelled", Some("STREAM_DROPPED"), false),
-            (false, "completed", Some("STREAM_DROPPED"), false),
-            (false, "cancelled", None, false),
+        for (ephemeral, bounded, call_status, call_error, allowed) in [
+            (false, false, "cancelled", Some("STREAM_DROPPED"), true),
+            (false, true, "cancelled", Some("STREAM_DROPPED"), false),
+            (false, false, "cancelled", Some("PROVIDER_CANCELLED"), true),
+            (false, true, "cancelled", Some("PROVIDER_CANCELLED"), false),
+            (false, false, "cancelled", Some("PROVIDER_ERROR"), false),
+            (false, false, "completed", Some("STREAM_DROPPED"), false),
+            (false, false, "cancelled", None, false),
+            (true, false, "cancelled", Some("PROVIDER_CANCELLED"), true),
+            (true, true, "cancelled", Some("PROVIDER_CANCELLED"), false),
         ] {
             let db = Db::open_in_memory().expect("db");
-            let session = db.create_session("m", "/tmp/timeout-usage").await.unwrap();
-            let mut root_request = budgeted_root_request(&session.id);
+            let (session_id, _lease) = if ephemeral {
+                let (session, lease) = db
+                    .create_ephemeral_session("m", "/tmp/timeout-usage", "DONT_ASK")
+                    .await
+                    .unwrap();
+                (session, Some(lease))
+            } else {
+                (
+                    db.create_session("m", "/tmp/timeout-usage")
+                        .await
+                        .unwrap()
+                        .id,
+                    None,
+                )
+            };
+            let mut root_request = budgeted_root_request(&session_id);
             if !bounded {
                 root_request.execution_config_json = serde_json::json!({"budget": {
                     "deadlineAtMs": now_millis() + 600_000
@@ -689,7 +811,7 @@ mod tests {
                 .await
                 .unwrap();
             let child = db
-                .create_task_with_run(&budgeted_child_request(&session.id, &root, 0))
+                .create_task_with_run(&budgeted_child_request(&session_id, &root, 0))
                 .await
                 .unwrap();
             db.claim_task_run_cas(&child.task.id, &child.run_id, child.task.version)
@@ -770,6 +892,23 @@ mod tests {
                 )
                 .await;
             assert_eq!(next.is_ok(), allowed);
+            let call = call_id.clone();
+            let child_task = child.task.id.clone();
+            let facts = db.with_reader(move |conn| {
+                let usage = conn.query_row(
+                    "SELECT usage_complete,input_tokens,output_tokens,cost_nanos_usd FROM llm_calls WHERE call_id=?1", [&call],
+                    |row| Ok((row.get::<_, bool>(0)?, row.get::<_, Option<i64>>(1)?, row.get::<_, Option<i64>>(2)?, row.get::<_, Option<i64>>(3)?)))?;
+                let reservation = conn.query_row(
+                    "SELECT status,usage_complete,used_cost_nanos_usd FROM task_budget_reservations WHERE child_task_id=?1", [&child_task],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?, row.get::<_, Option<i64>>(2)?)))?;
+                Ok((usage, reservation))
+            }).await.unwrap();
+            assert_eq!(
+                facts.0,
+                (false, None, None, None),
+                "unknown physical usage must never become free"
+            );
+            assert_eq!(facts.1, ("incomplete".to_owned(), false, None));
         }
     }
 
@@ -2253,32 +2392,45 @@ impl LlmUsageIntegrity {
 /// Unknown usage is admissible only for cleaned-up, timed-out descendants of
 /// an unbounded root. This never changes the accounting facts themselves.
 pub(crate) fn timeout_usage_exception(conn: &Connection, run_id: &str) -> Result<bool, DbError> {
-    conn.query_row(
-        "SELECT EXISTS(
-           SELECT 1 FROM run_envelopes current
-           JOIN tasks owner ON owner.id=current.task_id AND owner.current_run_id=current.id
-           JOIN tasks root ON root.id=owner.root_task_id
-           WHERE current.id=?1 AND current.usage_complete=1
+    // Take all metadata and diagnostics from one SQLite statement snapshot.
+    // Temporary diagnostics are opaque references; compare their decoded values,
+    // never the reference text and never by granting a broader error whitelist.
+    let mut statement = conn.prepare(
+        "SELECT r.session_id,c.error_code,result.error_code,
+           COALESCE(current.usage_complete=1
              AND root.token_budget_limit IS NULL AND root.cost_budget_nanos_usd IS NULL
-             AND EXISTS(SELECT 1 FROM llm_calls c JOIN tasks t ON t.id=c.task_id
-                        WHERE t.root_task_id=root.id AND c.usage_complete=0)
-             AND NOT EXISTS(
-               SELECT 1 FROM llm_calls c JOIN tasks t ON t.id=c.task_id
-               JOIN run_envelopes r ON r.id=c.run_id
-               WHERE t.root_task_id=root.id AND c.usage_complete=0
-                 AND COALESCE((t.id<>owner.id AND t.parent_task_id IS NOT NULL
-                   AND t.status IN ('partial','failed') AND t.reason='timeout'
-                   AND t.cleanup_status='confirmed'
-                   AND r.requested_exit_reason='timeout'
-                   AND c.status='cancelled' AND c.error_code='STREAM_DROPPED'
-                   AND EXISTS(SELECT 1 FROM task_results result
-                     WHERE result.task_id=t.id AND result.run_id=r.id
-                       AND result.error_code='SUBAGENT_DEADLINE_EXCEEDED')),0)=0)
-        )",
-        [run_id],
-        |row| row.get(0),
-    )
-    .map_err(Into::into)
+             AND t.id<>owner.id AND t.parent_task_id IS NOT NULL
+             AND t.status IN ('partial','failed') AND t.reason='timeout'
+             AND t.cleanup_status='confirmed' AND r.requested_exit_reason='timeout'
+             AND c.status='cancelled' AND result.result_id IS NOT NULL,0)
+         FROM run_envelopes current
+         JOIN tasks owner ON owner.id=current.task_id AND owner.current_run_id=current.id
+         JOIN tasks root ON root.id=owner.root_task_id
+         JOIN tasks t ON t.root_task_id=root.id
+         JOIN llm_calls c ON c.task_id=t.id
+         JOIN run_envelopes r ON r.id=c.run_id
+         LEFT JOIN task_results result ON result.task_id=t.id AND result.run_id=r.id
+         WHERE current.id=?1 AND c.usage_complete=0",
+    )?;
+    let mut rows = statement.query([run_id])?;
+    let mut found = false;
+    while let Some(row) = rows.next()? {
+        found = true;
+        if !row.get::<_, bool>(3)? {
+            return Ok(false);
+        }
+        let session: String = row.get(0)?;
+        let call_error = load_ledger_diagnostic(conn, &session, row.get(1)?)?;
+        let result_error = crate::content::load_diagnostic(conn, &session, row.get(2)?)?;
+        if !matches!(
+            call_error.as_deref(),
+            Some("STREAM_DROPPED" | "PROVIDER_CANCELLED")
+        ) || result_error.as_deref() != Some("SUBAGENT_DEADLINE_EXCEEDED")
+        {
+            return Ok(false);
+        }
+    }
+    Ok(found)
 }
 
 fn read_llm_usage_integrity_in_current_read(
@@ -2605,6 +2757,13 @@ impl Db {
                 return Err(DbError::Invalid("COST_BUDGET_EXHAUSTED".to_owned()));
             }
             let now = format_rfc3339_micros(now_millis());
+            let session = crate::content::run_session(&tx, &call.run_id)?;
+            let route = crate::content::store_diagnostic(&tx, &session, call.route.as_deref())?;
+            let provider_request_id = crate::content::store_diagnostic(
+                &tx,
+                &session,
+                call.provider_request_id.as_deref(),
+            )?;
             let inserted = tx.execute(
                 "INSERT INTO llm_calls
                     (call_id,task_id,run_id,provider,model,route,provider_request_id,status,
@@ -2625,8 +2784,8 @@ impl Db {
                     call.run_id,
                     call.provider,
                     call.model,
-                    call.route,
-                    call.provider_request_id,
+                    route,
+                    provider_request_id,
                     reservation.input_tokens,
                     reservation.output_tokens,
                     reservation.cost_nanos_usd,
@@ -2692,6 +2851,8 @@ impl Db {
                 });
             };
             let now = format_rfc3339_micros(now_millis());
+            let session = crate::content::run_session(&tx, &run_id)?;
+            let error_code = store_ledger_diagnostic(&tx, &session, usage.error_code.as_deref())?;
             tx.execute(
                 "UPDATE llm_calls SET status=?1,input_tokens=?2,output_tokens=?3,
                     cache_read_tokens=?4,cache_create_tokens=?5,cost_nanos_usd=?6,
@@ -2705,7 +2866,7 @@ impl Db {
                     usage.cache_create_tokens,
                     usage.cost_nanos_usd,
                     usage.usage_complete,
-                    usage.error_code,
+                    error_code,
                     now,
                     call_id,
                 ],
@@ -2754,4 +2915,27 @@ impl Db {
         })
         .await
     }
+}
+
+// These exact fixed codes identify accounting timeout and process restart.
+// All other diagnostic text stays in the session's content store.
+pub(crate) fn store_ledger_diagnostic(
+    conn: &Connection,
+    session: &str,
+    value: Option<&str>,
+) -> Result<Option<String>, DbError> {
+    if matches!(value, Some("STREAM_DROPPED" | "SERVICE_RESTART")) {
+        return Ok(value.map(str::to_owned));
+    }
+    crate::content::store_diagnostic(conn, session, value)
+}
+pub(crate) fn load_ledger_diagnostic(
+    conn: &Connection,
+    session: &str,
+    value: Option<String>,
+) -> rusqlite::Result<Option<String>> {
+    if matches!(value.as_deref(), Some("STREAM_DROPPED" | "SERVICE_RESTART")) {
+        return Ok(value);
+    }
+    crate::content::load_diagnostic(conn, session, value)
 }

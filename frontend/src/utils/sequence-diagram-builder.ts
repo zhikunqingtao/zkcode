@@ -33,6 +33,8 @@ export function extractToolCalls(messages: Message[]): ToolCallRecord[] {
                     toolUseId: block.toolUseId,
                     toolName: block.toolName,
                     input: block.input,
+                    result: block.result?.content,
+                    isError: block.result?.isError,
                     startTime: msg.timestamp,
                 });
             } else if (block.type === 'tool_result') {
@@ -94,6 +96,7 @@ export function summarizeInput(
  * 响应摘要：将工具结果转为简短可读字符串
  */
 function summarizeResult(record: ToolCallRecord): string {
+    if (record.result === undefined) return '结果待确认';
     if (record.isError) {
         const errText = record.result || 'Error';
         return `错误: ${errText.slice(0, 30)}`;

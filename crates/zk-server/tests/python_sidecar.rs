@@ -19,7 +19,9 @@ use axum::{Json, Router as AxumRouter};
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 use zk_server::config::Config;
-use zk_server::python::{CodeIntelTool, GitEnhancedTool, PythonClient, WebBrowserTool};
+use zk_server::python::{
+    CodeIntelTool, Correlation, GitEnhancedTool, PythonClient, WebBrowserTool,
+};
 use zk_tools::{Tool, ToolContext, ToolOutput};
 
 use common::{app_with_config, call, json_body, local_get, local_post, local_with_headers};
@@ -118,8 +120,8 @@ fn stub_router(browser_available: bool) -> Router {
         .route("/api/files/tree", post(echo_proxy))
         .route("/api/files/analysis/summary", post(echo_proxy))
         .route("/api/analysis/openapi/merged", get(echo_proxy))
-        .route("/api/git/log/detail", get(echo_proxy))
-        .route("/api/code-quality/broken", post(broken_proxy))
+        .route("/api/tokenizer/detail", get(echo_proxy))
+        .route("/api/tokenizer/broken", post(broken_proxy))
 }
 
 /// 代理回显端点：把侧车真实收到的内容原样送回，便于断言「原样转发」。
@@ -394,12 +396,12 @@ async fn health_reports_disabled_when_sidecar_switched_off() {
     assert_eq!(health["subsystems"]["database"]["status"], "UP");
 }
 
-// ───── 反向代理四前缀（回归修复：前端面板此前直接 ECONNREFUSED）─────
+// ───── Remaining utility proxies; workspace readers use typed authorization adapters. ─────
 
-/// 侧车在线：四条前缀全部原样转发（方法 / 路径 / query / JSON 体 / 会话头），
+/// 侧车在线：保留的通用工具端点原样转发（方法 / 路径 / query / JSON 体 / 会话头），
 /// 响应状态码与体逐字回传。
 #[tokio::test]
-async fn proxy_forwards_four_prefixes_verbatim() {
+async fn proxy_forwards_remaining_unscoped_utilities_verbatim() {
     let socket = unique_socket("proxy-ok");
     let stub = spawn_stub(&socket, true);
     let mut config = Config::test_config();
@@ -409,7 +411,6 @@ async fn proxy_forwards_four_prefixes_verbatim() {
 
     for path in [
         "/api/tokenizer/count",
-        "/api/code-quality/complexity",
         "/api/files/tree",
         "/api/files/analysis/summary",
     ] {
@@ -433,19 +434,22 @@ async fn proxy_forwards_four_prefixes_verbatim() {
         assert_eq!(echoed["content_type"], "application/json");
     }
 
-    // API 契约面板的 GET 端点同样直通。
+    // The contract panel now aggregates native Rust plus Python. This stub has
+    // no Python OpenAPI endpoint, so expose the native contract with a warning.
     let (status, _headers, body) =
         call(&mut router, local_get("/api/analysis/openapi/merged")).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(json_body(&body)["path"], "/api/analysis/openapi/merged");
+    let spec = json_body(&body);
+    assert!(spec["paths"]["/api/sessions"].is_object());
+    assert!(!spec["warnings"].as_array().unwrap().is_empty());
 
     // GET + query：查询串必须原样带到侧车（面板的分页/limit 依赖它）。
     let (status, _headers, body) =
-        call(&mut router, local_get("/api/git/log/detail?limit=20")).await;
+        call(&mut router, local_get("/api/tokenizer/detail?limit=20")).await;
     assert_eq!(status, StatusCode::OK);
     let echoed = json_body(&body);
     assert_eq!(echoed["method"], "GET");
-    assert_eq!(echoed["path"], "/api/git/log/detail");
+    assert_eq!(echoed["path"], "/api/tokenizer/detail");
     assert_eq!(echoed["query"], "limit=20");
     assert_eq!(echoed["body"], "", "GET 无体转发");
 
@@ -492,7 +496,7 @@ async fn proxy_passes_sidecar_error_status_through() {
 
     let (status, headers, body) = call(
         &mut router,
-        local_post("/api/code-quality/broken", Some("{}".to_owned())),
+        local_post("/api/tokenizer/broken", Some("{}".to_owned())),
     )
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
@@ -535,7 +539,7 @@ async fn proxy_returns_503_when_sidecar_disabled() {
     let (mut router, _db) = app_with_config(Config::test_config());
     let (status, _headers, body) = call(
         &mut router,
-        local_post("/api/git/diff", Some("{}".to_owned())),
+        local_post("/api/tokenizer/count", Some("{}".to_owned())),
     )
     .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
@@ -572,4 +576,69 @@ async fn proxy_does_not_capture_neighbouring_routes() {
     )
     .await;
     assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+}
+
+#[tokio::test]
+async fn journey_refusals_are_stable_and_side_effects_are_not_retried() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let socket = unique_socket("journey-refusal");
+    let count = Arc::new(AtomicUsize::new(0));
+    let calls = count.clone();
+    let router = stub_router(true).route(
+        "/api/browser/journey/run",
+        post(move |Json(body): Json<Value>| {
+            let calls = calls.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({"detail": body["detail"]})),
+                )
+            }
+        }),
+    );
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let task = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let client = PythonClient::new(socket.clone());
+    client.refresh_capabilities().await;
+    for (index, code) in [
+        "BROWSER_CAPACITY_REACHED",
+        "BROWSER_SESSION_CONFLICT",
+        "BROWSER_CLEANUP_PENDING",
+        "BROWSER_NOT_RUNNING",
+        "JOURNEY_CANCELLED",
+        "JOURNEY_CLIENT_DISCONNECTED",
+        "JOURNEY_DEADLINE_EXCEEDED",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let result: Result<Option<Value>, _> = client
+            .call_journey_if_available(
+                "BROWSER_AUTOMATION",
+                "/api/browser/journey/run",
+                &json!({"detail":code}),
+                &Correlation::default(),
+                std::time::Duration::from_secs(2),
+            )
+            .await;
+        assert_eq!(result, Err(*code));
+        assert_eq!(count.load(Ordering::SeqCst), index + 1);
+    }
+    let result: Result<Option<Value>, _> = client
+        .call_journey_if_available(
+            "BROWSER_AUTOMATION",
+            "/api/browser/journey/run",
+            &json!({"detail":"secret private service diagnostics"}),
+            &Correlation::default(),
+            std::time::Duration::from_secs(2),
+        )
+        .await;
+    assert_eq!(result, Ok(None));
+    assert_eq!(count.load(Ordering::SeqCst), 8);
+    task.abort();
+    let _ = task.await;
+    std::fs::remove_file(socket).unwrap();
 }

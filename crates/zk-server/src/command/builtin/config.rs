@@ -268,8 +268,13 @@ mod tests {
     /// `/config` 无参 → 五行清单 + 用法尾行（`permissionMode:` 行 1 空格）。
     #[tokio::test]
     async fn config_without_args_lists_every_setting() {
-        let CommandResult::Text(text) = run("config", "", "s-1", AppState::for_tests()).await
-        else {
+        let state = AppState::for_tests();
+        state
+            .db
+            .create_session_with_id("s-1", "kimi-k3", "/tmp/zk-config")
+            .await
+            .expect("persisted session owns its permission mode");
+        let CommandResult::Text(text) = run("config", "", "s-1", state).await else {
             panic!("/config must be text");
         };
         assert_eq!(
@@ -334,8 +339,13 @@ mod tests {
     /// `/permissions` 空授权态：Mode/Bypass + 两段 `(none)`（旧输出逐字）。
     #[tokio::test]
     async fn permissions_renders_the_empty_rule_sections() {
-        let CommandResult::Text(text) = run("permissions", "", "s-1", AppState::for_tests()).await
-        else {
+        let state = AppState::for_tests();
+        state
+            .db
+            .create_session_with_id("s-1", "kimi-k3", "/tmp/zk-config")
+            .await
+            .expect("persisted session owns its permission mode");
+        let CommandResult::Text(text) = run("permissions", "", "s-1", state).await else {
             panic!("/permissions must be text");
         };
         assert_eq!(
@@ -355,10 +365,16 @@ mod tests {
     async fn permissions_bypass_tracks_the_auto_approve_mode() {
         let state = AppState::for_tests();
         state
+            .db
+            .create_session_with_id("s-1", "test", "/tmp")
+            .await
+            .expect("session");
+        state
             .authz
             .modes
             .set_mode("s-1", PermissionMode::AutoApprove)
-            .await;
+            .await
+            .expect("permission persisted");
         let CommandResult::Text(text) = run("permissions", "", "s-1", state).await else {
             panic!("/permissions must be text");
         };

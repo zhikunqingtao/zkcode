@@ -148,15 +148,17 @@ async def test_real_chromium_complete_browser_lifecycle(local_page_url):
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(30)
-async def test_real_chromium_session_eviction(local_page_url):
+async def test_real_chromium_capacity_preserves_existing_session(local_page_url):
     service = BrowserService()
     service.max_sessions = 1
     await service.startup()
     try:
         await service.navigate("old", local_page_url)
-        await service.navigate("new", local_page_url)
-        assert await service.validate_session("old") is False
-        assert await service.validate_session("new") is True
+        from services.browser_service import BrowserAdmissionError
+        with pytest.raises(BrowserAdmissionError, match="capacity"):
+            await service.navigate("new", local_page_url)
+        assert await service.validate_session("old") is True
+        assert await service.validate_session("new") is False
     finally:
         await service.shutdown()
 
@@ -164,6 +166,7 @@ async def test_real_chromium_session_eviction(local_page_url):
 def test_browser_session_expiration_uses_real_clock_values():
     # No browser I/O is needed for this small state invariant.
     session = object.__new__(BrowserSession)
+    session.owner_task = None
     session.created_at = datetime.now() - timedelta(minutes=10)
     session.last_activity = datetime.now() - timedelta(minutes=6)
     assert session.is_expired(timedelta(minutes=5)) is True

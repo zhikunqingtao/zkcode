@@ -1,11 +1,12 @@
 //! Evidence REST service with durable bundles and content-addressed workspace blobs.
 
 use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use axum::Json;
 use axum::body::Body;
-use axum::extract::{Path as AxumPath, State};
+use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use base64::Engine as _;
@@ -20,6 +21,12 @@ use crate::session_access::{accessible_run, can_access_session, require_session_
 use crate::state::AppState;
 
 const MAX_BLOB_BYTES: usize = 10 * 1024 * 1024;
+
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct BlobQuery {
+    #[serde(default)]
+    preview: bool,
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -98,7 +105,7 @@ pub(crate) async fn create_evidence(
                         "Evidence blob exceeds 10 MiB",
                     ));
                 }
-                Some(store_blob(workspace.clone(), bytes).await?)
+                Some(store_blob(&state.db, &request.session_id, workspace.clone(), bytes).await?)
             }
             None => None,
         };
@@ -197,17 +204,69 @@ pub(crate) async fn get_blob(
     State(state): State<AppState>,
     headers: HeaderMap,
     AxumPath(sha256): AxumPath<String>,
+    Query(query): Query<BlobQuery>,
 ) -> Result<Response, ApiError> {
     let asserted = require_session_header(&headers)?;
     let session = require_session(&state, &asserted, &asserted).await?;
     let digest = normalize_digest(&sha256)?;
     let workspace = PathBuf::from(session.working_dir);
-    let bytes = read_blob(workspace, digest).await?;
+    if !state.db.evidence_owns_blob(&asserted, &digest).await? {
+        return Err(ApiError::not_found(
+            "EVIDENCE_BLOB_NOT_FOUND",
+            "Evidence blob not found in this session",
+        ));
+    }
+    let bytes = if state.db.session_retention(&asserted).await?
+        == zk_db::content::ContentRetention::Ephemeral
+    {
+        let bytes = state
+            .db
+            .memory_content_store()
+            .get_named_bytes(&asserted, &format!("evidence:{digest}"))?;
+        if format!("{:x}", Sha256::digest(&bytes)) != digest {
+            return Err(ApiError::internal());
+        }
+        bytes.to_vec()
+    } else {
+        read_blob(workspace, digest.clone()).await?
+    };
+    let mime = if query.preview {
+        image_mime(&bytes).ok_or_else(|| {
+            ApiError::validation_with_code(
+                "EVIDENCE_PREVIEW_UNSUPPORTED",
+                "Only PNG and JPEG evidence can be previewed",
+            )
+        })?
+    } else {
+        "application/octet-stream"
+    };
+    let disposition = super::attachment::content_disposition(
+        if query.preview {
+            "inline"
+        } else {
+            "attachment"
+        },
+        &digest,
+    );
     Ok((
-        [(header::CONTENT_TYPE, "application/octet-stream")],
+        [
+            (header::CONTENT_TYPE, mime),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            (header::CACHE_CONTROL, "private, no-store"),
+            (header::CONTENT_DISPOSITION, disposition.as_str()),
+        ],
         Body::from(bytes),
     )
         .into_response())
+}
+
+pub(crate) fn image_mime(bytes: &[u8]) -> Option<&'static str> {
+    // Use bounded header inspection; optional PNG text/profile metadata is never inflated.
+    match zk_llm::payload_guard::image_media_type(bytes).ok()? {
+        "image/png" if bytes.ends_with(b"\0\0\0\0IEND\xae\x42\x60\x82") => Some("image/png"),
+        "image/jpeg" if bytes.ends_with(b"\xff\xd9") => Some("image/jpeg"),
+        _ => None,
+    }
 }
 
 async fn require_session(
@@ -239,7 +298,27 @@ fn normalize_digest(value: &str) -> Result<String, ApiError> {
     Ok(value.to_ascii_lowercase())
 }
 
-pub(crate) async fn store_blob(workspace: PathBuf, bytes: Vec<u8>) -> Result<String, ApiError> {
+pub(crate) async fn store_blob(
+    db: &zk_db::Db,
+    session_id: &str,
+    workspace: PathBuf,
+    bytes: Vec<u8>,
+) -> Result<String, ApiError> {
+    if bytes.len() > MAX_BLOB_BYTES {
+        return Err(ApiError::validation_with_code(
+            "EVIDENCE_BLOB_TOO_LARGE",
+            "Evidence blob exceeds 10 MiB",
+        ));
+    }
+    if db.session_retention(session_id).await? == zk_db::content::ContentRetention::Ephemeral {
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        db.memory_content_store().put_named_bytes(
+            session_id,
+            &format!("evidence:{digest}"),
+            &bytes,
+        )?;
+        return Ok(digest);
+    }
     tokio::task::spawn_blocking(move || store_blob_blocking(&workspace, &bytes))
         .await
         .map_err(|error| {
@@ -249,6 +328,12 @@ pub(crate) async fn store_blob(workspace: PathBuf, bytes: Vec<u8>) -> Result<Str
 }
 
 fn store_blob_blocking(workspace: &Path, bytes: &[u8]) -> Result<String, ApiError> {
+    if bytes.len() > MAX_BLOB_BYTES {
+        return Err(ApiError::validation_with_code(
+            "EVIDENCE_BLOB_TOO_LARGE",
+            "Evidence blob exceeds 10 MiB",
+        ));
+    }
     let workspace = std::fs::canonicalize(workspace).map_err(|_| {
         ApiError::validation_with_code("WORKSPACE_UNAVAILABLE", "Workspace is unavailable")
     })?;
@@ -272,28 +357,75 @@ fn store_blob_blocking(workspace: &Path, bytes: &[u8]) -> Result<String, ApiErro
         ));
     }
     let target = canonical_parent.join(&digest);
-    if target.exists() {
+    if std::fs::symlink_metadata(&target).is_ok() {
+        validate_existing_blob(&target, bytes)?;
         return Ok(digest);
     }
     let temp = canonical_parent.join(format!(".{digest}.{}.tmp", uuid::Uuid::new_v4()));
-    let mut file = std::fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&temp)
-        .map_err(|_| ApiError::internal())?;
-    file.write_all(bytes).map_err(|_| ApiError::internal())?;
-    file.sync_all().map_err(|_| ApiError::internal())?;
-    match std::fs::rename(&temp, &target) {
-        Ok(()) => {}
-        Err(_) if target.exists() => {
-            let _ = std::fs::remove_file(&temp);
+    let write_result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(&temp)
+            .map_err(|_| ApiError::internal())?;
+        file.write_all(bytes).map_err(|_| ApiError::internal())?;
+        file.sync_all().map_err(|_| ApiError::internal())?;
+        match std::fs::hard_link(&temp, &target) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                validate_existing_blob(&target, bytes)
+            }
+            Err(_) => Err(ApiError::internal()),
         }
-        Err(_) => {
-            let _ = std::fs::remove_file(&temp);
-            return Err(ApiError::internal());
-        }
-    }
+    })();
+    finish_blob_publication(write_result, std::fs::remove_file(&temp))?;
     Ok(digest)
+}
+
+fn finish_blob_publication(
+    publication: Result<(), ApiError>,
+    cleanup: std::io::Result<()>,
+) -> Result<(), ApiError> {
+    if let Err(cleanup_error) = cleanup {
+        tracing::error!(%cleanup_error, "evidence temporary blob cleanup failed");
+        // Preserve a primary publication failure. Cleanup failure after a
+        // successful atomic link must not be silently reported as success.
+        return publication.and(Err(ApiError {
+            status: axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            code: "EVIDENCE_BLOB_CLEANUP_FAILED".into(),
+            message: "Evidence temporary blob cleanup failed".into(),
+        }));
+    }
+    publication
+}
+
+fn validate_existing_blob(target: &Path, bytes: &[u8]) -> Result<(), ApiError> {
+    let corrupt = || {
+        ApiError::validation_with_code(
+            "EVIDENCE_BLOB_CORRUPT",
+            "Stored blob does not match its digest",
+        )
+    };
+    let metadata = std::fs::symlink_metadata(target).map_err(|_| corrupt())?;
+    if !metadata.file_type().is_file() || metadata.len() != bytes.len() as u64 {
+        return Err(corrupt());
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW)
+        .open(target)
+        .map_err(|_| corrupt())?;
+    let mut existing = Vec::new();
+    std::io::Read::read_to_end(
+        &mut std::io::Read::take(&mut file, MAX_BLOB_BYTES as u64 + 1),
+        &mut existing,
+    )
+    .map_err(|_| corrupt())?;
+    if existing != bytes {
+        return Err(corrupt());
+    }
+    Ok(())
 }
 
 async fn read_blob(workspace: PathBuf, digest: String) -> Result<Vec<u8>, ApiError> {
@@ -318,11 +450,62 @@ async fn read_blob(workspace: PathBuf, digest: String) -> Result<Vec<u8>, ApiErr
                 "Blob not found",
             ));
         }
-        std::fs::read(canonical).map_err(|_| ApiError::internal())
+        let metadata = std::fs::metadata(&canonical).map_err(|_| ApiError::internal())?;
+        if metadata.len() > MAX_BLOB_BYTES as u64 {
+            return Err(ApiError::validation_with_code(
+                "EVIDENCE_BLOB_TOO_LARGE",
+                "Evidence blob exceeds 10 MiB",
+            ));
+        }
+        let bytes = std::fs::read(canonical).map_err(|_| ApiError::internal())?;
+        if format!("{:x}", Sha256::digest(&bytes)) != digest {
+            return Err(ApiError::validation_with_code(
+                "EVIDENCE_BLOB_CORRUPT",
+                "Stored blob does not match its digest",
+            ));
+        }
+        Ok(bytes)
     })
     .await
     .map_err(|error| {
         tracing::error!(%error, "evidence blob reader panicked");
         ApiError::internal()
     })?
+}
+
+#[cfg(test)]
+mod screenshot_format_tests {
+    use super::image_mime;
+    use base64::Engine as _;
+
+    #[test]
+    fn cleanup_failure_never_turns_publication_into_success_or_masks_primary_failure() {
+        let denied = || std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        let cleanup_only = super::finish_blob_publication(Ok(()), Err(denied())).unwrap_err();
+        assert_eq!(cleanup_only.code, "EVIDENCE_BLOB_CLEANUP_FAILED");
+        let primary = crate::error::ApiError::validation_with_code(
+            "EVIDENCE_BLOB_CORRUPT",
+            "existing blob mismatch",
+        );
+        let both = super::finish_blob_publication(Err(primary), Err(denied())).unwrap_err();
+        assert_eq!(both.code, "EVIDENCE_BLOB_CORRUPT");
+    }
+
+    #[test]
+    fn screenshot_headers_require_metadata_and_complete_trailers_without_inflating_png_text() {
+        let png = base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==").unwrap();
+        assert_eq!(image_mime(&png), Some("image/png"));
+        assert_eq!(image_mime(&png[..png.len() - 1]), None);
+        let mut ancillary = png[..33].to_vec();
+        ancillary.extend_from_slice(&6u32.to_be_bytes());
+        ancillary.extend_from_slice(b"zTXtk\0\0\x01\x02\x03");
+        ancillary.extend_from_slice(&[0; 4]);
+        ancillary.extend_from_slice(&png[33..]);
+        assert_eq!(image_mime(&ancillary), Some("image/png"));
+        let mut fake = b"\x89PNG\r\n\x1a\n".to_vec();
+        fake.extend_from_slice(b"\0\0\0\0IEND\xae\x42\x60\x82");
+        for bytes in [&fake[..], b"\xff\xd8\xff\xd9", b"<svg/>", b"GIF89a", b""] {
+            assert_eq!(image_mime(bytes), None);
+        }
+    }
 }

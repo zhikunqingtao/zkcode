@@ -38,6 +38,8 @@ pub struct FileState {
     /// SHA-256 of the complete on-disk bytes observed by `Read`. `None` means
     /// the recorded view cannot authorize an overwrite.
     pub content_sha256: Option<String>,
+    /// Encoding/BOM identity from the physical Read, never inferred during Write.
+    pub text_format: crate::text_encoding::TextFormat,
     /// 记录时刻（Unix 毫秒，对照旧 `System.currentTimeMillis()`）。
     pub timestamp_ms: u64,
     /// 起始行（`None` = 完整读取，对照旧 `offset > 0 ? offset : null`）。
@@ -127,6 +129,7 @@ impl FileStateCache {
             state: FileState {
                 content: content.to_owned(),
                 content_sha256: if is_partial { None } else { content_sha256 },
+                text_format: crate::text_encoding::TextFormat::default(),
                 timestamp_ms: now_ms(),
                 offset,
                 limit,
@@ -249,6 +252,46 @@ pub struct FileStateStore {
 }
 
 impl FileStateStore {
+    /// Record decoded text and its physical encoding in the same cache mutation.
+    pub fn mark_text_read(
+        &self,
+        session_id: &str,
+        path: &str,
+        content: &str,
+        observation: ReadObservation,
+        format: crate::text_encoding::TextFormat,
+    ) {
+        self.with_session(session_id, |cache| {
+            cache.mark_read_with_hash(
+                path,
+                content,
+                observation.offset,
+                observation.limit,
+                observation.is_partial,
+                observation.content_sha256,
+            );
+            if let Some(entry) = cache.entries.get_mut(&normalize_key(path)) {
+                entry.state.text_format = format;
+            }
+        });
+    }
+
+    /// Return the observed format only; callers must separately require a full
+    /// read hash before treating it as authorization to overwrite.
+    pub fn read_text_format(
+        &self,
+        session_id: &str,
+        path: &str,
+    ) -> crate::text_encoding::TextFormat {
+        self.with_session(session_id, |cache| {
+            cache
+                .entries
+                .get(&normalize_key(path))
+                .map_or_else(crate::text_encoding::TextFormat::default, |entry| {
+                    entry.state.text_format
+                })
+        })
+    }
     /// 建空台账。
     #[must_use]
     pub fn new() -> Self {
@@ -319,6 +362,12 @@ impl FileStateStore {
         self.lock()
             .get(session_id)
             .and_then(|cache| cache.read_hash(path))
+    }
+
+    /// Discard read authorization evidence when a child attempt resumes. A new
+    /// physical Read is required before replacing any pre-existing file.
+    pub fn remove_session(&self, session_id: &str) {
+        self.lock().remove(session_id);
     }
 
     /// 已建桶的会话数（测试用）。

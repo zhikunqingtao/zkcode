@@ -1,0 +1,100 @@
+{
+  "release_sha256": "cca0d0a64e2ab3bad9bf95fdc22fcb02f278d89c8b9e78286d4c0960a89e3251",
+  "fixture": "/private/var/folders/g_/cgkxr_w91xg7tx8n84hjt9zm0000gn/T/zk-deepseek-release-c7naj5q2",
+  "request_id": "3a4b2872-4b8c-4da8-8666-7b7d16bb833e",
+  "model": "deepseek-flash",
+  "provider": "deepseek",
+  "upstream": "https://api.deepseek.com/v1/chat/completions",
+  "transport_note": "one-request loopback transparent gate; official TLS upstream",
+  "max_turns": 2,
+  "timeout_seconds": 90,
+  "max_budget_usd": 0.05,
+  "tools": [],
+  "thinking": "disabled",
+  "token_budget": 1024,
+  "fallback_chain": [],
+  "auxiliary_enabled": false,
+  "passed": true,
+  "first_text_ms": 404,
+  "terminal_ms": 562,
+  "stream_event_names": [
+    "query_started",
+    "task_boundary",
+    "text",
+    "text",
+    "cost_update",
+    "assistant_message",
+    "session_list_updated",
+    "result",
+    "complete"
+  ],
+  "session_id": "887e2462-e5b5-45ee-966f-afd1683b4c24",
+  "run_id": "596aefd1-8080-49d4-ad4f-e157efb1e3db",
+  "official_sse_metadata": {
+    "models": [
+      "deepseek-flash"
+    ],
+    "usage_frames": [
+      {
+        "prompt_tokens": 32,
+        "completion_tokens": 2,
+        "total_tokens": 34,
+        "prompt_cache_hit_tokens": 0,
+        "prompt_cache_miss_tokens": 32,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      }
+    ],
+    "thinking_delta_seen": false,
+    "done_seen": true,
+    "parse_error": null
+  },
+  "ledger": {
+    "calls": [
+      {
+        "call_id": "a6c0c102-de9c-4532-9c45-fbd98d69798b",
+        "task_id": "596aefd1-8080-49d4-ad4f-e157efb1e3db",
+        "run_id": "596aefd1-8080-49d4-ad4f-e157efb1e3db",
+        "provider": "deepseek",
+        "model": "deepseek-flash",
+        "status": "completed",
+        "input_tokens": 32,
+        "output_tokens": 2,
+        "cache_read_tokens": 0,
+        "cache_create_tokens": 0,
+        "cost_nanos_usd": 12000,
+        "usage_complete": 1
+      }
+    ],
+    "runs": [
+      {
+        "id": "596aefd1-8080-49d4-ad4f-e157efb1e3db",
+        "task_id": "596aefd1-8080-49d4-ad4f-e157efb1e3db",
+        "status": "completed",
+        "exit_reason": "modelFinished",
+        "cleanup_status": "confirmed",
+        "input_tokens": 32,
+        "output_tokens": 2,
+        "cache_read_tokens": 0,
+        "cache_create_tokens": 0,
+        "cost_nanos_usd": 12000,
+        "usage_complete": 1
+      }
+    ],
+    "unreleased_resources": 0,
+    "actual_tool_invocations": 0
+  },
+  "server_exit_code": 0,
+  "process_group_gone": true,
+  "gate": {
+    "attempts": 1,
+    "forwarded": 1,
+    "rejected": 0,
+    "upstream_status": 200,
+    "failure_code": null,
+    "response_bytes": 1337
+  },
+  "binary_unchanged": true,
+  "credential_absent_from_probe_files": true
+}

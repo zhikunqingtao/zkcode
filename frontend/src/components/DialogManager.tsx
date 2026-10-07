@@ -4,7 +4,7 @@
  * 统一管理应用中所有对话框的显示：
  * - PermissionDialog (权限请求)
  * - ElicitationDialog (反向提问)
- * - SettingsPanel (设置面板)
+ * - SettingsPanel (外观设置)
  */
 
 import React from 'react';
@@ -17,10 +17,17 @@ import { useNotificationStore } from '@/store/notificationStore';
 import PermissionDialog from '@/components/permission/PermissionDialog';
 import { ElicitationDialog } from '@/components/dialog/ElicitationDialog';
 import { SettingsPanel } from '@/components/dialog/SettingsPanel';
+import { KeyboardShortcutsDialog } from '@/components/dialog/KeyboardShortcutsDialog';
+import { SessionExportDialog } from '@/components/dialog/SessionExportDialog';
+import { HooksEditor } from '@/components/settings/HooksEditor';
+import { FileRewindDialog } from '@/components/dialog/FileRewindDialog';
+import { McpManagementPage } from '@/components/mcp/McpManagementPage';
+import { MemoryPage } from '@/components/memory/MemoryPage';
+import { SkillManagementPage } from '@/components/skills/SkillManagementPage';
 import { recoverPendingInteractions } from '@/api/dispatch';
 
 export const DialogManager: React.FC = () => {
-    const { activeDialog, closeDialog } = useDialogStore();
+    const { activeDialog, closeDialog, dialogData } = useDialogStore();
     const { pendingPermissions, respondPermission } = usePermissionStore();
     const currentPermission = pendingPermissions[0] ?? null;
     const { elicitationDialog, dismissElicitationDialog } = useAppUiStore();
@@ -136,6 +143,7 @@ export const DialogManager: React.FC = () => {
                     interactionId={elicitationDialog.interactionId}
                     question={elicitationDialog.question}
                     options={elicitationDialog.options as { value: string; label: string; description?: string }[] | undefined}
+                    inputType={elicitationDialog.multiSelect ? 'multiselect' : 'select'}
                     decisionDeadlineAt={elicitationDialog.decisionDeadlineAt}
                     allowFreeText={!elicitationDialog.options || (elicitationDialog.options as unknown[]).length === 0}
                     onSubmit={handleElicitationSubmit}
@@ -146,6 +154,31 @@ export const DialogManager: React.FC = () => {
             {/* Settings Panel */}
             {activeDialog === 'settings' && (
                 <SettingsPanel onClose={closeDialog} />
+            )}
+
+            {activeDialog === 'keybindings' && (
+                <KeyboardShortcutsDialog onClose={closeDialog} />
+            )}
+
+            {activeDialog === 'mcp' && (
+                <McpManagementPage onClose={closeDialog} />
+            )}
+
+            {activeDialog === 'memory' && (
+                <MemoryPage onClose={closeDialog} />
+            )}
+
+            {activeDialog === 'skills' && (
+                <SkillManagementPage onClose={closeDialog} />
+            )}
+            {activeDialog === 'export' && typeof dialogData.sessionId === 'string' && (
+                <SessionExportDialog key={dialogData.sessionId} sessionId={dialogData.sessionId} initialFormat={typeof dialogData.format === 'string' ? dialogData.format : undefined} onClose={closeDialog} />
+            )}
+            {activeDialog === 'hooks' && typeof dialogData.sessionId === 'string' && (
+                <HooksEditor key={dialogData.sessionId} sessionId={dialogData.sessionId} onClose={closeDialog} />
+            )}
+            {activeDialog === 'rewind' && typeof dialogData.sessionId === 'string' && (
+                <FileRewindDialog key={dialogData.sessionId} sessionId={dialogData.sessionId} onClose={closeDialog} />
             )}
         </>
     );

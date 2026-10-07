@@ -49,6 +49,20 @@ impl Command for UndoCommand {
                 return CommandResult::error("No active session.");
             }
 
+            let _reservation = if let Some(conversation) = ctx.state.conversation() {
+                let Some(guard) = conversation.try_reserve_session_mutation(&ctx.session_id) else {
+                    return CommandResult::error(
+                        "Session is currently executing; undo was not applied.",
+                    );
+                };
+                Some(guard)
+            } else {
+                None
+            };
+            if let Err(error) = ctx.state.db.ensure_session_idle(&ctx.session_id).await {
+                return CommandResult::error(format!("Undo was not applied: {error}"));
+            }
+
             let file_history = &ctx.state.file_history;
 
             // 1. 查找最近有文件变更的事务
@@ -125,6 +139,41 @@ mod tests {
         assert_eq!(
             result,
             CommandResult::text("Nothing to undo — no recent file changes found.")
+        );
+    }
+
+    #[tokio::test]
+    async fn undo_shares_query_reservation_and_rejects_durable_background_work() {
+        let state = AppState::for_tests();
+        let session = state.db.create_session("test-model", "/tmp").await.unwrap();
+        let engine = crate::engine_bridge::wire_engine(&state);
+        let reservation = engine.try_reserve_session_mutation(&session.id).unwrap();
+        let ctx = CommandContext::of(&session.id, "/tmp", "test-model", state.clone());
+        let command = state.commands.find_command("undo").unwrap();
+        assert!(
+            matches!(command.execute("", &ctx).await, CommandResult::Error(message) if message.contains("currently executing"))
+        );
+        assert!(engine.try_reserve_session_mutation(&session.id).is_none());
+        drop(reservation);
+        state
+            .db
+            .start_run("background-run", &session.id, None, None, "test-model")
+            .await
+            .unwrap();
+        assert!(
+            matches!(command.execute("", &ctx).await, CommandResult::Error(message) if message.contains("active tasks"))
+        );
+        // A refused command must release the reservation, without cancelling the run.
+        assert!(engine.try_reserve_session_mutation(&session.id).is_some());
+        assert_eq!(
+            state
+                .db
+                .find_run_by_id("background-run")
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            "running"
         );
     }
 }

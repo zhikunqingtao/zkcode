@@ -62,30 +62,30 @@ const ToolProgressBar: React.FC<ToolProgressBarProps> = ({ progress, startTime }
 
     const barColor =
         parsed.percent != null && parsed.percent > 80
-            ? 'bg-green-500'
-            : 'bg-blue-500';
+            ? 'bg-ok'
+            : 'bg-accent2';
 
     return (
         <div className="flex flex-col gap-0.5" style={{ maxHeight: 40 }}>
             {/* 进度文本 */}
-            <div className="text-xs text-gray-400 truncate leading-tight">
+            <div className="text-[13px] text-t2 truncate leading-tight">
                 {parsed.raw}
             </div>
 
             {/* 进度条 */}
-            <div className="h-1.5 w-full rounded-full bg-gray-700/60 overflow-hidden">
+            <div className="h-1.5 w-full rounded-full bg-sunken2 overflow-hidden">
                 {parsed.percent != null ? (
                     <div
-                        className={`h-full rounded-full ${barColor} transition-all duration-300 ease-out`}
+                        className={`h-full rounded-full ${barColor} transition-[width] duration-slow ease-out`}
                         style={{ width: `${parsed.percent}%` }}
                     />
                 ) : (
-                    <div className="h-full w-full rounded-full bg-gradient-to-r from-transparent via-blue-500/60 to-transparent animate-shimmer" />
+                    <div className="h-full w-full rounded-full bg-gradient-to-r from-transparent via-accent2 to-transparent animate-shimmer" />
                 )}
             </div>
 
             {/* 百分比 + ETA / 处理中 */}
-            <div className="text-[10px] text-gray-500 leading-tight">
+            <div className="text-[13px] text-t2 leading-tight">
                 {parsed.percent != null ? (
                     <span>{parsed.percent}%{eta ? ` · ${eta}` : ''}</span>
                 ) : (

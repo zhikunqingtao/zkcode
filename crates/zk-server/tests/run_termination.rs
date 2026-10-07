@@ -390,3 +390,76 @@ async fn unconfirmed_cleanup_is_partial_never_cancelled() {
         .expect("terminal retry");
     assert_eq!(retry, TransitionResult::AlreadyTerminal);
 }
+
+#[tokio::test]
+async fn cancellation_write_failure_still_stops_run_and_reconciles_interactions() {
+    let fixture = fixture().await;
+    let request = fixture
+        .interactions
+        .create(elicitation(&fixture.run_id, "storage-outage"))
+        .await
+        .expect("pending interaction");
+    fixture.db.with_writer(|connection| {
+        connection.execute_batch("CREATE TRIGGER reject_cancellation BEFORE UPDATE OF status ON tasks
+            WHEN NEW.status='cancelling' BEGIN SELECT RAISE(ABORT, 'scripted cancellation outage'); END;")?;
+        Ok(())
+    }).await.expect("inject cancellation write failure");
+    let error = fixture
+        .terminations
+        .cancel_by_user(&fixture.run_id, Some("stop despite failed write"))
+        .await
+        .expect_err("storage failure must be reported");
+    assert_eq!(error.code, "TASK_CANCELLATION_PERSISTENCE_PENDING");
+    assert!(
+        fixture.cancel.is_cancelled(),
+        "physical cancellation is independent of storage availability"
+    );
+    let run = fixture
+        .db
+        .find_run_by_id(&fixture.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(run.status, "cancelled", "a signal is not confirmed cleanup");
+    assert!(
+        fixture
+            .db
+            .read_task_result(&fixture.run_id, None, 0, 1024)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    fixture
+        .db
+        .with_writer(|connection| {
+            connection.execute_batch("DROP TRIGGER reject_cancellation;")?;
+            Ok(())
+        })
+        .await
+        .expect("restore cancellation writes");
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if find(&fixture.interactions, &request.interaction_id)
+                .await
+                .status
+                == InteractionStatus::Cancelled
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("retained reconciliation owner closes interaction after recovery");
+    assert_cancelling(&fixture, "userCancelled").await;
+    assert_eq!(fixture.interactions.available_permits(), MAX_WAITING);
+    assert!(
+        fixture
+            .db
+            .read_task_result(&fixture.run_id, None, 0, 1024)
+            .await
+            .unwrap()
+            .is_none(),
+        "only the execution owner may confirm cleanup and publish its immutable result"
+    );
+}

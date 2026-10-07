@@ -441,6 +441,7 @@ pub fn create_in_tx(
     requested_scope: Option<PermissionScope>,
     interaction_id: Option<&str>,
 ) -> Result<Option<String>, DbError> {
+    zk_db::content::require_persistent_session(conn, &subject.root_session_id)?;
     let Some(plan) = plan(operation, requested_scope) else {
         return Ok(None);
     };
@@ -570,7 +571,8 @@ pub fn supported_scopes(operation: &OperationDescriptor) -> Vec<PermissionScope>
     if operation.risk == RiskClass::High {
         return Vec::new();
     }
-    if operation.analyzer_id == "bash-v2"
+    if operation.analyzer_id == "hook-v1"
+        || operation.analyzer_id == "bash-v2"
         || REMOTE_CAPABILITY_ANALYZERS.contains(&operation.analyzer_id.as_str())
     {
         return vec![PermissionScope::Run, PermissionScope::Session];
@@ -598,6 +600,23 @@ pub fn plan(
     let requested = requested?;
     if requested == PermissionScope::Once || operation.risk == RiskClass::High {
         return None;
+    }
+    if operation.analyzer_id == "hook-v1" {
+        if !matches!(requested, PermissionScope::Run | PermissionScope::Session) {
+            return None;
+        }
+        return Some(GrantPlan {
+            kind: GrantKind::ExactGuarded,
+            scope: requested,
+            delegation: if requested == PermissionScope::Run {
+                DelegationPolicy::DirectOnly
+            } else {
+                DelegationPolicy::RootAndDescendants
+            },
+            constraint: GrantConstraint::Exact {
+                operation_hash: operation.operation_hash.clone(),
+            },
+        });
     }
     let tool_wide_remote = operation.analyzer_id == "bash-v2"
         || REMOTE_CAPABILITY_ANALYZERS.contains(&operation.analyzer_id.as_str());

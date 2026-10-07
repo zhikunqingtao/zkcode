@@ -124,6 +124,23 @@ async fn artifact_manifest_detects_mutation_and_authorizes_the_run() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json_body(&body)["state"], "verified");
+    // File integrity covers only this manifest, never whole-task acceptance.
+    assert_eq!(
+        db.find_run_by_id("artifact-run")
+            .await
+            .unwrap()
+            .unwrap()
+            .verification_status,
+        "notRequested",
+    );
+    assert_eq!(
+        db.find_runtime_task_by_id("artifact-run")
+            .await
+            .unwrap()
+            .unwrap()
+            .verification_status,
+        zk_db::VerificationStatus::NotRequested,
+    );
 
     db.with_conn_blocking(|conn| {
         conn.execute(

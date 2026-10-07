@@ -4,7 +4,8 @@
  */
 
 import { create } from 'zustand';
-import { ensurePythonPanelResponse } from '@/api/pythonServiceError';
+import { AnalysisRequest, isAnalysisCancelled } from '@/api/analysisClient';
+import { useSessionStore } from './sessionStore';
 import { immer } from 'zustand/middleware/immer';
 import { subscribeWithSelector } from 'zustand/middleware';
 
@@ -35,6 +36,9 @@ interface ComplexityApiResponse {
     root: ComplexityNode;
     stats: ComplexityStats;
     cached: boolean;
+    truncated: boolean;
+    analysis_kind: 'heuristic';
+    is_verification_evidence: false;
   } | null;
   error_message?: string;
   elapsed_ms?: number;
@@ -48,6 +52,8 @@ export interface ComplexityState {
   isLoading: boolean;
   error: string | null;
   cached: boolean;
+  truncated: boolean;
+  lastRequest: { projectRoot: string; targetPath?: string; languages?: string[] } | null;
 
   // 钻取导航状态
   currentDrillPath: ComplexityNode[];   // 面包屑路径栈
@@ -70,6 +76,8 @@ export interface ComplexityState {
   reset: () => void;
 }
 
+let activeRequest: AnalysisRequest | null = null;
+
 export const useComplexityStore = create<ComplexityState>()(
   subscribeWithSelector(immer((set, _get) => ({
     complexityTree: null,
@@ -77,6 +85,8 @@ export const useComplexityStore = create<ComplexityState>()(
     isLoading: false,
     error: null,
     cached: false,
+    truncated: false,
+    lastRequest: null,
 
     currentDrillPath: [],
     currentNode: null,
@@ -86,35 +96,26 @@ export const useComplexityStore = create<ComplexityState>()(
     lastHint: null,
 
     fetchComplexity: async (projectRoot, targetPath, languages) => {
-      set(d => { d.isLoading = true; d.error = null; });
+      cancelPendingComplexityAnalysis();
+      set(d => { d.isLoading = true; d.error = null; d.complexityTree = null; d.currentNode = null; d.stats = null; d.currentDrillPath = []; d.lastRequest = { projectRoot, targetPath, languages }; });
+      let request: AnalysisRequest | null = null;
       try {
-        const resp = await fetch('/api/code-quality/complexity', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            project_root: projectRoot,
-            ...(targetPath ? { target_path: targetPath } : {}),
-            ...(languages && languages.length > 0 ? { languages } : {}),
-          }),
-        });
-        await ensurePythonPanelResponse(resp);
-        const json: ComplexityApiResponse = await resp.json();
-        if (!json.success || !json.data) {
-          throw new Error(json.error_message ?? '分析失败');
-        }
+        request = new AnalysisRequest(projectRoot);
+        activeRequest = request;
+        const json = await request.post<ComplexityApiResponse>('/api/code-quality/complexity', { targetPath, languages });
+        if (activeRequest !== request) return;
+        const data = json.data;
+        if (!json.success || !data?.root || !data.stats || data.analysis_kind !== 'heuristic' || data.is_verification_evidence !== false || typeof data.truncated !== 'boolean') throw new Error('复杂度服务返回无效的辅助分析结果');
         set(d => {
-          d.complexityTree = json.data!.root;
-          d.stats = json.data!.stats;
-          d.cached = json.data!.cached;
-          d.isLoading = false;
-          d.currentNode = json.data!.root;
-          d.currentDrillPath = [json.data!.root];
+          d.complexityTree = data.root; d.stats = data.stats; d.cached = data.cached;
+          d.truncated = data.truncated; d.isLoading = false;
+          d.currentNode = data.root; d.currentDrillPath = [data.root];
         });
-      } catch (e) {
-        set(d => {
-          d.error = e instanceof Error ? e.message : String(e);
-          d.isLoading = false;
-        });
+      } catch (error) {
+        if (request && activeRequest !== request) return;
+        set(d => { d.error = isAnalysisCancelled(error) ? null : error instanceof Error ? error.message : String(error); d.isLoading = false; });
+      } finally {
+        if (activeRequest === request) activeRequest = null;
       }
     },
 
@@ -151,12 +152,15 @@ export const useComplexityStore = create<ComplexityState>()(
     },
 
     reset: () => {
+      cancelPendingComplexityAnalysis();
       set(d => {
         d.complexityTree = null;
         d.stats = null;
         d.isLoading = false;
         d.error = null;
         d.cached = false;
+        d.truncated = false;
+        d.lastRequest = null;
         d.currentDrillPath = [];
         d.currentNode = null;
         d.languageFilter = null;
@@ -166,3 +170,11 @@ export const useComplexityStore = create<ComplexityState>()(
     },
   })))
 );
+
+export function cancelPendingComplexityAnalysis(): void {
+  activeRequest?.cancel(); activeRequest = null;
+  useComplexityStore.setState({ isLoading: false });
+}
+useSessionStore.subscribe((state, previous) => {
+  if (state.sessionId !== previous.sessionId) useComplexityStore.getState().reset();
+});

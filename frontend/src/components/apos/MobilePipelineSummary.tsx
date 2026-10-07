@@ -13,17 +13,17 @@ export interface MobilePipelineSummaryProps {
 function getWorkerDotClass(worker: WorkerInfo): string {
   switch (worker.status) {
     case 'STARTING':
-      return 'bg-gray-400';
+      return 'bg-t3';
     case 'WORKING':
-      return 'bg-blue-500 animate-pulse';
+      return 'bg-accent2 motion-safe:animate-pulse';
     case 'IDLE':
-      return 'bg-yellow-400';
+      return 'bg-warn';
     case 'TERMINATED':
-      if (worker.terminationReason === 'completed') return 'bg-green-500';
-      if (worker.terminationReason === 'error') return 'bg-red-500';
-      return 'bg-gray-500';
+      if (worker.terminationReason === 'completed') return 'bg-ok';
+      if (worker.terminationReason === 'error') return 'bg-err';
+      return 'bg-t2';
     default:
-      return 'bg-gray-400';
+      return 'bg-t3';
   }
 }
 
@@ -33,7 +33,7 @@ export function MobilePipelineSummary({ workers }: MobilePipelineSummaryProps) {
   ).length;
 
   return (
-    <div className="flex items-center gap-2 min-h-[44px] min-w-[44px] px-2">
+    <div className="flex items-center gap-2 min-w-[44px] px-2">
       {/* 状态圆点 */}
       <div className="flex items-center gap-1.5">
         {workers.map((worker) => (
@@ -46,7 +46,7 @@ export function MobilePipelineSummary({ workers }: MobilePipelineSummaryProps) {
       </div>
 
       {/* 进度文本 */}
-      <span className="text-xs text-gray-400 whitespace-nowrap">
+      <span className="text-[13px] text-t2 whitespace-nowrap">
         {completed}/{workers.length} 完成
       </span>
     </div>

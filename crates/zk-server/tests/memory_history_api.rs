@@ -283,7 +283,10 @@ async fn memory_tool_and_api_share_scoped_sqlite_authority() {
 async fn history_snapshots_group_by_message_id() {
     let (mut router, db) = app_with_db();
     let session = db
-        .create_session("claude-sonnet-4", "/tmp")
+        .create_session(
+            "claude-sonnet-4",
+            std::fs::canonicalize("/tmp").unwrap().to_str().unwrap(),
+        )
         .await
         .expect("create session");
     for (message_id, file_path) in [
@@ -298,7 +301,12 @@ async fn history_snapshots_group_by_message_id() {
 
     let (status, _headers, body) = call(
         &mut router,
-        local_get(&format!("/api/sessions/{}/history/snapshots", session.id)),
+        local_with_headers(
+            &format!("/api/sessions/{}/history/snapshots", session.id),
+            Method::GET,
+            None,
+            &[("X-Session-Id", &session.id)],
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -344,7 +352,10 @@ async fn history_snapshots_group_by_message_id() {
 async fn history_diff_classifies_added_modified_deleted() {
     let (mut router, db) = app_with_db();
     let session = db
-        .create_session("claude-sonnet-4", "/tmp")
+        .create_session(
+            "claude-sonnet-4",
+            std::fs::canonicalize("/tmp").unwrap().to_str().unwrap(),
+        )
         .await
         .expect("create session");
     for (message_id, file_path, content) in [
@@ -360,10 +371,15 @@ async fn history_diff_classifies_added_modified_deleted() {
 
     let (status, _headers, body) = call(
         &mut router,
-        local_get(&format!(
-            "/api/sessions/{}/history/diff?fromMessageId=from&toMessageId=to",
-            session.id
-        )),
+        local_with_headers(
+            &format!(
+                "/api/sessions/{}/history/diff?fromMessageId=from&toMessageId=to",
+                session.id
+            ),
+            Method::GET,
+            None,
+            &[("X-Session-Id", &session.id)],
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -401,7 +417,10 @@ async fn history_diff_classifies_added_modified_deleted() {
 async fn history_diff_requires_both_message_ids() {
     let (mut router, db) = app_with_db();
     let session = db
-        .create_session("claude-sonnet-4", "/tmp")
+        .create_session(
+            "claude-sonnet-4",
+            std::fs::canonicalize("/tmp").unwrap().to_str().unwrap(),
+        )
         .await
         .expect("create session");
     for query in ["", "?fromMessageId=a", "?toMessageId=b"] {
@@ -439,16 +458,23 @@ async fn history_rewind_restores_file_content() {
     .await
     .expect("insert snapshot");
 
-    let (status, _headers, body) = call(
+    let (status, _, preview) = call(
         &mut router,
-        local_post(
-            &format!("/api/sessions/{}/history/rewind", session.id),
-            Some(format!(
-                "{{\"messageId\":\"turn-1\",\"filePaths\":[\"{target_path}\"]}}"
-            )),
+        local_with_headers(
+            &format!("/api/sessions/{}/history/rewind/preview", session.id),
+            Method::POST,
+            Some(serde_json::json!({"messageId":"turn-1","filePaths":[target_path]}).to_string()),
+            &[("X-Session-Id", &session.id)],
         ),
     )
     .await;
+    assert_eq!(status, StatusCode::OK, "{}", json_body(&preview));
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "current");
+    let (status, _headers, body) = call(&mut router, local_with_headers(
+        &format!("/api/sessions/{}/history/rewind",session.id), Method::POST,
+        Some(serde_json::json!({"previewToken":json_body(&preview)["previewToken"],"confirmed":true}).to_string()),
+        &[("X-Session-Id",&session.id)],
+    )).await;
     assert_eq!(status, StatusCode::OK);
     let result = json_body(&body);
     let mut keys: Vec<&str> = result
@@ -485,43 +511,156 @@ async fn history_rewind_restores_file_content() {
     cleanup(&root);
 }
 
-/// `rewind` 失败恒 200：错误只进 `errors`（会话缺失 / 快照缺失两分支）。
+/// Unreviewed legacy requests are refused before any mutation; missing session
+/// ownership remains a normal 404 when a valid-shaped confirmation is supplied.
 #[tokio::test]
-async fn history_rewind_reports_failures_with_ok_status() {
-    let (mut router, db) = app_with_db();
-
-    let (status, _headers, body) = call(
+async fn history_rewind_requires_reviewed_confirmation_and_session() {
+    let (mut router, _) = app_with_db();
+    let (status, _, body) = call(
         &mut router,
         local_post(
             "/api/sessions/ghost-session/history/rewind",
-            Some("{\"messageId\":\"turn-1\"}".to_owned()),
+            Some("{\"messageId\":\"turn-1\"}".into()),
         ),
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
-    let result = json_body(&body);
-    assert_eq!(result["success"], false);
-    assert_eq!(result["errors"][0], "SESSION_NOT_FOUND");
-
-    let session = db
-        .create_session("claude-sonnet-4", "/tmp")
-        .await
-        .expect("create session");
-    let (status, _headers, body) = call(
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(json_body(&body)["code"], "REWIND_PREVIEW_REQUIRED");
+    let (status, _, body) = call(
         &mut router,
-        local_post(
-            &format!("/api/sessions/{}/history/rewind", session.id),
-            Some("{\"messageId\":\"nope\"}".to_owned()),
+        local_with_headers(
+            "/api/sessions/ghost-session/history/rewind",
+            Method::POST,
+            Some("{\"previewToken\":\"unknown\",\"confirmed\":true}".into()),
+            &[("X-Session-Id", "ghost-session")],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(json_body(&body)["code"], "SESSION_NOT_FOUND");
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "One preview token lifecycle verifies preflight, a concurrent edit, foreign confirmation, selected restore and replay rejection"
+)]
+async fn history_rewind_preflight_rejects_changes_without_partial_writes_then_restores_only_selected_files()
+ {
+    let root = workspace("rewind-cas");
+    let first = root.join("first.txt");
+    let second = root.join("second.txt");
+    std::fs::write(&first, "new first").unwrap();
+    std::fs::write(&second, "new second").unwrap();
+    let (mut router, db) = app_with_db();
+    let session = db
+        .create_session("fixture", root.to_str().unwrap())
+        .await
+        .unwrap();
+    for (file, old) in [(&first, "old first"), (&second, "old second")] {
+        db.insert_file_snapshot(
+            &session.id,
+            Some("checkpoint"),
+            file.to_str().unwrap(),
+            old,
+            "edit",
+        )
+        .await
+        .unwrap();
+    }
+    let preview_path = format!("/api/sessions/{}/history/rewind/preview", session.id);
+    let confirm_path = format!("/api/sessions/{}/history/rewind", session.id);
+    let (status, _, body) = call(
+        &mut router,
+        local_with_headers(
+            &preview_path,
+            Method::POST,
+            Some(
+                serde_json::json!({"messageId":"checkpoint","filePaths":[first,second]})
+                    .to_string(),
+            ),
+            &[("X-Session-Id", &session.id)],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", json_body(&body));
+    let token = json_body(&body)["previewToken"].clone();
+    std::fs::write(&second, "external concurrent change").unwrap();
+    let (status, _, body) = call(
+        &mut router,
+        local_with_headers(
+            &confirm_path,
+            Method::POST,
+            Some(serde_json::json!({"previewToken":token,"confirmed":true}).to_string()),
+            &[("X-Session-Id", &session.id)],
         ),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let result = json_body(&body);
-    assert_eq!(result["success"], false);
+    assert_eq!(json_body(&body)["errors"][0], "REWIND_FILE_CHANGED");
+    assert_eq!(std::fs::read_to_string(&first).unwrap(), "new first");
     assert_eq!(
-        result["errors"][0],
-        "No snapshots found for messageId: nope"
+        std::fs::read_to_string(&second).unwrap(),
+        "external concurrent change"
     );
+    let (status, _, body) = call(
+        &mut router,
+        local_with_headers(
+            &preview_path,
+            Method::POST,
+            Some(serde_json::json!({"messageId":"checkpoint","filePaths":[first]}).to_string()),
+            &[("X-Session-Id", &session.id)],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let body =
+        serde_json::json!({"previewToken":json_body(&body)["previewToken"],"confirmed":true})
+            .to_string();
+    let (status, _, result) = call(
+        &mut router,
+        local_with_headers(
+            &confirm_path,
+            Method::POST,
+            Some(body.clone()),
+            &[("X-Session-Id", "foreign")],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{}", json_body(&result));
+    let (_, _, result) = call(
+        &mut router,
+        local_with_headers(
+            &confirm_path,
+            Method::POST,
+            Some(body.clone()),
+            &[("X-Session-Id", &session.id)],
+        ),
+    )
+    .await;
+    assert_eq!(
+        json_body(&result)["success"],
+        true,
+        "{}",
+        json_body(&result)
+    );
+    assert_eq!(std::fs::read_to_string(&first).unwrap(), "old first");
+    assert_eq!(
+        std::fs::read_to_string(&second).unwrap(),
+        "external concurrent change"
+    );
+    let (_, _, result) = call(
+        &mut router,
+        local_with_headers(
+            &confirm_path,
+            Method::POST,
+            Some(body),
+            &[("X-Session-Id", &session.id)],
+        ),
+    )
+    .await;
+    assert_eq!(json_body(&result)["errors"][0], "REWIND_PREVIEW_EXPIRED");
+    cleanup(&root);
 }
 
 /// `rewind` 空体 / 非法 JSON → 400 `INVALID_REQUEST_BODY`。
@@ -593,5 +732,42 @@ fn cleanup(root: &Path) {
         let _ = std::fs::remove_dir_all(root);
     } else {
         eprintln!("kept history fixture at {}", root.display());
+    }
+}
+
+#[tokio::test]
+async fn history_read_routes_require_the_exact_session_identity() {
+    let (mut router, db) = app_with_db();
+    let root = std::fs::canonicalize("/tmp").unwrap();
+    let session = db
+        .create_session("fixture", root.to_str().unwrap())
+        .await
+        .unwrap();
+    db.insert_file_snapshot(
+        &session.id,
+        Some("m1"),
+        "/tmp/private-source",
+        "private snapshot body",
+        "edit",
+    )
+    .await
+    .unwrap();
+    for suffix in ["snapshots", "diff?fromMessageId=m1&toMessageId=m1"] {
+        let uri = format!("/api/sessions/{}/history/{suffix}", session.id);
+        for headers in [vec![], vec![("X-Session-Id", "foreign")]] {
+            let (status, _, body) = call(
+                &mut router,
+                local_with_headers(&uri, Method::GET, None, &headers),
+            )
+            .await;
+            assert!(!status.is_success());
+            assert!(!String::from_utf8_lossy(&body).contains("private-source"));
+        }
+        let (status, _, _) = call(
+            &mut router,
+            local_with_headers(&uri, Method::GET, None, &[("X-Session-Id", &session.id)]),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
     }
 }

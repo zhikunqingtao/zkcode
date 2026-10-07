@@ -8,7 +8,7 @@
  */
 
 import React, { useRef, useCallback } from 'react';
-import { Paperclip } from 'lucide-react';
+import { ImagePlus } from 'lucide-react';
 
 interface FileUploadProps {
     onFiles: (files: File[]) => void;
@@ -53,15 +53,17 @@ const FileUpload: React.FC<FileUploadProps> = ({
                     inputRef.current?.click();
                 }}
                 disabled={disabled}
-                className={`shrink-0 p-2 rounded-lg transition-colors
+                className={`panel-control flex h-10 w-10 items-center justify-center shrink-0 rounded-[10px] transition-interactive duration-fast
+                    focus-visible:outline-hidden focus-visible:ring-[3px] focus-visible:ring-accent2-ring
                     ${disabled
-                        ? 'text-gray-600 cursor-not-allowed opacity-50'
-                        : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800'}`}
-                title={title ?? 'Attach file'}
+                        ? 'text-t4 cursor-not-allowed opacity-50'
+                        : 'text-t3 hover:text-t1 hover:bg-hover2'}`}
+                title={title ?? '上传图片'}
+                aria-label="上传图片"
                 type="button"
                 aria-disabled={disabled}
             >
-                <Paperclip size={18} />
+                <ImagePlus size={18} />
             </button>
         </>
     );

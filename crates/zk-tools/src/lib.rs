@@ -89,15 +89,21 @@ pub mod file_read;
 pub mod file_state;
 pub mod file_write;
 pub mod git;
+mod git_changes;
 pub mod glob;
 pub mod grep;
+pub mod image_read;
 pub mod list_dir;
+pub mod lsp;
 pub mod memory;
 pub mod process;
 pub mod registry;
 pub mod research;
+pub mod run_scope;
+pub mod safe_file;
 pub mod snapshot;
 pub mod synthetic_output;
+pub mod text_encoding;
 pub mod todo_write;
 // Batch 7: plan mode + snip + ctx_inspect + verify_plan
 pub mod ctx_inspect;
@@ -161,6 +167,7 @@ pub use research::{
     RESEARCH_RECEIPT_SCHEMA_VERSION, ResearchReceipt, ResearchReceiptEntry, ResearchReceiptKind,
     truncate_utf8_bytes,
 };
+pub use run_scope::{RunToolScope, RunToolScopeFactory};
 pub use snapshot::{MAX_SNAPSHOT_BYTES, SnapshotRequest, SnapshotSink};
 pub use synthetic_output::SyntheticOutputTool;
 pub use todo_write::TodoWriteTool;

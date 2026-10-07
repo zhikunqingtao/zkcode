@@ -50,9 +50,11 @@
 
 pub mod cascade;
 pub mod compact;
+pub(crate) mod handoff;
 // Batch 0 P0-15：图片 / Base64 上下文预算守卫（对照旧 `TokenBudgetGuard`）。
 pub mod image_budget;
 pub mod incremental;
+pub mod quality;
 pub mod token_counter;
 
 use std::sync::OnceLock;
@@ -148,6 +150,11 @@ pub fn token_char_ratio(model: &str) -> f64 {
 pub fn message_chars(message: &ChatMessage) -> u64 {
     let mut chars = char_count(&message.content)
         .saturating_add(message.thinking.as_deref().map_or(0, char_count));
+    if let Some(state) = &message.provider_state {
+        chars = chars.saturating_add(char_count(
+            &serde_json::to_string(state).unwrap_or_default(),
+        ));
+    }
     for call in &message.tool_calls {
         chars +=
             char_count(&call.name) + char_count(&call.arguments) + TOOL_USE_BLOCK_OVERHEAD_CHARS;
@@ -175,6 +182,19 @@ fn char_count(text: &str) -> u64 {
 #[must_use]
 pub fn estimate_tokens(messages: &[ChatMessage], model: &str) -> u32 {
     token_counter::count(messages, model)
+}
+
+/// History allowance after real system/tool schemas, requested output and wire margin.
+pub(crate) fn request_history_budget(request: &zk_llm::ChatRequest) -> u32 {
+    let caps = zk_llm::capabilities_for(&request.model);
+    let mut overhead = request.clone();
+    overhead.messages.clear();
+    let cost = u32::try_from(crate::llm_ledger::conservative_request_tokens(&overhead))
+        .unwrap_or(u32::MAX);
+    caps.context_window
+        .saturating_sub(request.max_tokens)
+        .saturating_sub(caps.context_window.div_ceil(20).max(2048))
+        .saturating_sub(cost)
 }
 
 /// 单条消息 token 估算（旧 `estimateTokens(List.of(msg))` 的等价便捷式）。

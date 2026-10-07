@@ -38,6 +38,63 @@ pub struct AgentCheckpointRecord {
     pub created_at: String,
 }
 
+fn enrich_recovery_proof(
+    tx: &rusqlite::Transaction<'_>,
+    checkpoint: &AgentCheckpointRecord,
+    messages: &mut Value,
+) -> Result<(), DbError> {
+    // Recovery proofs contain content-derived hashes. Temporary checkpoints
+    // are usable only within their live scope, never as restart evidence.
+    let persistent = crate::content::session_retention(tx, &checkpoint.session_id)?
+        == crate::content::ContentRetention::Persistent;
+    if persistent
+        && matches!(
+            messages.get("kind").and_then(Value::as_str),
+            Some("contextCheckpoint")
+        )
+    {
+        let owner: Option<CheckpointRecoveryOwner> = tx
+            .query_row(
+                "SELECT run.task_id,run.startup_epoch,task.parent_task_id,
+                                task.task_type,task.execution_config_json,
+                                task.token_budget_limit,task.cost_budget_nanos_usd,
+                                task.deadline_at_ms,task.budget_consumed_tokens,
+                                task.budget_consumed_cost_nanos_usd,task.usage_complete,
+                                session.working_dir
+                         FROM run_envelopes run
+                         JOIN tasks task ON task.id=run.task_id
+                         JOIN sessions session ON session.id=run.session_id
+                         WHERE run.id=?1 AND run.session_id=?2",
+                rusqlite::params![checkpoint.run_id, checkpoint.session_id],
+                |row| {
+                    Ok(CheckpointRecoveryOwner {
+                        task_id: row.get(0)?,
+                        startup_epoch: row.get(1)?,
+                        parent_task_id: row.get(2)?,
+                        task_type: row.get(3)?,
+                        execution_config_json: row.get(4)?,
+                        token_budget_limit: row.get(5)?,
+                        cost_budget_nanos_usd: row.get(6)?,
+                        deadline_at_ms: row.get(7)?,
+                        consumed_tokens: row.get(8)?,
+                        consumed_cost_nanos_usd: row.get(9)?,
+                        usage_complete: row.get::<_, i64>(10)? != 0,
+                        working_dir: row.get(11)?,
+                    })
+                },
+            )
+            .optional()?;
+        if let Some(owner) = owner {
+            let proof = recovery_proof(checkpoint, &owner)?;
+            let object = messages
+                .as_object_mut()
+                .ok_or_else(|| DbError::Invalid("CONTEXT_CHECKPOINT_NOT_OBJECT".to_owned()))?;
+            object.insert("recoveryProof".to_owned(), proof);
+        }
+    }
+    Ok(())
+}
+
 impl Db {
     /// Insert or replace the unique `(run_id, seq)` checkpoint.
     ///
@@ -51,55 +108,22 @@ impl Db {
         self.with_writer(move |conn| {
             let tx = conn.transaction()?;
             let mut messages = checkpoint.messages.clone();
-            if matches!(
-                messages.get("kind").and_then(Value::as_str),
-                Some("contextCheckpoint")
-            ) {
-                let owner: Option<CheckpointRecoveryOwner> = tx
-                    .query_row(
-                        "SELECT run.task_id,run.startup_epoch,task.parent_task_id,
-                                task.task_type,task.execution_config_json,
-                                task.token_budget_limit,task.cost_budget_nanos_usd,
-                                task.deadline_at_ms,task.budget_consumed_tokens,
-                                task.budget_consumed_cost_nanos_usd,task.usage_complete,
-                                session.working_dir
-                         FROM run_envelopes run
-                         JOIN tasks task ON task.id=run.task_id
-                         JOIN sessions session ON session.id=run.session_id
-                         WHERE run.id=?1 AND run.session_id=?2",
-                        rusqlite::params![checkpoint.run_id, checkpoint.session_id],
-                        |row| {
-                            Ok(CheckpointRecoveryOwner {
-                                task_id: row.get(0)?,
-                                startup_epoch: row.get(1)?,
-                                parent_task_id: row.get(2)?,
-                                task_type: row.get(3)?,
-                                execution_config_json: row.get(4)?,
-                                token_budget_limit: row.get(5)?,
-                                cost_budget_nanos_usd: row.get(6)?,
-                                deadline_at_ms: row.get(7)?,
-                                consumed_tokens: row.get(8)?,
-                                consumed_cost_nanos_usd: row.get(9)?,
-                                usage_complete: row.get::<_, i64>(10)? != 0,
-                                working_dir: row.get(11)?,
-                            })
-                        },
-                    )
-                    .optional()?;
-                if let Some(owner) = owner {
-                    let proof = recovery_proof(&checkpoint, &owner)?;
-                    let object = messages.as_object_mut().ok_or_else(|| {
-                        DbError::Invalid("CONTEXT_CHECKPOINT_NOT_OBJECT".to_owned())
-                    })?;
-                    object.insert("recoveryProof".to_owned(), proof);
-                }
-            }
-            let messages_json = serde_json::to_string(&messages)?;
+            enrich_recovery_proof(&tx, &checkpoint, &mut messages)?;
+            let messages_json = crate::content::store_text(
+                &tx,
+                &checkpoint.session_id,
+                &serde_json::to_string(&messages)?,
+            )?;
             let file_state_json = checkpoint
                 .file_state
                 .as_ref()
                 .map(serde_json::to_string)
                 .transpose()?;
+            let file_state_json = crate::content::store_optional(
+                &tx,
+                &checkpoint.session_id,
+                file_state_json.as_deref(),
+            )?;
             tx.execute(
                 "INSERT INTO agent_checkpoints \
                  (id, run_id, session_id, agent_id, seq, messages_json, file_state_json, \
@@ -166,12 +190,13 @@ impl Db {
             let Some(row) = rows.next()? else {
                 return Ok(None);
             };
-            let messages_json: String = row.get(5)?;
-            let file_state_json: Option<String> = row.get(6)?;
+            let session_id: String = row.get(2)?;
+            let messages_json = crate::content::load_row_text(conn, &session_id, row.get(5)?)?;
+            let file_state_json = crate::content::load_optional(conn, &session_id, row.get(6)?)?;
             Ok(Some(AgentCheckpointRecord {
                 id: row.get(0)?,
                 run_id: row.get(1)?,
-                session_id: row.get(2)?,
+                session_id,
                 agent_id: row.get(3)?,
                 seq: row.get(4)?,
                 messages: serde_json::from_str(&messages_json)?,

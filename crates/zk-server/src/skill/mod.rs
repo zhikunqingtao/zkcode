@@ -12,10 +12,12 @@
 //!   `include_str!` 编译期嵌入，进程内恒可用，不依赖运行目录）；
 //! - [`loader`]：磁盘目录扫描（六级来源）与 500ms 轮询热重载。
 //!
-//! 域隔离：本模块只依赖 `crate::skill` 内部与标准库/regex，不引用其它 server
-//! 域模块；对外仅经 [`crate::state::AppState::skills`] 与 `crate::api::skill`
-//! 暴露。
+//! [`catalog`] binds project/plugin views to persisted Session/Project workspaces;
+//! global preferences remain in [`registry`]. REST, WS and model invocation use
+//! that same scoped catalog, while [`loader`] publishes complete directory views.
 
+pub mod catalog;
+mod filesystem;
 pub mod loader;
 pub mod parser;
 pub mod registry;

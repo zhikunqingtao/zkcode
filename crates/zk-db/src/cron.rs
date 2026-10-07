@@ -169,6 +169,7 @@ impl Db {
         let request = request.clone();
         self.with_writer(move |conn| {
             let tx = conn.transaction()?;
+            crate::content::require_persistent_session(&tx, &request.owner_session_id)?;
             let session: Option<(String, String)> = tx
                 .query_row(
                     "SELECT model,working_dir FROM sessions
@@ -518,7 +519,7 @@ impl Db {
                 ],
             )?;
             let task_sql = format!("SELECT {RUNTIME_TASK_COLUMNS} FROM tasks WHERE id=?1");
-            let task = tx.query_row(&task_sql, [&request.task_id], map_runtime_task)?;
+            let task = tx.query_row(&task_sql, [&request.task_id], |row|map_runtime_task(&tx,row))?;
             let occurrence_sql = format!(
                 "SELECT {OCCURRENCE_COLUMNS} FROM cron_occurrences WHERE occurrence_id=?1"
             );

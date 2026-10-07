@@ -3,6 +3,9 @@ import { useProjectStore } from '@/store/projectStore';
 import { useSessionStore } from '@/store/sessionStore';
 import { useModelStore } from '@/store/modelStore';
 
+let newSessionModelSelection: string | null = null;
+export function setNewSessionModelSelection(model: string | null): void { newSessionModelSelection = model; }
+
 let pendingCreation: Promise<string | null> | null = null;
 
 export const NEW_AUTHORIZED_SESSION_EVENT =
@@ -39,6 +42,8 @@ async function selectAvailableModel(): Promise<string | null> {
         return null;
     }
 
+    if (!useSessionStore.getState().sessionId && newSessionModelSelection
+            && catalog.models.some(model => model.id === newSessionModelSelection)) return newSessionModelSelection;
     const configuredDefault = useConfigStore.getState().defaultModel;
     return catalog.models.some(model => model.id === configuredDefault)
         ? configuredDefault
@@ -68,7 +73,10 @@ export function requestAuthorizedSession(): Promise<string | null> {
             project.id,
             selectedModel,
         );
-    })().finally(() => {
+    })().then(sessionId => {
+        if (sessionId) newSessionModelSelection = null;
+        return sessionId;
+    }).finally(() => {
         pendingCreation = null;
     });
 

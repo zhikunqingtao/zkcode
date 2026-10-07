@@ -1,0 +1,485 @@
+{
+  "sourceRange": "3e536438..053adf90",
+  "targetBaseline": "08cbdc45",
+  "scope": "Seven process/Git source test paths: entire changed hunks reviewed against native ownership and lifecycle code",
+  "method": "Read complete net diffs (including all new files), inspect actual native lifetime/wire/storage paths and map exact regression names. Tests are not marked executed by inspection. Root start-gate changes in progress and bounded-output differences remain explicit.",
+  "paths": {
+    "backend/src/test/java/com/aicodeassistant/service/GitServiceTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/service/GitServiceTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "sourceDiffSha256": "3131a2b805e027b4c8bd23a31898e12273cb9eec6b066119c092d3e6548838b8",
+      "reviewStatus": "reviewed_changed_assertions",
+      "changedMethods": [
+        "returnsCompleteMultiMegabyteUnstagedAndStagedDiff",
+        "returnsNullForNonRepositoryInvalidCommandAndMissingDirectory",
+        "preservesEmptyUnicodeAndLineNormalization",
+        "rawOutputPreservesWhitespaceCrLfNulAndUnicodeWithoutChangingTextApi",
+        "discardsPartialOutputOnReadFailure",
+        "cleanupInspectionFailureStillPreservesNullFailureContract",
+        "repeatedSuccessAndReadFailureCloseEveryStreamAndFinishReaders",
+        "timesOutAndCleansKnownHookDescendants",
+        "eofSharesDeadlineWhenExitedParentLeavesPipeOpen",
+        "interruptionCleansCommandAndRestoresCallingThreadsInterruptFlag",
+        "successfulCommandDoesNotKillDetachedHookWorkWithRedirectedOutput",
+        "normalAndLargeOutputHookCommitsEachCreateExactlyOneCommit",
+        "alias",
+        "assertPidStopped",
+        "stopPid",
+        "initializeRepository",
+        "git",
+        "gitRaw"
+      ],
+      "sourceAssertions": [
+        "Complete multi-megabyte staged/unstaged diff, raw NUL/whitespace/CRLF/Unicode preservation, human text trimming, empty-success vs failed-command distinction.",
+        "Read failures never return authoritative partial output; streams/readers close on repeated success/failure; command/pipe EOF share deadline; interruption and timeout terminate only owned descendants.",
+        "Successful Git never kills detached hook work; explicit normal/large-output hook commits execute exactly once."
+      ],
+      "nativeImplementation": [
+        "crates/zk-tools/src/git_process.rs",
+        "crates/zk-tools/src/process.rs",
+        "crates/zk-server/src/command/builtin/git_review.rs",
+        "crates/zk-server/src/command/builtin/git_commit.rs",
+        "crates/zk-server/src/command/builtin/git_regressions.rs"
+      ],
+      "actualNativeAssertions": [
+        "invalid_utf8_git_output_is_never_authoritative_complete_output",
+        "normal_git_exit_waits_for_background_hook_without_killing_it",
+        "late_natural_hook_reports_uncertain_but_survives_cancellation",
+        "cancellation_of_running_git_terminates_the_owned_process_group",
+        "commit_preview_contains_only_complete_staged_paths_and_preserves_message_arguments",
+        "rejected_commit_reports_uncertainty_and_does_not_retry_a_hook",
+        "complete_multi_megabyte_unstaged_and_staged_diffs_reach_the_preview",
+        "raw_git_preserves_whitespace_crlf_nul_and_unicode_without_merging_stderr",
+        "explicit_commit_with_multi_megabyte_hook_output_succeeds_exactly_once"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Native retained process-group anchor and async concurrent bounded pipe pumps replace Java platform readers/interrupt flags. Git arguments remain argv; NUL paths use run_git_raw without text trim. Failed, truncated, timed-out or unconfirmed machine results are rejected, never parsed as complete.",
+        "Human Git diff and explicit commit report capture have a separate bounded 16 MiB budget, enabling the source >3 MB staged/unstaged diff and >1 MiB hook-output capabilities while retaining native resource limits. Machine/path output and other ordinary commands keep the existing 1 MiB bound; raw output preserves whitespace/CRLF/NUL/Unicode. Over-limit/read-failed results remain uncertain failures, never authoritative partial success, and are never retried automatically. Unlimited output capture is deliberately not claimed; existing diff preview truncation remains visible to users.",
+        "The real PID-bind/start-gate race regression passed in resume7; see currentNativeExecution. Source mock reader-close counts and Java Thread interrupted flag are not directly portable to Tokio ownership."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "passed_named_assertions_in_complete_workspace",
+      "intentionalBoundary": "Human diff and explicit commit reports (including hook stdout/stderr) are complete only within 16 MiB per stream; machine/path records and other commands retain 1 MiB. New real multi-megabyte staged/unstaged diff, large-hook exactly-once commit and raw-byte regressions passed in the root complete workspace run; exact Java reader/thread permutations remain unclaimed.",
+      "currentNativeExecution": {
+        "status": "passed_named_assertions",
+        "tests": [
+          "command::builtin::git_regressions::commit_preview_contains_only_complete_staged_paths_and_preserves_message_arguments",
+          "command::builtin::git_regressions::complete_multi_megabyte_unstaged_and_staged_diffs_reach_the_preview",
+          "command::builtin::git_regressions::explicit_commit_with_multi_megabyte_hook_output_succeeds_exactly_once",
+          "command::builtin::git_regressions::raw_git_preserves_whitespace_crlf_nul_and_unicode_without_merging_stderr",
+          "command::builtin::git_regressions::rejected_commit_reports_uncertainty_and_does_not_retry_a_hook",
+          "process::git_process::tests::cancellation_of_running_git_terminates_the_owned_process_group",
+          "process::git_process::tests::invalid_utf8_git_output_is_never_authoritative_complete_output",
+          "process::git_process::tests::late_natural_hook_reports_uncertain_but_survives_cancellation",
+          "process::git_process::tests::normal_git_exit_waits_for_background_hook_without_killing_it",
+          "process::tests::process_and_git_start_gates_prevent_side_effects_during_binding_failure_or_cancel"
+        ],
+        "evidence": {
+          "path": "/tmp/zk-workspace-tests-resume7.txt",
+          "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7"
+        },
+        "unmatchedAuditNames": [],
+        "limits": "Native assertions only; source Java not executed and exhaustive source permutation coverage remains unclaimed."
+      },
+      "previousVerificationNotes": [
+        "Native retained process-group anchor and async concurrent bounded pipe pumps replace Java platform readers/interrupt flags. Git arguments remain argv; NUL paths use run_git_raw without text trim. Failed, truncated, timed-out or unconfirmed machine results are rejected, never parsed as complete.",
+        "Human Git diff and explicit commit report capture have a separate bounded 16 MiB budget, enabling the source >3 MB staged/unstaged diff and >1 MiB hook-output capabilities while retaining native resource limits. Machine/path output and other ordinary commands keep the existing 1 MiB bound; raw output preserves whitespace/CRLF/NUL/Unicode. Over-limit/read-failed results remain uncertain failures, never authoritative partial success, and are never retried automatically. Unlimited output capture is deliberately not claimed; existing diff preview truncation remains visible to users.",
+        "New start-gate race fixes are in progress; no final execution claimed here. Source mock reader-close counts and Java Thread interrupted flag are not directly portable to Tokio ownership."
+      ]
+    },
+    "backend/src/test/java/com/aicodeassistant/tool/bash/ProcessTreeManagerTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/tool/bash/ProcessTreeManagerTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "sourceDiffSha256": "8d0f6d43f03f3179f5120484fd22fb7bd1bee3bad26858e9e2007e635df9a7a5",
+      "reviewStatus": "reviewed_changed_assertions",
+      "changedMethods": [],
+      "sourceAssertions": [
+        "Snapshot actual children before termination; require at least one child; prove each prior child exited instead of querying descendants only after root has already died.",
+        "Unavailable host enumeration skips that Java fixture rather than claiming full child cleanup."
+      ],
+      "nativeImplementation": [
+        "crates/zk-tools/src/process.rs",
+        "crates/zk-engine/src/execution_resources.rs"
+      ],
+      "actualNativeAssertions": [
+        "process_group_is_registered_and_positively_released",
+        "timeout_kills_the_process_group",
+        "cancellation_terminates_immediately",
+        "real_process_is_owned_and_released_in_the_runtime_database"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Native POSIX process-group probing and SIGTERM/SIGKILL replace Java ProcessHandle snapshots. ESRCH is positive absence; permission/probe errors keep cleanup unconfirmed. Native tests must be evaluated on supported macOS; no source Linux deployment/browser claim implied.",
+        "No independent PID-reuse or detached-session adversarial fixture was executed by this audit. Existing group containment is not a claim to control arbitrary descendants that deliberately leave the owned process group."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "passed_named_assertions_in_complete_workspace",
+      "currentNativeExecution": {
+        "status": "passed_named_assertions",
+        "tests": [
+          "execution_resources::tests::real_process_is_owned_and_released_in_the_runtime_database",
+          "process::tests::cancellation_terminates_immediately",
+          "process::tests::process_group_is_registered_and_positively_released",
+          "process::tests::timeout_kills_the_process_group"
+        ],
+        "evidence": {
+          "path": "/tmp/zk-workspace-tests-resume7.txt",
+          "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7"
+        },
+        "unmatchedAuditNames": [],
+        "limits": "Native assertions only; source Java not executed and exhaustive source permutation coverage remains unclaimed."
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/tool/bash/ShellStateManagerTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/tool/bash/ShellStateManagerTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "sourceDiffSha256": "ebd9e4fb57157c600c26acb6af8d6cf63b470ac2b15145feb64978587ef82fc7",
+      "reviewStatus": "reviewed_changed_assertions",
+      "changedMethods": [
+        "wrappedCommandPersistsOnlyPrivateCwdState",
+        "initializationFailurePreservesCwdAndDoesNotRunUserCommand",
+        "assertNoTemporaryFiles",
+        "quote"
+      ],
+      "sourceAssertions": [
+        "Quoted session IDs/cwd survive command execution and nonzero exit; only private cwd is persisted, not environment secrets; directory/file permissions 0700/0600 and no temporary leftovers.",
+        "First/second mktemp or script-write failure must preserve prior cwd and execute no user command; configured private temp path works even with invalid TMPDIR."
+      ],
+      "nativeImplementation": [
+        "crates/zk-tools/src/bash/shell_state.rs",
+        "crates/zk-tools/src/bash.rs"
+      ],
+      "actualNativeAssertions": [
+        "private_wrapper_ignores_tmpdir_and_escapes_quotes",
+        "wrapper_initialization_failure_never_executes_user_command",
+        "wrapped_command_keeps_baseline_script_skeleton",
+        "tracked_cwd_falls_back_to_original",
+        "heredoc_delimiter_is_rotated_on_collision"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Native wrapper now quotes private cwd paths, checks both mktemp calls and cat write, uses umask 077 and EXIT cleanup, preserves sourced command exit code, and writes only cwd. Process environment stripping remains separate and unchanged.",
+        "Actual native tests cover quoted session/invalid TMPDIR and first mktemp/cat failure. The source second-mktemp fault with a pre-existing cwd, nonzero-exit + quoted child path, permission and no-temp enumeration permutations were inspected but not individually executed in this audit. Legacy .env cleanup is retained native behavior; no historical session migration is added."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "passed_named_assertions_in_complete_workspace",
+      "currentNativeExecution": {
+        "status": "passed_named_assertions",
+        "tests": [
+          "bash::shell_state::tests::heredoc_delimiter_is_rotated_on_collision",
+          "bash::shell_state::tests::private_wrapper_ignores_tmpdir_and_escapes_quotes",
+          "bash::shell_state::tests::tracked_cwd_falls_back_to_original",
+          "bash::shell_state::tests::wrapped_command_keeps_baseline_script_skeleton",
+          "bash::shell_state::tests::wrapper_initialization_failure_never_executes_user_command"
+        ],
+        "evidence": {
+          "path": "/tmp/zk-workspace-tests-resume7.txt",
+          "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7"
+        },
+        "unmatchedAuditNames": [],
+        "limits": "Native assertions only; source Java not executed and exhaustive source permutation coverage remains unclaimed."
+      }
+    },
+    "backend/src/test/java/com/aicodeassistant/tool/process/LifecycleRecoveryRegressionTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/tool/process/LifecycleRecoveryRegressionTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "sourceDiffSha256": "f0444e1bf1c9e3e9c10f04b0ce3e535175a9a7ab655fc1d1d2d2e7edd2e3d9a7",
+      "reviewStatus": "reviewed_changed_assertions",
+      "changedMethods": [
+        "maintenanceDoesNotCancelAnActiveForegroundCommand"
+      ],
+      "sourceAssertions": [
+        "Cancellation during launch must use fresh post-launch cleanup evidence, not cached success before process identity arrives.",
+        "Retained cleanup ownership and capacity release only after confirmed exit, once; prevent same-session replacement while residue exists.",
+        "Background maintenance must not cancel an active foreground command."
+      ],
+      "nativeImplementation": [
+        "crates/zk-tools/src/process.rs",
+        "crates/zk-tools/src/git_process.rs",
+        "crates/zk-engine/src/execution_resources.rs",
+        "crates/zk-engine/src/task/runtime.rs",
+        "crates/zk-tools/src/executor.rs",
+        "crates/zk-db/src/restart_reconciliation.rs"
+      ],
+      "actualNativeAssertions": [
+        "dropping_caller_future_does_not_drop_process_cleanup_responsibility",
+        "finalizer_owner_survives_physical_finish_until_durable_commit",
+        "cancellation_waits_for_cooperative_cleanup_before_cancelled_result",
+        "terminal_commit_reaper_retains_owner_past_legacy_retry_limit_then_recovers_once",
+        "shutdown_timeout_never_claims_stuck_future_cleanup_is_confirmed"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Native owned Tokio futures plus durable resource rows and TaskRuntime reapers replace Java WorkLease/session registry; physical completion and durable terminal commit are separate.",
+        "The new PID-binding/start-gate cancellation regression is explicitly present and passed in resume7. Native needsAttention/Unconfirmed may remain conservatively durable after uncertain cleanup; source maintenance retry-to-release exact sequence is not blindly claimed equivalent.",
+        "Read-only occupancy queries and Git retained-scope observation do not authorize termination. Explicit user/workflow cancellation remains separate."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "passed_named_assertions_in_complete_workspace",
+      "currentNativeExecution": {
+        "status": "passed_named_assertions",
+        "tests": [
+          "execution_resources::tests::finalizer_owner_survives_physical_finish_until_durable_commit",
+          "process::tests::dropping_caller_future_does_not_drop_process_cleanup_responsibility",
+          "process::tests::process_and_git_start_gates_prevent_side_effects_during_binding_failure_or_cancel",
+          "task::runtime::tests::cancellation_waits_for_cooperative_cleanup_before_cancelled_result",
+          "task::runtime::tests::shutdown_timeout_never_claims_stuck_future_cleanup_is_confirmed",
+          "task::runtime::tests::terminal_commit_reaper_retains_owner_past_legacy_retry_limit_then_recovers_once"
+        ],
+        "evidence": {
+          "path": "/tmp/zk-workspace-tests-resume7.txt",
+          "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7"
+        },
+        "unmatchedAuditNames": [],
+        "limits": "Native assertions only; source Java not executed and exhaustive source permutation coverage remains unclaimed."
+      },
+      "previousVerificationNotes": [
+        "Native owned Tokio futures plus durable resource rows and TaskRuntime reapers replace Java WorkLease/session registry; physical completion and durable terminal commit are separate.",
+        "Root is adding PID-binding/start-gate cancellation regressions; do not infer those have passed from older process tests. Native needsAttention/Unconfirmed may remain conservatively durable after uncertain cleanup; source maintenance retry-to-release exact sequence is not blindly claimed equivalent.",
+        "Read-only occupancy queries and Git retained-scope observation do not authorize termination. Explicit user/workflow cancellation remains separate."
+      ]
+    },
+    "backend/src/test/java/com/aicodeassistant/tool/process/OwnedProcessTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/tool/process/OwnedProcessTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "sourceDiffSha256": "d9bcfd67dccf26cc29b5ca09385d841a8a295a5786220894d8e019d8876c02f6",
+      "reviewStatus": "reviewed_changed_assertions",
+      "changedMethods": [
+        "deniedStartGateNeverExecutesTheUserCommand",
+        "gatedStartPreservesDirectoryEnvironmentArgumentsOutputAndExitCode",
+        "scopeObservationNeverSignalsAndInspectionFailureIsNotExit",
+        "admitsDescendantsOnlyWhileOwnerIdentityRemainsAlive",
+        "stoppedRealChromiumIsReapedByForcedServiceCleanup",
+        "live"
+      ],
+      "sourceAssertions": [
+        "Denied gate must execute no user side effect; admitted gate preserves cwd/env/quoted argv/stdout/stderr/exit status and caller configuration.",
+        "Scope observation never sends signals; unavailable inspection is not exit proof; only live stable owner identity can admit newly observed descendants.",
+        "Linux fixtures exercise parent-exit stubborn descendants, detached browser-like groups, real paused Chromium, root shutdown grace and interrupted caller cleanup."
+      ],
+      "nativeImplementation": [
+        "crates/zk-tools/src/process.rs",
+        "crates/zk-tools/src/git_process.rs",
+        "crates/zk-engine/src/execution_resources.rs"
+      ],
+      "actualNativeAssertions": [
+        "process_group_is_registered_and_positively_released",
+        "registration_failure_fails_closed_and_marks_unconfirmed",
+        "non_zero_exit_and_stderr_are_preserved",
+        "sensitive_env_vars_are_stripped_from_child",
+        "normal_git_exit_waits_for_background_hook_without_killing_it"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Native safe /bin/sh -p gate starts parked and execs argv only after durable PID bind and cancellation check; the real binding-failure/cancellation regression validates this sequence in resume7. Provider/user environment secrets on the existing sensitive deny-list remain stripped intentionally, unlike a fixture that asks all environment bytes be preserved.",
+        "Git keeps a live owned group anchor and verifies it before reading membership; no Java ProcessHandle reflection / stale handle cache is introduced.",
+        "Linux /proc, setsid and --no-sandbox Chromium implementation is excluded on Apple Silicon macOS. Browser ownership is validated separately by native Python/UDS gates, not by claiming these Linux tests pass. Exact process-identity mutation mock matrix has no newly run native equivalent."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "passed_named_assertions_in_complete_workspace",
+      "currentNativeExecution": {
+        "status": "passed_named_assertions",
+        "tests": [
+          "process::git_process::tests::normal_git_exit_waits_for_background_hook_without_killing_it",
+          "process::tests::non_zero_exit_and_stderr_are_preserved",
+          "process::tests::process_and_git_start_gates_prevent_side_effects_during_binding_failure_or_cancel",
+          "process::tests::process_group_is_registered_and_positively_released",
+          "process::tests::registration_failure_fails_closed_and_marks_unconfirmed",
+          "process::tests::sensitive_env_vars_are_stripped_from_child"
+        ],
+        "evidence": {
+          "path": "/tmp/zk-workspace-tests-resume7.txt",
+          "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7"
+        },
+        "unmatchedAuditNames": [],
+        "limits": "Native assertions only; source Java not executed and exhaustive source permutation coverage remains unclaimed."
+      },
+      "previousVerificationNotes": [
+        "Native safe /bin/sh -p gate starts parked and execs argv only after durable PID bind and cancellation check; root currently implements/validates this sequence. Provider/user environment secrets on the existing sensitive deny-list remain stripped intentionally, unlike a fixture that asks all environment bytes be preserved.",
+        "Git keeps a live owned group anchor and verifies it before reading membership; no Java ProcessHandle reflection / stale handle cache is introduced.",
+        "Linux /proc, setsid and --no-sandbox Chromium implementation is excluded on Apple Silicon macOS. Browser ownership is validated separately by native Python/UDS gates, not by claiming these Linux tests pass. Exact process-identity mutation mock matrix has no newly run native equivalent."
+      ]
+    },
+    "backend/src/test/java/com/aicodeassistant/tool/process/ManagedProcessRunnerTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/tool/process/ManagedProcessRunnerTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "sourceDiffSha256": "2a0ac3d0ec6ed1cb28440851554b9b0c5e0bc90d9f750930f25d61e7b89b9a16",
+      "reviewStatus": "reviewed_changed_assertions",
+      "changedMethods": [
+        "cancellationBetweenLeaseAcquisitionAndCallbackRegistrationNeverStartsCommand",
+        "exactCancellationWhilePreparingStartKeepsOtherToolRunnable",
+        "deniedBackgroundAdmissionDoesNotRunCommandOrConsumeCapacity",
+        "failedLaunchRetainsUnconfirmedProcessAndItsCapacityUntilActualCleanup",
+        "failedCleanupRetainsRunLeaseUntilRetryConfirmsExit",
+        "sessionForegroundObservationRequiresAnAvailableRegistryAndSessionIdentity",
+        "sessionForegroundObservationRetainsResidueWithoutCancellingOrRunningCleanup",
+        "sessionForegroundObservationRejectsChangingMapping",
+        "failedStartReleasesReservedLeaseAndCapacityWithoutCallingCleanup",
+        "duplicateRequestDoesNotExecuteCommandOrReleaseOriginalOwnership",
+        "cancellationDuringLaunchDoesNotCleanOrCacheSuccessBeforeProcessExists",
+        "concurrentCancellationsShareOneRetryAfterFailedCleanup",
+        "preservesCompletedOutputEvenWhenCleanupConsumesItsBudget",
+        "foregroundParallelWorkThatWaitsStillCompletesNormally",
+        "survivingChildRetainsLeaseAfterShellExitsOrIsKilled",
+        "backgroundSessionLeaseOutlivesLaunchAndReleasesOnlyOnProcessExit"
+      ],
+      "sourceAssertions": [
+        "Cancellation between lease acquisition, callback registration and physical launch prevents side effects; exact tool cancellation does not stop siblings; denied background launch consumes no capacity.",
+        "Launch/cleanup failure keeps owner, session gate and permit until positive cleanup; duplicate owner cannot rerun command; concurrent cleanup shares one recovery and releases once.",
+        "Observing session foreground occupancy is read-only and exact; missing/unavailable/changing registry mapping is never reported idle.",
+        "Completed stdout/stderr survive cleanup deadline; foreground parallel jobs work; background descendant/session ownership outlives parent exit; failed launch releases reservation."
+      ],
+      "nativeImplementation": [
+        "crates/zk-tools/src/process.rs",
+        "crates/zk-engine/src/execution_resources.rs",
+        "crates/zk-tools/src/executor.rs",
+        "crates/zk-engine/src/task/runtime.rs",
+        "crates/zk-db/src/runtime_ledger.rs",
+        "crates/zk-db/src/session_merge.rs"
+      ],
+      "actualNativeAssertions": [
+        "process_group_is_registered_and_positively_released",
+        "dropping_caller_future_does_not_drop_process_cleanup_responsibility",
+        "registration_failure_fails_closed_and_marks_unconfirmed",
+        "cancellation_waits_for_cooperative_cleanup_before_cancelled_result",
+        "detached_task_survives_parent_cancel_without_releasing_its_budget_early",
+        "shell_task_executes_once_and_commits_result_and_cleanup",
+        "shutdown_timeout_never_claims_stuck_future_cleanup_is_confirmed",
+        "idempotent_replay_does_not_spawn_second_executor"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Native durable Task/Run/resource IDs and same-writer merge/delete gates replace Java registry mappings and service-process caches. ToolExecutor owns scheduler permits, process supervisor owns physical lifetime, TaskRuntime owns finalizer/recovery; do not add a second independent semaphore/lease implementation.",
+        "The corrected pre-bind start release and cancellation race passed the real marker-file regression in resume7. Existing terminal reapers retain unconfirmed resources/needsAttention rather than inventing cleanup success.",
+        "A detached Task survives parent task cancellation, while a shell process deliberately backgrounded within a foreground command remains in that command owned group. This existing native distinction is preserved; source background process scope is not copied as an unowned escape.",
+        "Exact Java duplicate ProcessKey and fake-terminate concurrent callback permutations were not rerun as Java tests. Native idempotent durable task/tool identity and per-owner future tests provide separate bounded evidence."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "passed_named_assertions_in_complete_workspace",
+      "currentNativeExecution": {
+        "status": "passed_named_assertions",
+        "tests": [
+          "process::tests::dropping_caller_future_does_not_drop_process_cleanup_responsibility",
+          "process::tests::process_and_git_start_gates_prevent_side_effects_during_binding_failure_or_cancel",
+          "process::tests::process_group_is_registered_and_positively_released",
+          "process::tests::registration_failure_fails_closed_and_marks_unconfirmed",
+          "task::runtime::tests::cancellation_waits_for_cooperative_cleanup_before_cancelled_result",
+          "task::runtime::tests::detached_task_survives_parent_cancel_without_releasing_its_budget_early",
+          "task::runtime::tests::idempotent_replay_does_not_spawn_second_executor",
+          "task::runtime::tests::shell_task_executes_once_and_commits_result_and_cleanup",
+          "task::runtime::tests::shutdown_timeout_never_claims_stuck_future_cleanup_is_confirmed"
+        ],
+        "evidence": {
+          "path": "/tmp/zk-workspace-tests-resume7.txt",
+          "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7"
+        },
+        "unmatchedAuditNames": [],
+        "limits": "Native assertions only; source Java not executed and exhaustive source permutation coverage remains unclaimed."
+      },
+      "previousVerificationNotes": [
+        "Native durable Task/Run/resource IDs and same-writer merge/delete gates replace Java registry mappings and service-process caches. ToolExecutor owns scheduler permits, process supervisor owns physical lifetime, TaskRuntime owns finalizer/recovery; do not add a second independent semaphore/lease implementation.",
+        "Root is correcting pre-bind start release and cancellation race; new assertions remain pending unified gates. Existing terminal reapers retain unconfirmed resources/needsAttention rather than inventing cleanup success.",
+        "A detached Task survives parent task cancellation, while a shell process deliberately backgrounded within a foreground command remains in that command owned group. This existing native distinction is preserved; source background process scope is not copied as an unowned escape.",
+        "Exact Java duplicate ProcessKey and fake-terminate concurrent callback permutations were not rerun as Java tests. Native idempotent durable task/tool identity and per-owner future tests provide separate bounded evidence."
+      ]
+    },
+    "backend/src/test/java/com/aicodeassistant/tool/process/RawGitManagedProcessRunnerTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/tool/process/RawGitManagedProcessRunnerTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "sourceDiffSha256": "e21746c2f8b1da5fabd939b9bf2d5ea630f2747470b616e0c141ae7b17ed5cb9",
+      "reviewStatus": "reviewed_changed_assertions",
+      "changedMethods": [
+        "completeMachineOutputExceedsPreviewAndPreservesNulAndWhitespace",
+        "macScopeLifecycleWorksFromVirtualThreadWithOneCarrier",
+        "main",
+        "nonMacFactoryRetainsTheExistingOwnedProcessContract",
+        "invalidUtf8AndCaptureOverflowAreNotCompleteMachineRecords",
+        "naturallyExitedGitPreservesHookAndPipesWithoutHoldingForegroundCapacity",
+        "rawTimeoutStopsOnlyItsOwnedScopeAndReportsDeadline",
+        "macSupervisorFailureCannotTurnAStoredGroupNumberIntoExitProof",
+        "rawCancellationIsExactAndDoesNotUseDefaultServiceOwner",
+        "rawLaunchFailureAndInvalidOwnerDoNotLeakCapacity",
+        "captureSetupFailureDoesNotLeaveUnstartedFutureOrCapacityReserved",
+        "unconfirmedPartialLaunchKeepsItsOwnerUntilReadOnlyExitConfirmation",
+        "currentSessionBackgroundIsReadOnlyAndMatchesOnlyExactSession",
+        "cancellationDuringRawLaunchIsAppliedAfterProcessIdentityArrives",
+        "naturalExitWinsCancellationRaceAndUnknownScopeIsOnlyObserved",
+        "cancelledRootExitReturnsCapacityWhileDescendantOwnershipRemains",
+        "git",
+        "stopFixtureChildIfNecessary",
+        "awaitRetainedDrains",
+        "quotedPath",
+        "release"
+      ],
+      "sourceAssertions": [
+        "Raw machine capture preserves NUL/whitespace/Unicode over preview limits, but invalid UTF-8 and >1 MiB streams are incomplete, never authoritative complete records.",
+        "Natural Git exit preserves late hooks/pipes even after cancellation/shutdown; retain scope, release foreground capacity, prevent duplicate operation; observation must not kill.",
+        "Timeout/cancel affect exact owned running Git, distinguish natural exit race, inspect owner identity/protocol rather than stale process-group number; failures retain unknown scope.",
+        "Partial launch/read setup failure retains ownership until positive cleanup; exact session background observation is read-only; single-carrier macOS virtual-thread tests must avoid scheduler deadlock."
+      ],
+      "nativeImplementation": [
+        "crates/zk-tools/src/git_process.rs",
+        "crates/zk-tools/src/process.rs",
+        "crates/zk-tools/src/executor.rs",
+        "crates/zk-engine/src/execution_resources.rs",
+        "crates/zk-engine/src/agent/worktree.rs"
+      ],
+      "actualNativeAssertions": [
+        "invalid_utf8_git_output_is_never_authoritative_complete_output",
+        "normal_git_exit_waits_for_background_hook_without_killing_it",
+        "late_natural_hook_reports_uncertain_but_survives_cancellation",
+        "cancellation_of_running_git_terminates_the_owned_process_group",
+        "capture_is_bounded_at_one_mib",
+        "no_newline_output_keeps_bounded_head_and_tail"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Native async Tokio process I/O replaces Java virtual carrier/platform supervisor protocol; no JDK single-carrier assertion is copied. Retained Git child pipes stay supervised and bounded; uncertainty is returned instead of killing naturally completed Git hooks.",
+        "Confirmed natural Git completes with its real status; active cancellation uses native 143 (SIGTERM), timeout 137, rather than source generic cancellation 130. These are existing native POSIX exit conventions, not success states.",
+        "After tool uncertainty returns, ToolExecutor drops foreground permit while the child supervisor remains separately owned. Slash Git has no leaf semaphore. Inspection failures keep durable Unconfirmed; the exact source recovery from every injected anchor/protocol corruption and all eight fast/slow hook variants is not newly executed.",
+        "Root PID-bind/start-gate corrections and the real race regression passed in resume7. No automatic Git commit/merge, source Docker runtime or --no-sandbox browser behavior is introduced."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "passed_named_assertions_in_complete_workspace",
+      "currentNativeExecution": {
+        "status": "passed_named_assertions",
+        "tests": [
+          "process::git_process::tests::cancellation_of_running_git_terminates_the_owned_process_group",
+          "process::git_process::tests::invalid_utf8_git_output_is_never_authoritative_complete_output",
+          "process::git_process::tests::late_natural_hook_reports_uncertain_but_survives_cancellation",
+          "process::git_process::tests::normal_git_exit_waits_for_background_hook_without_killing_it",
+          "process::tests::capture_is_bounded_at_one_mib",
+          "process::tests::no_newline_output_keeps_bounded_head_and_tail",
+          "process::tests::process_and_git_start_gates_prevent_side_effects_during_binding_failure_or_cancel"
+        ],
+        "evidence": {
+          "path": "/tmp/zk-workspace-tests-resume7.txt",
+          "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7"
+        },
+        "unmatchedAuditNames": [],
+        "limits": "Native assertions only; source Java not executed and exhaustive source permutation coverage remains unclaimed."
+      },
+      "previousVerificationNotes": [
+        "Native async Tokio process I/O replaces Java virtual carrier/platform supervisor protocol; no JDK single-carrier assertion is copied. Retained Git child pipes stay supervised and bounded; uncertainty is returned instead of killing naturally completed Git hooks.",
+        "Confirmed natural Git completes with its real status; active cancellation uses native 143 (SIGTERM), timeout 137, rather than source generic cancellation 130. These are existing native POSIX exit conventions, not success states.",
+        "After tool uncertainty returns, ToolExecutor drops foreground permit while the child supervisor remains separately owned. Slash Git has no leaf semaphore. Inspection failures keep durable Unconfirmed; the exact source recovery from every injected anchor/protocol corruption and all eight fast/slow hook variants is not newly executed.",
+        "Root PID-bind/start-gate corrections and real race tests are pending. No automatic Git commit/merge, source Docker runtime or --no-sandbox browser behavior is introduced."
+      ]
+    }
+  }
+}

@@ -1,21 +1,22 @@
-//! `ToolGatewayArchitectureTest.java`（60 行）逐条翻译。
+//! `ToolGatewayArchitectureTest.java` 的 Rust 源码边界检查适配。
 //!
-//! 形状差异（已在 `docs/compatibility.md` §8 记录，编号 GW-ARCH）：
-//! 旧测试用 Spring 内置 ASM 扫 `target/classes` 的**字节码** invoke 指令。Rust 无
-//! 等价的稳定字节码可扫（`.rlib` 内是 MIR/机器码，无 Java 那种符号化 invoke 表），
-//! 故改为扫**产物源码文本**：等价性依据是三条不变量都表述为「符号 X 只允许在文件
-//! Y 中被调用」，源码层的调用点集合与字节码层一一对应（Rust 无反射/动态代理可绕过
-//! 这层文本可见性）。
+//! 旧测试使用 Spring ASM 检查字节码调用指令；这里扫描 `crates/*/src/**/*.rs`
+//! 的已知调用形状和允许文件，防止执行入口在重构中意外绕过既有网关。
+//! 这不是 Rust AST、类型或调用图证明：别名、跨行表达式和其他调用写法可能不匹配，
+//! 并且按当前文件布局截取首个 `#[cfg(test)]` 之前的文本。真实授权与生命周期
+//! 仍由运行时不变量和集成测试验证，不能从本检查通过推出不存在所有执行旁路。
 //!
-//! 三条不变量的 zkcode 对应：
-//! 1. 旧 `Tool.call` 只许 `ToolExecutionGateway` 调 → zkcode `Tool::execute` 只许
-//!    `zk-tools/src/executor.rs` 调（授权拦截在 `ToolAdmission`，见 §3）。
-//! 2. 旧 `ToolExecutionPipeline.execute` 只许 `StreamingToolExecutor`（+ MCP 适配器）
-//!    调 → zkcode `ToolExecutor::spawn_call{,_in}` 只许 Engine 与唯一的
-//!    `ExecutionSupervisor` 封装调用。HTTP/MCP 等适配器只能调用 Supervisor，
-//!    且必须在调用点附近完成 PRE hook、admission 与持久 invocation 装配。
-//! 3. 旧 `HookRegistry.register` 必须带显式 role → zkcode 尚无 hook 子系统（Phase 3
-//!    才移植），此条记 DEFERRED，本测试留断言占位以便 hook 落地时自动生效。
+//! 当前检查范围：
+//! 1. 已知 `Tool::execute` 调用形状只能出现在 `zk-tools/src/executor.rs`；
+//!    已授权 REPL 工具内部的物理解释器端口只允许会话服务 bridge 调用。
+//! 2. 原始 `ToolExecutor::spawn_call{,_in}`、宿主 `ExecutionSupervisor` 入口与
+//!    server 内独立执行器构造的已知形状受文件边界限制。检查不证明调用点已经
+//!    完成 PRE、admission 或持久 invocation 装配，这些由真实管线测试覆盖。
+//! 3. Hook 子系统已经实现。保留的源码规则会拒绝同一行同时出现
+//!    `HookRegistry` 和 `register(` 的直接注册形状；它不解析 `HookConfig.role`。
+//!    当前注册通过完整 `HookConfig`，角色/事件/异步兼容性由 `HookRegistry::register`
+//!    校验；反序列化缺省角色为 notification。角色语义、安全拒绝及外部副作用
+//!    边界由 Hook 单测与真实执行回归验证，本检查不能替代它们。
 
 use std::path::{Path, PathBuf};
 
@@ -48,8 +49,8 @@ fn source_has_no_execution_bypass() {
             .to_string_lossy()
             .replace('\\', "/");
         let source = std::fs::read_to_string(&path).expect("read source");
-        // 只看产物代码：`#[cfg(test)]` 之后的内容等价于旧 `target/test-classes`
-        // （旧测试也只扫 `target/classes`）。
+        // 按现有文件布局跳过首个测试模块及后续文本；这只是文本范围约定，
+        // 不会展开 cfg 或识别测试模块之后可能出现的生产项。
         let production = source
             .split_once("#[cfg(test)]")
             .map_or(source.as_str(), |(head, _)| head);
@@ -67,6 +68,17 @@ fn source_has_no_execution_bypass() {
                 && relative != TOOL_EXECUTE_CALLER
             {
                 violations.push(format!("{relative}:{number} invokes Tool::execute"));
+            }
+
+            // The native REPL bridge may borrow an admitted Session interpreter,
+            // but no API or alternate Tool implementation may invoke that physical port.
+            // It never calls Tool::execute a second time or creates another gateway.
+            if trimmed.contains(".execute_authorized(")
+                && relative != "crates/zk-server/src/repl_service.rs"
+            {
+                violations.push(format!(
+                    "{relative}:{number} bypasses the admitted REPL bridge"
+                ));
             }
 
             // L39-46：原始 ToolExecutor 只能被 Engine 或唯一 Supervisor 封装调用。
@@ -98,8 +110,8 @@ fn source_has_no_execution_bypass() {
                 ));
             }
 
-            // L47-51：hook 注册必须带显式 role。zkcode 无 hook 子系统，一旦引入
-            // `HookRegistry::register` 而不带 role 参数即触发。
+            // 保留旧注册形状哨兵：拒绝同一行直接注册，不解析角色实参。
+            // 真实 HookConfig 角色校验和执行行为另由 Hook 系统及其回归负责。
             if trimmed.contains("HookRegistry") && trimmed.contains("register(") {
                 violations.push(format!(
                     "{relative}:{number} registers a hook without explicit role"

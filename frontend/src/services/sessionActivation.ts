@@ -8,6 +8,9 @@ import {
     sendToServer,
     waitForWsConnection,
 } from '@/api/stompClient';
+import { useConfigStore } from '@/store/configStore';
+import { setNewSessionModelSelection } from './authorizedSession';
+import { useMessageStore } from '@/store/messageStore';
 import { useSessionStore } from '@/store/sessionStore';
 
 export type SessionActivationResult =
@@ -17,6 +20,8 @@ export type SessionActivationResult =
 
 export interface ActivationOptions {
     bindTimeoutMs?: number;
+    /** Captured only by an actual new-session request, never ordinary resume. */
+    newSessionDraftId?: string;
 }
 
 interface PendingActivation {
@@ -28,6 +33,12 @@ interface PendingActivation {
 
 let activationGeneration = 0;
 let pendingActivation: PendingActivation | null = null;
+
+/** Capture before asynchronous Session creation; a newer selection invalidates it. */
+export function captureSessionSelectionGuard(): () => boolean {
+    const generation = activationGeneration;
+    return () => generation === activationGeneration;
+}
 
 /** Returns the authoritative Session activation already in progress, if any. */
 export function getPendingSessionActivation():
@@ -65,6 +76,7 @@ async function restorePreviousBinding(
         previousSessionId,
         publishBind,
         bindTimeoutMs,
+        { isCurrent: () => generation === activationGeneration },
     );
     if (generation !== activationGeneration) return;
     if (useSessionStore.getState().sessionId !== previousSessionId
@@ -122,7 +134,7 @@ export function activateSessionCandidate(
     const connectionController = new AbortController();
     const previousSessionId =
         useSessionStore.getState().sessionId?.trim() || null;
-    const bindTimeoutMs = options.bindTimeoutMs ?? 5000;
+    const bindTimeoutMs = options.bindTimeoutMs ?? 30000;
 
     const operation = (async (): Promise<SessionActivationResult> => {
         try {
@@ -146,6 +158,10 @@ export function activateSessionCandidate(
                 normalizedSessionId,
                 publishBind,
                 bindTimeoutMs,
+                {
+                    newSessionDraftId: options.newSessionDraftId,
+                    isCurrent: () => generation === activationGeneration,
+                },
             );
             if (generation !== activationGeneration) {
                 return {
@@ -209,4 +225,15 @@ export function activateSessionCandidate(
         promise: tracked,
     };
     return tracked;
+}
+
+export function clearSessionSelection(): void {
+    activationGeneration++;
+    pendingActivation?.connectionController.abort();
+    pendingActivation = null;
+    resetBoundSession();
+    useMessageStore.getState().clearMessages();
+    setNewSessionModelSelection(null);
+    useSessionStore.getState().setModel(useConfigStore.getState().defaultModel);
+    void useSessionStore.getState().resumeSession('');
 }

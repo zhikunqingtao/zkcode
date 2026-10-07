@@ -12,6 +12,8 @@ repository = "https://github.com/zhikunqingtao/zkcode"
 homepage = "https://github.com/zhikunqingtao/zkcode"
 
 [workspace.dependencies]
+# Local-only final answer validation. HTTP/file reference resolution is disabled.
+jsonschema = { version = "=0.58.6", default-features = false }
 # 集中版本管理：成员 crate 一律以 `dep.workspace = true` 引用，禁止写死版本。
 # Phase 1 S3 仅声明依赖池；后续步骤按需增补，不提前引入。
 serde = { version = "1", features = ["derive"] }
@@ -27,7 +29,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # workspace 的 Connection 是同一 rusqlite 版本——若取 0.40 会被解析为两个并存
 # 版本，迁移入口类型不兼容。bundled：内嵌 SQLite 源码编译，消除宿主 libsqlite3
 # 版本差异（RETURNING 等新语法、外键与 WAL 行为一致性）。
-rusqlite = { version = "0.39", features = ["bundled"] }
+rusqlite = { version = "0.39", features = ["bundled", "functions"] }
 # Batch 0 P0-16（ProjectPromptLoader 热重载）引入：SettingsWatcher 的项目提示
 # 内容缓存用 `ArcSwap<String>`——读路径（系统提示动态段消费方）无锁、无写者阻塞，
 # 写仅在 5s 轮询探测到 mtime 变更时触发一次原子换出。纯 Rust、无 C 依赖、无
@@ -36,6 +38,7 @@ arc-swap = "1"
 refinery = { version = "0.9", features = ["rusqlite-bundled"] }
 # 游标 Base64 编解码（对齐旧系统 java.util.Base64 标准 alphabet + padding）。
 base64 = "0.22"
+encoding_rs = "0.8"
 # 会话/消息主键 = UUIDv4（对齐旧系统 UUID.randomUUID()）。
 uuid = { version = "1", features = ["v4"] }
 # S6（zk-llm）引入：异步流原语 / OpenAI 兼容 HTTP 客户端 / 取消令牌 / 字节缓冲。
@@ -99,6 +102,9 @@ getrandom = "0.3"
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
+# Reuse the already locked native TLS stack for owned cancellable image downloads.
+native-tls = "0.2"
+tokio-native-tls = "0.3"
 # 2.5（zk-authz）引入：SHA-256。授权身份哈希（operationHash / inputHash /
 # workspaceKey / capabilityHash）必须与旧 `MessageDigest.getInstance("SHA-256")`
 # + `HexFormat.of().formatHex` 逐字节一致，故取纯 Rust RustCrypto 实现（无
@@ -118,9 +124,9 @@ tiktoken-rs = "0.6"
 # `image` crate 的同构三步：`ImageReader::into_dimensions()`（只解析头部，不全解码）
 # → `load_from_memory` → `codecs::jpeg::JpegEncoder::new_with_quality`。
 # features 收紧至旧 ImageIO 覆盖的三种栅格格式 + WebP（五种魔数前缀含 `UklGR`），
-# 关掉 bmp/tiff/exr/hdr/ico/pnm/qoi/tga/dds/ff 以压缩供应链面与编译时间。
-# 许可证 MIT OR Apache-2.0，在 deny.toml allow 列表内；由 zk-engine 的
-# `image-budget` feature 门控（`dep:image`），最小构建不落入依赖图。
+# 默认仅启用四种浏览器图片格式；zk-tools 的本地 Read 额外启用 bmp，
+# 用于有界 BMP→PNG 转换。tiff/exr/hdr/ico/pnm/qoi/tga/dds/ff 仍关闭。
+# 许可证 MIT OR Apache-2.0，在 deny.toml allow 列表内。
 image = { version = "0.25", default-features = false, features = [
     "jpeg",
     "png",

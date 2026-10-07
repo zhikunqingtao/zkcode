@@ -8,9 +8,11 @@ import { useTaskStore } from '@/store/taskStore';
 import { useCoordinatorStore } from '@/store/coordinatorStore';
 import { bindSessionAndWait, dispatch, resetBoundSession } from '@/api/dispatch';
 import { runtimeEnvelope } from '@/test/runtimeEnvelope';
+import { selectToolPresentation, useToolPresentationStore } from '@/store/toolPresentationStore';
 
 beforeEach(() => {
     resetBoundSession();
+    useToolPresentationStore.getState().activate(null);
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => [] }));
     // Reset stores between tests
     useMessageStore.setState({
@@ -38,6 +40,22 @@ beforeEach(() => {
 });
 
 describe('dispatch 消息分发', () => {
+    test('Hook display survives canonical completion while raw error and history remain untouched', async () => {
+        useSessionStore.setState({ sessionId: 'hook-session' });
+        const actor = { sessionId: 'hook-session', taskId: 'task', runId: 'run', sourceTaskId: 'task', sourceRunId: 'run', toolUseId: 'hook-tool' };
+        dispatch({ ...runtimeEnvelope(actor), type: 'tool_result', toolUseId: 'hook-tool', result: { content: 'actual failure', isError: true, metadata: { reason: 'real', hookPresentation: { text: 'display note' } } } } as never);
+        const live = useMessageStore.getState().activeToolCalls.get('sourceRun:run\u0000hook-tool');
+        expect(live?.status).toBe('error');
+        expect(live?.result?.metadata).toEqual({ reason: 'real' });
+        const usage = { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 };
+        const messages = [{ type: 'assistant', uuid: 'committed-assistant', timestamp: 1, stopReason: 'tool_use', usage, content: [{ type: 'tool_use', toolUseId: 'hook-tool', toolName: 'Bash', input: {} }] }, { type: 'user', uuid: 'result', timestamp: 2, content: [{ type: 'tool_result', toolUseId: 'hook-tool', content: 'actual failure', isError: true, metadata: { reason: 'real' } }] }];
+        dispatch({ ...runtimeEnvelope(actor), type: 'message_complete', sessionId: 'hook-session', usage, stopReason: 'end_turn', replaceAfterMessageId: null, committedMessages: messages } as never);
+        await new Promise<void>(resolve => queueMicrotask(resolve));
+        expect(selectToolPresentation(useToolPresentationStore.getState(), 'hook-session', 'hook-tool', undefined, 'committed-assistant')).toBe('display note');
+        expect(JSON.stringify(useMessageStore.getState().messages)).not.toContain('display note');
+        expect(JSON.stringify(useMessageStore.getState().messages)).toContain('actual failure');
+        expect(JSON.stringify(messages)).not.toContain('hookPresentation');
+    });
     test('stream_delta → appendStreamDelta (external store)', () => {
         // stream_delta now goes to external streaming store, not messageStore
         // Verify it doesn't throw

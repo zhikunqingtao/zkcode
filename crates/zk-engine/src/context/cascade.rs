@@ -75,9 +75,6 @@ const SUMMARY_KEEP_CHARS: usize = 500;
 /// `SkeletonRetention` 级的最短生效长度（旧 `length() <= 50` 直接返回）。
 const SKELETON_MIN_CHARS: usize = 50;
 
-/// `SkeletonRetention` 级保留的首行字符数（旧 `Math.min(newline, 80)`）。
-const SKELETON_FIRST_LINE_CHARS: usize = 80;
-
 /// `SkeletonRetention` 级前缀（旧 `"[skeleton] "`）。
 const SKELETON_PREFIX: &str = "[skeleton] ";
 
@@ -488,10 +485,14 @@ impl ContextCascade {
         collapse_executed: bool,
         execution: Option<&SummaryExecution>,
     ) -> AutoCompactOutcome {
+        let needs_compact = should_auto_compact(current, model)
+            || execution
+                .and_then(SummaryExecution::history_budget)
+                .is_some_and(|budget| estimate_tokens(current, model) > budget);
         // 分支结构照搬旧实现（含两支在「同时低于阈值且熔断打开」时给出不同
         // 决策标签的差异）。
         if collapse_executed {
-            if !should_auto_compact(current, model) {
+            if !needs_compact {
                 return AutoCompactOutcome::skipped(AutoCompactDecision::SkipBelowThreshold);
             }
             if tracking.is_circuit_broken() {
@@ -501,7 +502,7 @@ impl ContextCascade {
             if tracking.is_circuit_broken() {
                 return AutoCompactOutcome::skipped(AutoCompactDecision::CircuitOpen);
             }
-            if !should_auto_compact(current, model) {
+            if !needs_compact {
                 return AutoCompactOutcome::skipped(AutoCompactDecision::NotNeededNoCollapse);
             }
         }
@@ -807,28 +808,19 @@ impl CollapseLevel {
                     return None;
                 }
                 Some(format!(
-                    "{}\n...[summary-collapsed: {total} chars]",
+                    "{}\n...[content truncated by system]",
                     take_chars(content, SUMMARY_KEEP_CHARS)
                 ))
             }
             Self::SkeletonRetention => {
                 let total = content.chars().count();
-                if total <= SKELETON_MIN_CHARS || content.starts_with(SKELETON_PREFIX) {
+                if total <= SKELETON_MIN_CHARS
+                    || (content.starts_with(SKELETON_PREFIX)
+                        || content.starts_with("[content compressed by system]"))
+                {
                     return None;
                 }
-                let first_line = content
-                    .split('\n')
-                    .next()
-                    .map_or(content, |line| line)
-                    .chars()
-                    .take(SKELETON_FIRST_LINE_CHARS)
-                    .collect::<String>();
-                let candidate = format!("{SKELETON_PREFIX}{first_line}...");
-                if candidate.chars().count() < total {
-                    Some(candidate)
-                } else {
-                    None
-                }
+                Some("[content compressed by system]".to_owned())
             }
         }
     }
@@ -1185,13 +1177,13 @@ mod tests {
         let summary = CollapseLevel::SummaryRetention
             .collapse(&long)
             .expect("应折叠");
-        assert!(summary.contains("summary-collapsed: 600 chars"));
+        assert!(summary.contains("[content truncated by system]"));
         assert!(CollapseLevel::SummaryRetention.collapse("x").is_none());
         // Skeleton：首行 + 前缀；已骨架化的内容不再处理。
         let skeleton = CollapseLevel::SkeletonRetention
             .collapse(&format!("first line\n{}", "x".repeat(200)))
             .expect("应折叠");
-        assert!(skeleton.starts_with("[skeleton] first line"));
+        assert_eq!(skeleton, "[content compressed by system]");
         assert!(
             CollapseLevel::SkeletonRetention
                 .collapse(&skeleton)
@@ -1330,8 +1322,16 @@ mod tests {
             cascade.execute_pre_api_cascade(messages, MODEL, &AutoCompactTrackingState::initial());
         assert_eq!(result.auto_compact_decision, AutoCompactDecision::Attempt);
         assert!(result.auto_compact_attempted);
-        assert!(result.auto_compact_executed);
-        assert!(result.final_tokens < result.original_tokens);
+        assert!(!result.auto_compact_executed);
+        assert_eq!(result.final_tokens, result.original_tokens);
+        assert_eq!(
+            result
+                .messages
+                .iter()
+                .filter(|message| message.role == Role::User)
+                .count(),
+            6
+        );
     }
 
     #[test]

@@ -29,13 +29,20 @@ async fn main() {
     // migration, SQLite, or network initialization. This is also what package
     // managers and macOS doctor scripts expect from a conventional CLI.
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    if args.first().and_then(|arg| arg.to_str()) == Some("mcp-stdio") {
+        if let Err(error) = zk_server::mcp_stdio::run(&args[1..]).await {
+            eprintln!("zk-server mcp-stdio: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if args.len() == 1 && matches!(args[0].to_str(), Some("--version" | "-V")) {
         zk_server::print_version();
         return;
     }
     if args.len() == 1 && matches!(args[0].to_str(), Some("--help" | "-h")) {
         println!(
-            "zk-server {}\n\nUsage: zk-server [OPTIONS]\n\nOptions:\n  -V, --version  Print version\n  -h, --help     Print help",
+            "zk-server {}\n\nUsage: zk-server [OPTIONS]\n       zk-server mcp-stdio --project-id ID [--server-url URL] [--request-capabilities write,process,network]\n\nCommands:\n  mcp-stdio     Serve MCP over STDIO using an existing local server; --project-id must name a registered project.\n                Optional capabilities require approval in the local application.\n\nOptions:\n  -V, --version  Print version\n  -h, --help     Print help",
             env!("CARGO_PKG_VERSION")
         );
         return;
@@ -94,6 +101,10 @@ async fn main() {
     // 未配任何 provider key 时退化为 Phase 1 单 provider（`ZK_LLM_BASE_URL` /
     // `ZK_LLM_API_KEY`），行为与 S9 一致。默认模型统一取 `ZK_DEFAULT_MODEL`
     // （与创建会话共用同一配置源）。密钥不落日志（ApiKey 脱敏）。
+    if let Err(error) = db.pause_session_merges_at_startup() {
+        tracing::error!(%error, "cannot recover session merge state");
+        std::process::exit(1);
+    }
     let providers = build_provider_registry(&config);
     tracing::info!(
         provider_count = providers.len(),
@@ -192,6 +203,9 @@ async fn main() {
         state = state.with_python_sidecar(sidecar);
     }
     let skill_watcher = wire_skills(&state);
+    let project_skill_watcher = state
+        .skill_catalog
+        .spawn_watcher(skill_loader::WATCH_INTERVAL);
 
     let engine = zk_server::engine_bridge::wire_engine(&state);
     let cron_scheduler = if state.config.cron_enabled {
@@ -220,6 +234,7 @@ async fn main() {
     // Batch 7b Step 7：Run 注册表周期清理（30min interval，滞留 run 回收）。
     let run_cleanup = engine.spawn_run_cleanup();
     let runtime_health_metrics = zk_server::runtime_health_metrics::spawn(state.db.clone());
+    let runtime_maintenance = zk_server::maintenance::spawn(state.db.clone());
     // 2.5：交互生命周期常驻任务——启动期容量对账（旧 `@PostConstruct
     // reconcileCapacityAfterRestart`）+ 1s 截止扫描（旧 `@Scheduled(fixedRate=1000)
     // expireDeadlines`）+ 250ms 未 ACK 重投（旧 `@Scheduled(fixedDelay=250)`）。
@@ -265,11 +280,13 @@ async fn main() {
     ws_cleanup.abort();
     coordinator_events.abort();
     runtime_health_metrics.abort();
+    runtime_maintenance.abort();
     if let Some(task) = cron_scheduler {
         task.abort();
     }
     run_cleanup.abort();
     skill_watcher.abort();
+    project_skill_watcher.abort();
     for task in interaction_tasks {
         task.abort();
     }
@@ -359,16 +376,24 @@ fn acquire_data_dir_lock(db_path: &std::path::Path) -> rusqlite::Result<Option<D
     }))
 }
 
-/// 3B.7：技能磁盘来源装配 + 热重载。内置 14 技能已随 `AppState` 编译期就位，
+/// 3B.7：技能磁盘来源装配 + 热重载。内置 13 技能已随 `AppState` 编译期就位，
 /// 这里只补六级磁盘来源（plugin < project < user < managed 升序注册，高优先级
 /// 覆盖低优先级）并起 500ms 轮询热重载（旧 `WatchService` + 500ms 防抖的等价
 /// 实现，理由见 `skill::loader` 模块文档）。扫描失败只 warn，不阻断启动。
 ///
 /// 返回可 abort 的轮询任务句柄（关停时终止）。
 fn wire_skills(state: &AppState) -> tokio::task::JoinHandle<()> {
-    let skill_dirs = skill_loader::skill_dirs(
-        &skill_loader::resolve_working_directory().unwrap_or_else(|| std::path::PathBuf::from(".")),
-    );
+    // Only user/managed directories are process-global. Project/plugin content
+    // is loaded lazily from each authoritative Session or selected Project.
+    let skill_dirs = skill_loader::skill_dirs(std::path::Path::new("."))
+        .into_iter()
+        .filter(|dir| {
+            matches!(
+                dir.source,
+                zk_server::skill::SkillSource::User | zk_server::skill::SkillSource::Managed
+            )
+        })
+        .collect::<Vec<_>>();
     let loaded = skill_loader::load_and_register(&state.skills, &skill_dirs);
     tracing::info!(
         builtin = zk_server::skill::BUILTIN_SKILL_NAMES.len(),

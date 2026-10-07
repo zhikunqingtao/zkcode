@@ -102,6 +102,10 @@ pub struct ToolCallRequest {
 /// `{role:"tool"}` 消息）。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChatMessage {
+    /// Durable UI/runtime metadata; never sent as provider instructions.
+    pub metadata: Option<serde_json::Value>,
+    /// Opaque continuation state, replayed only to its original provider and model.
+    pub provider_state: Option<ProviderResponseState>,
     /// 消息角色。
     pub role: Role,
     /// 消息文本。
@@ -115,6 +119,17 @@ pub struct ChatMessage {
     pub tool_calls: Vec<ToolCallRequest>,
     /// 工具结果对应的调用 ID（仅 [`Role::Tool`] 消息）。
     pub tool_call_id: Option<String>,
+}
+
+/// Signed/encrypted reasoning or Responses items scoped to one exact provider/model.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ProviderResponseState {
+    /// Origin provider.
+    pub provider: String,
+    /// Origin local model identifier.
+    pub model: String,
+    /// Opaque provider items, kept in their original order.
+    pub output: Vec<serde_json::Value>,
 }
 
 /// Provider-neutral validated image input.
@@ -140,9 +155,18 @@ impl ChatMessage {
             content: content.into(),
             images: Vec::new(),
             thinking: None,
+            provider_state: None,
+            metadata: None,
             tool_calls: Vec::new(),
             tool_call_id: None,
         }
+    }
+
+    /// Preserve typed message metadata through context transformations.
+    #[must_use]
+    pub fn with_metadata(mut self, metadata: Option<serde_json::Value>) -> Self {
+        self.metadata = metadata;
+        self
     }
 
     /// 构造 system 消息。
@@ -179,6 +203,13 @@ impl ChatMessage {
         self
     }
 
+    /// Attach opaque continuation state without treating it as user instructions.
+    #[must_use]
+    pub fn with_provider_state(mut self, state: Option<ProviderResponseState>) -> Self {
+        self.provider_state = state;
+        self
+    }
+
     /// 构造携带工具调用的 assistant 消息（多轮回填历史）。
     #[must_use]
     pub fn assistant_tool_calls(
@@ -190,6 +221,8 @@ impl ChatMessage {
             content: content.into(),
             images: Vec::new(),
             thinking: None,
+            provider_state: None,
+            metadata: None,
             tool_calls,
             tool_call_id: None,
         }
@@ -203,6 +236,8 @@ impl ChatMessage {
             content: content.into(),
             images: Vec::new(),
             thinking: None,
+            provider_state: None,
+            metadata: None,
             tool_calls: Vec::new(),
             tool_call_id: Some(tool_call_id.into()),
         }
@@ -236,6 +271,17 @@ pub enum ThinkingMode {
     Disabled,
 }
 
+/// Explicit reasoning setting for independent summaries; ordinary chat is unchanged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SummaryThinkingMode {
+    /// Maximum supported reasoning.
+    Max,
+    /// Low reasoning effort (`DeepSeek` summaries).
+    Low,
+    /// Disable reasoning for a supported summary model.
+    Off,
+}
+
 impl ThinkingMode {
     /// 是否要求 provider 具备思考能力（对齐旧 `requiresThinkingSupport`：
     /// Adaptive / Enabled 为 `true`，Disabled 为 `false`）。
@@ -249,13 +295,20 @@ impl ThinkingMode {
 ///
 /// 生成参数按旧 Java 实际下发字段收敛：`max_tokens`（kimi 系列在 wire 层
 /// 自动换名 `max_completion_tokens`）+ 思考参数（按模型族判定）；旧实现
-/// **不发送** temperature / `top_p` / stop，本实现保持一致（不虚构字段）。
+/// 默认不发送 temperature / `top_p` / stop；显式停止序列仅发往支持该字段的协议。
 ///
 /// prompt caching（`Anthropic` 专属）：[`Self::system_segments`] 与
 /// [`Self::tool_cache_breakpoint`] 承载两个**相互独立**的缓存断点，规则、门控与
 /// 旧仓库对照见 [`crate::cache`]；非 `Anthropic` provider 忽略这两个字段。
 #[derive(Clone, Debug)]
 pub struct ChatRequest {
+    /// Immutable current user identity captured at Run entry, never sent on the wire.
+    pub current_user_message_id: Option<String>,
+    /// Sources retained in the latest physical request after image preparation.
+    /// Shared across request copies; delivery is confirmed only after a successful finish.
+    pub delivered_image_sources: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    /// Sanitized image omission notices from the latest request preparation.
+    pub image_notices: Arc<std::sync::Mutex<Vec<String>>>,
     /// 目标模型标识。
     pub model: String,
     /// 对话消息（不含 system prompt——后者独立字段）。
@@ -285,6 +338,14 @@ pub struct ChatRequest {
     pub max_tokens: u32,
     /// 思考模式。
     pub thinking: ThinkingMode,
+    /// Explicit reasoning effort; absent preserves the existing model policy.
+    pub reasoning_effort: Option<crate::ReasoningEffort>,
+    /// Provider stop sequences; empty preserves the existing request.
+    pub stop_sequences: Vec<String>,
+    /// Per-request fallback candidates. None uses configured defaults; an empty list disables fallback.
+    pub fallback_models: Option<Vec<String>>,
+    /// Summary-only wire override, validated against the selected summary model.
+    pub summary_thinking: Option<SummaryThinkingMode>,
     /// Durable Task/Run attribution for physical-call accounting.
     ///
     /// This is local execution metadata and is never serialized to a provider.
@@ -300,6 +361,9 @@ impl ChatRequest {
     #[must_use]
     pub fn new(model: impl Into<String>) -> Self {
         Self {
+            current_user_message_id: None,
+            delivered_image_sources: Arc::default(),
+            image_notices: Arc::default(),
             model: model.into(),
             messages: Vec::new(),
             system_prompt: None,
@@ -308,6 +372,10 @@ impl ChatRequest {
             tool_cache_breakpoint: None,
             max_tokens: 8192,
             thinking: ThinkingMode::Disabled,
+            reasoning_effort: None,
+            stop_sequences: Vec::new(),
+            fallback_models: None,
+            summary_thinking: None,
             execution: None,
             call_observer: None,
         }
@@ -472,6 +540,11 @@ impl FinishReason {
 /// arguments 组装完整入参（旧 `BlockStop` 补发不建模，留痕 §3）。
 #[derive(Clone, Debug, PartialEq)]
 pub enum ProviderEvent {
+    /// Opaque provider continuation state to persist with the assistant message.
+    ResponseState {
+        /// State is never replayed to a different provider or model.
+        state: ProviderResponseState,
+    },
     /// 文本增量（`choices[].delta.content`，空串不产出）。
     TextDelta {
         /// 增量文本。
@@ -529,6 +602,15 @@ pub enum ProviderEvent {
 pub trait ChatProvider: Send + Sync {
     /// 供应商标识（注册表键，如 `dashscope` / `openai`）。
     fn provider_name(&self) -> &str;
+
+    /// Validate explicit request options using this adapter's actual protocol.
+    /// This performs no network I/O and admits no billable call.
+    ///
+    /// # Errors
+    /// Unsupported or contradictory options are rejected before dispatch.
+    fn validate_request_options(&self, request: &ChatRequest) -> Result<(), ProviderError> {
+        crate::validate_request_options(request, self.provider_name())
+    }
 
     /// 发起流式补全，返回惰性事件流。
     ///

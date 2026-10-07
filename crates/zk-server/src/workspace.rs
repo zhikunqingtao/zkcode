@@ -182,6 +182,16 @@ pub(crate) fn require_current_binding(
     config: &Config,
     saved_workspace_root: &str,
 ) -> Result<PathBuf, ApiError> {
+    let current = require_current_binding_identity(saved_workspace_root)?;
+    assert_within_allowed_roots(config, &current)?;
+    Ok(current)
+}
+
+/// Recheck the physical identity already saved by workspace authorization.
+/// Source readers use this without inventing a new configured-root policy.
+pub(crate) fn require_current_binding_identity(
+    saved_workspace_root: &str,
+) -> Result<PathBuf, ApiError> {
     let saved = lexical_normalize(Path::new(saved_workspace_root.trim()));
     let current = std::fs::canonicalize(&saved).map_err(|err| match err.kind() {
         std::io::ErrorKind::PermissionDenied => failure(
@@ -210,7 +220,6 @@ pub(crate) fn require_current_binding(
             "Workspace path now resolves to a different directory",
         ));
     }
-    assert_within_allowed_roots(config, &current)?;
     Ok(current)
 }
 

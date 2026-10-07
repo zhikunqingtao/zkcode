@@ -53,7 +53,11 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::SystemTime;
 
 use zk_db::{Db, DbError, FileSnapshotRecord};
-use zk_tools::{ExpectedOldState, MAX_SNAPSHOT_BYTES, sha256_hex, write_checked};
+use zk_tools::atomic::write_checked_bytes;
+use zk_tools::{ExpectedOldState, MAX_SNAPSHOT_BYTES, sha256_hex};
+
+mod preview;
+pub use preview::{RewindPreview, RewindPreviewFile};
 
 /// 单个快照的对外摘要（对照旧 `record SnapshotInfo(String filePath, String timestamp)`）。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -150,6 +154,8 @@ pub struct FileHistoryService {
     active_transactions: Mutex<HashMap<String, ActiveTransaction>>,
     /// 会话 → 已提交事务列表（追加序）。
     committed_transactions: Mutex<HashMap<String, Vec<TransactionRecord>>>,
+    /// Short-lived explicit user previews. Temporary content remains in its RAM scope.
+    rewind_previews: Mutex<HashMap<String, preview::PreviewSlot>>,
 }
 
 impl std::fmt::Debug for FileHistoryService {
@@ -170,6 +176,7 @@ impl FileHistoryService {
             read_timestamps: Mutex::new(HashMap::new()),
             active_transactions: Mutex::new(HashMap::new()),
             committed_transactions: Mutex::new(HashMap::new()),
+            rewind_previews: Mutex::new(HashMap::new()),
         }
     }
 
@@ -314,26 +321,39 @@ impl FileHistoryService {
             .filter(std::fs::Metadata::is_file)
         {
             if metadata.len() > u64::try_from(MAX_SNAPSHOT_BYTES).unwrap_or(u64::MAX) {
-                tracing::debug!(file_path, "文件超过 10MB，跳过写前快照");
+                tracing::debug!(session_id, code = "HISTORY_SNAPSHOT_SIZE_SKIPPED");
                 return Ok(());
             }
-            match tokio::fs::read_to_string(path).await {
-                Ok(content) => {
+            match tokio::fs::read(path).await {
+                Ok(bytes) => {
+                    if bytes.len() > MAX_SNAPSHOT_BYTES {
+                        return Err("HISTORY_SNAPSHOT_LIMIT".into());
+                    }
+                    let observed =
+                        zk_tools::file_state::global().read_text_format(session_id, file_path);
+                    let decoded =
+                        zk_tools::text_encoding::decode(&bytes, Some(observed.encoding.name()))
+                            .or_else(|_| zk_tools::text_encoding::decode(&bytes, None))
+                            .map_err(str::to_owned)?;
+                    let original_bytes = (decoded.format
+                        != zk_tools::text_encoding::TextFormat::default())
+                    .then_some(bytes.as_slice());
+                    let content = decoded.text;
                     self.db
-                        .insert_file_snapshot(
-                            session_id, message_id, file_path, &content, operation,
+                        .insert_file_snapshot_with_bytes(
+                            session_id,
+                            message_id,
+                            file_path,
+                            &content,
+                            operation,
+                            original_bytes,
                         )
                         .await
-                        .map_err(|error| {
-                            tracing::warn!(file_path, %error, "写前快照落库失败");
-                            error.to_string()
+                        .map_err(|_| {
+                            tracing::warn!(session_id, code = "HISTORY_SNAPSHOT_STORE_FAILED");
+                            "HISTORY_SNAPSHOT_STORE_FAILED".to_owned()
                         })?;
-                    tracing::debug!(
-                        session_id,
-                        file_path,
-                        size = content.len(),
-                        "写前快照已保存"
-                    );
+                    tracing::debug!(session_id, size = content.len(), "写前快照已保存");
                     let mut active = lock(&self.active_transactions);
                     if let Some(transaction) = active.get_mut(session_id)
                         && !transaction
@@ -344,7 +364,9 @@ impl FileHistoryService {
                         transaction.changed_files.push(file_path.to_owned());
                     }
                 }
-                Err(error) => tracing::warn!(file_path, %error, "写前快照读取失败"),
+                Err(error) => {
+                    tracing::warn!(session_id, kind = ?error.kind(), code = "HISTORY_SNAPSHOT_READ_FAILED");
+                }
             }
         }
         lock(&self.read_timestamps).insert(file_path.to_owned(), SystemTime::now());
@@ -469,7 +491,11 @@ impl FileHistoryService {
                     continue;
                 }
             };
-            let outcome = write_checked(&resolved, &snapshot.content, &expected).await;
+            let original = snapshot
+                .original_bytes
+                .as_deref()
+                .unwrap_or(snapshot.content.as_bytes());
+            let outcome = write_checked_bytes(&resolved, original, &expected).await;
             if !outcome.success {
                 let reason = outcome
                     .error

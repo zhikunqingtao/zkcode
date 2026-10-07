@@ -150,12 +150,12 @@ def check_supported_env() -> None:
         "ZK_PYTHON_UDS": ".runtime/python.sock",
         "ZK_DEV_ALLOW_DEMO_CREDENTIAL": "0",
         "ZK_AGENT_ENABLED": "true",
-        "ZK_AGENT_WRITE_ENABLED": "false",
+        "ZK_AGENT_WRITE_ENABLED": "true",
         "ZK_SHARED_WORKSPACE_ENABLED": "false",
         "ZK_AUTO_RESUME_SAFE_TASKS": "false",
         "ZK_CRON_ENABLED": "false",
         "ZK_SWARM_ENABLED": "false",
-        "ZK_WORKTREE_ENABLED": "false",
+        "ZK_WORKTREE_ENABLED": "true",
         "ZK_FEATURE_THINKING_MODE": "true",
         "ZK_FEATURE_COORDINATOR_MODE": "true",
         "ZK_FEATURE_WEB_BROWSER_TOOL": "true",
@@ -377,6 +377,8 @@ def main() -> None:
         fail("upstream count does not match contract")
     if len(ws["downstream"]) != ws["downstreamTargetCount"]:
         fail("downstream count does not match contract")
+    if len(set(ws["downstream"])) != len(ws["downstream"]):
+        fail("downstream contract contains duplicate message kinds")
     if "evidence_decision" in ws["upstream"]:
         fail("removed evidence_decision is active")
     if len(tools["frozenDefault"]) != tools["frozenDefaultCount"]:
@@ -392,7 +394,12 @@ def main() -> None:
     task_runtime = json.loads(
         (ROOT / "contracts" / "task-runtime-v4.json").read_text(encoding="utf-8")
     )
-    expected_agent_tools = set(task_runtime["tools"])
+    always_available_task_tools = {"TaskGet", "TaskList", "TaskOutput", "TaskStop"}
+    if not always_available_task_tools <= set(tools["frozenDefault"]):
+        fail("Owned background task controls are missing from the frozen default tools")
+    if always_available_task_tools & set(tools["featureGates"]["ZK_AGENT_ENABLED"]):
+        fail("Owned background task controls must not depend on Agent being enabled")
+    expected_agent_tools = set(task_runtime["tools"]) - always_available_task_tools
     actual_agent_tools = set(tools["featureGates"]["ZK_AGENT_ENABLED"])
     if actual_agent_tools != expected_agent_tools:
         fail(
@@ -425,6 +432,13 @@ def main() -> None:
         fail("REST contract is empty")
 
     routes_source = (ROOT / "crates" / "zk-server" / "src" / "routes.rs").read_text(encoding="utf-8")
+    # Include only literal child routers actually mounted by the production router.
+    # Scanning every API file would incorrectly accept defined-but-unmounted routes.
+    for module in re.findall(r"\.merge\(crate::api::([a-z_]+)::router\(\)\)", routes_source):
+        child = ROOT / "crates" / "zk-server" / "src" / "api" / f"{module}.rs"
+        if not child.is_file():
+            fail(f"mounted REST router source missing: {module}")
+        routes_source += "\n" + child.read_text(encoding="utf-8").split("#[cfg(test)]", 1)[0]
     enforced_through = int(rest.get("enforcedThroughWorkPackage", 0))
     for endpoint in rest["requiredEndpoints"]:
         packages = [int(value) for value in re.findall(r"WP-(\d+)", endpoint["workPackage"])]
@@ -443,8 +457,13 @@ def main() -> None:
     server_source = ROOT / "crates" / "zk-protocol" / "src" / "server_message.rs"
     server_kinds = quoted_kinds(server_source, r'=>\s*"([a-z0-9_]+)"')
     missing_downstream = set(ws["downstream"]) - server_kinds
-    if missing_downstream:
-        fail(f"server message kinds missing: {sorted(missing_downstream)}")
+    undocumented_downstream = server_kinds - set(ws["downstream"])
+    if missing_downstream or undocumented_downstream:
+        fail(
+            "server message kinds differ from the contract: "
+            f"missing={sorted(missing_downstream)}, "
+            f"undocumented={sorted(undocumented_downstream)}"
+        )
 
     print("parity-contract: ok")
 

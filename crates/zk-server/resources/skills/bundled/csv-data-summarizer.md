@@ -1,8 +1,12 @@
 ---
 name: csv-data-summarizer
 description: 自动分析CSV文件并生成统计摘要与可视化图表，支持中文列名、编码自动检测与大文件保护
-allowed-tools: [Bash, Read, Write]
-arguments: [file_path]
+allowed-tools:
+  - Bash
+  - Read
+  - Write
+arguments:
+  - file_path
 argument-hint: "CSV文件的绝对路径，如 '/Users/xxx/data/sales.csv'"
 when_to_use: 当用户需要快速了解CSV数据全貌、分布特征或生成数据摘要报告时
 effort: medium

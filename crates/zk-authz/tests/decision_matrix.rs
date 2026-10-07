@@ -372,3 +372,153 @@ async fn user_denial_blocks_execution() {
     assert_eq!(denied.code, "PERMISSION_USER_DENIED");
     assert_eq!(harness.gateway.prompt_count(), 1, "拒绝前必然弹过一次窗");
 }
+
+#[tokio::test]
+async fn plan_mode_does_not_reuse_previous_grants() {
+    let harness = Harness::new();
+    harness.seed_run("s-plan-grant", "r-plan-grant").await;
+    let (tool, input) = guarded_read(&harness);
+    let frozen = harness.freeze(tool.name(), &input);
+    let context = harness.context("r-plan-grant", "tu-plan", "s-plan-grant");
+    let prepared = harness
+        .service
+        .prepare(&tool, &frozen, &input, &context)
+        .await
+        .unwrap();
+    harness
+        .grants
+        .create(
+            &prepared.subject,
+            &prepared.descriptor,
+            Some(PermissionScope::Session),
+            None,
+        )
+        .await
+        .unwrap();
+    harness.modes.set(zk_authz::model::PermissionMode::Plan);
+    let error = harness
+        .service
+        .authorize_prepared(&tool, &frozen, input, &context, prepared)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "PLAN_MODE_EFFECT_DENIED");
+    assert_eq!(harness.gateway.prompt_count(), 0);
+}
+
+#[tokio::test]
+async fn permission_mode_changed_during_approval_blocks_late_answer() {
+    use zk_authz::model::PermissionMode;
+    for (mode, code) in [
+        (PermissionMode::Plan, "PLAN_MODE_EFFECT_DENIED"),
+        (PermissionMode::DontAsk, "PERMISSION_INTERACTION_REQUIRED"),
+    ] {
+        let harness = Harness::new();
+        harness.seed_run("s-late", "r-late").await;
+        let (tool, input) = guarded_read(&harness);
+        let frozen = harness.freeze(tool.name(), &input);
+        let context = harness.context("r-late", "tu-late", "s-late");
+        let prepared = harness
+            .service
+            .prepare(&tool, &frozen, &input, &context)
+            .await
+            .unwrap();
+        harness
+            .gateway
+            .allow_once(&prepared.descriptor.operation_hash);
+        harness.modes.script([PermissionMode::Default, mode]);
+        let error = harness
+            .service
+            .authorize_prepared(&tool, &frozen, input, &context, prepared)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, code);
+        assert_eq!(harness.gateway.prompt_count(), 1);
+    }
+}
+
+#[tokio::test]
+async fn cancelled_run_cannot_admit_a_previously_authorized_tool() {
+    let harness = Harness::new();
+    harness.seed_run("s-cancel", "r-cancel").await;
+    let (tool, input) = safe_read(&harness);
+    let frozen = harness.freeze(tool.name(), &input);
+    let context = harness.context("r-cancel", "tu-cancel", "s-cancel");
+    let prepared = harness
+        .service
+        .prepare(&tool, &frozen, &input, &context)
+        .await
+        .unwrap();
+    let authorized = harness
+        .service
+        .authorize_prepared(&tool, &frozen, input, &context, prepared)
+        .await
+        .unwrap();
+    harness
+        .db
+        .with_writer(|conn| {
+            conn.execute(
+                "UPDATE run_envelopes SET status='cancelling' WHERE id='r-cancel'",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let error = harness
+        .execution_gateway()
+        .admit(&tool, &authorized, &context)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, zk_authz::gateway::GatewayError::Denied(ref denied) if denied.code == "RUN_TOOL_ADMISSION_CLOSED")
+    );
+    assert!(harness.events.of_type("tool_started").is_empty());
+}
+
+#[tokio::test]
+async fn native_handoff_read_needs_no_new_permission_but_mcp_cannot_spoof_it() {
+    use zk_authz::model::PermissionMode;
+    let harness = Harness::new();
+    harness.seed_run("s-handoff", "r-handoff").await;
+    harness.modes.set(PermissionMode::DontAsk);
+    let tool = FakeTool::new("HandoffRead");
+    let input = json!({"operation": "list"});
+    let frozen = harness.freeze(tool.name(), &input);
+    let context = harness.context("r-handoff", "tu-handoff", "s-handoff");
+    let prepared = harness
+        .service
+        .prepare(&tool, &frozen, &input, &context)
+        .await
+        .unwrap();
+    let authorized = harness
+        .service
+        .authorize_prepared(&tool, &frozen, input, &context, prepared)
+        .await
+        .unwrap();
+    assert_eq!(authorized.reason_code, "BUILTIN_SAFE");
+    let mcp_tool = FakeTool::new("HandoffRead").mcp("foreign-server");
+    let mcp_input = json!({"operation": "list"});
+    let mcp_frozen = harness.freeze(mcp_tool.name(), &mcp_input);
+    let mcp_prepared = harness
+        .service
+        .prepare(&mcp_tool, &mcp_frozen, &mcp_input, &context)
+        .await
+        .unwrap();
+    assert_ne!(
+        mcp_prepared.descriptor.effects,
+        [zk_authz::model::EffectClass::SafeInternal]
+    );
+    assert!(
+        harness
+            .service
+            .authorize_prepared(&mcp_tool, &mcp_frozen, mcp_input, &context, mcp_prepared)
+            .await
+            .is_err()
+    );
+    harness
+        .execution_gateway()
+        .admit(&tool, &authorized, &context)
+        .await
+        .unwrap();
+    assert_eq!(harness.gateway.prompt_count(), 0);
+}

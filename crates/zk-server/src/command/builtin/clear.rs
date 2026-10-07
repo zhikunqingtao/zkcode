@@ -41,11 +41,24 @@ impl Command for ClearCommand {
             if ctx.session_id.trim().is_empty() {
                 return CommandResult::error("No active session to clear.");
             }
-            // 旧 L46-47：新会话沿用当前模型与工作目录。
+            let mode = match ctx.state.authz.modes.checked_mode(&ctx.session_id) {
+                Ok(mode) => mode,
+                Err(error) => {
+                    return CommandResult::error(format!(
+                        "Failed to read current session permission: {error}"
+                    ));
+                }
+            };
+            // 新会话只继承已确认的当前权限、模型和工作目录。
             match ctx
                 .state
                 .db
-                .create_session(&ctx.current_model, &ctx.working_dir)
+                .create_session_with_permission(
+                    &uuid::Uuid::new_v4().to_string(),
+                    &ctx.current_model,
+                    &ctx.working_dir,
+                    Some(mode.as_str()),
+                )
                 .await
             {
                 Ok(created) => {
@@ -90,6 +103,10 @@ mod tests {
             .expect("list")
             .sessions
             .len();
+        state
+            .authz
+            .modes
+            .set_ephemeral_mode("s-1", zk_authz::model::PermissionMode::DontAsk);
         let result = run("s-1", state.clone()).await;
         assert_eq!(result, CommandResult::text("Conversation cleared."));
 
@@ -97,7 +114,50 @@ mod tests {
         assert_eq!(page.sessions.len(), before + 1);
         let created = page.sessions.first().expect("new session is newest");
         assert_eq!(created.model, "kimi-k3");
+        assert_eq!(created.permission_mode.as_deref(), Some("DONT_ASK"));
         assert_eq!(created.working_directory, "/tmp/zk-clear");
+    }
+
+    #[tokio::test]
+    async fn missing_or_unreadable_permission_never_creates_a_replacement() {
+        let state = AppState::for_tests();
+        assert!(matches!(
+            run("missing", state.clone()).await,
+            CommandResult::Error(_)
+        ));
+        assert!(
+            state
+                .db
+                .list_sessions(None, 50)
+                .await
+                .unwrap()
+                .sessions
+                .is_empty()
+        );
+        state
+            .db
+            .create_session_with_id("existing", "model", "/tmp")
+            .await
+            .unwrap();
+        state
+            .db
+            .with_conn_blocking(|conn| {
+                conn.execute_batch(
+                    "ALTER TABLE sessions RENAME COLUMN permission_mode TO unavailable_mode",
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            matches!(run("existing", state.clone()).await, CommandResult::Error(message) if message.starts_with("Failed to read current session permission:"))
+        );
+        let count: i64 = state
+            .db
+            .with_conn_blocking(|conn| {
+                Ok(conn.query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))?)
+            })
+            .unwrap();
+        assert_eq!(count, 1);
     }
 
     /// 空白 `sessionId` → 旧固定错误文案，且不建会话。

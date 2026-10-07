@@ -27,7 +27,7 @@
 //! 从 outbox 恢复。多订阅者收到重复持久事件时同样按 `eventId` 去重。
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
@@ -219,9 +219,50 @@ struct HubStats {
     pending_evicted: AtomicU64,
 }
 
+type EventListeners = HashMap<SessionId, HashMap<String, EventListener>>;
+
+struct EventListener {
+    tx: mpsc::Sender<ServerEnvelope>,
+    overflowed: Arc<AtomicBool>,
+}
+
+/// Bounded transport-neutral subscription to already attributed runtime events.
+/// Overflow is a visible error, never a silently truncated successful stream.
+pub(crate) struct SessionEvents {
+    pub(crate) receiver: mpsc::Receiver<ServerEnvelope>,
+    overflowed: Arc<AtomicBool>,
+    session_id: String,
+    id: String,
+    hub: WsHub,
+}
+
+impl SessionEvents {
+    pub(crate) fn overflowed(&self) -> bool {
+        self.overflowed.load(Ordering::Acquire)
+    }
+}
+
+impl Drop for SessionEvents {
+    fn drop(&mut self) {
+        let mut listeners = self
+            .hub
+            .inner
+            .event_listeners
+            .lock()
+            .expect("event listeners lock");
+        if let Some(session) = listeners.get_mut(&self.session_id) {
+            session.remove(&self.id);
+            if session.is_empty() {
+                listeners.remove(&self.session_id);
+            }
+        }
+    }
+}
+
 /// hub 可变状态全集。
 struct HubInner {
     config: WsConfig,
+    event_listeners: Mutex<EventListeners>,
     /// 连接注册表（`conn_id` → entry）。
     connections: RwLock<HashMap<ConnId, Arc<ConnectionEntry>>>,
     /// 会话 → 订阅连接集合。
@@ -254,6 +295,7 @@ impl WsHub {
         Self {
             inner: Arc::new(HubInner {
                 config,
+                event_listeners: Mutex::new(HashMap::new()),
                 connections: RwLock::new(HashMap::new()),
                 session_subscribers: RwLock::new(HashMap::new()),
                 session_epochs: Mutex::new(HashMap::new()),
@@ -271,6 +313,33 @@ impl WsHub {
     #[must_use]
     pub fn config(&self) -> &WsConfig {
         &self.inner.config
+    }
+
+    /// Subscribe after authorization and query reservation, before execution.
+    pub(crate) fn subscribe_events(&self, session_id: &str) -> SessionEvents {
+        let (tx, receiver) = mpsc::channel(64);
+        let overflowed = Arc::new(AtomicBool::new(false));
+        let id = uuid::Uuid::new_v4().to_string();
+        self.inner
+            .event_listeners
+            .lock()
+            .expect("event listeners lock")
+            .entry(session_id.to_owned())
+            .or_default()
+            .insert(
+                id.clone(),
+                EventListener {
+                    tx,
+                    overflowed: Arc::clone(&overflowed),
+                },
+            );
+        SessionEvents {
+            receiver,
+            overflowed,
+            session_id: session_id.to_owned(),
+            id,
+            hub: self.clone(),
+        }
     }
 
     /// 注入 S9 引擎挂点（Phase 1 为 Noop）。
@@ -915,6 +984,7 @@ impl WsHub {
 
     /// 核心分发段：订阅者扫描 + 双档投递 + pending 回退。
     async fn deliver(&self, session_id: &str, mut envelope: ServerEnvelope, critical: bool) {
+        self.deliver_event_listeners(session_id, &envelope);
         let subscribers: Vec<Arc<ConnectionEntry>> = {
             let mapping = self
                 .inner
@@ -1012,6 +1082,22 @@ impl WsHub {
         }
         if pending_needed {
             self.enqueue_pending(session_id, envelope);
+        }
+    }
+
+    fn deliver_event_listeners(&self, session_id: &str, envelope: &ServerEnvelope) {
+        if let Some(listeners) = self
+            .inner
+            .event_listeners
+            .lock()
+            .expect("event listeners lock")
+            .get(session_id)
+        {
+            for listener in listeners.values() {
+                if listener.tx.try_send(envelope.clone()).is_err() {
+                    listener.overflowed.store(true, Ordering::Release);
+                }
+            }
         }
     }
 
@@ -1136,6 +1222,7 @@ mod tests {
     /// error 消息（critical 档代表）。
     fn critical_msg(code: &str) -> ServerMessage {
         ServerMessage::Error {
+            request_id: None,
             code: code.to_owned(),
             message: "test".to_owned(),
             retryable: false,

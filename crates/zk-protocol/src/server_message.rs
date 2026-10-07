@@ -23,6 +23,7 @@
 //! 3. **`tool_permission_denied`**：§11.1b 表述为 `interactionId/operationHash`，
 //!    后端实际直推（L413-414）为 `toolUseId/toolName`，**以代码为准**。
 
+use crate::model::SessionPurpose;
 use crate::model::{FlexEpoch, Message, Usage};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -37,6 +38,40 @@ use std::collections::BTreeMap;
 #[allow(clippy::large_enum_variant)] // 序列化主导；Phase 1 无高频 clone 路径，不引入 Box
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMessage {
+    /// Persisted system notice, deduplicated by its message UUID on restore.
+    SystemMessage {
+        /// Authoritative persisted message; carries no execution authorization.
+        message: crate::model::Message,
+    },
+    /// Persisted intermediate assistant segment, separate from final completion.
+    #[serde(rename_all = "camelCase")]
+    AssistantSegmentComplete {
+        /// Stable persisted message identity used for replay deduplication.
+        message_id: String,
+        /// Authoritative complete segment.
+        content: Vec<crate::model::ContentBlock>,
+        /// Physical request usage, when reported by the provider.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        usage: Option<Usage>,
+        /// Provider stop reason.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stop_reason: Option<String>,
+    },
+    /// Persisted conversational task boundary; ownership remains in eventContext.
+    #[serde(rename_all = "camelCase")]
+    TaskBoundary {
+        /// System message id, stable across restore and live delivery.
+        message_id: String,
+        /// Root task identity.
+        task_id: String,
+        /// Display title.
+        title: String,
+        /// Persisted message sequence.
+        seq: i64,
+        /// Optional conversational turn index.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_index: Option<i64>,
+    },
     // ═══════════ messageStore 链路（record #1-5 + 直推 tool_use_input） ═══════════
     /// 旧 record `StreamDelta` / 直推点 `sendStreamDelta`（L335）：文本流增量。
     ///
@@ -188,6 +223,9 @@ pub enum ServerMessage {
     /// **Phase 1 激活**。
     #[serde(rename_all = "camelCase")]
     Error {
+        /// Optional initiating request identity.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
         /// 错误码（机器可读）。
         code: String,
         /// 人类可读消息。
@@ -518,6 +556,9 @@ pub enum ServerMessage {
     /// **Phase 1 激活**。
     #[serde(rename_all = "camelCase")]
     PermissionModeChanged {
+        /// Confirmation identity, including no-op transitions.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
         /// 新模式（`DEFAULT` / `AUTO_APPROVE` 等）。
         mode: String,
         /// 前一模式（个别调用点可缺省）。
@@ -701,12 +742,10 @@ pub enum ServerMessage {
         reason: String,
     },
 
-    /// 直推点 `sendPlanUpdate`（L587，PlanCommand 构造）：Plan Mode 状态更新。
-    ///
-    /// **Phase 2+ 建模未激活**。
+    /// `/plan` 通过会话路由推送规划面板状态；不修改权限模式。
     #[serde(rename_all = "camelCase")]
     PlanUpdate {
-        /// 是否处于 Plan Mode。
+        /// 是否显示规划面板（字段名保留前端协议）。
         is_plan_mode: bool,
         /// 计划名（关闭时可缺省）。
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -959,6 +998,9 @@ pub struct McpToolInfo {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionMetadata {
+    /// Trusted use derived from durable root task ownership.
+    #[serde(default)]
+    pub purpose: SessionPurpose,
     /// 会话 ID。
     pub session_id: String,
     /// 模型标识。
@@ -1105,6 +1147,9 @@ impl ServerMessage {
     #[must_use]
     pub fn kind(&self) -> &'static str {
         match self {
+            Self::SystemMessage { .. } => "system_message",
+            Self::AssistantSegmentComplete { .. } => "assistant_segment_complete",
+            Self::TaskBoundary { .. } => "task_boundary",
             ServerMessage::StreamDelta { .. } => "stream_delta",
             ServerMessage::ThinkingDelta { .. } => "thinking_delta",
             ServerMessage::ToolUseStart { .. } => "tool_use_start",

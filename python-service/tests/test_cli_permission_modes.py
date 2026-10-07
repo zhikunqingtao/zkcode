@@ -27,7 +27,7 @@ def test_cli_does_not_expose_permission_bypass_flag():
     assert "skip_all_prompts" not in {mode.value for mode in PermissionMode}
 
 
-def test_cli_sends_auto_approve_and_keeps_dont_ask_as_default(monkeypatch):
+def test_cli_sends_explicit_mode_and_omits_default_for_server_resolution(monkeypatch):
     bodies = []
 
     class FakeClient:
@@ -47,16 +47,16 @@ def test_cli_sends_auto_approve_and_keeps_dont_ask_as_default(monkeypatch):
 
     auto_result = runner.invoke(
         cli_main.app,
-        ["hello", "--output-format", "json", "--permission-mode", "auto_approve"],
+        ["hello", "--project-id", "project-1", "--output-format", "json", "--permission-mode", "auto_approve"],
     )
     default_result = runner.invoke(
         cli_main.app,
-        ["hello", "--output-format", "json"],
+        ["hello", "--project-id", "project-1", "--output-format", "json"],
     )
 
     assert auto_result.exit_code == 0, auto_result.output
     assert default_result.exit_code == 0, default_result.output
     assert bodies[0]["permissionMode"] == "AUTO_APPROVE"
-    assert bodies[1]["permissionMode"] == "DONT_ASK"
-    assert bodies[1]["maxTurns"] == 4
-    assert bodies[1]["timeoutSeconds"] == 90
+    assert "permissionMode" not in bodies[1]
+    assert bodies[1]["maxTurns"] == 99
+    assert bodies[1]["timeoutSeconds"] == 300

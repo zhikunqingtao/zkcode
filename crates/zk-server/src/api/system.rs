@@ -99,7 +99,7 @@ pub(crate) async fn health(State(state): State<AppState>) -> Json<serde_json::Va
             ),
             "worktree": capability_readiness(
                 state.config.worktree_enabled,
-                execution_runtime_ready && agent_assembled && tools.get("Worktree").is_some(),
+                execution_runtime_ready && tools.get("Worktree").is_some(),
                 "real Git worktree isolation gates pass"
             ),
             "swarm": capability_readiness(

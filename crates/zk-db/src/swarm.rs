@@ -64,6 +64,7 @@ impl Db {
         let payload = serde_json::to_string(&record)
             .map_err(|error| DbError::Invalid(format!("invalid Swarm projection: {error}")))?;
         self.with_writer(move |conn| {
+            crate::content::require_persistent_session(conn, &record.session_id)?;
             conn.execute(
                 "INSERT INTO activities \
                  (id,session_id,operation_type,summary,status,timestamp,file_count,\

@@ -148,8 +148,8 @@ async fn dispatch(state: &AppState, conn_id: &str, msg: ClientMessage) {
         ClientMessage::PermissionResponse { .. } => {
             handle_permission_response(state, conn_id).await;
         }
-        ClientMessage::SetPermissionMode { mode } => {
-            handle_set_permission_mode(state, conn_id, &mode).await;
+        ClientMessage::SetPermissionMode { mode, request_id } => {
+            handle_set_permission_mode(state, conn_id, &mode, request_id).await;
         }
         // 3B.7：`/skill` 在服务端本地渲染为提示词后注入对话（旧 PROMPT 命令
         // 路径）。
@@ -203,6 +203,27 @@ const MCP_NOTIFICATION_TIMEOUT_MS: i64 = 3000;
 /// - 并发保护不在此处做：注入走 `UserMessage`，由 zk-engine 既有 CAS 门控
 ///   （`query_busy`，retryable=false）承担，与旧 `sessionQueryRunning` 同语义;
 /// - `context: fork` 不分叉子会话（任务明确「先 inline」）。
+fn parse_skill_command(input: &str) -> Result<(String, &str), &'static str> {
+    let input = input.trim();
+    if input.starts_with('"') {
+        let mut parser = serde_json::Deserializer::from_str(input).into_iter::<String>();
+        let name = parser
+            .next()
+            .ok_or("技能名称引号格式无效")?
+            .map_err(|_| "技能名称引号格式无效")?;
+        let remaining = &input[parser.byte_offset()..];
+        if remaining.chars().next().is_some_and(|c| !c.is_whitespace()) {
+            return Err("技能名称后需用空格分隔参数");
+        }
+        Ok((name, remaining.trim_start()))
+    } else {
+        Ok(match input.find(char::is_whitespace) {
+            Some(index) => (input[..index].into(), input[index..].trim_start()),
+            None => (input.into(), ""),
+        })
+    }
+}
+
 async fn handle_skill_command(state: &AppState, conn_id: &str, args: &str) {
     let Some((session_id, _epoch)) = state.hub.bound_session(conn_id) else {
         tracing::debug!(conn_id, "slash_command /skill dropped (session not bound)");
@@ -216,14 +237,20 @@ async fn handle_skill_command(state: &AppState, conn_id: &str, args: &str) {
     }
     // 旧 `args.trim().split("\s+", 2)`：首个空白串整体作分隔（故 rest 需
     // `trim_start` 吃掉剩余空白，与 Java `\s+` 的贪婪消费一致）。
-    let (name, skill_args) = match args.find(char::is_whitespace) {
-        Some(idx) => (&args[..idx], args[idx..].trim_start()),
-        None => (args, ""),
+    let (name, skill_args) = match parse_skill_command(args) {
+        Ok(parts) => parts,
+        Err(error) => {
+            push_command_error(state, &session_id, error).await;
+            return;
+        }
     };
-    let Some(skill) = state.skills.resolve(name) else {
+    let Ok(view) = state.skill_catalog.view(Some(&session_id), None).await else {
+        push_command_error(state, &session_id, "SKILL_SCOPE_UNAVAILABLE").await;
+        return;
+    };
+    let Some(skill) = view.resolve(&name) else {
         // 旧 L50-56 文案逐字（含「可用技能:」清单与空清单的「无」）。
-        let available = state
-            .skills
+        let available = view
             .all_skills()
             .iter()
             .map(|skill| skill.effective_name().to_owned())
@@ -242,6 +269,10 @@ async fn handle_skill_command(state: &AppState, conn_id: &str, args: &str) {
         return;
     };
     let params = skill.parse_args(skill_args);
+    if !skill.is_user_invocable() {
+        push_command_error(state, &session_id, "此技能不允许用户直接调用").await;
+        return;
+    }
     let rendered = skill.render_template(&params);
     tracing::info!(
         session_id = %session_id,
@@ -319,6 +350,10 @@ async fn handle_skill_command(state: &AppState, conn_id: &str, args: &str) {
 ///    `IllegalStateException`，该异常不在旧 catch 覆盖内 → 逃逸到 STOMP 框架
 ///    （前端无任何下行）。此处改推 `COMMAND_ERROR` 携同源文案——静默失败是旧
 ///    侧缺陷。
+#[expect(
+    clippy::too_many_lines,
+    reason = "one ordered command resolution and dispatch protocol"
+)]
 async fn handle_slash_command(state: &AppState, conn_id: &str, command: &str, args: &str) {
     let Some((session_id, _epoch)) = state.hub.bound_session(conn_id) else {
         tracing::warn!(
@@ -328,6 +363,18 @@ async fn handle_slash_command(state: &AppState, conn_id: &str, command: &str, ar
         );
         return;
     };
+    if matches!(command.to_ascii_lowercase().as_str(), "fix" | "stuck")
+        || state.commands.get_command(command).is_err()
+    {
+        let Ok(view) = state.skill_catalog.view(Some(&session_id), None).await else {
+            push_command_error(state, &session_id, "SKILL_SCOPE_UNAVAILABLE").await;
+            return;
+        };
+        if view.resolve_including_disabled(command).is_some() {
+            handle_skill_command(state, conn_id, &format!("{command} {args}")).await;
+            return;
+        }
+    }
     tracing::info!(
         session_id = %session_id,
         command,
@@ -344,6 +391,7 @@ async fn handle_slash_command(state: &AppState, conn_id: &str, command: &str, ar
                 .push(
                     &session_id,
                     ServerMessage::Error {
+                        request_id: None,
                         code: "COMMAND_NOT_FOUND".to_owned(),
                         message: not_found.message,
                         retryable: false,
@@ -471,6 +519,7 @@ async fn push_command_error(state: &AppState, session_id: &str, message: &str) {
         .push(
             session_id,
             ServerMessage::Error {
+                request_id: None,
                 code: "COMMAND_ERROR".to_owned(),
                 message: message.to_owned(),
                 retryable: false,
@@ -656,6 +705,7 @@ async fn push_mcp_error(state: &AppState, session_id: &str, code: &str, message:
         .push(
             session_id,
             ServerMessage::Error {
+                request_id: None,
                 code: code.to_owned(),
                 message,
                 retryable: false,
@@ -696,6 +746,10 @@ async fn handle_ping(state: &AppState, conn_id: &str) {
 }
 
 /// `bind_session` 握手（校验链见模块文档；成功路径 restore + replay）。
+#[expect(
+    clippy::too_many_lines,
+    reason = "one ordered epoch validation, snapshot and event replay handshake"
+)]
 async fn handle_bind(
     state: &AppState,
     conn_id: &str,
@@ -714,6 +768,19 @@ async fn handle_bind(
     ) else {
         return;
     };
+    if !matches!(
+        state.db.is_merge_billing_session(session_id).await,
+        Ok(false)
+    ) {
+        reply_protocol_error(
+            state,
+            conn_id,
+            "SESSION_NOT_FOUND".into(),
+            Some(bind_request_id.to_owned()),
+            None,
+        );
+        return;
+    }
     // 4. 会话存在性（DB 读失败 → BIND_RECOVERY_FAILED，对齐旧 catch 路径）。
     let mut restore_snapshot = match state.db.get_session_runtime_restore(session_id).await {
         Ok(Some(snapshot)) => snapshot,
@@ -826,6 +893,14 @@ async fn replay_persisted_events(
         .await
     {
         Ok(events) => events,
+        Err(zk_db::DbError::Conflict(code)) if code == "RUNTIME_CURSOR_EXPIRED" => {
+            state.hub.push_direct(conn_id, ServerMessage::Error {
+                request_id: None, code,
+                message: "Runtime events have expired; bind again to fetch a current session snapshot".into(),
+                retryable: false,
+            });
+            return;
+        }
         Err(error) => {
             tracing::error!(conn_id, session_id, %error, "durable WS replay query failed");
             return;
@@ -1096,6 +1171,7 @@ async fn handle_permission_response(state: &AppState, conn_id: &str) {
         .push(
             &session_id,
             ServerMessage::Error {
+                request_id: None,
                 code: "interaction_rest_required".to_owned(),
                 message: "协议 v2 的交互决定必须提交到 /api/interactions/{id}/decisions".to_owned(),
                 retryable: false,
@@ -1111,7 +1187,12 @@ async fn handle_permission_response(state: &AppState, conn_id: &str) {
 /// `IllegalArgumentException` 统一捕获，且只记录长度与指纹、不记录原值）；
 /// 合法 → `info` 日志 + `PermissionModeManager.setMode`（真实变化才推
 /// `permission_mode_changed`）。
-async fn handle_set_permission_mode(state: &AppState, conn_id: &str, mode: &str) {
+async fn handle_set_permission_mode(
+    state: &AppState,
+    conn_id: &str,
+    mode: &str,
+    request_id: Option<String>,
+) {
     let Some((session_id, _epoch)) = state.hub.bound_session(conn_id) else {
         tracing::debug!(conn_id, "set_permission_mode dropped (session not bound)");
         return;
@@ -1129,6 +1210,7 @@ async fn handle_set_permission_mode(state: &AppState, conn_id: &str, mode: &str)
             .push(
                 &session_id,
                 ServerMessage::Error {
+                    request_id: request_id.clone(),
                     code: "INVALID_PERMISSION_MODE".to_owned(),
                     message: "Invalid permission mode".to_owned(),
                     retryable: false,
@@ -1138,7 +1220,26 @@ async fn handle_set_permission_mode(state: &AppState, conn_id: &str, mode: &str)
         return;
     };
     tracing::info!(session_id = %session_id, mode = parsed.as_str(), "WS set_permission_mode");
-    state.authz.modes.set_mode(&session_id, parsed).await;
+    if let Err(error) = state
+        .authz
+        .modes
+        .set_mode_with_request(&session_id, parsed, request_id.clone())
+        .await
+    {
+        tracing::error!(%error, "permission change persistence failed");
+        state
+            .hub
+            .push(
+                &session_id,
+                ServerMessage::Error {
+                    request_id,
+                    code: "PERMISSION_MODE_SAVE_FAILED".into(),
+                    message: "Permission mode was not changed because it could not be saved".into(),
+                    retryable: true,
+                },
+            )
+            .await;
+    }
 }
 
 /// `set_model` 上行处理（旧 `handleSetModel` L1285-1304 语义 + 2.7 多提供商校验）。
@@ -1158,6 +1259,7 @@ async fn handle_set_model(state: &AppState, conn_id: &str, model: &str) {
             .push(
                 &session_id,
                 ServerMessage::Error {
+                    request_id: None,
                     code: "INVALID_MODEL".to_owned(),
                     message: format!("Unsupported model: {model}"),
                     retryable: false,
@@ -1179,6 +1281,7 @@ async fn handle_set_model(state: &AppState, conn_id: &str, model: &str) {
             .push(
                 &session_id,
                 ServerMessage::Error {
+                    request_id: None,
                     code: "MODEL_UPDATE_FAILED".to_owned(),
                     message: "Failed to persist model selection".to_owned(),
                     retryable: true,
@@ -1448,6 +1551,7 @@ mod tests {
             }
             .kind(),
             M::RunInput {
+                meta: None,
                 request_id: empty(),
                 text: empty(),
             }
@@ -1464,7 +1568,11 @@ mod tests {
             }
             .kind(),
             M::SetModel { model: empty() }.kind(),
-            M::SetPermissionMode { mode: empty() }.kind(),
+            M::SetPermissionMode {
+                mode: empty(),
+                request_id: None,
+            }
+            .kind(),
             M::SlashCommand {
                 command: empty(),
                 args: empty(),
@@ -1525,5 +1633,23 @@ mod tests {
         let mut known = KNOWN_CLIENT_TYPES.to_vec();
         known.sort_unstable();
         assert_eq!(kinds, known, "KNOWN_CLIENT_TYPES must track ClientMessage");
+    }
+}
+
+#[cfg(test)]
+mod skill_argument_tests {
+    use super::parse_skill_command;
+    #[test]
+    fn canonical_quoted_ids_preserve_full_prose_scope() {
+        assert_eq!(
+            parse_skill_command("\"团队 审查\"  src/ui 与 API").unwrap(),
+            ("团队 审查".into(), "src/ui 与 API")
+        );
+        assert_eq!(
+            parse_skill_command("review staged and untracked").unwrap(),
+            ("review".into(), "staged and untracked")
+        );
+        assert!(parse_skill_command("\"review\"extra").is_err());
+        assert!(parse_skill_command("\"unfinished").is_err());
     }
 }

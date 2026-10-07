@@ -31,6 +31,7 @@ async fn seed_messages(db: &zk_db::Db, session_id: &str) {
     db.append_message(
         session_id,
         NewMessage {
+            meta: None,
             role: MessageRole::User,
             content: vec![
                 StoredBlock::Text {
@@ -52,6 +53,7 @@ async fn seed_messages(db: &zk_db::Db, session_id: &str) {
     db.append_message(
         session_id,
         NewMessage {
+            meta: None,
             role: MessageRole::Assistant,
             content: vec![StoredBlock::Text {
                 text: "我来看看".into(),
@@ -67,6 +69,7 @@ async fn seed_messages(db: &zk_db::Db, session_id: &str) {
     db.append_message(
         session_id,
         NewMessage {
+            meta: None,
             role: MessageRole::System,
             content: vec![StoredBlock::Text {
                 text: "系统提示".into(),
@@ -110,6 +113,7 @@ async fn lifecycle_matches_baseline_samples() {
     let (status, _, body) = call(&mut router, local_get("/api/sessions?limit=1")).await;
     assert_eq!(status, StatusCode::OK);
     let listed = json_body(&body);
+    assert_eq!(listed["sessions"][0]["purpose"], "chat");
     assert_same_shape(&sample("GET_api-sessions.json"), &listed, "list");
     assert_eq!(listed["sessions"].as_array().expect("array").len(), 1);
     assert_eq!(listed["hasMore"], true);
@@ -138,6 +142,7 @@ async fn lifecycle_matches_baseline_samples() {
     .await;
     assert_eq!(status, StatusCode::OK);
     let detail = json_body(&body);
+    assert_eq!(detail["purpose"], "chat");
     assert_same_shape(&sample("GET_api-sessions-id.json"), &detail, "detail");
     assert!(detail.get("title").is_none(), "null title stripped");
     assert!(detail.get("summary").is_none(), "null summary stripped");
@@ -199,6 +204,7 @@ async fn lifecycle_matches_baseline_samples() {
     .await;
     assert_eq!(status, StatusCode::OK);
     let exported = json_body(&body);
+    assert_eq!(exported["purpose"], "chat");
     assert_same_shape(
         &sample("POST_api-sessions-id-export-json.json"),
         &exported,
@@ -417,6 +423,7 @@ async fn message_shapes_and_pagination() {
     .await;
     assert_eq!(status, StatusCode::OK);
     let exported = json_body(&body);
+    assert_eq!(exported["purpose"], "chat");
     let export_user = &exported["messages"][0];
     assert!(
         export_user.get("toolUseResult").is_some(),
@@ -472,6 +479,7 @@ async fn compact_persists_summary() {
         db.append_message(
             &session_id,
             NewMessage {
+                meta: None,
                 role: MessageRole::User,
                 content: vec![StoredBlock::Text {
                     text: format!("user turn {round} with sufficiently long body text to compress"),
@@ -486,6 +494,7 @@ async fn compact_persists_summary() {
         db.append_message(
             &session_id,
             NewMessage {
+                meta: None,
                 role: MessageRole::Assistant,
                 content: vec![StoredBlock::Text {
                     // 超过摘要摘录上限（500 字符），确保确定性压缩有净收益。
@@ -524,6 +533,7 @@ async fn compact_persists_summary() {
     .await;
     assert_eq!(status, StatusCode::OK);
     let detail = json_body(&body);
+    assert_eq!(detail["purpose"], "chat");
     let summary = detail["summary"].as_str().expect("summary persisted");
     assert!(summary.contains("[User] user turn 0"));
 }

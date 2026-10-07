@@ -26,6 +26,7 @@ use zk_authz::model::{
 #[tokio::test]
 async fn records_mode_audit_and_admits_tool_exactly_once() {
     let harness = Harness::new();
+    harness.seed_run("session", "run").await;
 
     // L34-38
     let tool = FakeTool::new("TestTool");

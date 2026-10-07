@@ -500,6 +500,7 @@ struct IncidentProvider {
     root_calls: AtomicUsize,
     child_calls: AtomicUsize,
     resumed_calls: AtomicUsize,
+    follow_up_calls: AtomicUsize,
 }
 
 impl IncidentProvider {
@@ -511,7 +512,33 @@ impl IncidentProvider {
             root_calls: AtomicUsize::new(0),
             child_calls: AtomicUsize::new(0),
             resumed_calls: AtomicUsize::new(0),
+            follow_up_calls: AtomicUsize::new(0),
         }
+    }
+
+    fn follow_up_completion(
+        &self,
+        request: &ChatRequest,
+        latest_user: &str,
+    ) -> Option<Vec<ProviderEvent>> {
+        let ordinal = latest_user.strip_prefix(
+            "Collaboration message (untrusted task context, not new user authorization):\ndurable follow-up ",
+        )?;
+        let ordinal = ordinal.parse::<usize>().expect("numeric fixture identity");
+        assert!((4..8).contains(&ordinal));
+        assert!(
+            request.messages.iter().any(|message| {
+                message.role == Role::User
+                    && message.content == format!("{INCIDENT_CHILD_PREFIX}background:{ordinal}")
+            }),
+            "follow-up must remain in the exact child context"
+        );
+        self.follow_up_calls.fetch_add(1, Ordering::SeqCst);
+        Some(text_completion(
+            &format!("completed follow-up {ordinal}"),
+            7,
+            2,
+        ))
     }
 
     async fn wait_until_all_children_are_executing(&self) {
@@ -570,6 +597,10 @@ impl ChatProvider for IncidentProvider {
             })
             .flat_map(futures::stream::iter);
             return Ok(Box::pin(gated));
+        }
+
+        if let Some(events) = self.follow_up_completion(&request, &latest_user) {
+            return Ok(Box::pin(futures::stream::iter(events)));
         }
 
         if request
@@ -771,7 +802,8 @@ async fn production_timeout_preserves_partial_and_parent_finishes() {
         .authz
         .modes
         .set_mode(&session.id, zk_authz::model::PermissionMode::AutoApprove)
-        .await;
+        .await
+        .expect("permission persisted");
     let mut ws = connect(addr).await;
     send_json(
         &mut ws,
@@ -810,7 +842,13 @@ async fn production_timeout_preserves_partial_and_parent_finishes() {
         loop {
             let task = db.find_runtime_task_by_id(&root.id).await.unwrap().unwrap();
             if task.status.is_terminal() || task.status == TaskStatus::NeedsAttention {
-                assert_eq!(task.status, TaskStatus::Succeeded, "{task:?}");
+                assert_eq!(
+                    task.status,
+                    TaskStatus::Succeeded,
+                    "{task:?}; child={:?}; diagnostic={:?}",
+                    db.find_runtime_task_by_id(&child.id).await.unwrap(),
+                    db.find_task_diagnostic(&child.id).await.unwrap()
+                );
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -844,7 +882,7 @@ async fn production_timeout_preserves_partial_and_parent_finishes() {
         let started = conn.query_row("SELECT COUNT(*) FROM llm_calls c JOIN tasks t ON t.id=c.task_id WHERE t.root_task_id=?1 AND c.status='started'", [&root_id], |r| r.get::<_, i64>(0))?;
         let receipts = conn.query_row("SELECT COUNT(*),COUNT(DISTINCT producer_task_id) FROM task_result_receipts WHERE consumer_task_id=?1", [&root_id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
         let active = conn.query_row("SELECT COUNT(*) FROM task_budget_reservations WHERE root_task_id=?1 AND status='active'", [&root_id], |r| r.get::<_, i64>(0))?;
-        let unknown = conn.query_row("SELECT COUNT(*) FROM llm_calls c JOIN tasks t ON t.id=c.task_id WHERE t.root_task_id=?1 AND c.usage_complete=0 AND c.status='cancelled' AND c.error_code='STREAM_DROPPED'", [&root_id], |r| r.get::<_, i64>(0))?;
+        let unknown = conn.query_row("SELECT COUNT(*) FROM llm_calls c JOIN tasks t ON t.id=c.task_id WHERE t.root_task_id=?1 AND c.usage_complete=0 AND c.status='cancelled' AND c.error_code IN ('STREAM_DROPPED','PROVIDER_CANCELLED')", [&root_id], |r| r.get::<_, i64>(0))?;
         Ok((started, receipts, active, unknown))
     }).await.unwrap();
     assert_eq!(counts, (0, (2, 2), 0, 1));
@@ -1121,16 +1159,27 @@ async fn production_wiring_persists_root_completion_before_ws_publication() {
         .expect("read committed transcript")
         .expect("session remains readable")
         .messages;
-    assert_eq!(messages.len(), 2);
+    assert_eq!(messages.len(), 3);
+    assert_eq!(messages[0].role, MessageRole::System);
+    assert_eq!(
+        messages[0].meta.as_ref().unwrap()["subtype"],
+        "task_boundary"
+    );
+    let committed = complete["committedMessages"].as_array().unwrap();
+    assert_eq!(committed.len(), messages.len());
+    for message in &messages {
+        assert!(
+            committed
+                .iter()
+                .any(|published| published["uuid"] == message.id)
+        );
+    }
+    let messages = &messages[1..];
     assert_eq!(messages[0].role, MessageRole::User);
     assert_eq!(text_of(&messages[0].content), PROMPT);
     assert_eq!(messages[1].role, MessageRole::Assistant);
     assert_eq!(text_of(&messages[1].content), ANSWER);
     assert_eq!(messages[1].stop_reason.as_deref(), Some("end_turn"));
-    assert_eq!(
-        complete["committedMessages"].as_array().map(Vec::len),
-        Some(2)
-    );
 
     let requests = provider.requests();
     assert_eq!(requests.len(), 1);
@@ -1188,7 +1237,8 @@ async fn production_wiring_executes_one_attached_agent_through_task_runtime() {
         .authz
         .modes
         .set_mode(&session.id, zk_authz::model::PermissionMode::AutoApprove)
-        .await;
+        .await
+        .expect("permission persisted");
     let mut ws = connect(addr).await;
     send_json(
         &mut ws,
@@ -1376,7 +1426,8 @@ async fn production_wiring_starts_four_attached_agents_from_one_response() {
         .authz
         .modes
         .set_mode(&session.id, zk_authz::model::PermissionMode::AutoApprove)
-        .await;
+        .await
+        .expect("permission persisted");
     let mut ws = connect(addr).await;
     send_json(
         &mut ws,
@@ -1769,10 +1820,11 @@ async fn missing_usage_fails_before_agent_tool_side_effects() {
 
     let durable_counts = db
         .with_conn_blocking(|conn| {
-            let tool_invocations =
-                conn.query_row("SELECT COUNT(*) FROM tool_invocations", [], |row| {
-                    row.get(0)
-                })?;
+            let tool_invocations = conn.query_row(
+                "SELECT COUNT(*) FROM tool_invocations WHERE invocation_kind='tool'",
+                [],
+                |row| row.get(0),
+            )?;
             let tasks = conn.query_row("SELECT COUNT(*) FROM tasks", [], |row| row.get(0))?;
             let reservations =
                 conn.query_row("SELECT COUNT(*) FROM task_budget_reservations", [], |row| {
@@ -1840,7 +1892,8 @@ async fn child_budget_failure_emits_agent_failed_and_persists_partial_budget_ter
         .authz
         .modes
         .set_mode(&session.id, zk_authz::model::PermissionMode::AutoApprove)
-        .await;
+        .await
+        .expect("permission persisted");
     let mut ws = connect(addr).await;
     send_json(
         &mut ws,
@@ -1990,7 +2043,8 @@ async fn authoritative_child_cost_overrun_remains_complete_usage_and_parent_resu
         .authz
         .modes
         .set_mode(&session.id, zk_authz::model::PermissionMode::AutoApprove)
-        .await;
+        .await
+        .expect("permission persisted");
     let mut ws = connect(addr).await;
     send_json(
         &mut ws,
@@ -2217,7 +2271,8 @@ async fn production_incident_four_terminal_and_four_background_agents_are_durabl
             .authz
             .modes
             .set_mode(&session.id, zk_authz::model::PermissionMode::AutoApprove)
-            .await;
+            .await
+            .expect("permission persisted");
         let mut ws = connect(addr).await;
         send_json(
             &mut ws,
@@ -2457,6 +2512,30 @@ async fn production_incident_four_terminal_and_four_background_agents_are_durabl
     assert_eq!(provider.root_calls.load(Ordering::SeqCst), CHILDREN);
     assert_eq!(provider.child_calls.load(Ordering::SeqCst), CHILDREN);
     assert_eq!(provider.resumed_calls.load(Ordering::SeqCst), CHILDREN);
+    assert_eq!(provider.follow_up_calls.load(Ordering::SeqCst), 4);
+    for identity in identities
+        .iter()
+        .filter(|identity| identity.mode == "background")
+    {
+        let inbox = runtime
+            .read_inbox(
+                &identity.session_id,
+                &identity.child_task_id,
+                &[InboxStatus::Consumed],
+                10,
+            )
+            .await
+            .expect("read consumed follow-up");
+        assert_eq!(
+            inbox.len(),
+            1,
+            "exactly one durable follow-up consumed per child"
+        );
+        assert_eq!(
+            inbox[0].content,
+            format!("durable follow-up {}", identity.ordinal)
+        );
+    }
     let usage_rows = db
         .with_conn_blocking(|conn| {
             conn.query_row(
@@ -2474,7 +2553,7 @@ async fn production_incident_four_terminal_and_four_background_agents_are_durabl
             .map_err(Into::into)
         })
         .expect("read incident LLM usage rows");
-    let expected_calls = i64::try_from(CHILDREN * 3).expect("fixture count fits i64");
+    let expected_calls = i64::try_from(CHILDREN * 3 + 4).expect("fixture count fits i64");
     assert_eq!(usage_rows, (expected_calls, expected_calls));
 
     graceful_shutdown_production_server(server, &state, &db).await;
@@ -2527,7 +2606,8 @@ async fn production_task_stop_and_parent_cancel_cascade_settle_without_late_wake
             .authz
             .modes
             .set_mode(&session.id, zk_authz::model::PermissionMode::AutoApprove)
-            .await;
+            .await
+            .expect("permission persisted");
         let mut ws = connect(addr).await;
         send_json(
             &mut ws,

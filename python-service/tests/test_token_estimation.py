@@ -9,6 +9,9 @@ import pytest
 @pytest.mark.asyncio
 async def test_estimate_batch(client):
     """批量 Token 估算端点：POST /api/v1/tokens/estimate"""
+    # Warm the process-local tokenizer before timing the cached batch endpoint.
+    await client.post("/api/v1/tokens/estimate", json={"texts": ["hello world", "你好世界"], "model": "cl100k_base"})
+
     start = time.monotonic()
     resp = await client.post("/api/v1/tokens/estimate", json={
         "texts": ["hello world", "你好世界"],

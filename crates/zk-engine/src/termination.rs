@@ -103,14 +103,13 @@ pub fn evaluate(ctx: &LoopContext) -> TerminationDecision {
         return TerminationDecision::TerminateBudget;
     }
 
-    // 2. 连续错误：达阈直接错误终止（旧 3→SWITCH_STRATEGY，本 Batch 10→ERROR）。
-    if ctx.consecutive_errors >= CONSECUTIVE_ERROR_THRESHOLD {
-        return TerminationDecision::TerminateError;
-    }
-
-    // 3. 正常成功：stop_reason end_turn/stop + 无工具调用。
+    // A substantive completed response is final even after earlier tool errors.
+    // Budget admission and the hard outer turn cap remain authoritative.
     if matches!(ctx.stop_reason.as_deref(), Some("end_turn" | "stop")) && !ctx.has_tool_calls {
         return TerminationDecision::TerminateSuccess;
+    }
+    if ctx.consecutive_errors >= CONSECUTIVE_ERROR_THRESHOLD {
+        return TerminationDecision::TerminateError;
     }
 
     // 4. 轮次上界（旧为动态 max + errors*2，本 Batch 固定 max_turns）。
@@ -207,5 +206,16 @@ mod tests {
     #[test]
     fn continues_by_default() {
         assert_eq!(evaluate(&base_ctx()), TerminationDecision::Continue);
+    }
+    #[test]
+    fn completed_final_answer_wins_over_previous_tool_errors_but_not_budget() {
+        let mut ctx = base_ctx();
+        ctx.consecutive_errors = 100;
+        ctx.stop_reason = Some("end_turn".into());
+        ctx.has_tool_calls = false;
+        assert_eq!(evaluate(&ctx), TerminationDecision::TerminateSuccess);
+        ctx.token_budget = 1;
+        ctx.total_tokens = 1;
+        assert_eq!(evaluate(&ctx), TerminationDecision::TerminateBudget);
     }
 }

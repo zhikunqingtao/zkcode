@@ -1,0 +1,1022 @@
+{
+  "sourceRange": "3e536438..053adf90",
+  "targetBaseline": "08cbdc45",
+  "scope": "Frontend-facing APIs/session/merge/interactions/workbench plus three Git command tests",
+  "method": "Read each changed source assertion and compare native production implementation; native test names identify actual coverage, not automatic equivalence. Gaps and excluded legacy workflows stay explicit.",
+  "paths": {
+    "backend/src/test/java/com/aicodeassistant/asr/AsrServiceTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/asr/AsrServiceTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "477e5f7001f32c4bb1d98a69a88a4ec58767eea13ba57d259f6c944ef27b7c1e",
+      "changedMethods": [
+        "parseCorrections_defaultConfig_shouldYieldOneRuleWithSixVariants",
+        "parseCorrections_multipleEntries_shouldParseEachRule",
+        "parseCorrections_fullWidthSeparators_shouldParse",
+        "parseCorrections_nullOrBlankOrSeparatorOnly_shouldReturnEmpty",
+        "parseCorrections_entryWithoutColon_shouldSkipEntry",
+        "parseCorrections_blankCanonical_shouldSkipEntry",
+        "parseCorrections_entryWithoutVariants_shouldKeepRuleWithEmptyPatterns",
+        "parseCorrections_duplicateVariants_shouldDeduplicate",
+        "parseCorrections_shouldTrimTokens",
+        "variantToPattern_spacesAndHyphens_shouldMatchAllSeparatorForms",
+        "variantToPattern_shouldBeCaseInsensitive",
+        "variantToPattern_cjkMixedToken_shouldSplitAtBoundary",
+        "variantToPattern_threeWayMixedToken_shouldSplitEachBoundary",
+        "variantToPattern_cjkVariant_shouldMatchLiterally",
+        "variantToPattern_separatorOnlyVariant_shouldNeverMatch",
+        "corrections_zkuncodeVariant_shouldNormalize",
+        "corrections_zkunCodeFamily_shouldNormalizeAllForms",
+        "corrections_chineseVariant_shouldNormalize",
+        "corrections_mixedVariants_shouldNormalizeAll",
+        "corrections_caseVariants_shouldNormalize",
+        "corrections_homophoneAndMixedVariants_shouldNormalize",
+        "corrections_canonicalText_shouldBeIdempotent",
+        "corrections_plainText_shouldRemainUnchanged",
+        "corrections_nullOrEmpty_shouldReturnAsIs",
+        "corrections_emptyRules_shouldReturnAsIs",
+        "corrections_multipleRules_shouldApplyEachCanonical",
+        "buildSystemText_hotwords_nullContext_shouldReturnPrefixOnly",
+        "buildSystemText_hotwords_withContext_shouldReturnPrefixAndContext",
+        "buildSystemText_hotwords_blankContext_shouldReturnPrefixOnly",
+        "buildSystemText_emptyHotwords_withContext_shouldReturnContextAsIs",
+        "buildSystemText_emptyHotwords_nullContext_shouldReturnNull",
+        "buildSystemText_nullHotwords_nullContext_shouldReturnNull",
+        "buildSystemText_blankHotwords_blankContext_shouldReturnNull",
+        "buildSystemText_multipleCanonicals_shouldJoinWithDunHao",
+        "defaultConfig_shouldDriveBothVocabularyBiasAndPostCorrection"
+      ],
+      "sourceAssertions": [
+        "Trim/fullwidth rules, duplicate variants, mixed CJK/ASCII tolerant matching, canonical vocabulary and optional context."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/speech.rs"
+      ],
+      "actualNativeAssertions": [
+        "hotwords_handle_cjk_boundaries_literal_replacements_and_optional_context",
+        "asr_body_uses_audio_data_uri_and_itn"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Duplicate variants were not deduplicated; root added hotword_variants_are_trimmed_and_deduplicated_in_order after this audit, final execution belongs to root. Source zhikuncode default branding intentionally becomes zkcode.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/command/impl/DiffCommandTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/command/impl/DiffCommandTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "85408f4b759e19642f279438b9552aa24ab4159de6d61e9a629b6d59072e4fbf",
+      "changedMethods": [
+        "nullEmptyBlankAndUnstagedArgsAllReadUnstagedScope",
+        "stagedAndDoubleDashStagedArgsReadStagedScopeIgnoringCase",
+        "unknownOrCombinedArgumentsReturnUsageErrorWithoutGitCalls",
+        "statReadFailureAloneReturnsExplicitError",
+        "diffBodyReadFailureAloneReturnsExplicitError",
+        "bothReadsFailingReturnCombinedError",
+        "stagedScopeReadFailureIsIdentifiedAsWell",
+        "successfulButEmptyReadsReturnNoDiffText",
+        "whitespaceOnlyReadsAlsoReturnNoDiffText",
+        "nonEmptyReadsReturnDiffViewWithScopeAndCounters",
+        "diffBodyOver10000CharsIsTruncatedWithMarker",
+        "diffBodyAt10000CharsIsKeptWhole",
+        "blankStatWithNonEmptyDiffCountsZeroFilesInsteadOfMinusOne",
+        "oversizedStatIsTruncatedButFileCountStillUsesFullStat",
+        "realRepositorySeparatesUnstagedAndStagedScopes",
+        "realCleanRepositoryReturnsNoDiffText",
+        "stubAllScopes",
+        "stubUnstaged",
+        "stubStaged",
+        "runGit"
+      ],
+      "sourceAssertions": [
+        "Exact case-insensitive unstaged/staged options; errors never no-diff; full stat count precedes 10000-character truncation; real staged and unstaged scopes."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/command/builtin/diff.rs",
+        "crates/zk-server/src/command/builtin/git_regressions.rs"
+      ],
+      "actualNativeAssertions": [
+        "diff_arguments_are_exact_and_read_failures_cannot_report_no_changes"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "19 actual Git command tests passed in /tmp/zk-git-command-tests3.txt. Java mocked stat/body-specific error wording matrix not literally ported.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/command/impl/GitCommitCommandTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/command/impl/GitCommitCommandTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "f36c52a04574da323dbcfb567a5b01ec466fc2e64d4665cc4f34dbf1b9d8af5b",
+      "changedMethods": [
+        "nullStatusReturnsErrorAndDoesNotRunCommit",
+        "blankStatusAndEmptyIndexWithoutMergeReportsNoStagedChanges",
+        "previewWithFailedStagedStatReturnsErrorInsteadOfPanel",
+        "previewWithFailedDetailedDiffReturnsErrorInsteadOfPanel",
+        "previewWithBothStagedDiffsFailedReturnsError",
+        "unstagedChangesDoNotProduceCommitPanelOrExecuteCommit",
+        "unreadableStagedFileListStopsBeforeCommit",
+        "failedMergeStateReadIsNotReportedAsNoChanges",
+        "unreadableCommitResultReportsUnconfirmedAndCommitsExactlyOnce",
+        "blankCommitResultIsAlsoReportedAsUnconfirmed",
+        "commitSuccessOnlyReadsStatusAndIndexBeforeOneCommitWithoutAutoStaging",
+        "commitMessageIsPassedAsOneUnchangedArgument",
+        "realCommitPreservesMessageAddsExactlyOneCommitAndThenReportsCleanTree",
+        "mixedWorkingTreePreviewsAndCommitsOnlyTheStagedFile",
+        "realEmptyStagingAreaDoesNotPreviewOrAttemptCommit",
+        "emptyIndexStillCompletesPendingMerge",
+        "renameIsOneStagedEntryAndUnusualFileNamesArePreserved",
+        "initialCommitWorksWithoutHead",
+        "unresolvedIndexStillLetsGitRejectExactlyOneCommitAttempt",
+        "stagedSubmoduleChangesRemainCommittableWhenIgnored",
+        "ignoredUnstagedSubmoduleChangesDoNotBecomeCommittable",
+        "stubEmptyStagingArea",
+        "verifyStagedNamesRead",
+        "gitOutput",
+        "runGit"
+      ],
+      "sourceAssertions": [
+        "Staged-only complete raw NUL paths, quotes/newlines unchanged; one commit, no stage/retry; empty-index MERGE_HEAD including linked worktree; submodule ignore none; error/unknown honest."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/command/builtin/git_commit.rs",
+        "crates/zk-server/src/command/builtin/git_regressions.rs"
+      ],
+      "actualNativeAssertions": [
+        "commit_preview_contains_only_complete_staged_paths_and_preserves_message_arguments",
+        "commit_does_not_attempt_unstaged_changes_but_accepts_empty_tree_linked_worktree_merge",
+        "rejected_commit_reports_uncertainty_and_does_not_retry_a_hook",
+        "completed_commit_with_a_late_hook_is_uncertain_until_the_hook_really_finishes"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "19 actual Git tests passed. --ignore-submodules=none verified in implementation; no separate 3-config real submodule matrix was executed here.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/command/impl/GitReviewCommandTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/command/impl/GitReviewCommandTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "22bd634dbcc4e8652f4f24452853827c83e86ad7100ac0df1bd904e5050e6238",
+      "changedMethods": [
+        "argsReturnReviewRequirementsWithoutDiffPrefetch",
+        "argsPreserveRawFormattingVerbatim",
+        "blankArgsFallThroughToDefaultLocalChangesFlow",
+        "nullArgsFallThroughToDefaultLocalChangesFlow",
+        "bothDiffsFailingReturnsError",
+        "unstagedDiffFailingWithNonEmptyStagedReturnsError",
+        "unstagedDiffFailingWithEmptyStagedReturnsError",
+        "stagedDiffFailingWithNonEmptyUnstagedReturnsError",
+        "stagedDiffFailingWithEmptyUnstagedReturnsError",
+        "emptyDiffsProduceReviewPromptWithEmptyPartNotes",
+        "reviewPromptContainsUntrackedGuidanceBeforeDimensions",
+        "sharedBudgetUnstaged7000Staged0",
+        "sharedBudgetUnstaged0Staged7000",
+        "sharedBudgetUnstaged7000Staged2000",
+        "sharedBudgetUnstaged7000Staged7000",
+        "sharedBudgetUnstaged2000Staged7000",
+        "assertBudget",
+        "stagedOnlyChangesAppearInStagedPreview",
+        "untrackedOnlyChangesProduceEmptyNotesAndPendingVerification",
+        "bothTrackedChangeKindsAppearInBothPreviews",
+        "completelyCleanRepoStillProducesReviewPrompt",
+        "stubDiffs",
+        "runGit"
+      ],
+      "sourceAssertions": [
+        "Explicit args preserve scope/raw formatting and no prefetch; default both staged/unstaged honest read errors, 8000 shared budget, untracked coverage disclosed before findings."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/command/builtin/git_review.rs",
+        "crates/zk-server/src/command/builtin/git_regressions.rs"
+      ],
+      "actualNativeAssertions": [
+        "explicit_review_scope_never_prefetches_excluded_diff_and_default_discloses_coverage",
+        "truncate_appends_the_legacy_suffix_only_when_over_the_limit"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "19 actual Git tests passed; exact five ASCII budget split fixture permutations verified by code inspection, not all separate tests.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/controller/ActivityDecisionControllerTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/controller/ActivityDecisionControllerTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "3e85ffbb11f180cc0a0ae7a43639d0996c3dd70b463dcffe3c0e2b31355c454e",
+      "changedMethods": [
+        "confirmsOnlyAnExistingActivityInTheRequestedSession",
+        "rejectsUnsupportedDecisionsWithoutWriting"
+      ],
+      "sourceAssertions": [
+        "Decision writes only existing activity belonging to requested session; unsupported decisions 400 without mutation."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/api/activity.rs",
+        "frontend/src/store/activityStore.ts"
+      ],
+      "actualNativeAssertions": [
+        "activity_decision_rejects_invalid_values_without_writing_and_checks_session"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Audit found Axum enum rejection returned422 instead of400. Corrected with unified ApiError and added real HTTP ownership/invalid-body regression; current compile reached server but disk-full prevented test execution.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/controller/AsrControllerTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/controller/AsrControllerTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "aa2f86f5933e3263d88ca3e88df62278712e4af734bcea69695ede299ccad553",
+      "changedMethods": [
+        "recognize_withContext_shouldDecodeUtf8AndPassToService"
+      ],
+      "sourceAssertions": [
+        "UTF8 multipart context reaches recognition alongside audio; missing context stays absent."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/api/speech.rs"
+      ],
+      "actualNativeAssertions": [
+        "success_contracts_cover_status_asr_and_tts"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Existing native API test does not assert captured Chinese context; frontend ASR optional context/ownership tests pass. Live ASR not executed.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/controller/ConfigControllerTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/controller/ConfigControllerTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "811c501186dba9eec46d38c14c89d0c37e9cacefc844ec077195ba14e46a5873",
+      "changedMethods": [
+        "reportsRequiredWhenCodeConfigured",
+        "reportsNotRequiredWhenCodeBlank",
+        "reportsNotRequiredWhenCodeEmpty",
+        "responseBodyDoesNotExposeCodeValue"
+      ],
+      "sourceAssertions": [
+        "Only required boolean exposes configured fixed delete confirmation state, never secret."
+      ],
+      "nativeImplementation": [],
+      "actualNativeAssertions": [],
+      "disposition": "excluded_by_user",
+      "verificationNotes": "Fixed delete code explicitly excluded by user; ordinary confirmation remains.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/controller/QueryControllerProjectContractTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/controller/QueryControllerProjectContractTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "28fb057c729d51e61c74dabfda9054591f17c478bf31fe6441ff623d9d86af02",
+      "changedMethods": [
+        "allRestEntrypointsRejectModeMismatchBeforeExecution",
+        "conversationWithoutSessionIdFailsAsNotFoundBeforeTouchingGate"
+      ],
+      "sourceAssertions": [
+        "All REST paths reject saved-mode mismatch before running; new sessions persist initial mode atomically; missing conversation id fails cleanly."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/api/query.rs",
+        "crates/zk-server/tests/query_api.rs"
+      ],
+      "actualNativeAssertions": [
+        "conversation_requires_an_existing_session",
+        "query_rejects_arbitrary_working_directory_before_execution"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Native server mode truth is audited by root. Exact SSE accept-header permutations not newly executed here.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/controller/SessionControllerCreateTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/controller/SessionControllerCreateTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "7cfe52925a8183ef67812d1c85d86f72e6c454f66f87864586f5d29ebb270451",
+      "changedMethods": [
+        "explicitCreationModeIsWrittenAsPartOfCreation"
+      ],
+      "sourceAssertions": [
+        "Initial explicit mode is written atomically and omitted mode autoApprove; model alias/default uses supported catalog."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/api/session.rs",
+        "crates/zk-server/tests/migration_api.rs"
+      ],
+      "actualNativeAssertions": [
+        "saved_default_changes_only_new_sessions_and_explicit_selection_wins",
+        "omitted_model_uses_effective_registered_default"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Native permission creation is root-owned; current-session config preserved. No Java mocks executed.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/controller/SessionControllerDeleteTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/controller/SessionControllerDeleteTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "741e1fc9e7ad613fdb7a8f990461baebf560127c2f7d4f6759d16b2cfd9d651d",
+      "changedMethods": [
+        "rejectsDeleteWhenConfirmCodeMissing",
+        "rejectsDeleteWhenConfirmCodeWrong",
+        "deletesSessionWhenConfirmCodeMatches",
+        "deletesSessionWithoutCodeWhenNotConfigured"
+      ],
+      "sourceAssertions": [
+        "Fixed confirmation code rejects absent/wrong and admits equal/unconfigured."
+      ],
+      "nativeImplementation": [],
+      "actualNativeAssertions": [],
+      "disposition": "excluded_by_user",
+      "verificationNotes": "Fixed delete code explicitly excluded by user; no secret header/config copied.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/controller/SessionControllerExportTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/controller/SessionControllerExportTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "20a39cfa3d7c81afd292188d1d86942d0336134cf308b63376248066a7a45601",
+      "changedMethods": [
+        "markdownExportKeepsAttachmentDispositionAndPlainTextBody",
+        "jsonExportKeepsJsonContentTypeAndAttachmentDisposition"
+      ],
+      "sourceAssertions": [
+        "Markdown is text/plain and JSON application/json; both download attachment filename and valid body."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/api/session.rs",
+        "crates/zk-server/tests/rest_api.rs"
+      ],
+      "actualNativeAssertions": [
+        "markdown_export_format",
+        "lifecycle_matches_baseline_samples"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Native ASCII UUID filenames retain attachment filename; redundant RFC5987 ASCII filename* is not required for correct downloads. Full source header string equality not imported.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/controller/SessionControllerListTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/controller/SessionControllerListTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "98ac40e978b4da83481ea3f60ccb51a756fcd82ae286e8b37f91f8073e098eaf",
+      "changedMethods": [
+        "marksOnlyRunningRunsAsRunning"
+      ],
+      "sourceAssertions": [
+        "Only actual latest root Run running is running=true; waitingInteraction and absent run false."
+      ],
+      "nativeImplementation": [
+        "crates/zk-db/src/session.rs",
+        "crates/zk-db/tests/session_search_source.rs"
+      ],
+      "actualNativeAssertions": [
+        "running_badge_tracks_latest_root_run_without_relaxing_busy_tasks"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Fixed actual mismatch discovered by this audit; session_search_source 3 passed. Execution/merge busy gates unchanged.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/interaction/DurableInteractionServiceCasTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/interaction/DurableInteractionServiceCasTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "d7b43669c5c0b77374545d25e8ab6cf104d6e2840e416eb191602721b068a4a8",
+      "changedMethods": [
+        "questionSelectionModeSurvivesRecoveryAndAnswersRoundTrip",
+        "offlineRecoveryIsBoundedAndRetryable",
+        "overdueRecoveryCannotResurrectQuestion",
+        "deliveryFailureReachesToolWithoutBlamingUser",
+        "lateAnswerAndCancelledQuestionCannotBeRecovered"
+      ],
+      "sourceAssertions": [
+        "multiSelect retained through recovery and answer, 600s initial/30s dispatched window, stale ACK/answer cannot resurrect terminal requests; delivery errors distinguish user silence."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/interaction/service.rs",
+        "crates/zk-server/src/interaction/elicitation.rs",
+        "crates/zk-server/tests/interaction_cas.rs"
+      ],
+      "actualNativeAssertions": [
+        "staged_deadlines_start_at_ten_minutes_and_obey_root_deadline",
+        "expired_decision_cannot_win_before_background_sweeper",
+        "short_ack_timeout_remains_recoverable_until_final_delivery_window",
+        "redelivery_claims_are_atomic_and_bounded",
+        "answered_interaction_yields_the_stored_response"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Actual Rust tests contain multi-select response array persistence and deadline clamping. Audit subsequently found missing Undeliverable outcome and never-dispatched terminal reason. Both now corrected and real SQLite-to-AskUserQuestion three-stage regression added; disk-full prevented this new batch execution.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/model/MessageSerializationProbeTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/model/MessageSerializationProbeTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "bcf17fe3f7e4d27ec2426be1845788aad8425a56ac7e2898634e9a822f1be063",
+      "changedMethods": [
+        "systemMessageSerializesSingleTypeKeyWithSubtypeAndMetadata",
+        "systemMessageWithoutSubtypeOmitsSubtypeAndMetadataKeys",
+        "systemMessageRoundTripDeserializesSubtypeAndMetadata",
+        "compactSummaryKindSurvivesRoundTrip",
+        "snapshotReloadPreservesCompactionBoundary",
+        "legacyDuplicateTypeSnapshotRemainsReadableButIsWrittenAsKind",
+        "legacyShapeSystemMessageDeserializesWithoutSubtype"
+      ],
+      "sourceAssertions": [
+        "System role and kind separated, subtype/metadata and compact summary survive round trip; legacy duplicate type reading."
+      ],
+      "nativeImplementation": [
+        "crates/zk-protocol/src/model.rs",
+        "crates/zk-server/src/engine_bridge.rs",
+        "frontend/src/api/dispatch.ts",
+        "frontend/e2e/production-backend.spec.ts"
+      ],
+      "actualNativeAssertions": [
+        "native V4 segment/task-boundary replay and 4 production E2E"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Legacy duplicate Jackson discriminator compatibility excluded by no historical-data requirement. Native typed serde shape retained; no Java snapshot import.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/session/SessionExecutionGateTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/session/SessionExecutionGateTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "73d4a051d3dc20a49481cea851fc24161cddf7322c8e25360b79d8da93cd5ab0",
+      "changedMethods": [
+        "mergeExcludesActualBackgroundLifetimeButNormalQueriesStillWork",
+        "sameDataSourceAndSessionIsExclusiveAndCloseIsIdempotent",
+        "sameSessionOnDifferentDataSourcesDoesNotConflict"
+      ],
+      "sourceAssertions": [
+        "Normal per-session exclusivity, per-database identity, background lifetime blocks merge; releasing/closing twice does not leave locks."
+      ],
+      "nativeImplementation": [
+        "crates/zk-db/src/session_merge.rs",
+        "crates/zk-db/src/task_runtime.rs",
+        "crates/zk-db/tests/migration_integrity.rs"
+      ],
+      "actualNativeAssertions": [
+        "merge_publication_is_idempotent_scoped_and_inherits_primary_permission",
+        "merge_restart_resume_and_cancel_fence_old_workers"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Native writer transaction checks durable tasks/runs and seals then unlocks; Java in-memory token-close identity not ported. Separate two-DB token object test not relevant to native DB-owned locks.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/session/SessionManagerMessageIdempotencyTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/session/SessionManagerMessageIdempotencyTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "abe85ca86bfe32ef7ea2eba843a0282523a389279a796610e08adfec0779b8c1",
+      "changedMethods": [
+        "setUp",
+        "identicalUuidIsIdempotentButDifferentContentConflicts"
+      ],
+      "sourceAssertions": [
+        "Identical stable UUID and JSON values are idempotent across key order; changed content or cross-session use conflict."
+      ],
+      "nativeImplementation": [
+        "crates/zk-db/src/message.rs",
+        "crates/zk-db/tests/repository.rs"
+      ],
+      "actualNativeAssertions": [
+        "append_with_id_is_idempotent",
+        "repeated_message_identity_rejects_changed_payload_or_session_atomically"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Found silent INSERT OR IGNORE collision: now added structural JSON/metadata/session/role/usage/runtime attribution equality. Focused repository batch 15 passed in /tmp/zk-message-idempotency-tests.txt.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/session/SessionManagerSearchTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/session/SessionManagerSearchTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "7e05336efadb0e5569d879d3334ff6aa47f70b40cf04d43302998f586bc67a64",
+      "changedMethods": [
+        "setUp",
+        "insertSession",
+        "insertSession",
+        "insertUserMessage",
+        "matchesKeywordBeyond80CharGoalPreviewTruncation",
+        "matchesSessionTitleKeyword",
+        "returnsEmptyWhenKeywordMatchesNothing",
+        "nullOrBlankQueryBehavesLikeUnfilteredListing",
+        "matchesChineseKeywordInFirstUserMessage",
+        "searchStillExcludesSubagentSessions",
+        "percentAndUnderscoreInQueryAreEscapedNotWildcards",
+        "searchAlsoAppliesOnCursorPaginationBranch",
+        "searchesDecodedTextWithoutMatchingJsonKeys",
+        "searchesAllTextBlocksBeforePaginationButNotOtherContentOrLaterMessages",
+        "malformedAndNonArrayHistoryDoesNotBreakSearchOrTitleMatching"
+      ],
+      "sourceAssertions": [
+        "First user message all decoded text blocks only; beyond preview; literal percent/underscore/backslash/quotes, title, Chinese, pagination, root-only and malformed/nonarray isolation."
+      ],
+      "nativeImplementation": [
+        "crates/zk-db/src/session.rs",
+        "crates/zk-db/tests/session_search_source.rs",
+        "crates/zk-db/tests/migration_integrity.rs"
+      ],
+      "actualNativeAssertions": [
+        "search_uses_only_decoded_text_blocks_in_first_user_message",
+        "malformed_and_non_array_history_never_breaks_title_or_empty_search",
+        "search_paginates_matching_text_with_deleted_anchor_and_timestamp_ties"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Fixed all-message/image matching and malformed JSON error discovered here; source tests replaced by 3 actual SQLite regressions plus existing keyset test, all passed.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/session/SessionMessagePersistenceTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/session/SessionMessagePersistenceTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "028baaec4fc97078cba044abc097dd34dd9b4dc892ac01c9ef42da5fe91cd85c",
+      "changedMethods": [
+        "normalAppendIsPersistedExactlyOnce",
+        "userMessageMetaIsForwardedToPersistence",
+        "firstFailureIsLatchedAndNeverRetried",
+        "systemMessageSubtypeIsMergedIntoPersistedMeta",
+        "systemMessageWithoutSubtypeOrMetadataPersistsNullMeta"
+      ],
+      "sourceAssertions": [
+        "Append only once; steering metadata/subtype persisted; first persistence failure propagated, no silent listener retry."
+      ],
+      "nativeImplementation": [
+        "crates/zk-db/src/message.rs",
+        "crates/zk-db/src/task_boundary.rs",
+        "crates/zk-engine/src/engine.rs",
+        "frontend/e2e/production-backend.spec.ts"
+      ],
+      "actualNativeAssertions": [
+        "append_with_id_is_idempotent",
+        "native task boundary before-user persistence/reload production E2E"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Native direct transactional persistence has no Java listener reconciliation. E2E 4 passed previously; explicit induced-write-failure latch matrix not separately executed.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/session/merge/HandoffReadServiceTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/session/merge/HandoffReadServiceTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "630f65064a565794ae6ddd72b798e5c10f6fbeb711efd7124e75f0c7f158b30a",
+      "changedMethods": [
+        "prepare",
+        "readsIndependentRawAndDetailsAfterSourcesAreDeleted",
+        "paginatesWithinWrapperLimitAndBindsCursorToFiltersAndPackage",
+        "rejectsCrossSessionUnknownRefsTraversalAndSymlinks",
+        "rejectsCorruptCatalogAndDeletedTargetBinding",
+        "projectionUsesTrustedRunRootRespectsBudgetAndDoesNotRewriteCurrentTodos",
+        "imageOutsideWorkspaceIsInjectedOnlyThroughTheCurrentRootsBoundAsset",
+        "everyAggregateEvidenceReferenceResolvesToPreservedChild",
+        "searchReturnsEveryMatchAndResumesInsideTheSameChunkWithoutDuplicates",
+        "unicodeSearchDoesNotDuplicateACompleteSurrogatePairInTheCarry",
+        "listingUsesExactCatalogByteOffsetsAndRejectsMidLineCursors",
+        "timeoutAndInterruptionApplyBeforeAndDuringIntegrityVerification",
+        "bodyScanBudgetReturnsAProgressingCursorAndEventuallyFindsTheTail",
+        "successfulReadDoesNotCacheIntegrityAcrossCalls",
+        "thousandsOfIndependentRecordsDoNotRescanCatalogForMissingNextParts",
+        "searchChecksAdjacentPartIntegrityBeforeReturningACrossPartMatch",
+        "replaceReadableCatalog",
+        "replaceReadableCatalog"
+      ],
+      "sourceAssertions": [
+        "Owned root binding, deleted sources survive, query-bound cursors, 16KiB whole JSON, all same-record hits with offsets, Unicode/cross-part integrity, read spans, deadline and advancing scan cursor."
+      ],
+      "nativeImplementation": [
+        "crates/zk-db/src/session_merge.rs",
+        "crates/zk-server/src/handoff.rs",
+        "crates/zk-db/tests/migration_integrity.rs"
+      ],
+      "actualNativeAssertions": [
+        "handoff_preserves_owned_files_and_paginates_original_text_after_source_deletion",
+        "merge_cancel_and_publish_have_exactly_one_winner"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Audit found first-match-only search, unresolved @byte spans, wrapper beyond16KiB and no scan/deadline bound; root actively correcting with actual regressions. Not yet claimed complete. File catalog offset/symlink layout replaced by sealed SQLite ownership.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/session/merge/HandoffRegressionTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/session/merge/HandoffRegressionTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "49e438408c5b9156336b2a90b2a7a70d1eaaa8b8cfb1c3f4183ba308608b2089",
+      "changedMethods": [
+        "closeScenariosAndClearInterrupt",
+        "authorizeTimeoutKeepsItsBudgetCode",
+        "readInitialInterruptionIsRethrownRatherThanWrapped",
+        "handoffSearchExcerptPreservesSurrogatePairs",
+        "embeddedImageAndManagedFileKeepTheSameCopyQuotaClassification",
+        "hasUnpairedSurrogate"
+      ],
+      "sourceAssertions": [
+        "Budget/interruption retain distinct error meaning; Unicode excerpts valid; embedded images and managed files share copy quota."
+      ],
+      "nativeImplementation": [
+        "crates/zk-db/src/session_merge.rs",
+        "crates/zk-db/src/session_merge_snapshot.rs",
+        "crates/zk-server/src/handoff.rs"
+      ],
+      "actualNativeAssertions": [
+        "handoff_preserves_owned_files_and_paginates_original_text_after_source_deletion"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Found missing per-read budget/cancellation enforcement in native; root implementing. Unicode bound tested in native integrity, shared cumulative asset counter inspected. Exact synthetic 1byte copy classification not individually executed.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/session/merge/MergeFixture.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/session/merge/MergeFixture.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "cda1b8fae5337cd56132032229674d06e3af6ef5c0d805ef2f8d6a84c7615f00",
+      "changedMethods": [
+        "message"
+      ],
+      "sourceAssertions": [
+        "Synthetic Java file-backed SQLite fixture, baseline schemas, mock runner and three sources; no product assertions."
+      ],
+      "nativeImplementation": [
+        "crates/zk-db/tests/migration_integrity.rs",
+        "crates/zk-server/src/session_merge_summary.rs"
+      ],
+      "actualNativeAssertions": [
+        "merge_fixture",
+        "summary test fixtures"
+      ],
+      "disposition": "fixture_only",
+      "verificationNotes": "Test support only; not itself an executed capability.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/session/merge/MergePackageServiceTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/session/merge/MergePackageServiceTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "2a95f6afb49459dcb58cb3439362247a633f8df0735e33bf3474ae48d34f0f12",
+      "changedMethods": [
+        "editPreviewStaysInRawButNotInNewOrRecoveredText",
+        "rawContents",
+        "projectionContents",
+        "legacyPublishedPackageIsCopiedWithoutDependingOnItsOldDirectory",
+        "blockedLargeRecordCanBeReparsedOnlyFromItsImmutableCopy",
+        "emptyRecoveredSealCannotSatisfyABlockedRecord",
+        "corruptTextAttachmentCannotBeBypassedByRecovery",
+        "largeCheckpointCanRecoverAfterRaisingTheMaterializationLimit",
+        "missingUnpersistedChildHistoryIsAnExplicitNonBlockingGap",
+        "v2SnapshotPreservesRawAndTextAfterSourceDeletion",
+        "v2ParsingFailurePreservesRawAndSealsWithExplicitBlocker",
+        "v2DetectsTamperedSnapshotAndRejectsPathTraversal",
+        "v2OrdinaryTextBeyondLegacyRecordLimitIsFullySplit",
+        "v2RepeatedMergeCopiesIndependentOriginalsAndDeduplicatesMessages",
+        "preservesLastUnicodeRecordAndBinaryCopiesWithoutImportingToolState",
+        "corruptPersistedMessagesFailInsteadOfSilentlySkipping",
+        "includesDescendantCheckpointsAndDoesNotFollowExternalSymlinks",
+        "splittingHugeSingleRecordPreservesEveryCodepointAndFinalPart",
+        "fileChangedDuringCopyIsOmittedWithWarning",
+        "sourceRootSymlinkCannotImportAnotherSessionsFiles",
+        "legacyToolResultsPreserveFailureAndAssociatedBackgroundOutput",
+        "checkpointDeduplicationKeepsChangedVersionsAndEarlierTrimmedMessages",
+        "oversizeRecordFailsBeforeMaterializingItsJson",
+        "partsAreWrittenIncrementallyAndReconstructTheExactOriginal",
+        "copyAllowanceIsSharedAcrossSourcesAndResetsForEachOperation",
+        "embeddedImagesShareTheFileCopyAllowance",
+        "lowDiskSpaceStopsRequiredTextWithoutTouchingSources",
+        "diskDropDuringCopyRemovesPartialCopyWithoutTouchingSource",
+        "growingSourceCannotExceedCopyAllowanceMidStream",
+        "exportsPersistedTruncationAndFailureFacts",
+        "exportsArtifactVerificationSeparatelyFromCompletedRun",
+        "diskDropDuringTextExportStopsBeforeUsingReserve",
+        "readTranscripts"
+      ],
+      "sourceAssertions": [
+        "Independent originals/assets/checkpoints after source deletion/remerge, codepoint-complete split, source/tool/error/verification facts, no symlink escape, shared copy quota, required disk reserve and immutable raw versus text projection."
+      ],
+      "nativeImplementation": [
+        "crates/zk-db/src/session_merge.rs",
+        "crates/zk-db/src/session_merge_snapshot.rs",
+        "crates/zk-db/src/session_merge_budget.rs",
+        "crates/zk-db/tests/migration_integrity.rs"
+      ],
+      "actualNativeAssertions": [
+        "handoff_preserves_owned_files_and_paginates_original_text_after_source_deletion",
+        "remerging_inherits_sealed_ancestors_without_borrowing_their_access",
+        "merge_projection_filters_archive_blocks_and_edit_preview_without_changing_sealed_bytes",
+        "disk budget tests"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Integrity8 + disk4 passed. Native SQLite atomic seal replaces Java multipart files/recovery marker rename. Legacy package/checkpoint import and parser repair excluded; not every source injected file-growth/copy-budget race individually recreated.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/session/merge/MergeProgressRepositoryTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/session/merge/MergeProgressRepositoryTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "4b0bd36677aca6b1e52ff459fe70bc941a747b29c2dc62a388b876471c33cfe3",
+      "changedMethods": [
+        "setup",
+        "create",
+        "plan",
+        "singleSlotPersistsAcrossPauseAndCancelledEpochRejectsLateResults",
+        "targetBindingRequiresAtomicPublicationAndLiveTarget",
+        "splitIsAtomicAndCompletedUnitsSurviveResume"
+      ],
+      "sourceAssertions": [
+        "Single active slot, atomic split/results survive epochs, late completion cannot overwrite cancelled; publication binding only when target exists and atomic transaction commits."
+      ],
+      "nativeImplementation": [
+        "crates/zk-db/src/session_merge_summary.rs",
+        "crates/zk-db/tests/migration_integrity.rs"
+      ],
+      "actualNativeAssertions": [
+        "split_plans_are_atomic_and_stale_epochs_cannot_commit_or_rewrite_completed_units",
+        "merge_restart_resume_and_cancel_fence_old_workers",
+        "merge_cancel_and_publish_have_exactly_one_winner"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Native unit1 + latest integrity8 passed. Source one session_merge_attempt row replaced by more accurate physical-attempt llm_calls plus logical units; unknown usage is never invented.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/session/merge/MergeSnapshotRegressionTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/session/merge/MergeSnapshotRegressionTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "11e7de0bf7b9cfb8cfa9da4af1a01f8839fec1728535eacddd650ace7150d427",
+      "changedMethods": [
+        "malformedHistoricalAgentOutputPathIsPreservedAsAGap",
+        "correctedCheckpointParserKeepsToolEvidenceAndFiltersArchiveOnlyBlocks",
+        "recoveredProjectionMustNotSendArchiveOnlyBlocksToExtractor",
+        "sameCheckpointUuidWithChangedLegacyToolResultMustRetainVersions",
+        "ordinarySavedCheckpointToolResultMustBeSearchableForExtraction",
+        "copiedManagedFileMustNotAlsoBeReportedAsAnExternalGap",
+        "historicalReferenceCannotCopyThroughIntermediateSymlink",
+        "malformedExternalReferenceIsAnExplicitNonBlockingGap",
+        "correctedParserConfigurationRecoversTheBoundRawRecord",
+        "projectedText"
+      ],
+      "sourceAssertions": [
+        "Original raw/checkpoint tool evidence kept; projection removes archive-only thinking/provider state and display Edit preview; malformed references explicit gaps; no intermediate-symlink copy."
+      ],
+      "nativeImplementation": [
+        "crates/zk-db/src/session_merge.rs",
+        "crates/zk-db/src/session_merge_snapshot.rs",
+        "crates/zk-db/tests/migration_integrity.rs"
+      ],
+      "actualNativeAssertions": [
+        "merge_projection_filters_archive_blocks_and_edit_preview_without_changing_sealed_bytes",
+        "handoff_preserves_owned_files_and_paginates_original_text_after_source_deletion",
+        "remerging_inherits_sealed_ancestors_without_borrowing_their_access"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Found missing model projection filter; root added and regression passed. Legacy Java checkpoint parser repair/single-quote support excluded by no historical-data requirement. Current raw data remains sealed.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/session/merge/MergeSummaryServiceTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/session/merge/MergeSummaryServiceTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "86dd2f2ea5fa838b2a40a8ad7b93d6ea0bb8126b3611a395e4cd6d4363072b70",
+      "changedMethods": [
+        "setup",
+        "stub",
+        "validatesSchemaAndEvidenceAliasesWithoutTrustingModelPaths",
+        "separatesUtf8BytesVisibleTokensAndReasoningAndAcceptsUnknownUsage",
+        "processesMoreThanSixteenUnitsAndPreservesTailAndDetailedResults",
+        "prepareOmitsLargeEditPreviewAndReusesImmutableInputsOnResume",
+        "provider413SplitsOnlyFailedUnitIntoStrictlySmallerInputs",
+        "rejectsCorruptedCommittedUnitOnResumeWithoutRepayingItsCall",
+        "generationReservesReasoningButNotEntireContext",
+        "changingModelFinishesPreviouslyPlannedAggregateUnits"
+      ],
+      "sourceAssertions": [
+        "Strict JSON evidence aliases, all >16 chunks/tail, immutable input reuse/corrupt result refusal, smaller split on413, reasoning+visible generation capacity, model-changing aggregate resume."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/session_merge_summary.rs",
+        "crates/zk-db/src/session_merge_summary.rs",
+        "crates/zk-db/tests/migration_integrity.rs"
+      ],
+      "actualNativeAssertions": [
+        "generation_budget_preserves_visible_and_reasoning_capacity",
+        "splitting_is_unicode_safe_overlapping_and_never_discards_source_bytes",
+        "summaries_are_tool_free_durable_charged_and_reused_after_resume",
+        "model_aliases_cannot_forge_references_statuses_or_spans",
+        "merge_projection_filters_archive_blocks_and_edit_preview_without_changing_sealed_bytes"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "8 summary tests + latest integrity8 passed. Source accepts unknown usage and retries; native deliberately retains strict ledger unknown block. HTTP413 split exists but unknown-charge rejection may pause rather than repay blindly. No separate >16 paid-call/model-change aggregate fixture executed.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/session/merge/SessionMergeServiceTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/session/merge/SessionMergeServiceTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "1d015362ee872ff78794113f4758971a719c34bb140a916f017c40c85207c0e3",
+      "changedMethods": [
+        "setup",
+        "handle",
+        "stub",
+        "answer",
+        "respond",
+        "shutdown",
+        "modelConfigurationRemovedAfterAdmissionHasAnActionablePauseCode",
+        "cancelLosingToPublicationReturnsAlreadyCompletedAndPreservesTarget",
+        "publishesBoundedWarningDetailsAndRetainsTheCompleteGapLedger",
+        "publishesTwoThroughFiveSourcesAtomicallyWithIndependentHistory",
+        "damagedCheckpointPausesWithoutPublishingAndCannotResumePastTheGap",
+        "sealedSnapshotReleasesSourcesBeforeFirstProviderCallAndExcludesLaterMessages",
+        "failureRetainsUnitsAndResumeDoesNotRecallCompletedUnits",
+        "cancelFencesLateResponseAndDefersCleanupUntilWriterStops",
+        "idleRootAndDescendantsAreBothRequired",
+        "failedPublicationRollsBackTargetAndPreservesPreparedFiles",
+        "activeApiResumeConflictAndDeletedTargetRemainAuthoritative",
+        "uncertainCommitKeepsTheDurableTargetAndItsPackage",
+        "doCommit",
+        "sealedRenameBeforeLedgerCommitRecoversWithoutSources",
+        "targetDeletionRevokesBindingImmediatelyAndCleanupStaysInsideMergeLifecycle",
+        "unexpectedRestartContinuesSealedSnapshotWithoutLiveSources"
+      ],
+      "sourceAssertions": [
+        "2-5 sources, immutable cutoff and unlock-before-provider, one active op, preserve units/resume/newmodel, cancel-publication race, independent deletion/restart recovery, bounded warnings and full ledger, transactional target publication."
+      ],
+      "nativeImplementation": [
+        "crates/zk-db/src/session_merge.rs",
+        "crates/zk-server/src/api/session_merge.rs",
+        "crates/zk-server/src/session_merge_summary.rs",
+        "crates/zk-db/tests/migration_integrity.rs",
+        "frontend/e2e/production-backend.spec.ts"
+      ],
+      "actualNativeAssertions": [
+        "merge_publication_is_idempotent_scoped_and_inherits_primary_permission",
+        "merge_restart_resume_and_cancel_fence_old_workers",
+        "merge_cancel_and_publish_have_exactly_one_winner",
+        "summaries_are_tool_free_durable_charged_and_reused_after_resume",
+        "cancellation_aborts_the_active_provider_and_cannot_publish"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Integrity8 + summary8 passed; production merge/reload one of4 E2E passed earlier. Java uncertain file rename/commit acknowledgement injection is SQLite atomic seal/publication equivalent, no literal file lifecycle test. All2-5 counts not individually recreated.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/websocket/AssistantSegmentContractTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/websocket/AssistantSegmentContractTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "90783b4fa3ae63dc852b40e2d1382c1f25370fbccd96f7e6868f4f7307ff6595",
+      "changedMethods": [
+        "setUp",
+        "segmentUsesHistoryWireShapeAndBoundarySharesStoredUuidAndEnvelopeTimestamp",
+        "segmentPushFailureDoesNotAbortRun",
+        "imageNoticeIsPushedButLegacyThinkingNoticeIsNot"
+      ],
+      "sourceAssertions": [
+        "Segment uses persisted message identity and tool shape; task boundary UUID/timestamp, offline push does not abort; image_notice sent and obsolete thinking notice suppressed."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/engine_bridge.rs",
+        "frontend/src/api/dispatch.ts",
+        "frontend/src/store/messageStore.ts",
+        "frontend/e2e/production-backend.spec.ts"
+      ],
+      "actualNativeAssertions": [
+        "assistant segment authoritative reconcile",
+        "task-boundary replay production E2E"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Native WS V4 eventContext retained, STOMP binding epoch not copied. Image notices being verified in auditor image batch; do not infer that from chat E2E.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/websocket/WebSocketQueryErrorTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/websocket/WebSocketQueryErrorTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "13ae39e7bb93601cb00d0c351d859d6c18cb4f0117a0565b17baa865a92f0435",
+      "changedMethods": [
+        "setUp",
+        "allThreeUnclassifiedExitsPreserveRetryability",
+        "messageHandlerKeepsHttpAndConnectionClassification",
+        "deliverError"
+      ],
+      "sourceAssertions": [
+        "Query and command setup/handler errors preserve retryability; explicit HTTP 402/403/429/500/400 and connection classification wins."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/engine_bridge.rs",
+        "crates/zk-llm/src/error.rs"
+      ],
+      "actualNativeAssertions": [
+        "provider error classification in runtime scope"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Native typed ProviderError path differs from Java exception cause wrappers. This audit did not execute all three source setup/handler fault injection matrices; runtime final provider tests are separate.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/workbench/StructuredSummaryExtractorTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/workbench/StructuredSummaryExtractorTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "5e16ecfcdeb612eb0be9b97301ca99fed7b77cf8c38264184f7772a87be9035c",
+      "changedMethods": [
+        "stripsContentCompressedBySystemPrefixBeforeExtraction"
+      ],
+      "sourceAssertions": [
+        "Strip literal content-compressed-by-system prefix before extracting conclusion."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/api/workbench.rs"
+      ],
+      "actualNativeAssertions": [
+        "structured_summary"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Prefix is explicitly present in native strip list; source one Java unit was not executed.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    },
+    "backend/src/test/java/com/aicodeassistant/workbench/WorkbenchProjectionServiceTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/workbench/WorkbenchProjectionServiceTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "12a282d1f74d0a7657089d078834fd4cc6f5543cc44f00daf77ee83120fd6206",
+      "changedMethods": [
+        "matchedClaimFromFailedEvidenceRemainsFailed",
+        "matchedClaimWithValidStepsIsPartialNotPassed",
+        "matchedClaimWithoutValidStepDataIsPartialWithUnknownScope",
+        "runtimeCheckWithoutEvidenceDoesNotPass",
+        "runtimeCheckIgnoresEmptyItemsAndUnknownTypes",
+        "runtimeCheckPassesOnlyWithVerifiedStepEvidence",
+        "runtimeCheckIsPartialWhenValidStepsAreNotAllVerified",
+        "runtimeCheckKeepsExplicitFailureVisible",
+        "seedBoundRoot"
+      ],
+      "sourceAssertions": [
+        "Matched claim never means business verified; failed evidence remains failed; runtime passed only valid verified steps, empty/unknown evidence notVerified, partial mixed results."
+      ],
+      "nativeImplementation": [
+        "crates/zk-server/src/api/workbench.rs",
+        "crates/zk-db/src/workbench.rs",
+        "crates/zk-server/tests/workbench_api.rs"
+      ],
+      "actualNativeAssertions": [
+        "workbench_round_trip_requires_owned_run_and_owned_evidence",
+        "empty_journey_cannot_pass_runtime_check_and_failure_cannot_be_hidden",
+        "current_projection_includes_internal_child_runs_and_subtree_usage"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": "Native provenance/immutable machine-evidence authority retained; full Java 8-case fake evidence matrix not separately rerun. Primary Run usage versus subtree regression separately added and front tests passed.",
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false
+    }
+  }
+}

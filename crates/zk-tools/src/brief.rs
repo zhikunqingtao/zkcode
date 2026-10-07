@@ -7,9 +7,8 @@
 //!
 //! # 有意差异
 //!
-//! - 旧实现三分支均为 **P1 占位**（正文里写明「GitService / `SessionService` /
-//!   `LlmClient` 集成后完善」），故此处逐字保留其结构与占位提示，不擅自补
-//!   Git/LLM 调用——那属于后续批次。
+//! - Scope branches display only available context. No Git/history collection
+//!   or generated topic analysis is claimed.
 //! - 本移植**追加** `content` 摘要形态（`max_lines` + `strategy` ∈
 //!   {head, tail, smart}）：`content` 给出时走摘要，缺省时回落旧 scope 简报。
 //!   追加原因是旧占位分支对模型无实际信息量，而「长输出裁剪成简报」是本
@@ -42,7 +41,7 @@ impl Tool for BriefTool {
     }
 
     fn description(&self) -> &'static str {
-        "Generate a project status brief in Markdown format. \
+        "Return basic execution context in Markdown without collecting Git or session history. \
          Supports project, session, and custom scopes; \
          pass 'content' to condense long text instead."
     }
@@ -54,11 +53,11 @@ impl Tool for BriefTool {
                 "scope": {
                     "type": "string",
                     "enum": ["project", "session", "custom"],
-                    "description": "Scope of the brief (default: project)"
+                    "description": "Context fields to display (default: project); no Git or session history is collected"
                 },
                 "topic": {
                     "type": "string",
-                    "description": "Custom topic (required when scope=custom)"
+                    "description": "Topic text to display (required when scope=custom); no analysis is generated"
                 },
                 "content": {
                     "type": "string",
@@ -93,7 +92,7 @@ fn run(input: &Value, ctx: &ToolContext) -> ToolOutput {
     scope_brief(input, ctx)
 }
 
-/// 旧 scope 三分支（逐字保留占位文案）。
+/// Display available scope context without implying unperformed collection.
 fn scope_brief(input: &Value, ctx: &ToolContext) -> ToolOutput {
     let scope = optional_str(input, "scope").unwrap_or("project");
     let topic = optional_str(input, "topic").unwrap_or_default();
@@ -107,13 +106,13 @@ fn scope_brief(input: &Value, ctx: &ToolContext) -> ToolOutput {
             let _ = writeln!(out, "Working directory: {working_dir}");
             let _ = writeln!(out, "Session: {session}\n");
             out.push_str(
-                "*Git status and recent changes will be available after GitService integration.*\n",
+                "*Context only: Git status and commit history have not been collected.*\n",
             );
         }
         "session" => {
             out.push_str("## Session Brief\n\n");
             let _ = writeln!(out, "Session: {session}\n");
-            out.push_str("*Session summary will be available after SessionService integration.*\n");
+            out.push_str("*Context only: session history, tool calls, and actions have not been collected.*\n");
         }
         "custom" => {
             if topic.trim().is_empty() {
@@ -124,7 +123,9 @@ fn scope_brief(input: &Value, ctx: &ToolContext) -> ToolOutput {
             }
             let _ = writeln!(out, "## Custom Brief: {topic}\n");
             let _ = writeln!(out, "Working directory: {working_dir}\n");
-            out.push_str("*Detailed analysis will be available after LlmClient integration.*\n");
+            out.push_str(
+                "*Context only: the supplied topic is displayed without generated analysis.*\n",
+            );
         }
         other => {
             return failure(
@@ -206,6 +207,9 @@ fn tail_slice(lines: &[&str], max_lines: usize) -> Vec<String> {
 /// 首 [`SMART_EDGE_LINES`] 行 + 中间省略号 + 末 [`SMART_EDGE_LINES`] 行；
 /// `max_lines` 不足两段时按比例收缩，仍保证首尾对称。
 fn smart_slice(lines: &[&str], max_lines: usize) -> Vec<String> {
+    if max_lines == 1 {
+        return head_slice(lines, 1);
+    }
     let edge = SMART_EDGE_LINES.min(max_lines / 2).max(1);
     let mut kept: Vec<String> = lines
         .iter()
@@ -243,7 +247,11 @@ mod tests {
         assert!(output.content.starts_with("## Project Brief"));
         assert!(output.content.contains("Working directory: /tmp/zk-brief"));
         assert!(output.content.contains("Session: sess-1"));
-        assert!(output.content.contains("GitService integration"));
+        assert!(
+            output
+                .content
+                .contains("Git status and commit history have not been collected")
+        );
     }
 
     #[tokio::test]
@@ -252,13 +260,17 @@ mod tests {
             .execute(json!({ "scope": "session" }), ctx())
             .await;
         assert!(session.content.starts_with("## Session Brief"));
-        assert!(session.content.contains("SessionService integration"));
+        assert!(
+            session
+                .content
+                .contains("session history, tool calls, and actions have not been collected")
+        );
 
         let custom = BriefTool
             .execute(json!({ "scope": "custom", "topic": "release" }), ctx())
             .await;
         assert!(custom.content.starts_with("## Custom Brief: release"));
-        assert!(custom.content.contains("LlmClient integration"));
+        assert!(custom.content.contains("without generated analysis"));
     }
 
     #[tokio::test]
@@ -270,6 +282,15 @@ mod tests {
         let unknown = BriefTool.execute(json!({ "scope": "weekly" }), ctx()).await;
         assert!(unknown.is_error);
         assert!(unknown.content.starts_with("BRIEF_SCOPE_INVALID: "));
+    }
+
+    #[tokio::test]
+    async fn single_line_budget_never_returns_two_lines_of_content() {
+        let output = BriefTool
+            .execute(json!({"content":"a\nb\nc","max_lines":1}), ctx())
+            .await;
+        assert_eq!(output.content, "a\n…");
+        assert_eq!(output.metadata.unwrap()["keptLines"], 1);
     }
 
     #[tokio::test]

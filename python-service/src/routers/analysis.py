@@ -2,11 +2,10 @@
 
 import asyncio
 import logging
-import os
 import time
+import uuid
 from typing import Any, List, Literal, Optional
 
-import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -15,139 +14,29 @@ from workspace_paths import WorkspacePathError, resolve_workspace_path
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Analysis"])
 
-JAVA_BACKEND_URL = os.getenv("JAVA_BACKEND_URL", "http://localhost:8080")
-JAVA_OPENAPI_PATH = "/v3/api-docs"
-_CACHE_TTL_SECONDS = 300  # 5 minutes
-
-# ── Simple TTL cache ──
-_merged_cache: dict[str, Any] = {"data": None, "timestamp": 0.0}
-
-
-# ── Pydantic response models ──
-
-class MergedOpenAPIResponse(BaseModel):
-    openapi: str = "3.0.3"
-    info: dict[str, str] = Field(default_factory=dict)
-    paths: dict[str, Any] = Field(default_factory=dict)
-    components: dict[str, Any] = Field(default_factory=dict)
-    tags: list[dict[str, Any]] = Field(default_factory=list)
-    warnings: Optional[list[str]] = None
-
-
-class JavaProxyErrorResponse(BaseModel):
-    error: str
-    detail: str
-
-
-# ── Helper functions ──
-
-def merge_openapi_specs(python_spec: dict, java_spec: dict) -> dict:
-    """Merge Python and Java OpenAPI specs into a single unified spec."""
-    merged = {
-        "openapi": "3.0.3",
-        "info": {
-            "title": "zkcode API (Merged)",
-            "version": "1.0.0",
-            "description": "Combined API specification from Java Backend and Python Service",
-        },
-        "paths": {**java_spec.get("paths", {}), **python_spec.get("paths", {})},
-        "components": {
-            "schemas": {
-                **java_spec.get("components", {}).get("schemas", {}),
-                **python_spec.get("components", {}).get("schemas", {}),
-            }
-        },
-        "tags": java_spec.get("tags", []) + python_spec.get("tags", []),
-    }
-    return merged
-
-
-async def _fetch_java_openapi() -> Optional[dict]:
-    """Fetch OpenAPI spec from Java backend, returns None on failure."""
-    url = f"{JAVA_BACKEND_URL}{JAVA_OPENAPI_PATH}"
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(url)
-            resp.raise_for_status()
-            return resp.json()
-    except Exception as e:
-        logger.warning(f"Failed to fetch Java OpenAPI spec from {url}: {e}")
-        return None
-
-
-# ── Route endpoints ──
-
 @router.get("/health")
 async def health():
-    """Health check for analysis service."""
     return {"status": "ok", "service": "analysis"}
-
-
-@router.get("/openapi/merged")
-async def get_merged_openapi(request: Request, refresh: bool = False):
-    """Merge Java backend and Python service OpenAPI specs.
-
-    Uses a 5-minute TTL cache. Pass ?refresh=true to force refresh.
-    """
-    now = time.time()
-
-    # Check cache
-    if (
-        not refresh
-        and _merged_cache["data"] is not None
-        and (now - _merged_cache["timestamp"]) < _CACHE_TTL_SECONDS
-    ):
-        logger.debug("Returning cached merged OpenAPI spec")
-        return _merged_cache["data"]
-
-    # Get Python spec from the running app
-    python_spec = request.app.openapi()
-
-    # Fetch Java spec with graceful degradation
-    warnings: list[str] = []
-    java_spec = await _fetch_java_openapi()
-
-    if java_spec is None:
-        warnings.append(
-            f"Java backend unreachable at {JAVA_BACKEND_URL}{JAVA_OPENAPI_PATH}; "
-            "returning Python-only spec"
-        )
-        merged = merge_openapi_specs(python_spec, {})
-    else:
-        merged = merge_openapi_specs(python_spec, java_spec)
-
-    if warnings:
-        merged["warnings"] = warnings
-
-    # Update cache
-    _merged_cache["data"] = merged
-    _merged_cache["timestamp"] = now
-    logger.info("Merged OpenAPI spec generated (warnings=%d)", len(warnings))
-
-    return merged
-
-
-@router.get("/openapi/java")
-async def get_java_openapi():
-    """Proxy to Java backend OpenAPI spec."""
-    url = f"{JAVA_BACKEND_URL}{JAVA_OPENAPI_PATH}"
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(url)
-            resp.raise_for_status()
-            return resp.json()
-    except Exception as e:
-        logger.error(f"Java backend unreachable: {e}")
-        raise HTTPException(
-            status_code=502,
-            detail={"error": "Java backend unreachable", "detail": str(e)},
-        )
 
 
 @router.get("/openapi/python")
 async def get_python_openapi(request: Request):
-    """Return Python service's own OpenAPI spec."""
+    """The running service's actual schema, including available capability routes."""
     return request.app.openapi()
+
+
+@router.get("/openapi/merged")
+async def get_merged_openapi(request: Request, refresh: bool = False):
+    """Standalone UDS callers get an explicitly partial spec; Rust owns aggregation."""
+    spec = dict(request.app.openapi())
+    spec["warnings"] = ["Python service only; use the Rust gateway for merged documentation"]
+    return spec
+
+
+@router.get("/openapi/java", deprecated=True)
+@router.get("/openapi/backend")
+async def get_backend_openapi():
+    raise HTTPException(410, "Backend documentation is provided by the Rust gateway")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -161,7 +50,17 @@ class DiagramOptions(BaseModel):
     format: str = Field(default="mermaid", description="输出格式")
 
 
-class DiagramRequest(BaseModel):
+class AnalysisControl(BaseModel):
+    request_id: Optional[str] = None
+    analysis_owner: str = "standalone"
+
+    def job_payload(self) -> dict:
+        payload = self.model_dump()
+        payload["request_id"] = self.request_id or str(uuid.uuid4())
+        return payload
+
+
+class DiagramRequest(AnalysisControl):
     diagram_type: Literal["sequence", "flowchart"]
     target: str  # API路径或方法签名
     project_root: str  # 项目根目录绝对路径
@@ -187,7 +86,7 @@ _DIAGRAM_TIMEOUT_SECONDS = 30
 
 
 @router.post("/generate-diagram", response_model=DiagramGenerationResult)
-async def generate_diagram(request: DiagramRequest):
+async def generate_diagram(request: DiagramRequest, http_request: Request = None):
     """生成代码图表（时序图/流程图）— F35"""
     try:
         project_root = resolve_workspace_path(
@@ -199,31 +98,8 @@ async def generate_diagram(request: DiagramRequest):
     if not request.target.strip():
         raise HTTPException(status_code=400, detail="target must not be empty")
 
-    # 2. 按 diagram_type 分发到对应生成器
-    try:
-        result = await asyncio.wait_for(
-            _run_diagram_generation(request),
-            timeout=_DIAGRAM_TIMEOUT_SECONDS,
-        )
-    except asyncio.TimeoutError:
-        raise HTTPException(
-            status_code=408,
-            detail=f"Diagram generation timed out after {_DIAGRAM_TIMEOUT_SECONDS}s",
-        )
-    except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
-        logger.error("Diagram generation failed: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Diagram generation error: {str(e)}")
-
-    return result
-
-
-async def _run_diagram_generation(request: DiagramRequest) -> DiagramGenerationResult:
-    """在线程池中运行图表生成（CPU 密集型操作）"""
-    loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(None, _generate_diagram_sync, request)
-    return result
+    from analysis_jobs import run
+    return await run("diagram", request.job_payload(), http_request, _DIAGRAM_TIMEOUT_SECONDS)
 
 
 def _generate_diagram_sync(request: DiagramRequest) -> DiagramGenerationResult:
@@ -268,9 +144,9 @@ def _generate_diagram_sync(request: DiagramRequest) -> DiagramGenerationResult:
 # F33: Change Impact Analysis
 # ═══════════════════════════════════════════════════════════════
 
-class ChangeImpactRequest(BaseModel):
+class ChangeImpactRequest(AnalysisControl):
     file_path: str = Field(..., description="被修改的文件路径")
-    changed_lines: List[int] = Field(..., description="修改的行号列表")
+    changed_lines: List[int] = Field(..., min_length=1, max_length=20000, description="修改的新版本行号列表")
     project_root: str = Field(..., description="项目根目录")
     depth: int = Field(3, ge=1, le=5, description="BFS 最大深度 (1|3|5)")
 
@@ -309,7 +185,7 @@ def _change_impact_error(status: int, code: str, message: str, start_ms: float) 
 
 
 @router.post("/change-impact", response_model=ChangeImpactResponse)
-async def analyze_change_impact(request: ChangeImpactRequest):
+async def analyze_change_impact(request: ChangeImpactRequest, http_request: Request = None):
     """分析代码变更的影响链路 (F33)"""
     start_ms = time.time() * 1000
 
@@ -324,20 +200,21 @@ async def analyze_change_impact(request: ChangeImpactRequest):
             "project_root and file_path must resolve inside the workspace",
             start_ms)
 
-    try:
-        analyzer = _get_change_impact_analyzer()
-        result = await analyzer.analyze(
-            file_path=str(file_path),
-            changed_lines=request.changed_lines,
-            project_root=str(project_root),
-            depth=request.depth,
-        )
-        elapsed_ms = round(time.time() * 1000 - start_ms, 1)
-        return ChangeImpactResponse(success=True, data=result.model_dump(), error=None,
-                                    elapsed_ms=elapsed_ms)
-    except Exception as e:
-        logger.error("Change impact analysis failed: %s", e, exc_info=True)
-        return _change_impact_error(500, "CHANGE_IMPACT_FAILED", str(e), start_ms)
+    if any(line < 1 for line in request.changed_lines):
+        return _change_impact_error(400, "CHANGED_LINES_INVALID", "Changed lines must be positive", start_ms)
+    if file_path.suffix.lower() not in {".py", ".java", ".ts", ".tsx", ".js", ".jsx"}:
+        return _change_impact_error(400, "ANALYSIS_LANGUAGE_UNSUPPORTED", "Semantic impact is available for Python, Java and TypeScript/JavaScript; use LSP for Rust", start_ms)
+    request=request.model_copy(update={"project_root":str(project_root),"file_path":str(file_path),"changed_lines":sorted(set(request.changed_lines))})
+    from analysis_jobs import run
+    result=await run("impact",request.job_payload(),http_request)
+    return ChangeImpactResponse(success=True,data=result,error=None,elapsed_ms=round(time.time()*1000-start_ms,1))
+
+
+def _change_impact_sync(request: ChangeImpactRequest) -> dict:
+    from analyzers.change_impact_analyzer import ChangeImpactAnalyzer
+    result=ChangeImpactAnalyzer()._analyze_sync(request.file_path,request.changed_lines,request.project_root,request.depth).model_dump()
+    result.update(analysis_kind="advisory",is_verification_evidence=False)
+    return result
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -345,12 +222,12 @@ async def analyze_change_impact(request: ChangeImpactRequest):
 # ═══════════════════════════════════════════════════════════════
 
 
-class APIEndpointRequest(BaseModel):
+class APIEndpointRequest(AnalysisControl):
     project_root: str = Field(..., description="项目根目录路径")
     languages: Optional[List[str]] = Field(None, description="指定语言过滤")
 
 
-class CodePathRequest(BaseModel):
+class CodePathRequest(AnalysisControl):
     project_root: str = Field(..., description="项目根目录路径")
     entry_file: str = Field(..., description="入口方法所在文件路径")
     entry_function: str = Field(..., description="入口方法名")
@@ -378,6 +255,8 @@ def _trace_code_path_sync(request: CodePathRequest) -> dict:
         entry_function=request.entry_function,
         max_depth=request.max_depth,
     )
+    if result.entry_node is None:
+        raise FileNotFoundError("Entry function not found")
     return {
         "success": True,
         "data": result.model_dump(),
@@ -385,7 +264,7 @@ def _trace_code_path_sync(request: CodePathRequest) -> dict:
 
 
 @router.post("/api-endpoints")
-async def scan_api_endpoints(request: APIEndpointRequest):
+async def scan_api_endpoints(request: APIEndpointRequest, http_request: Request = None):
     """扫描项目所有 API 端点 (F40)"""
     try:
         project_root = resolve_workspace_path(
@@ -394,23 +273,12 @@ async def scan_api_endpoints(request: APIEndpointRequest):
         raise HTTPException(status_code=400, detail=str(error)) from error
     request = request.model_copy(update={"project_root": str(project_root)})
 
-    try:
-        result = await asyncio.wait_for(
-            asyncio.get_event_loop().run_in_executor(
-                None, _scan_endpoints_sync, request
-            ),
-            timeout=30.0,
-        )
-        return result
-    except asyncio.TimeoutError:
-        raise HTTPException(status_code=408, detail="API endpoint scan timed out after 30s")
-    except Exception as e:
-        logger.error("API endpoint scan failed: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Scan error: {str(e)}")
+    from analysis_jobs import run
+    return await run("endpoints", request.job_payload(), http_request)
 
 
 @router.post("/code-path")
-async def trace_code_path(request: CodePathRequest):
+async def trace_code_path(request: CodePathRequest, http_request: Request = None):
     """追踪指定 API 的完整代码路径 (F40)"""
     try:
         project_root = resolve_workspace_path(
@@ -424,16 +292,23 @@ async def trace_code_path(request: CodePathRequest):
         "entry_file": str(entry_file),
     })
 
+    from analysis_jobs import run
+    return await run("trace", request.job_payload(), http_request)
+
+
+class AnalysisCancelRequest(AnalysisControl):
+    project_root: str
+    request_id: str
+
+
+@router.post("/cancel")
+async def cancel_analysis(request: AnalysisCancelRequest):
+    from analysis_jobs import cancel
     try:
-        result = await asyncio.wait_for(
-            asyncio.get_event_loop().run_in_executor(
-                None, _trace_code_path_sync, request
-            ),
-            timeout=30.0,
-        )
-        return result
-    except asyncio.TimeoutError:
-        raise HTTPException(status_code=408, detail="Code path tracing timed out after 30s")
-    except Exception as e:
-        logger.error("Code path tracing failed: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Trace error: {str(e)}")
+        uuid.UUID(request.request_id)
+        root = resolve_workspace_path(request.project_root, require_directory=True)
+    except (ValueError, WorkspacePathError) as error:
+        raise HTTPException(400, "Invalid analysis cancellation scope") from error
+    payload = request.model_dump()
+    payload["project_root"] = str(root)
+    return cancel(payload)

@@ -92,7 +92,7 @@ fn server_listing(manager: &McpClientManager) -> String {
 }
 
 /// 旧 `mcpToolsCommand`：`## MCP 工具 (N)` + 每行工具名与描述。
-fn tool_listing(manager: &McpClientManager) -> String {
+fn tool_listing(manager: &std::sync::Arc<McpClientManager>) -> String {
     let tools = manager.discover_and_wrap_tools();
     let mut text = format!("## MCP 工具 ({})\n\n", tools.len());
     for tool in tools {

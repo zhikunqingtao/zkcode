@@ -8,8 +8,6 @@
 - 60s 超时保护，超时返回部分结果
 """
 
-import asyncio
-import hashlib
 import logging
 import time
 from collections import deque
@@ -110,36 +108,14 @@ class ChangeImpactAnalyzer:
         Returns:
             ChangeImpactResult 包含影响节点、边和摘要
         """
-        start_time = time.monotonic()
-        truncated = False
-
-        try:
-            # 在线程池中执行 CPU 密集型分析（带超时）
-            result = await asyncio.wait_for(
-                asyncio.to_thread(
-                    self._analyze_sync, file_path, changed_lines, project_root, depth
-                ),
-                timeout=_ANALYSIS_TIMEOUT,
-            )
-            return result
-        except asyncio.TimeoutError:
-            logger.warning(
-                "Change impact analysis timed out after %ds for %s",
-                _ANALYSIS_TIMEOUT, file_path,
-            )
-            # 超时：返回空结果
-            return ChangeImpactResult(
-                changed_file=file_path,
-                changed_lines=changed_lines,
-                impact_nodes=[],
-                impact_edges=[],
-                summary=ChangeImpactSummary(
-                    direct_count=0, indirect_count=0, potential_count=0,
-                    affected_apis=[], affected_tasks=[],
-                ),
-                truncated=True,
-                graph_stats={},
-            )
+        # Use the same killable process owner as the HTTP route; a deadline must
+        # not abandon an analysis thread that continues scanning the workspace.
+        import uuid
+        from analysis_jobs import run
+        result=await run("impact", {"file_path":file_path,"changed_lines":changed_lines,
+            "project_root":project_root,"depth":depth,"request_id":str(uuid.uuid4()),
+            "analysis_owner":"internal:change-impact"},None,_ANALYSIS_TIMEOUT)
+        return ChangeImpactResult.model_validate(result)
 
     def _analyze_sync(
         self,
@@ -230,21 +206,9 @@ class ChangeImpactAnalyzer:
 
     @staticmethod
     def _compute_cache_key(project_root: str) -> str:
-        """基于项目根路径 + 文件修改时间的最大值计算缓存 key"""
-        root = Path(project_root)
-        max_mtime = 0.0
-        try:
-            for p in root.rglob("*"):
-                if (not p.is_symlink() and p.is_file()
-                        and p.suffix in (".py", ".java", ".ts", ".tsx")):
-                    # 快速采样：只检查前 200 个文件
-                    mtime = p.stat().st_mtime
-                    if mtime > max_mtime:
-                        max_mtime = mtime
-        except (OSError, StopIteration):
-            pass
-        raw = f"{project_root}:{max_mtime}"
-        return hashlib.md5(raw.encode()).hexdigest()
+        """Content identity includes all supported source files, not maximum mtime."""
+        from .code_path_tracer import _graph_fingerprint
+        return _graph_fingerprint(project_root, None, True)
 
     # ── 定位修改元素 ──────────────────────────────────────
 
@@ -261,8 +225,7 @@ class ChangeImpactAnalyzer:
         for node_id, attrs in graph.nodes(data=True):
             node_file = attrs.get("file_path", "")
             # 路径匹配：完全匹配或结尾匹配
-            if not (node_file == norm_path or norm_path.endswith(node_file)
-                    or node_file.endswith(norm_path)):
+            if not node_file or Path(node_file).resolve() != Path(norm_path).resolve():
                 continue
 
             line_range = attrs.get("line_range", [0, 0])

@@ -1,8 +1,13 @@
 ---
 name: stuck
 description: 当陷入反复报错或循环修复无进展时，执行系统化脱困诊断并推荐突破路径
-allowed-tools: [Bash, FileRead, Search]
-arguments: [problem_description]
+allowed-tools:
+  - Bash
+  - Read
+  - Grep
+  - Glob
+arguments:
+  - problem_description
 argument-hint: "当前卡住的问题描述，如 '编译一直报NoClassDefFoundError修不好' 或 '测试来回失败不知道原因'"
 when_to_use: 当Agent或用户反复遇到同一错误、修复无进展、或不知道下一步该做什么时
 effort: medium
@@ -39,17 +44,8 @@ version: "1.0"
    git log --oneline -10
    find . -name "*.java" -o -name "*.tsx" -o -name "*.py" | xargs ls -lt 2>/dev/null | head -20
    ```
-3. **编译状态**：尝试编译检查当前代码健康度
-   ```bash
-   # 后端编译
-   cd backend && ./mvnw compile -q 2>&1 | tail -20
-   # 前端编译
-   cd frontend && npx tsc --noEmit 2>&1 | tail -20
-   ```
-4. **测试状态**：运行相关测试收集当前失败情况
-   ```bash
-   cd backend && ./mvnw test 2>&1 | grep -E "(Tests run|FAILURE|ERROR)" | tail -20
-   ```
+3. **编译状态**：先用 Read/Glob 确认当前项目的构建入口，再选择实际存在的命令。Rust 项目使用 `cargo check --workspace --locked`；前端使用项目定义的类型检查或构建脚本；Python 项目按其配置检查。不要假定存在 Java 后端或 Maven wrapper。
+4. **测试状态**：运行与问题相关的现有测试。Rust 可使用 `cargo test -p <实际crate> <相关测试>`，前端和 Python 按项目脚本执行；记录真实退出状态和错误，不用管道尾部命令的成功掩盖测试失败。
 5. **日志检查**：查看最新的错误日志
    ```bash
    tail -30 log/error.log 2>/dev/null
@@ -69,9 +65,9 @@ version: "1.0"
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
-> **失败处理**：某项检查命令执行失败时（如mvnw不存在），跳过该项并标注"无法检查"，继续收集其他信息。
+> **失败处理**：某项检查命令执行失败时（如项目没有对应构建入口），跳过该项并标注"无法检查"，继续收集其他信息。
 
-### 第二步：历史回溯（工具：Bash / FileRead）
+### 第二步：历史回溯（工具：Bash / Read）
 
 分析最近的操作轨迹，理解"是怎么走到这一步的"：
 
@@ -124,7 +120,7 @@ version: "1.0"
 
 > **失败处理**：无法明确判断类型时，标注为"复合问题"，同时列出最可能的两种类型。
 
-### 第四步：替代路径探索（工具：Search / FileRead）
+### 第四步：替代路径探索（工具：Grep / Read）
 
 基于诊断结论，提出 **3 个不同方向** 的解决方案：
 

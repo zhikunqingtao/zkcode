@@ -1,0 +1,841 @@
+{
+  "scope": "runtime/model/task/worktree migration",
+  "updated_at": "2026-10-07",
+  "capabilities": [
+    {
+      "capability": "providers-models",
+      "source_revision": "053adf90",
+      "baseline_revision": "3e536438",
+      "source": "llm/LlmProviderRegistry.java; llm/impl/OpenAiCompatibleProvider.java",
+      "rust": [
+        "crates/zk-llm/src/config.rs",
+        "crates/zk-llm/src/openai_compat.rs"
+      ],
+      "status": "implemented_verified",
+      "validation": "PASS in workspace_resume7 and strict_clippy_resume10 (exact logs and SHA-256 in verification_logs). The listed native assertions passed; this verifies the local Rust implementation and does not claim execution of source Java, ignored remote tests, or every source test permutation.",
+      "source_path_prefix": "backend/src/main/java/com/aicodeassistant/",
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/llm/LlmProviderRegistry.java",
+        "backend/src/main/java/com/aicodeassistant/llm/impl/OpenAiCompatibleProvider.java",
+        "backend/src/main/java/com/aicodeassistant/llm/impl/AnthropicProvider.java",
+        "backend/src/main/java/com/aicodeassistant/llm/BailianTokenPlanModels.java",
+        "backend/src/main/java/com/aicodeassistant/llm/OpenRouterModels.java",
+        "backend/src/main/java/com/aicodeassistant/llm/ModelRegistry.java",
+        "backend/src/main/java/com/aicodeassistant/llm/ModelCapabilities.java",
+        "backend/src/main/java/com/aicodeassistant/llm/ModelCapabilitiesProperties.java",
+        "backend/src/main/java/com/aicodeassistant/llm/MultiProviderConfiguration.java",
+        "backend/src/main/java/com/aicodeassistant/llm/VisionModelRouter.java"
+      ],
+      "previous_validation": "PASS: cargo test -p zk-llm: 175 unit +14 SSE +2 doc; 4 live credential tests ignored. Defaults/old catalog retained; no live paid API claims.",
+      "latest_source_assertion_refinement": "Deduplicate provider-qualified model aliases after normalization while preserving configured order; Bailian GLM cache capability and Kimi base64-only image contract corrected. Preserve baseline first-owner-wins model registry routing for existing valid user configuration; provider-qualified new IDs remain explicit.",
+      "source_test_audit": "docs/migration/runtime-backend-test-audit.json",
+      "verification_scope": "local_native_regressions_and_strict_clippy",
+      "verified_assertions": [
+        "normalization_deduplicates_provider_model_aliases_in_configured_order",
+        "subscription_model_capabilities_retain_wire_and_cache_contracts",
+        "catalog_matches_plan_matrix"
+      ],
+      "verification_evidence_refs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ],
+      "remote_validation": "Not executed: real provider credentials/live semantic continuation. Local wire fixtures use no_proxy solely to avoid ambient proxy preconnections; production proxy settings are preserved."
+    },
+    {
+      "capability": "multi-key-priority-paid-opt-in",
+      "source_revision": "053adf90",
+      "baseline_revision": "3e536438",
+      "source": "llm/ApiKeyRotationManager.java",
+      "rust": [
+        "crates/zk-llm/src/secret.rs",
+        "crates/zk-llm/src/registry.rs"
+      ],
+      "status": "implemented_verified",
+      "validation": "PASS in workspace_resume7 and strict_clippy_resume10 (exact logs and SHA-256 in verification_logs). The listed native assertions passed; this verifies the local Rust implementation and does not claim execution of source Java, ignored remote tests, or every source test permutation.",
+      "source_path_prefix": "backend/src/main/java/com/aicodeassistant/",
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/llm/ApiKeyRotationManager.java"
+      ],
+      "previous_validation": "PASS: priority/cooldown/paid-subscription LLM unit tests and server key_save_and_delete_rebuilds_keep_priority_paid_opt_in_and_routing. PUT/startup share full config lookup: key DB save/delete preserves strategy, explicit paid optin filtering, custom baseURL and configured models.",
+      "latest_source_assertion_refinement": "Deduplicate trimmed identical credentials into one cooldown slot for both selection strategies, preserving original priority and all configured paid-key opt-in/budget constraints; repeated_credentials_share_one_cooldown_and_preserve_priority added.",
+      "source_test_audit": "docs/migration/runtime-backend-test-audit.json",
+      "verification_scope": "local_native_regressions_and_strict_clippy",
+      "verified_assertions": [
+        "repeated_credentials_share_one_cooldown_and_preserve_priority",
+        "key_save_and_delete_rebuilds_keep_priority_paid_opt_in_and_routing"
+      ],
+      "verification_evidence_refs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ]
+    },
+    {
+      "capability": "stateless-responses",
+      "source_revision": "053adf90",
+      "baseline_revision": "3e536438",
+      "source": "llm/impl/OpenAiCompatibleProvider.java",
+      "rust": [
+        "crates/zk-llm/src/responses.rs"
+      ],
+      "status": "implemented_verified",
+      "validation": "PASS in workspace_resume7 and strict_clippy_resume10 (exact logs and SHA-256 in verification_logs). The listed native assertions passed; this verifies the local Rust implementation and does not claim execution of source Java, ignored remote tests, or every source test permutation.",
+      "source_path_prefix": "backend/src/main/java/com/aicodeassistant/",
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/llm/impl/OpenAiCompatibleProvider.java"
+      ],
+      "previous_validation": "5 Responses local stream/protocol tests passed",
+      "verification_scope": "local_native_regressions_and_strict_clippy",
+      "verified_assertions": [
+        "assistant_history_uses_output_text_and_provider_state_is_origin_scoped",
+        "tool_history_is_flattened_and_call_id_is_preserved",
+        "invalid_second_tool_prevents_the_whole_batch",
+        "disconnected_response_never_finishes_successfully",
+        "terminal_only_response_emits_text_usage_and_opaque_state"
+      ],
+      "verification_evidence_refs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ],
+      "remote_validation": "Not executed: real provider credentials/live semantic continuation. Local wire fixtures use no_proxy solely to avoid ambient proxy preconnections; production proxy settings are preserved."
+    },
+    {
+      "capability": "openrouter-opaque-reasoning",
+      "source_revision": "053adf90",
+      "baseline_revision": "3e536438",
+      "source": "llm/impl/OpenAiCompatibleProvider.java",
+      "rust": [
+        "crates/zk-llm/src/openai_compat.rs",
+        "crates/zk-engine/src/engine.rs",
+        "crates/zk-db/src/model.rs"
+      ],
+      "status": "implemented_verified",
+      "validation": "PASS in workspace_resume7 and strict_clippy_resume10 (exact logs and SHA-256 in verification_logs). The listed native assertions passed; this verifies the local Rust implementation and does not claim execution of source Java, ignored remote tests, or every source test permutation.",
+      "source_path_prefix": "backend/src/main/java/com/aicodeassistant/",
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/llm/impl/OpenRouterReasoning.java"
+      ],
+      "previous_validation": "PASS: same-provider/model opaque state replay and openrouter_streamed_reasoning_reassembles_only_same_identity; zk-llm175 unit suite.",
+      "verification_scope": "local_native_regressions_and_strict_clippy",
+      "verified_assertions": [
+        "openrouter_streamed_reasoning_reassembles_only_same_identity"
+      ],
+      "verification_evidence_refs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ],
+      "remote_validation": "Not executed: real provider credentials/live semantic continuation. Local wire fixtures use no_proxy solely to avoid ambient proxy preconnections; production proxy settings are preserved."
+    },
+    {
+      "capability": "independent-summary",
+      "source_revision": "053adf90",
+      "baseline_revision": "3e536438",
+      "source": "engine/CompactService.java",
+      "rust": [
+        "crates/zk-engine/src/llm_summarizer.rs",
+        "crates/zk-server/src/engine_bridge.rs",
+        "crates/zk-llm/src/summary_transport.rs",
+        "crates/zk-llm/src/registry.rs",
+        "crates/zk-llm/tests/summary_wire.rs"
+      ],
+      "status": "implemented_verified",
+      "source_path_prefix": "backend/src/main/java/com/aicodeassistant/",
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/engine/CompactConfiguration.java",
+        "backend/src/main/java/com/aicodeassistant/engine/CompactService.java",
+        "backend/src/main/java/com/aicodeassistant/llm/SummaryRequest.java",
+        "backend/src/main/java/com/aicodeassistant/llm/SummaryResult.java",
+        "backend/src/main/java/com/aicodeassistant/llm/impl/SummaryTransportClient.java",
+        "backend/src/main/java/com/aicodeassistant/llm/impl/BailianSummaryClient.java"
+      ],
+      "previous_validation": "PASS: engine534 unit and llm175 unit suites; direct deepseek/deepseek-flash isolated route, max thinking/8192 completion/4096 summary/90s, physical-call observer per attempt. Missing provider uses local fallback.",
+      "validation": "PASS in workspace_resume7 and strict_clippy_resume10 (exact logs and SHA-256 in verification_logs). The listed native assertions passed; this verifies the local Rust implementation and does not claim execution of source Java, ignored remote tests, or every source test permutation.",
+      "adaptation": "BailianSummaryClient existed only in intermediate commits and was replaced by SummaryTransportClient. Rust implements final direct DeepSeek default, official endpoint-specific completion limit, nonstream JSON, raw missing usage, fixed selected key and one 429 retry; no summary route fallback. Configured max/low/off model matrix retained.",
+      "verification_scope": "local_native_regressions_and_strict_clippy",
+      "verified_assertions": [
+        "compaction_phase_has_one_attempt_and_cancellation_prevents_external_call",
+        "scoped_summary_persists_attribution_and_authoritative_usage",
+        "independent_summary_retries_only_one_429_and_accounts_every_attempt",
+        "summary_http_is_nonstreaming_retries_once_with_same_key_and_keeps_partial_usage_unknown"
+      ],
+      "verification_evidence_refs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ],
+      "remote_validation": "Not executed: real provider credentials/live semantic continuation. Local wire fixtures use no_proxy solely to avoid ambient proxy preconnections; production proxy settings are preserved."
+    },
+    {
+      "capability": "lossless-mandatory-context-tool-transactions",
+      "source_revision": "053adf90",
+      "baseline_revision": "3e536438",
+      "source": "engine/TokenBudgetGuard.java",
+      "rust": [
+        "crates/zk-engine/src/context/compact.rs",
+        "crates/zk-engine/src/context_checkpoint.rs",
+        "crates/zk-engine/src/normalize.rs",
+        "crates/zk-engine/src/recovery.rs",
+        "crates/zk-engine/src/context/cascade.rs",
+        "crates/zk-engine/src/system_prompt.rs"
+      ],
+      "status": "implemented_verified",
+      "source_path_prefix": "backend/src/main/java/com/aicodeassistant/",
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/engine/TokenBudgetGuard.java",
+        "backend/src/main/java/com/aicodeassistant/engine/CompactionContext.java",
+        "backend/src/main/java/com/aicodeassistant/engine/CompactionHistory.java",
+        "backend/src/main/java/com/aicodeassistant/engine/ContextCascade.java",
+        "backend/src/main/java/com/aicodeassistant/engine/ContextCompactor.java",
+        "backend/src/main/java/com/aicodeassistant/engine/ContextCollapseService.java",
+        "backend/src/main/java/com/aicodeassistant/engine/CollapseLevel.java",
+        "backend/src/main/java/com/aicodeassistant/engine/MessageNormalizer.java"
+      ],
+      "previous_validation": "PASS: engine534 unit suite with image-budget; original User/System text/images/meta and tool transaction atomicity retained.",
+      "validation": "PASS in workspace_resume7 and strict_clippy_resume10 (exact logs and SHA-256 in verification_logs). The listed native assertions passed; this verifies the local Rust implementation and does not claim execution of source Java, ignored remote tests, or every source test permutation.",
+      "adaptation": "No old Java persisted mirror migration is required for greenfield Rust. Native tool_call_id and durable invocation uniqueness replace legacy namespace resolution; transaction unit validation rejects ambiguous/detached results for compaction. Source user text/images/meta remain durable. Machine history projects as untrusted User reference; opaque state and UI metadata never enter textual summary.",
+      "latest_source_assertion_refinement": "Repeated flattened compression-only replay blocks are omitted without editing original history; real tool pairs and provider/image/thinking boundaries remain preserved.",
+      "source_test_audit": "docs/migration/runtime-backend-test-audit.json",
+      "verification_scope": "local_native_regressions_and_strict_clippy",
+      "verified_assertions": [
+        "mandatory_user_images_metadata_and_literal_markers_survive_compaction",
+        "parallel_tool_batch_is_retained_or_omitted_in_its_entirety",
+        "repeated_marker_blocks_drop_only_the_replay_copy_and_preserve_tool_pairs",
+        "local_omission_does_not_freeze_optional_history_on_later_compaction",
+        "summary_quality_requires_file_paths_when_history_touched_files"
+      ],
+      "verification_evidence_refs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ]
+    },
+    {
+      "capability": "image-source-budget-provider-routing",
+      "source_revision": "053adf90",
+      "baseline_revision": "3e536438",
+      "source": "engine/TokenBudgetGuard.java; llm/InlineImageBudget.java",
+      "rust": [
+        "crates/zk-engine/src/context/image_budget.rs",
+        "crates/zk-engine/src/engine.rs",
+        "crates/zk-llm/src/vision_router.rs"
+      ],
+      "status": "implemented_verified",
+      "source_path_prefix": "backend/src/main/java/com/aicodeassistant/",
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/engine/TokenBudgetGuard.java",
+        "backend/src/main/java/com/aicodeassistant/engine/ImageRefInjector.java",
+        "backend/src/main/java/com/aicodeassistant/llm/InlineImageBudget.java",
+        "backend/src/main/java/com/aicodeassistant/llm/VisionModelRouter.java"
+      ],
+      "previous_validation": "PASS: actual_request_budget_keeps_user_images_and_reduces_only_trusted_injections, phase1_never_touches_system_or_original_user_messages, source_identity_survives_thumbnail_and_shared_mandatory_payload_is_protected, trusted HandoffRead digest/type validation, kimi_inline_payload_is_rechecked_after_url_conversion. Production server enables image-budget. Original required image overflow fails explicitly.",
+      "validation": "PASS in workspace_resume7 and strict_clippy_resume10 (exact logs and SHA-256 in verification_logs). The listed native assertions passed; this verifies the local Rust implementation and does not claim execution of source Java, ignored remote tests, or every source test permutation.",
+      "latest_source_assertion_refinement": "Engine uses shared bounded header dimensions and full validated media type for trusted tool images, including WebP. Actual Read→engine→loopback-provider roundtrip now includes two distinct original BMP identities with equal PNG payload plus genuine WebP; confirmation only after successful request.",
+      "source_test_audit": "docs/migration/runtime-backend-test-audit.json",
+      "verification_scope": "local_native_regressions_and_strict_clippy",
+      "verified_assertions": [
+        "actual_read_confirms_all_source_identities_only_after_successful_delivery",
+        "actual_request_budget_keeps_user_images_and_reduces_only_trusted_injections",
+        "source_identity_survives_thumbnail_and_shared_mandatory_payload_is_protected"
+      ],
+      "verification_evidence_refs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ]
+    },
+    {
+      "capability": "empty-placeholder-final-single-recovery",
+      "source_revision": "053adf90",
+      "baseline_revision": "3e536438",
+      "source": "engine/QueryEngine.java",
+      "rust": [
+        "crates/zk-engine/src/engine.rs",
+        "crates/zk-engine/src/recovery.rs"
+      ],
+      "status": "implemented_verified",
+      "validation": "PASS in workspace_resume7 and strict_clippy_resume10 (exact logs and SHA-256 in verification_logs). The listed native assertions passed; this verifies the local Rust implementation and does not claim execution of source Java, ignored remote tests, or every source test permutation.",
+      "source_path_prefix": "backend/src/main/java/com/aicodeassistant/",
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/engine/QueryEngine.java",
+        "backend/src/main/java/com/aicodeassistant/engine/QueryLoopState.java",
+        "backend/src/main/java/com/aicodeassistant/engine/RunResultProjection.java"
+      ],
+      "previous_validation": "runtime_migration empty final/second failure/durable failure blocking tests passed",
+      "latest_source_assertion_refinement": "Preserve original partial/placeholder answer blocks and real usage durably before bounded recovery in root and child; recovery metadata grants no new user authority. A failed original-answer write prevents a second physical request.",
+      "source_test_audit": "docs/migration/runtime-backend-test-audit.json",
+      "verification_scope": "local_native_regressions_and_strict_clippy",
+      "verified_assertions": [
+        "empty_final_answer_gets_one_durable_recovery_then_fails",
+        "trailing_compression_echo_preserves_original_and_recovers_once",
+        "failed_partial_answer_storage_prevents_a_recovery_request",
+        "failed_recovery_message_storage_prevents_second_physical_call"
+      ],
+      "verification_evidence_refs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ]
+    },
+    {
+      "capability": "once-hint-final-after-errors",
+      "source_revision": "053adf90",
+      "baseline_revision": "3e536438",
+      "source": "56f5c654d67c4ffa74049e69cac28aa95139722a",
+      "rust": [
+        "crates/zk-engine/src/tool_tracker.rs",
+        "crates/zk-engine/src/termination.rs",
+        "crates/zk-engine/src/engine.rs"
+      ],
+      "status": "implemented_verified",
+      "validation": "PASS in workspace_resume7 and strict_clippy_resume10 (exact logs and SHA-256 in verification_logs). The listed native assertions passed; this verifies the local Rust implementation and does not claim execution of source Java, ignored remote tests, or every source test permutation.",
+      "source_path_prefix": null,
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/engine/tracking/ToolCallTracker.java",
+        "backend/src/main/java/com/aicodeassistant/engine/strategy/DefaultTerminationStrategy.java"
+      ],
+      "previous_validation": "PASS: tracker/termination tests in engine534; production_worktree_agent_writes_only_snapshot_and_retains_durable_delivery runs 3 failed Read calls, one durable hint, successful Write, final answer, five accounted physical calls. Rust fixed error/turn/budget caps preserved. complete_batch_validation_precedes_every_tool_start covers valid-first/invalid-second plus token-truncated tool batch: no tool execution or invocation row is allowed.",
+      "latest_source_assertion_refinement": "Unknown tool in a mixed batch rejects every tool before effects with correction results for each durable invocation; existing error recovery and amount/turn limits remain. New actual execution counter regression added.",
+      "source_test_audit": "docs/migration/runtime-backend-test-audit.json",
+      "verification_scope": "local_native_regressions_and_strict_clippy",
+      "verified_assertions": [
+        "recovery_hint_once_per_failure_streak_preserves_counts",
+        "completed_final_answer_wins_over_previous_tool_errors_but_not_budget",
+        "complete_batch_validation_precedes_every_tool_start",
+        "unknown_tool_rejects_the_entire_batch_before_effects_and_allows_correction"
+      ],
+      "verification_evidence_refs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ]
+    },
+    {
+      "capability": "retryability-propagation",
+      "source_revision": "053adf90",
+      "baseline_revision": "3e536438",
+      "source": "f4f1bba7efbbfe4ec5563510098240d7b988bcb5",
+      "rust": [
+        "crates/zk-engine/src/engine.rs",
+        "crates/zk-llm/src/error.rs",
+        "crates/zk-llm/src/retry.rs",
+        "crates/zk-llm/src/registry.rs"
+      ],
+      "status": "implemented_verified",
+      "source_path_prefix": null,
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/engine/ApiRetryService.java",
+        "backend/src/main/java/com/aicodeassistant/engine/ModelTierService.java",
+        "backend/src/main/java/com/aicodeassistant/llm/ModelAwareRetryPolicy.java",
+        "backend/src/main/java/com/aicodeassistant/llm/ModelDegradationChain.java",
+        "backend/src/main/java/com/aicodeassistant/llm/ProviderErrorClassifier.java"
+      ],
+      "previous_validation": "PASS: engine_flow52, including fatal Config retryable=false, invalid tool JSON retryable=false, network retryable=true; ProviderError.is_retryable preserves suppressed HTTP retry.",
+      "validation": "PASS in workspace_resume7 and strict_clippy_resume10 (exact logs and SHA-256 in verification_logs). The listed native assertions passed; this verifies the local Rust implementation and does not claim execution of source Java, ignored remote tests, or every source test permutation.",
+      "adaptation": "Explicit retry=false wins even on 503/529; connect failures get max three attempts with short delay. Existing Rust default model/fallback choices and explicit user configuration are retained by decision; source model-tier documentation-only replacements do not overwrite them.",
+      "verification_scope": "local_native_regressions_and_strict_clippy",
+      "verified_assertions": [
+        "connect_failures_have_three_attempts_and_suppression_always_wins",
+        "fatal_errors_are_never_retried",
+        "wait_for_retry_yields_to_cancellation_first"
+      ],
+      "verification_evidence_refs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ]
+    },
+    {
+      "capability": "steering",
+      "source_revision": "053adf90",
+      "baseline_revision": "3e536438",
+      "source": "engine/QueryEngine.java; websocket/WebSocketController.java",
+      "rust": [
+        "crates/zk-engine/src/engine.rs",
+        "crates/zk-db/src/message.rs"
+      ],
+      "status": "implemented_verified",
+      "validation": "PASS in workspace_resume7 and strict_clippy_resume10 (exact logs and SHA-256 in verification_logs). The listed native assertions passed; this verifies the local Rust implementation and does not claim execution of source Java, ignored remote tests, or every source test permutation.",
+      "source_path_prefix": "backend/src/main/java/com/aicodeassistant/",
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/engine/QueryEngine.java"
+      ],
+      "previous_validation": "runtime_migration DB-first queue/idempotency/conflicting payload/runtime-boundary apply test passed",
+      "verification_scope": "local_native_regressions_and_strict_clippy",
+      "verified_assertions": [
+        "steering_is_durable_idempotent_and_applied_at_next_model_boundary"
+      ],
+      "verification_evidence_refs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ]
+    },
+    {
+      "capability": "task-boundary-assistant-segments",
+      "source_revision": "053adf90",
+      "baseline_revision": "3e536438",
+      "source": "engine/QueryEngine.java",
+      "rust": [
+        "crates/zk-engine/src/engine.rs",
+        "crates/zk-db/src/task_boundary.rs",
+        "crates/zk-db/src/runtime_ledger.rs",
+        "crates/zk-db/src/run.rs",
+        "crates/zk-server/src/ws/hub.rs",
+        "crates/zk-engine/tests/runtime_migration.rs"
+      ],
+      "status": "implemented_verified",
+      "source_path_prefix": "backend/src/main/java/com/aicodeassistant/",
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/engine/QueryMessageHandler.java",
+        "backend/src/main/java/com/aicodeassistant/engine/TaskBoundaryTracker.java"
+      ],
+      "previous_validation": "PASS: runtime_migration durable message-id/replay test; engine_flow53. Root and child segments emitted after durable assistant commit, TaskBoundary is stored System metadata.",
+      "validation": "PASS in workspace_resume7 and strict_clippy_resume10 (exact logs and SHA-256 in verification_logs). The listed native assertions passed; this verifies the local Rust implementation and does not claim execution of source Java, ignored remote tests, or every source test permutation.",
+      "adaptation": "Successful TodoWrite new in_progress item emits one durable logical boundary from the same commit. Todo ID is not a V4 Task ID; late/replayed event actor is resolved from persisted message attribution, never latest Run.",
+      "latest_source_assertion_refinement": "Store text/thinking/tool declaration order from the actual stream using byte ranges; root and child persist ordered blocks after whole-batch validation. Actual segment replay checks text→tool→text and exactly one tool start.",
+      "source_test_audit": "docs/migration/runtime-backend-test-audit.json",
+      "verification_scope": "local_native_regressions_and_strict_clippy",
+      "verified_assertions": [
+        "intermediate_segment_and_task_boundary_replay_the_same_durable_message_ids",
+        "todo_transition_boundary_is_committed_once_with_its_actual_tool_run",
+        "production_wiring_persists_root_completion_before_ws_publication"
+      ],
+      "verification_evidence_refs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ]
+    },
+    {
+      "capability": "conversation-options-isolation",
+      "source_revision": "053adf90",
+      "baseline_revision": "3e536438",
+      "source": "Rust production concurrency correction",
+      "rust": [
+        "crates/zk-engine/src/engine.rs",
+        "crates/zk-engine/src/conversation_service.rs"
+      ],
+      "status": "implemented_verified",
+      "validation": "PASS in workspace_resume7 and strict_clippy_resume10 (exact logs and SHA-256 in verification_logs). The listed native assertions passed; this verifies the local Rust implementation and does not claim execution of source Java, ignored remote tests, or every source test permutation.",
+      "source_path_prefix": null,
+      "previous_validation": "PASS: busy_conversation_cannot_replace_options_or_read_another_runs_result (runtime_migration7). Run CAS precedes options; result projection remains under owned Run guard.",
+      "verification_scope": "local_native_regressions_and_strict_clippy",
+      "verified_assertions": [
+        "busy_conversation_cannot_replace_options_or_read_another_runs_result"
+      ],
+      "verification_evidence_refs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ]
+    },
+    {
+      "capability": "shell-task-attached-detached",
+      "source_revision": "053adf90",
+      "baseline_revision": "3e536438",
+      "source": "tool/task/TaskCreateTool.java; tool/task/TaskCoordinator.java",
+      "rust": [
+        "contracts/task-runtime-v4.json",
+        "crates/zk-tools/src/task_tools.rs",
+        "crates/zk-engine/src/task/runtime.rs",
+        "crates/zk-server/src/shell_task.rs",
+        "crates/zk-server/src/engine_bridge.rs",
+        "crates/zk-db/src/task_runtime.rs"
+      ],
+      "status": "implemented_verified",
+      "validation": "PASS in workspace_resume7 and strict_clippy_resume10 (exact logs and SHA-256 in verification_logs). The listed native assertions passed; this verifies the local Rust implementation and does not claim execution of source Java, ignored remote tests, or every source test permutation.",
+      "source_path_prefix": "backend/src/main/java/com/aicodeassistant/",
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/tool/task/TaskCreateTool.java",
+        "backend/src/main/java/com/aicodeassistant/tool/task/TaskShellExecutor.java",
+        "backend/src/main/java/com/aicodeassistant/tool/StreamingToolExecutor.java"
+      ],
+      "previous_validation": "PASS: shell_task_executes_once_and_commits_result_and_cleanup; shell_nonzero_and_permission_denial_cannot_report_success; detached_task_survives_parent_cancel_without_releasing_its_budget_early; detached_task_has_independent_owned_stop; detached_shutdown_preserves_restart_reason_and_holds_unresolved_reservation_without_fake_result. Part of engine534 unit. NeedsAttention keeps unresolved reservation; no fake restart refund/result.",
+      "latest_source_assertion_refinement": "Shell Task inherits canonical effective parent shell cwd inside its authorized workspace; child Run/session remain isolated and budgeted. Cancellation-write local-stop fallback was subsequently approved and implemented. New background Bash actual TaskStop regression exposed early cleanupUnconfirmed sealing; bounded invocation drain and positive resource proof are implemented, but that new regression still requires re-execution.",
+      "source_test_audit": "docs/migration/runtime-backend-test-audit.json",
+      "verification_scope": "local_native_regressions_and_strict_clippy",
+      "verified_assertions": [
+        "shell_task_executes_once_and_commits_result_and_cleanup",
+        "shell_nonzero_and_permission_denial_cannot_report_success",
+        "detached_task_survives_parent_cancel_without_releasing_its_budget_early",
+        "detached_task_has_independent_owned_stop",
+        "shell_task_inherits_parent_current_directory_without_expanding_workspace"
+      ],
+      "verification_evidence_refs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ],
+      "current_tree_validation": "Earlier workspace_resume7 is historical evidence only. Background Bash cancellation changes and new full-alignment release gates are pending."
+    },
+    {
+      "capability": "per-wait-cycle-budget",
+      "source_revision": "053adf90",
+      "baseline_revision": "3e536438",
+      "source": "3b77e5f3439409de44fb17a7db7bfebd5c82f0d0",
+      "rust": [
+        "crates/zk-engine/src/task/runtime.rs"
+      ],
+      "status": "existing_equivalent",
+      "validation": "Rust read_output allocates a local timeout per request; TaskRuntime durable child/root wall-time and monetary budgets remain authoritative; no Java31min global waiter copied",
+      "source_path_prefix": null
+    },
+    {
+      "capability": "worktree-snapshot-delivery",
+      "source_revision": "053adf90",
+      "baseline_revision": "3e536438",
+      "source": "tool/agent/WorktreeManager.java; tool/agent/SubAgentExecutor.java",
+      "rust": [
+        "crates/zk-engine/src/agent/worktree.rs",
+        "crates/zk-engine/src/agent/executor.rs",
+        "crates/zk-tools/src/worktree.rs"
+      ],
+      "status": "implemented_verified",
+      "validation": "PASS in workspace_resume7 and strict_clippy_resume10 (exact logs and SHA-256 in verification_logs). The listed native assertions passed; this verifies the local Rust implementation and does not claim execution of source Java, ignored remote tests, or every source test permutation.",
+      "source_path_prefix": "backend/src/main/java/com/aicodeassistant/",
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/tool/agent/WorktreeManager.java",
+        "backend/src/main/java/com/aicodeassistant/tool/impl/WorktreeTool.java"
+      ],
+      "previous_validation": "PASS: six real Git tests (repo/subdir snapshot, dirty parent, clean unmerged commit retention, explicit commit/merge/remove, conflict retention, SQLite reopen, active owner/ref switch refusal); production Worktree Agent acceptance passes. Greenfield DDL + exact table set include managed_worktrees. Production defaults enabled, explicit env false respected. Parent cache revocation regression passed in final engine534 suite.",
+      "latest_source_assertion_refinement": "Strip only Git record LF so Unicode path/ref suffix remains part of identity; require captured baseline ancestor of current target; force status visibility of modified/untracked submodules despite Git config. Three new actual Git edge regressions added.",
+      "source_test_audit": "docs/migration/runtime-backend-test-audit.json",
+      "verification_scope": "local_native_regressions_and_strict_clippy",
+      "verified_assertions": [
+        "captures_committed_snapshot_and_relative_directory_of_actual_repository",
+        "clean_but_unmerged_commits_are_never_deleted_or_merged_implicitly",
+        "explicit_commit_merge_and_remove_are_separate_and_preserve_branch",
+        "explicit_merge_conflict_preserves_target_and_child_for_manual_resolution",
+        "unicode_ref_suffix_remains_part_of_captured_target_identity",
+        "rewritten_target_history_blocks_delivery_without_mutating_either_tree",
+        "dirty_submodules_cannot_be_hidden_by_user_git_configuration",
+        "sqlite_inventory_survives_database_and_manager_restart"
+      ],
+      "verification_evidence_refs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ]
+    },
+    {
+      "capability": "git-hook-process-supervision",
+      "source_revision": "053adf90",
+      "baseline_revision": "3e536438",
+      "source": "tool/process/RawGitProcess.java",
+      "rust": [
+        "crates/zk-tools/src/git_process.rs",
+        "crates/zk-engine/src/execution_resources.rs",
+        "crates/zk-tools/src/process.rs"
+      ],
+      "status": "implemented_verified",
+      "source_path_prefix": "backend/src/main/java/com/aicodeassistant/",
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/tool/process/RawGitProcess.java",
+        "backend/src/main/java/com/aicodeassistant/tool/process/ManagedProcessRunner.java",
+        "backend/src/main/java/com/aicodeassistant/tool/process/OwnedProcess.java",
+        "backend/src/main/java/com/aicodeassistant/tool/process/BackgroundProcessGroup.java",
+        "backend/src/main/java/com/aicodeassistant/tool/bash/ProcessTreeManager.java"
+      ],
+      "previous_validation": "PASS: all356 zk-tools unit tests. Three real process cases: active Git cancellation, natural hook completion, late natural descendant after observed Git PID exit survives cancellation while result is GIT_SCOPE_UNCONFIRMED. Test controls descendant release, so no fixed startup timing assumption; anchor survives until observed scope termination. Strict durable state remains unconfirmed after an uncertain return.",
+      "validation": "PASS in workspace_resume7 and strict_clippy_resume10 (exact logs and SHA-256 in verification_logs). The listed native assertions passed; this verifies the local Rust implementation and does not claim execution of source Java, ignored remote tests, or every source test permutation.",
+      "adaptation": "Native ExecutionSupervisor plus SQLite leases replace Java registered process scope. Active Git cancellation kills the owned group; normal Git completion does not kill surviving hooks. Unconfirmed descendants/pipes keep ownership until observed exit/EOF; invalid UTF-8 and pipe read failures cannot be authoritative complete Git output.",
+      "verification_scope": "local_native_regressions_and_strict_clippy",
+      "verified_assertions": [
+        "process_and_git_start_gates_prevent_side_effects_during_binding_failure_or_cancel",
+        "cancellation_of_running_git_terminates_the_owned_process_group",
+        "normal_git_exit_waits_for_background_hook_without_killing_it",
+        "late_natural_hook_reports_uncertain_but_survives_cancellation",
+        "invalid_utf8_git_output_is_never_authoritative_complete_output"
+      ],
+      "verification_evidence_refs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ]
+    },
+    {
+      "capability": "write-child-authority",
+      "source_revision": "053adf90",
+      "baseline_revision": "3e536438",
+      "source": "tool/agent/SubAgentExecutor.java",
+      "rust": [
+        "crates/zk-authz/src/subject.rs",
+        "crates/zk-engine/src/agent/executor.rs"
+      ],
+      "status": "implemented_verified",
+      "validation": "PASS in workspace_resume7 and strict_clippy_resume10 (exact logs and SHA-256 in verification_logs). The listed native assertions passed; this verifies the local Rust implementation and does not claim execution of source Java, ignored remote tests, or every source test permutation.",
+      "source_path_prefix": "backend/src/main/java/com/aicodeassistant/",
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/tool/agent/SubAgentExecutor.java",
+        "backend/src/main/java/com/aicodeassistant/tool/agent/AgentTool.java",
+        "backend/src/main/java/com/aicodeassistant/tool/agent/BuiltInAgentDefinition.java"
+      ],
+      "previous_validation": "PASS: managed_worktree_binding_narrows_only_its_exact_child_run (real Git authz test) and production_worktree_agent_writes_only_snapshot_and_retains_durable_delivery (real file Write with production admission/TaskRuntime/ledger). Parent tree/HEAD unchanged, child uncommitted checkout retained, result includes receipt, 100 tokens accounted, resources released. Only trusted exact child binding; no /tmp wildcard.",
+      "verification_scope": "local_native_regressions_and_strict_clippy",
+      "verified_assertions": [
+        "managed_worktree_binding_narrows_only_its_exact_child_run",
+        "production_worktree_agent_writes_only_snapshot_and_retains_durable_delivery"
+      ],
+      "verification_evidence_refs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ]
+    },
+    {
+      "capability": "auto-commit-auto-merge",
+      "source_revision": "053adf90",
+      "baseline_revision": "3e536438",
+      "source": "tool/agent/WorktreeManager.java finishWorktree",
+      "rust": [
+        "crates/zk-engine/src/agent/worktree.rs"
+      ],
+      "status": "excluded_by_user_decision",
+      "validation": "Commit and merge exposed only as explicit operations; completion/cancel/failure retain artifacts. No automatic commit/push performed",
+      "source_path_prefix": "backend/src/main/java/com/aicodeassistant/",
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/tool/agent/WorktreeManager.java"
+      ]
+    },
+    {
+      "capability": "resume-file-read-evidence",
+      "source_revision": "053adf90",
+      "baseline_revision": "3e536438",
+      "source": "tool/agent/SubAgentExecutor.java; tool/agent/AgentResumeService.java",
+      "rust": [
+        "crates/zk-tools/src/file_state.rs:326",
+        "crates/zk-engine/src/engine.rs:1456",
+        "crates/zk-engine/tests/runtime_migration.rs:393"
+      ],
+      "status": "implemented_verified",
+      "validation": "PASS in workspace_resume7 and strict_clippy_resume10 (exact logs and SHA-256 in verification_logs). The listed native assertions passed; this verifies the local Rust implementation and does not claim execution of source Java, ignored remote tests, or every source test permutation.",
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/service/FileStateCache.java",
+        "backend/src/main/java/com/aicodeassistant/tool/agent/SubAgentExecutor.java",
+        "backend/src/main/java/com/aicodeassistant/tool/agent/AgentResumeService.java"
+      ],
+      "previous_validation": "PASS: resumed_child_discards_read_authority_without_touching_other_sessions. Restored text is not permission to overwrite existing files; resumed child removes its session read hashes. Auto-resume feature remains separately disabled by existing Rust policy.",
+      "verification_scope": "local_native_regressions_and_strict_clippy",
+      "verified_assertions": [
+        "resumed_child_discards_read_authority_without_touching_other_sessions"
+      ],
+      "verification_evidence_refs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ]
+    },
+    {
+      "capability": "swarm-background-lifetime-parent-model",
+      "source_revision": "053adf90",
+      "baseline_revision": "3e536438",
+      "source": "coordinator/SwarmWorkerRunner.java; coordinator/SwarmService.java",
+      "rust": [
+        "crates/zk-server/src/api/swarm.rs:257",
+        "crates/zk-engine/src/task/runtime.rs:1729",
+        "crates/zk-db/src/session.rs",
+        "crates/zk-engine/src/coordinator/team.rs:657"
+      ],
+      "status": "existing_rust_adaptation",
+      "validation": "Read-only net-diff audit: missing worker model inherits run.model, explicit override retained; durable Task/Run/session owner and cleanup guards replace Java transient background lease. Rust Swarm default/readiness gate is unchanged; no claim of new production Swarm acceptance. Rust scratchpad is keyed by root session rather than reused teamName; merge sealing accepts only explicitly owned source paths/assets (session_merge_snapshot). No assumption that arbitrary existing team files are owned.",
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/coordinator/SwarmWorkerRunner.java",
+        "backend/src/main/java/com/aicodeassistant/coordinator/SwarmService.java",
+        "backend/src/main/java/com/aicodeassistant/coordinator/SwarmConfig.java",
+        "backend/src/main/java/com/aicodeassistant/tool/agent/BackgroundAgentTracker.java"
+      ],
+      "adaptation": "BackgroundAgentTracker terminal CAS and retained completed output map to durable Task records and immutable results. Each TaskOutput read has its own wait budget. Rust scope/readiness and auto-resume flags are preserved; enabling Worktree/Agentwrite does not imply Swarm production enablement."
+    },
+    {
+      "capability": "coordinator-notification-and-tool-truth",
+      "source_revision": "053adf90",
+      "baseline_revision": "3e536438",
+      "source": "coordinator/TaskNotificationFormatter.java; coordinator/WorkflowPhase.java",
+      "rust": [
+        "crates/zk-engine/src/task/runtime.rs:1360",
+        "crates/zk-server/src/engine_bridge.rs:260",
+        "crates/zk-engine/src/coordinator/prompt.rs:68",
+        "crates/zk-db/src/task_runtime.rs:4868"
+      ],
+      "status": "implemented_verified",
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/coordinator/TaskNotificationFormatter.java",
+        "backend/src/main/java/com/aicodeassistant/coordinator/WorkflowPhase.java",
+        "backend/src/main/java/com/aicodeassistant/coordinator/CoordinatorService.java",
+        "backend/src/main/java/com/aicodeassistant/coordinator/CoordinatorPromptBuilder.java",
+        "backend/src/main/java/com/aicodeassistant/tool/config/SendMessageTool.java"
+      ],
+      "previous_validation": "Read-only net-diff audit: structured TaskSnapshot/results/inbox replace XML notification interpolation (no agent/status XML string injection surface). Rust SendMessage and TaskStop have real ownership-checked durable implementations and prompt follows actual catalog, so Java removal of unconnected tools is not copied over working Rust capability.",
+      "validation": "PASS in workspace_resume7 and strict_clippy_resume10 (exact logs and SHA-256 in verification_logs). The listed native assertions passed; this verifies the local Rust implementation and does not claim execution of source Java, ignored remote tests, or every source test permutation.",
+      "adaptation": "SendMessageTool net diff only clarifies TaskUpdate display-output update and TaskStop cancellation; native V4 retains real durable inbox delivery and ownership checks, with advisory display output implemented incrementally (merge-capabilities TaskUpdate record). Coordinator runtime uses actual projected tool catalog; neither prompts nor background historical results grant authority.",
+      "verification_scope": "local_native_regressions_and_strict_clippy",
+      "verified_assertions": [
+        "coordinator_prompt_contains_no_retired_contract_vocabulary",
+        "examples_are_hidden_when_the_corresponding_tool_is_unavailable",
+        "structured_examples_match_authoritative_v4_tool_schemas",
+        "display_output_is_owned_and_mutable_after_terminal_without_rewriting_results"
+      ],
+      "verification_evidence_refs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ]
+    },
+    {
+      "capability": "run-usage-authority",
+      "source_revision": "053adf90",
+      "baseline_revision": "3e536438",
+      "source": "config/database/V027_AddRunUsageSnapshot.java; run/RunControlService.java",
+      "rust": [
+        "crates/zk-db/src/runtime_ledger.rs:2330",
+        "crates/zk-db/src/runtime_ledger.rs:2654",
+        "crates/zk-db/src/task_diagnostic.rs:676",
+        "crates/zk-db/src/task_budget.rs:380",
+        "crates/zk-server/src/engine_bridge.rs:1066"
+      ],
+      "status": "existing_rust_adaptation",
+      "validation": "Rust per-physical-call llm_calls and atomic run_envelopes totals/usage_complete plus ordered events are authority; unknown usage is never valid zero and blocks budgeted continuation. TaskSnapshot exposes complete flag alongside costs/tokens. Production child acceptance checks all five calls and run usage_complete. No copy of weaker independently updated Java snapshot counter.",
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/run/RunControlService.java"
+      ]
+    },
+    {
+      "capability": "run-termination-persistence-failure-policy",
+      "source_revision": "053adf90",
+      "baseline_revision": "3e536438",
+      "source": "run/RunTerminationCoordinator.java",
+      "rust": [
+        "crates/zk-engine/src/task/cancellation.rs",
+        "crates/zk-engine/src/task/runtime.rs",
+        "crates/zk-engine/src/engine.rs",
+        "crates/zk-server/src/run_termination.rs"
+      ],
+      "status": "implemented_verified",
+      "validation": "User explicitly approved best-effort local stop after cancellation storage failure. Run-scoped admission fence and cancellation token stop the owned Run/attached subtree immediately; durable intent and terminal classification reconcile under retained ownership. No fake durable cancellation or cleanup confirmation. Targeted engine cancellation tests 38 PASS, runtime_migration cancellation 13 PASS, server run_termination 5 PASS including real SQLite-trigger failure. See full-alignment-runtime.md for exact scope and later changes; full current-tree release gates remain pending.",
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/run/RunTerminationCoordinator.java"
+      ],
+      "verification_scope": "targeted_native_fault_injection; current-tree full release gates pending",
+      "current_verification_logs": [
+        {
+          "path": "/tmp/zk-runtime-cancellation-alignment-tests.txt",
+          "sha256": "b41173385dc7a93f2b471dabef43312fc58cdda87ab933f505ff98b8c1cb8aa4"
+        },
+        {
+          "path": "/tmp/zk-runtime-migration-cancel-tests.txt",
+          "sha256": "8ef88294937051f24512939acb7ba568a8548a2a0cde9abd8fd6bbf64d857bd5"
+        },
+        {
+          "path": "/tmp/zk-query-runtime-tests.txt",
+          "sha256": "9081980dd89af0e40e9fda8ac2cefcbea056e1751779ac0776bdc3be02f5193e"
+        }
+      ]
+    },
+    {
+      "capability": "shell-private-initialization-and-unknown-termination",
+      "source_revision": "053adf90",
+      "baseline_revision": "3e536438",
+      "source": "tool/bash/ShellStateManager.java; tool/impl/BashTool.java (7d14cfc5)",
+      "rust": [
+        "crates/zk-tools/src/bash/shell_state.rs:90",
+        "crates/zk-tools/src/bash.rs:203",
+        "crates/zk-tools/src/process.rs:84"
+      ],
+      "status": "implemented_verified",
+      "validation": "PASS in workspace_resume7 and strict_clippy_resume10 (exact logs and SHA-256 in verification_logs). The listed native assertions passed; this verifies the local Rust implementation and does not claim execution of source Java, ignored remote tests, or every source test permutation.",
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/tool/bash/ShellStateManager.java",
+        "backend/src/main/java/com/aicodeassistant/tool/impl/BashTool.java"
+      ],
+      "previous_validation": "PASS: all356 zk-tools unit tests, including private_wrapper_ignores_tmpdir_and_escapes_quotes, wrapper_initialization_failure_never_executes_user_command, unconfirmed_scope_is_never_a_success_or_retryable_result. Both mktemp files private; early trap; quoted CWD; mktemp/cat errors fail closed; unknown effects use PROCESS_TERMINATION_UNCONFIRMED/NEVER/UNKNOWN.",
+      "verification_scope": "local_native_regressions_and_strict_clippy",
+      "verified_assertions": [
+        "private_wrapper_ignores_tmpdir_and_escapes_quotes",
+        "wrapper_initialization_failure_never_executes_user_command",
+        "unconfirmed_scope_is_never_a_success_or_retryable_result"
+      ],
+      "verification_evidence_refs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ]
+    },
+    {
+      "capability": "plan-panel-permission-separation",
+      "source_revision": "053adf90",
+      "baseline_revision": "3e536438",
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/command/impl/PlanCommand.java",
+        "backend/src/main/java/com/aicodeassistant/tool/impl/EnterPlanModeTool.java",
+        "backend/src/main/java/com/aicodeassistant/tool/impl/ExitPlanModeTool.java"
+      ],
+      "rust": [
+        "crates/zk-server/src/command/builtin/plan.rs",
+        "crates/zk-server/tests/skill_ws.rs",
+        "crates/zk-tools/src/plan_mode.rs"
+      ],
+      "status": "implemented_verified",
+      "validation": "PASS in workspace_resume7 and strict_clippy_resume10 (exact logs and SHA-256 in verification_logs). The listed native assertions passed; this verifies the local Rust implementation and does not claim execution of source Java, ignored remote tests, or every source test permutation.",
+      "previous_validation": "Plan panel command emits session-scoped plan_update and accurate panel-only text. Native EnterPlanMode/ExitPlanMode retain real permission switching; Exit restores DEFAULT. No unimplemented plan-file or approval promise. Corrected WS isolation fixture awaits final run.",
+      "verification_scope": "local_native_regressions_and_strict_clippy",
+      "verified_assertions": [
+        "plan_panel_events_are_session_scoped_and_do_not_change_permissions",
+        "enter_plan_mode_returns_plan_metadata",
+        "exit_plan_mode_returns_default_metadata"
+      ],
+      "verification_evidence_refs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ]
+    },
+    {
+      "capability": "optional-fast-route",
+      "source_revision": "053adf90",
+      "baseline_revision": "3e536438",
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/llm/LlmProviderRegistry.java"
+      ],
+      "rust": [
+        "crates/zk-server/src/engine_bridge.rs",
+        ".env.example"
+      ],
+      "status": "implemented_verified",
+      "adaptation": "Optional ZK_FAST_MODEL (LLM_FAST_MODEL compatibility alias) applies only when existing explicit ZK_LIGHTWEIGHT_MODEL is absent. Invalid/unconfigured fast route retains original native auxiliary default; no user preference overwritten.",
+      "validation": "PASS in workspace_resume7 and strict_clippy_resume10 (exact logs and SHA-256 in verification_logs). The listed native assertions passed; this verifies the local Rust implementation and does not claim execution of source Java, ignored remote tests, or every source test permutation.",
+      "previous_validation": "optional_fast_route_preserves_explicit_auxiliary_and_unconfigured_defaults added; latest unified gate pending.",
+      "verification_scope": "local_native_regressions_and_strict_clippy",
+      "verified_assertions": [
+        "optional_fast_route_preserves_explicit_auxiliary_and_unconfigured_defaults"
+      ],
+      "verification_evidence_refs": [
+        "workspace_resume7",
+        "strict_clippy_resume10"
+      ]
+    }
+  ],
+  "verification": {
+    "engine": "PASS: 554 unit, 53 engine_flow, 12 runtime_migration and 1 image_roundtrip tests in workspace_resume7.",
+    "llm": "PASS: 203 unit, 14 SSE, 4 provider_routing_wire, 1 summary_wire and 2 doc tests in workspace_resume7. Four credentialed provider tests remain ignored.",
+    "authz": "PASS: exact managed-child binding and execution gateway architecture tests in workspace_resume7.",
+    "git": "PASS: actual Git Worktree snapshot, explicit delivery/conflict/Unicode/history/submodule guards, start gates and hook lifecycle regressions in workspace_resume7.",
+    "server": "PASS: 9 production_runtime_roundtrip tests; native browser journey remains ignored in this workspace run and requires separately recorded execution.",
+    "strict_clippy": "PASS: strict_clippy_resume10, all targets/features with warnings denied.",
+    "tools": "PASS: 368 unit tests in workspace_resume7; nested child-process fixture is counted only within its parent harness.",
+    "keys": "PASS: credential cooldown dedup and server save/delete routing/paid opt-in preservation regressions.",
+    "scope_note": "Named native assertions were matched to actual passing log lines. All Java tests remain unexecuted; source all-assertions coverage is not inferred. Full release readiness remains governed by the separate release gate ledger.",
+    "latest_revision": "PASS for the local Rust workspace and strict Clippy evidence referenced in verification_logs. The eight ignored tests are not included in passed totals; independent future native browser verification is outside these logs.",
+    "source_test_audit": "41 source test paths recorded in runtime-backend-test-audit.json with diff hashes, adaptations and native assertions; live remote semantic evaluation is not claimed."
+  },
+  "verification_logs": {
+    "workspace_resume7": {
+      "logPath": "/tmp/zk-workspace-tests-resume7.txt",
+      "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7",
+      "scope": "Complete Cargo workspace with all features",
+      "status": "passed",
+      "topLevelHarnesses": 106,
+      "passed": 2852,
+      "failed": 0,
+      "ignored": 8,
+      "countingMethod": "Take the final result per Cargo Running/Doc-tests header; do not count the nested 1-test process fixture again.",
+      "ignoredTests": [
+        "dashscope_live ... ignored, requires real LLM_PROVIDER_DASHSCOPE_API_KEY",
+        "dashscope_token_plan_live ... ignored, requires real LLM_PROVIDER_DASHSCOPE_TOKEN_PLAN_API_KEY",
+        "deepseek_live ... ignored, requires real LLM_PROVIDER_DEEPSEEK_API_KEY",
+        "moonshot_kimi_live ... ignored, requires real LLM_PROVIDER_MOONSHOT_API_KEY",
+        "api::swarm::tests::real_router_exposes_closed_gate_and_shared_swarm_state ... ignored, legacy Swarm coordinator is retained only as a future adapter test until the unified runtime gate passes",
+        "api::swarm::tests::two_read_only_workers_dispatch_through_shared_runtime_and_persist_tasks ... ignored, legacy Swarm coordinator is retained only as a future adapter test until the unified runtime gate passes",
+        "mcp_search::tests::dashscope_web_search_live ... ignored, requires a real DashScope key and makes one bounded network search",
+        "real_browser_and_http_journeys_archive_evidence_and_release_owned_resources ... ignored, requires the synchronized native Python/Chromium environment; runs in source-bootstrap CI"
+      ]
+    },
+    "strict_clippy_resume10": {
+      "logPath": "/tmp/zk-workspace-clippy-resume10.txt",
+      "sha256": "d2c539975b17f1983e2c2f9465869204726adf8cf656244c3e35b4ca27489d0c",
+      "scope": "Workspace strict Clippy across all targets and features, warnings denied",
+      "status": "passed"
+    }
+  }
+}

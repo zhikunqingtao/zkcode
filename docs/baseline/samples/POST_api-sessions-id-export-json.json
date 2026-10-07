@@ -5,7 +5,8 @@
     "status_code": 200,
     "content_type": "application/json",
     "sampled_at": "2026-08-15T19:05+08:00",
-    "note": "Content-Disposition attachment expected"
+    "note": "Content-Disposition attachment expected",
+    "migrationAdaptation": "Added typed session purpose for local MCP/chat separation in 2026-10 migration; this field was not in the historical capture."
   },
   "response": {
     "sessionId": "e7ce9134-c467-4424-be96-710a2666ddad",
@@ -24,6 +25,7 @@
     "totalCostUsd": 0.0,
     "summary": null,
     "createdAt": 1786792040.564532,
-    "updatedAt": 1786792040.564532
+    "updatedAt": 1786792040.564532,
+    "purpose": "chat"
   }
 }

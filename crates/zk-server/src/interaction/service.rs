@@ -66,6 +66,8 @@ use super::runs::{self, TransitionResult};
 
 /// 未确认投递的窗口（旧 `DELIVERY_WINDOW_SECONDS`，L27）。
 pub const DELIVERY_WINDOW_SECONDS: i64 = 30;
+/// Default time to wait for the first available client, before dispatch begins.
+pub const FIRST_CLIENT_WAIT_SECONDS: i64 = 600;
 /// 单次投递的 ACK 窗口（旧 `ACK_WINDOW_SECONDS`，L28）。
 pub const ACK_WINDOW_SECONDS: i64 = 5;
 /// ACK 后的用户决策期限（旧 `DECISION_SECONDS`，L29）。
@@ -173,6 +175,7 @@ pub struct CancellationResult {
 
 /// 持久交互服务（旧 `DurableInteractionService`）。
 pub struct DurableInteractionService {
+    first_client_wait_seconds: i64,
     db: Db,
     publisher: Arc<dyn InteractionPublisher>,
     terminations: Arc<dyn RunTerminationRequest>,
@@ -203,7 +206,8 @@ impl std::fmt::Debug for DurableInteractionService {
 /// [`time::format_rfc3339_micros`] 产物，直接按 TEXT 透传（同构，无需解析）。
 /// 未知 `type` / `status` 字面量在旧源抛 `IllegalArgumentException`
 ///（`Enum.valueOf`），此处映射为 [`DbError::Invalid`]（失败关闭）。
-fn map_row(row: &Row<'_>) -> Result<InteractionRecord, rusqlite::Error> {
+fn map_row(conn: &Connection, row: &Row<'_>) -> Result<InteractionRecord, rusqlite::Error> {
+    let session: String = row.get(2)?;
     let kind: String = row.get(4)?;
     let status: String = row.get(5)?;
     let parse = |value: &str, label: &str| -> Result<(), rusqlite::Error> {
@@ -223,15 +227,30 @@ fn map_row(row: &Row<'_>) -> Result<InteractionRecord, rusqlite::Error> {
     };
     Ok(InteractionRecord {
         interaction_id: row.get(0)?,
-        correlation_key: row.get(1)?,
+        correlation_key: interaction_body(
+            conn,
+            &session,
+            row.get(1)?,
+            status,
+            "EPHEMERAL_CONTENT_UNAVAILABLE",
+        )?,
         session_id: row.get(2)?,
         run_id: row.get(3)?,
         kind,
         status,
-        prompt_json: row.get(6)?,
-        allowed_decisions_json: row.get(7)?,
-        scope_options_json: row.get(8)?,
-        response_json: row.get(9)?,
+        prompt_json: interaction_body(
+            conn,
+            &session,
+            row.get(6)?,
+            status,
+            r#"{"contentUnavailable":true}"#,
+        )?,
+        allowed_decisions_json: interaction_body(conn, &session, row.get(7)?, status, "[]")?,
+        scope_options_json: interaction_body(conn, &session, row.get(8)?, status, "[]")?,
+        response_json: row
+            .get::<_, Option<String>>(9)?
+            .map(|value| interaction_body(conn, &session, value, status, "null"))
+            .transpose()?,
         created_at: row.get(10)?,
         delivery_window_ends_at: row.get(11)?,
         first_dispatched_at: row.get(12)?,
@@ -239,13 +258,16 @@ fn map_row(row: &Row<'_>) -> Result<InteractionRecord, rusqlite::Error> {
         received_at: row.get(14)?,
         decision_deadline_at: row.get(15)?,
         decided_at: row.get(16)?,
-        terminal_reason: row.get(17)?,
+        terminal_reason: load_terminal_reason(conn, &session, row.get(17)?)?,
         source: row.get(18)?,
         child_session_id: row.get(19)?,
         delivery_generation: row.get(20)?,
         dispatch_attempts: row.get(21)?,
         last_transport_id: row.get(22)?,
-        authorization_context_json: row.get(23)?,
+        authorization_context_json: row
+            .get::<_, Option<String>>(23)?
+            .map(|value| interaction_body(conn, &session, value, status, "null"))
+            .transpose()?,
         updated_at: row.get(24)?,
         version: row.get(25)?,
     })
@@ -261,7 +283,7 @@ pub fn find_by_id_in_tx(
 ) -> Result<Option<InteractionRecord>, DbError> {
     let sql = format!("SELECT {SELECT_COLUMNS} FROM interaction_requests WHERE interaction_id=?1");
     Ok(conn
-        .query_row(&sql, params![interaction_id], map_row)
+        .query_row(&sql, params![interaction_id], |row| map_row(conn, row))
         .optional()?)
 }
 
@@ -274,11 +296,29 @@ pub fn find_by_correlation_key_in_tx(
     run_id: &str,
     correlation_key: &str,
 ) -> Result<Option<InteractionRecord>, DbError> {
+    let session = zk_db::content::run_session(conn, run_id)?;
+    if zk_db::content::session_retention(conn, &session)?
+        == zk_db::content::ContentRetention::Ephemeral
+    {
+        let mut query = conn.prepare(&format!(
+            "SELECT {SELECT_COLUMNS} FROM interaction_requests WHERE run_id=?1"
+        ))?;
+        let records = query.query_map([run_id], |row| map_row(conn, row))?;
+        for record in records {
+            let record = record?;
+            if record.correlation_key == correlation_key {
+                return Ok(Some(record));
+            }
+        }
+        return Ok(None);
+    }
     let sql = format!(
         "SELECT {SELECT_COLUMNS} FROM interaction_requests WHERE run_id=?1 AND correlation_key=?2"
     );
     Ok(conn
-        .query_row(&sql, params![run_id, correlation_key], map_row)
+        .query_row(&sql, params![run_id, correlation_key], |row| {
+            map_row(conn, row)
+        })
         .optional()?)
 }
 
@@ -295,7 +335,7 @@ pub fn pending_in_tx(
          WHERE session_id=?1 AND status='pending' ORDER BY created_at"
     );
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(params![session_id], map_row)?;
+    let rows = stmt.query_map(params![session_id], |row| map_row(conn, row))?;
     let mut out = Vec::new();
     for record in rows {
         out.push(record?);
@@ -368,6 +408,21 @@ fn is_unique_violation(error: &DbError) -> bool {
     )
 }
 
+fn clamp_run_deadline(conn: &Connection, run_id: &str, proposed: i64) -> Result<i64, DbError> {
+    Ok(conn.query_row("SELECT min(?2,COALESCE(t.deadline_at_ms,?2),COALESCE(root.deadline_at_ms,?2)) FROM run_envelopes r JOIN tasks t ON t.id=r.task_id JOIN tasks root ON root.id=t.root_task_id WHERE r.id=?1",params![run_id,proposed],|r|r.get(0)).optional()?.unwrap_or(proposed))
+}
+
+fn clamp_interaction_deadline(conn: &Connection, id: &str, proposed: i64) -> Result<i64, DbError> {
+    let run: Option<String> = conn
+        .query_row(
+            "SELECT run_id FROM interaction_requests WHERE interaction_id=?1",
+            [id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    run.map_or(Ok(proposed), |run| clamp_run_deadline(conn, &run, proposed))
+}
+
 // ══════════════════ 服务本体 ══════════════════
 
 impl DurableInteractionService {
@@ -379,6 +434,11 @@ impl DurableInteractionService {
         terminations: Arc<dyn RunTerminationRequest>,
     ) -> Self {
         Self {
+            first_client_wait_seconds: std::env::var("ZK_INTERACTION_FIRST_CLIENT_WAIT_SECONDS")
+                .ok()
+                .and_then(|s| s.parse::<i64>().ok())
+                .filter(|n| *n > 0 && *n <= 86_400)
+                .unwrap_or(FIRST_CLIENT_WAIT_SECONDS),
             db,
             publisher,
             terminations,
@@ -483,8 +543,28 @@ impl DurableInteractionService {
     /// `INTERACTION_RUN_NOT_RUNNING`；写失败 → `INTERACTION_STORE_FAILED`。
     pub async fn create_authorization(
         &self,
-        spec: AuthorizationInteractionSpec,
+        mut spec: AuthorizationInteractionSpec,
     ) -> AuthzResult<InteractionRecord> {
+        if self
+            .db
+            .session_retention(&spec.root_session_id)
+            .await
+            .map_err(|error| operation_error("INTERACTION_STORE_FAILED", error))?
+            == zk_db::content::ContentRetention::Ephemeral
+        {
+            spec.authorization_context
+                .options
+                .retain(|option| option.scope == "once");
+            spec.scope_options.clear();
+            spec.prompt.remove("rememberScopeDescription");
+            spec.prompt.insert(
+                "options".into(),
+                serde_json::to_value(&spec.authorization_context.options)
+                    .map_err(|error| operation_error("INTERACTION_PAYLOAD_INVALID", error))?,
+            );
+            spec.prompt
+                .insert("ephemeralOnceOnly".into(), Value::Bool(true));
+        }
         if spec.authorization_context.protocol_version != PROTOCOL_VERSION {
             return Err(operation_error(
                 "PERMISSION_PROTOCOL_MISMATCH",
@@ -557,7 +637,7 @@ impl DurableInteractionService {
         // 且不可能漏归还。
         let now_millis = time::now_millis();
         let now = time::format_rfc3339_micros(now_millis);
-        let deadline = time::format_rfc3339_micros(now_millis + DELIVERY_WINDOW_SECONDS * 1000);
+        let proposed_deadline = now_millis + self.first_client_wait_seconds * 1000;
         let id = uuid::Uuid::new_v4().to_string();
         // 旧源 L104-121：序列化失败 → INTERACTION_PAYLOAD_INVALID（先归还配额）。
         // serde_json 对 Map/Vec/struct 序列化不会失败，此分支静态不可达，但保留
@@ -589,6 +669,15 @@ impl DurableInteractionService {
             self.db
                 .with_writer(move |conn| {
                     let tx = conn.transaction()?;
+                    if find_by_correlation_key_in_tx(&tx,&run_id,&correlation_key)?.is_some() {
+                        return Err(DbError::Conflict("INTERACTION_CORRELATION_EXISTS".into()));
+                    }
+                    let correlation_key=zk_db::content::store_text(&tx,&session_id,&correlation_key)?;
+                    let prompt_json=zk_db::content::store_text(&tx,&session_id,&prompt_json)?;
+                    let decisions_json=zk_db::content::store_text(&tx,&session_id,&decisions_json)?;
+                    let scopes_json=zk_db::content::store_text(&tx,&session_id,&scopes_json)?;
+                    let authorization_json=zk_db::content::store_optional(&tx,&session_id,authorization_json.as_deref())?;
+                    let deadline = time::format_rfc3339_micros(clamp_run_deadline(&tx, &run_id, proposed_deadline)?);
                     let waiting = ensure_run_waiting_in_current_write(&tx, &run_id, &kind_db)?;
                     if waiting != TransitionResult::Applied {
                         return Ok(Err(operation_error(
@@ -652,7 +741,6 @@ impl DurableInteractionService {
                     }
                     tracing::debug!(
                         run_id,
-                        correlation_key = %spec.correlation_key,
                         interaction_id = %existing.interaction_id,
                         "joined existing interaction after create failure"
                     );
@@ -803,13 +891,14 @@ impl DurableInteractionService {
         let (id, transport_id) = (id.to_owned(), transport_id.to_owned());
         self.db
             .with_writer(move |conn| {
+                let delivery_deadline = time::format_rfc3339_micros(clamp_interaction_deadline(conn, &id, now_millis + DELIVERY_WINDOW_SECONDS * 1000)?);
                 let updated = conn.execute(
-                    "UPDATE interaction_requests SET first_dispatched_at=COALESCE(first_dispatched_at,?1),\
+                    "UPDATE interaction_requests SET delivery_window_ends_at=CASE WHEN first_dispatched_at IS NULL THEN ?6 ELSE delivery_window_ends_at END,first_dispatched_at=COALESCE(first_dispatched_at,?1),\
                        delivery_ack_deadline_at=COALESCE(delivery_ack_deadline_at,?2),\
                        delivery_generation=delivery_generation+1,dispatch_attempts=dispatch_attempts+1,\
                        last_transport_id=?3,updated_at=?4 \
-                     WHERE interaction_id=?5 AND status='pending' AND received_at IS NULL",
-                    params![now, ack_deadline, transport_id, now, id],
+                     WHERE interaction_id=?5 AND status='pending' AND received_at IS NULL AND delivery_window_ends_at>?1",
+                    params![now, ack_deadline, transport_id, now, id, delivery_deadline],
                 )?;
                 if updated == 1 {
                     return Ok(true);
@@ -879,7 +968,7 @@ impl DurableInteractionService {
                 );
                 let mut stmt = conn.prepare(&sql)?;
                 let rows = stmt
-                    .query_map(params![now], map_row)?
+                    .query_map(params![now], |row| map_row(conn, row))?
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(rows)
             })
@@ -931,11 +1020,13 @@ impl DurableInteractionService {
         let now_millis = time::now_millis();
         let now = time::format_rfc3339_micros(now_millis);
         let decision_deadline_millis = now_millis + DECISION_SECONDS * 1000;
-        let decision_deadline = time::format_rfc3339_micros(decision_deadline_millis);
         let (id, transport_id) = (id.to_owned(), transport_id.to_owned());
         self.db
             .with_writer(move |conn| {
                 let tx = conn.transaction()?;
+                let decision_deadline_millis =
+                    clamp_interaction_deadline(&tx, &id, decision_deadline_millis)?;
+                let decision_deadline = time::format_rfc3339_micros(decision_deadline_millis);
                 let updated = tx.execute(
                     "UPDATE interaction_requests SET received_at=?1,decision_deadline_at=?2,\
                        last_transport_id=?3,updated_at=?4 \
@@ -1004,12 +1095,13 @@ impl DurableInteractionService {
             let (id, transport_id) = (id.to_owned(), transport_id.to_owned());
             self.db
                 .with_writer(move |conn| {
+                    let delivery_deadline = time::format_rfc3339_micros(clamp_interaction_deadline(conn, &id, now_millis + DELIVERY_WINDOW_SECONDS * 1000)?);
                     conn.execute(
-                        "UPDATE interaction_requests SET delivery_generation=delivery_generation+1,\
+                        "UPDATE interaction_requests SET delivery_window_ends_at=CASE WHEN first_dispatched_at IS NULL THEN ?5 ELSE delivery_window_ends_at END,first_dispatched_at=COALESCE(first_dispatched_at,?3),delivery_generation=delivery_generation+1,\
                            dispatch_attempts=dispatch_attempts+1,last_transport_id=?1,\
                            delivery_ack_deadline_at=?2,updated_at=?3 \
-                         WHERE interaction_id=?4 AND status='pending' AND received_at IS NULL",
-                        params![transport_id, ack_deadline, now, id],
+                         WHERE interaction_id=?4 AND status='pending' AND received_at IS NULL AND delivery_window_ends_at>?3",
+                        params![transport_id, ack_deadline, now, id, delivery_deadline],
                     )?;
                     Ok(())
                 })
@@ -1102,6 +1194,22 @@ impl DurableInteractionService {
                     {
                         return Ok(Ok(false));
                     }
+                    let deadline = before.decision_deadline_at.as_deref().unwrap_or(&before.delivery_window_ends_at);
+                    if time::parse_rfc3339_millis(deadline).is_some_and(|deadline| deadline <= now_millis) {
+                        return Ok(Err(operation_error("INTERACTION_EXPIRED", "The interaction deadline has passed")));
+                    }
+                    if before.kind == InteractionType::Elicitation && terminal == InteractionStatus::Answered {
+                        let prompt:Value=serde_json::from_str(&before.prompt_json)?;
+                        if let Some(multi)=prompt.get("multiSelect").and_then(Value::as_bool) {
+                            let valid=if multi {
+                                response.as_ref().and_then(Value::as_array).is_some_and(|values| {
+                                    let mut unique=std::collections::HashSet::new();
+                                    !values.is_empty() && values.len()<=16 && values.iter().all(|v|v.as_str().is_some_and(|s| !s.trim().is_empty() && s.len()<=8192 && unique.insert(s)))
+                                })
+                            } else {response.as_ref().and_then(Value::as_str).is_some_and(|s|!s.trim().is_empty() && s.len()<=32768)};
+                            if !valid {return Ok(Err(operation_error("INTERACTION_RESPONSE_INVALID", "Answer does not match the question's selection mode")));}
+                        }
+                    }
                     let mut authorization: Option<AuthorizationInteractionContext> = None;
                     let mut permission_response = Map::new();
                     if before.kind == InteractionType::Permission {
@@ -1116,6 +1224,9 @@ impl DurableInteractionService {
                                 )));
                             }
                         };
+                        if parsed.get("remember")==Some(&Value::Bool(true)) && zk_db::content::session_retention(&tx,&before.session_id)?==zk_db::content::ContentRetention::Ephemeral {
+                            return Ok(Err(operation_error("EPHEMERAL_OPERATION_UNSUPPORTED","Temporary conversations support one-time permission only")));
+                        }
                         let context = match decode_authorization_context(&before) {
                             Ok(context) => context,
                             Err(rejected) => return Ok(Err(rejected)),
@@ -1127,6 +1238,9 @@ impl DurableInteractionService {
                         permission_response = parsed;
                         authorization = Some(context);
                     }
+                    // The answer and its permission context stay in the same content scope.
+                    let response_json=zk_db::content::store_optional(&tx,&before.session_id,response_json.as_deref())?;
+                    let reason=zk_db::content::store_diagnostic(&tx,&before.session_id,reason.as_deref())?;
                     // 旧源 L365-370：CAS —— 只有仍 pending 且版本相符才落决策。
                     let updated = tx.execute(
                         "UPDATE interaction_requests SET status=?1,response_json=?2,decided_at=?3,\
@@ -1416,9 +1530,12 @@ impl DurableInteractionService {
                 .with_writer(move |conn| {
                     let tx = conn.transaction()?;
                     let updated = tx.execute(
-                        "UPDATE interaction_requests SET status=?1,terminal_reason=?2,decided_at=?3,\
+                        "UPDATE interaction_requests SET status=?1,terminal_reason=CASE \
+                           WHEN ?1='undeliverable' AND first_dispatched_at IS NULL THEN 'delivery_not_dispatched' ELSE ?2 END,decided_at=?3,\
                            updated_at=?4,version=version+1 \
-                         WHERE interaction_id=?5 AND status='pending'",
+                         WHERE interaction_id=?5 AND status='pending' AND \
+                           ((?1='undeliverable' AND received_at IS NULL AND delivery_window_ends_at<=?3) OR \
+                            (?1='expired' AND received_at IS NOT NULL AND decision_deadline_at<=?3))",
                         params![status_db, reason, now, now, id],
                     )?;
                     if updated == 1
@@ -1539,6 +1656,9 @@ impl DurableInteractionService {
                         .collect::<Result<Vec<String>, _>>()?
                 };
                 if !ids.is_empty() {
+                    let session = zk_db::content::run_session(&tx, &run_id_owned)?;
+                    let reason_owned =
+                        zk_db::content::store_diagnostic(&tx, &session, Some(&reason_owned))?;
                     let updated = tx.execute(
                         "UPDATE interaction_requests SET status='cancelled',terminal_reason=?1,\
                            decided_at=?2,updated_at=?3,version=version+1 \
@@ -1702,6 +1822,12 @@ impl DurableInteractionService {
         if status != "answered" || run_id != subject.current_run_id {
             return Err(stale());
         }
+        let session = zk_db::content::run_session(conn, &run_id)
+            .map_err(|error| invalid(&error.to_string()))?;
+        let context_json = zk_db::content::load_optional(conn, &session, context_json)
+            .map_err(|error| invalid(&error.to_string()))?;
+        let response_json = zk_db::content::load_optional(conn, &session, response_json)
+            .map_err(|error| invalid(&error.to_string()))?;
         let stored: AuthorizationInteractionContext = context_json
             .as_deref()
             .map(serde_json::from_str)
@@ -2072,4 +2198,43 @@ impl zk_authz::interaction::InteractionGateway for DurableInteractionService {
     ) -> AuthzResult<()> {
         Self::require_answered_once(conn, interaction_id, subject, descriptor, tool_use_id)
     }
+}
+
+// Terminal lifecycle/accounting remains readable when the content lease has ended.
+// The explicit placeholder never supplies an answer or authorization.
+fn interaction_body(
+    conn: &Connection,
+    session: &str,
+    value: String,
+    status: InteractionStatus,
+    unavailable: &str,
+) -> rusqlite::Result<String> {
+    if status == InteractionStatus::Pending {
+        return zk_db::content::load_row_text(conn, session, value);
+    }
+    let value =
+        zk_db::content::load_diagnostic(conn, session, Some(value))?.expect("present value");
+    Ok(if value == "EPHEMERAL_CONTENT_UNAVAILABLE" {
+        unavailable.to_owned()
+    } else {
+        value
+    })
+}
+fn load_terminal_reason(
+    conn: &Connection,
+    session: &str,
+    value: Option<String>,
+) -> rusqlite::Result<Option<String>> {
+    if matches!(
+        value.as_deref(),
+        Some(
+            "service_restart"
+                | "delivery_not_dispatched"
+                | "delivery_not_acknowledged"
+                | "decision_deadline_exceeded"
+        )
+    ) {
+        return Ok(value);
+    }
+    zk_db::content::load_diagnostic(conn, session, value)
 }

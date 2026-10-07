@@ -259,6 +259,25 @@ def doctor(root: Path, port: int, deep: bool, as_json: bool) -> int:
     ok, py_version = run([str(python), "--version"])
     checks.append(check("python", ok and semver_in_range(first_line(py_version), policy["python"]), f"{first_line(py_version)} ({python})", "./dev bootstrap"))
 
+    lsp_probe = root / "scripts/dev/lsp-toolchains.py"
+    if lsp_probe.is_file():
+        lsp_ok, lsp_output = run([str(python), str(lsp_probe), "--root", str(root)], timeout=60)
+        try:
+            lsp_result = json.loads(lsp_output)
+            checks.append(check("language-servers", lsp_ok and lsp_result.get("ok") is True,
+                                json.dumps(lsp_result.get("versions", lsp_result.get("reason"))), "./dev bootstrap"))
+        except (ValueError, TypeError):
+            checks.append(check("language-servers", False, "invalid private toolchain manifest", "./dev bootstrap"))
+
+    document_probe = root / "scripts/dev/document-tools.py"
+    if document_probe.is_file():
+        _, output = run([str(python), str(document_probe), "--json"], timeout=180)
+        try:
+            for item in json.loads(output):
+                checks.append(check("documents-" + item["name"], item["ok"], item["detail"], "./dev bootstrap"))
+        except (ValueError, TypeError, KeyError):
+            checks.append(check("document-toolchain", False, "probe failed", "./dev bootstrap"))
+
     env_path = root / ".env"
     try:
         parser = load_env_parser(root)

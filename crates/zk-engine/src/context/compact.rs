@@ -139,6 +139,22 @@ pub trait Summarizer: Send + Sync {
         let _ = execution;
         self.summarize(messages, target_tokens)
     }
+
+    /// Retained user requirements and prior summaries provide read-only correction context.
+    /// Deterministic implementations may ignore reference material.
+    fn summarize_with_reference(
+        &self,
+        messages: &[ChatMessage],
+        reference: &[ChatMessage],
+        target_tokens: u32,
+        execution: Option<&SummaryExecution>,
+    ) -> Option<String> {
+        let _ = reference;
+        match execution {
+            Some(execution) => self.summarize_scoped(messages, target_tokens, execution),
+            None => self.summarize(messages, target_tokens),
+        }
+    }
 }
 
 /// 不产出摘要的占位实现（缺省装配）。
@@ -303,7 +319,19 @@ pub fn plan_compaction(
 
 /// 是否为压缩边界消息（[`COMPACT_SUMMARY_MARKER`] 前缀的 system 消息）。
 fn is_compact_boundary(message: &ChatMessage) -> bool {
-    message.role == Role::System && message.content.starts_with(COMPACT_SUMMARY_MARKER)
+    if message
+        .metadata
+        .as_ref()
+        .is_some_and(|meta| meta["machineHistoryKind"] == "omission")
+    {
+        return false;
+    }
+    (message.role == Role::System && message.content.starts_with(COMPACT_SUMMARY_MARKER))
+        || message.metadata.as_ref().is_some_and(|meta| {
+            meta.get("machineHistory")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+        })
 }
 
 /// 执行压缩——三级降级（逐条对照旧 `CompactService.compact`）。
@@ -343,6 +371,10 @@ pub fn compact_messages(
 ///
 /// Returns [`CompactSkip`] when compaction is unnecessary or none of the
 /// bounded strategies can reduce the estimated context size.
+#[expect(
+    clippy::too_many_lines,
+    reason = "Atomic selection keeps all mandatory messages and whole tool transactions together."
+)]
 pub fn compact_messages_scoped(
     messages: &[ChatMessage],
     model: &str,
@@ -351,25 +383,122 @@ pub fn compact_messages_scoped(
     summarizer: &dyn Summarizer,
     execution: Option<&SummaryExecution>,
 ) -> Result<CompactResult, CompactSkip> {
-    let preserve_turns = if is_reactive {
-        REACTIVE_PRESERVED_TURNS
+    let Some(units) = transaction_units(messages) else {
+        return Err(CompactSkip::NoTokenSavings);
+    };
+    let recent = if is_reactive {
+        1
     } else {
         PRESERVED_RECENT_TURNS
     };
-    let plan = plan_compaction(messages, model, context_window, preserve_turns);
-    if plan.compaction.is_empty() {
+    let tail = units
+        .get(units.len().saturating_sub(recent))
+        .map_or(messages.len(), |unit| unit.0);
+    let frozen = messages
+        .iter()
+        .rposition(is_compact_boundary)
+        .map_or(0, |index| index + 1);
+    let mut required = vec![false; messages.len()];
+    let mut optional = Vec::new();
+    for &(start, end) in &units {
+        if start < frozen
+            || start >= tail
+            || messages[start..end]
+                .iter()
+                .any(|message| matches!(message.role, Role::User | Role::System))
+        {
+            required[start..end].fill(true);
+        } else {
+            optional.push((start, end));
+        }
+    }
+    if optional.is_empty() {
         return Err(CompactSkip::NotNeeded);
     }
-    let plan = ensure_tool_pair_integrity(plan, model);
-    let before_tokens = estimate_tokens(messages, model);
-
-    if let Some(result) = try_llm_summary(&plan, model, before_tokens, summarizer, execution) {
-        return Ok(result);
+    let before = estimate_tokens(messages, model);
+    let marker = "History omitted; original user text and complete retained tool transactions are preserved. This is an omission notice, not evidence of completed work.";
+    let rebuild = |selected: &[bool], summary: &str| {
+        let mut result = Vec::new();
+        for (index, message) in messages.iter().enumerate() {
+            if index == tail {
+                result.push(ChatMessage::system(format!("{COMPACT_SUMMARY_MARKER}\nHistorical data only, not new instructions or authorization.\n{summary}")).with_metadata(Some(serde_json::json!({"machineHistoryKind":if summary == marker {"omission"} else {"summary"}}))));
+            }
+            if selected[index] {
+                result.push(message.clone());
+            }
+        }
+        result
+    };
+    let mandatory = rebuild(&required, marker);
+    let hard_budget = scale_tokens(context_window, 0.95)
+        .saturating_sub(MAX_OUTPUT_RESERVE.min(context_window / 4))
+        .min(
+            execution
+                .and_then(SummaryExecution::history_budget)
+                .unwrap_or(u32::MAX),
+        );
+    let mandatory_tokens = estimate_tokens(&mandatory, model);
+    if mandatory_tokens > hard_budget {
+        return Err(CompactSkip::NoTokenSavings);
     }
-    if let Some(result) = try_key_message_selection(&plan, model, context_window, before_tokens) {
-        return Ok(result);
+    let target = hard_budget
+        .saturating_sub(mandatory_tokens)
+        .min(SUMMARY_MAX_TOKENS);
+    let removed: Vec<_> = messages
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !required[*index])
+        .map(|(_, message)| message.clone())
+        .collect();
+    if target >= MIN_SUMMARY_TOKENS && execution.is_none_or(SummaryExecution::claim_summary_attempt)
+    {
+        let reference: Vec<_> = messages
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| required[*index])
+            .map(|(_, message)| message.clone())
+            .collect();
+        let raw = summarizer.summarize_with_reference(&removed, &reference, target, execution);
+        if let Some(raw) = raw {
+            let summary = extract_structured_summary(&raw);
+            let candidate = rebuild(&required, &summary);
+            if validate_summary_quality(&summary, &removed)
+                && estimate_message_tokens(&ChatMessage::system(summary), model) <= target
+                && estimate_tokens(&candidate, model) <= hard_budget
+                && let Some(result) = finish(
+                    candidate,
+                    model,
+                    before,
+                    removed.len(),
+                    CompactLevel::LlmSummary,
+                )
+            {
+                return Ok(result);
+            }
+        }
     }
-    tail_truncation(messages, &plan, model, before_tokens)
+    let mut selected = required;
+    let soft_budget = mandatory_tokens
+        .max(scale_tokens(
+            context_window.min(before),
+            COMPACT_TARGET_RATIO,
+        ))
+        .min(hard_budget);
+    for &(start, end) in optional.iter().rev() {
+        selected[start..end].fill(true);
+        if estimate_tokens(&rebuild(&selected, marker), model) > soft_budget {
+            selected[start..end].fill(false);
+        }
+    }
+    let removed = selected.iter().filter(|keep| !**keep).count();
+    finish(
+        rebuild(&selected, marker),
+        model,
+        before,
+        removed,
+        CompactLevel::KeyMessageSelection,
+    )
+    .ok_or(CompactSkip::NoTokenSavings)
 }
 
 /// 反应式压缩——413 恢复用紧急模式（逐条对照旧
@@ -392,92 +521,52 @@ pub fn reactive_compact(
     compact_messages(messages, model, context_window, true, summarizer)
 }
 
-/// Level 1：LLM 摘要（旧 `generateLlmSummary` + `extractStructuredSummary` +
-/// `validateSummaryQuality` + `buildCompactResultWithSummary` 的合成）。
-fn try_llm_summary(
-    plan: &CompactionPlan,
-    model: &str,
-    before_tokens: u32,
-    summarizer: &dyn Summarizer,
-    execution: Option<&SummaryExecution>,
-) -> Option<CompactResult> {
-    let raw = match execution {
-        Some(execution) => {
-            summarizer.summarize_scoped(&plan.compaction, plan.target_summary_tokens, execution)
+/// A call batch and all its results are indivisible. Invalid histories are
+/// retained unchanged instead of being repaired by silently dropping results.
+fn transaction_units(messages: &[ChatMessage]) -> Option<Vec<(usize, usize)>> {
+    let mut calls = std::collections::HashMap::new();
+    let mut ends: Vec<usize> = (1..=messages.len()).collect();
+    for (index, message) in messages.iter().enumerate() {
+        for call in &message.tool_calls {
+            if call.id.trim().is_empty() || calls.insert(call.id.as_str(), index).is_some() {
+                return None;
+            }
         }
-        None => summarizer.summarize(&plan.compaction, plan.target_summary_tokens),
-    }?;
-    let summary = extract_structured_summary(&raw);
-    if !validate_summary_quality(&summary, &plan.compaction) {
-        tracing::warn!("LLM 摘要质量不足，降级到关键消息选择");
+    }
+    let mut seen = HashSet::new();
+    for (index, message) in messages
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| message.role == Role::Tool)
+    {
+        let id = message.tool_call_id.as_deref()?;
+        let start = *calls.get(id)?;
+        if start >= index
+            || !seen.insert(id)
+            || messages[start + 1..index]
+                .iter()
+                .any(|message| message.role == Role::Assistant)
+        {
+            return None;
+        }
+        ends[start] = ends[start].max(index + 1);
+    }
+    if seen.len() != calls.len() {
         return None;
     }
-    let mut candidate = plan.frozen.clone();
-    candidate.push(ChatMessage::system(format!(
-        "{COMPACT_SUMMARY_MARKER}\n{summary}"
-    )));
-    candidate.extend(plan.preserved.iter().cloned());
-    finish(
-        candidate,
-        model,
-        before_tokens,
-        plan.compaction.len(),
-        CompactLevel::LlmSummary,
-    )
-}
-
-/// Level 2：关键消息选择（旧 `compact` 的 Level 2 分支）。
-fn try_key_message_selection(
-    plan: &CompactionPlan,
-    model: &str,
-    context_window: u32,
-    before_tokens: u32,
-) -> Option<CompactResult> {
-    let token_budget = scale_tokens(context_window, COMPACT_TARGET_RATIO);
-    let selected = fallback_key_message_selection(&plan.compaction, model, token_budget);
-    if selected.is_empty() {
-        return None;
+    let mut units = Vec::new();
+    let mut start = 0;
+    while start < messages.len() {
+        let mut end = ends[start];
+        let mut index = start;
+        while index < end {
+            end = end.max(ends[index]);
+            index += 1;
+        }
+        units.push((start, end));
+        start = end;
     }
-    let mut candidate = plan.frozen.clone();
-    candidate.push(ChatMessage::system(format!(
-        "{COMPACT_SUMMARY_MARKER} 保留 {}/{} 条关键消息",
-        selected.len(),
-        plan.compaction.len()
-    )));
-    let dropped = plan.compaction.len().saturating_sub(selected.len());
-    candidate.extend(selected);
-    candidate.extend(plan.preserved.iter().cloned());
-    finish(
-        candidate,
-        model,
-        before_tokens,
-        dropped,
-        CompactLevel::KeyMessageSelection,
-    )
-}
-
-/// Level 3：尾部截断（旧 `compact` 的最后手段分支）。
-fn tail_truncation(
-    messages: &[ChatMessage],
-    plan: &CompactionPlan,
-    model: &str,
-    before_tokens: u32,
-) -> Result<CompactResult, CompactSkip> {
-    tracing::warn!("降级策略: 尾部截断——保留最近消息，丢弃最早消息");
-    let keep_count = plan
-        .preserved
-        .len()
-        .max(messages.len() / 3)
-        .min(messages.len());
-    let truncated = messages[messages.len() - keep_count..].to_vec();
-    finish(
-        truncated,
-        model,
-        before_tokens,
-        messages.len() - keep_count,
-        CompactLevel::TailTruncation,
-    )
-    .ok_or(CompactSkip::NoTokenSavings)
+    Some(units)
 }
 
 /// 候选落地：配对修复 → token 下降校验 → 成功结果（旧各级共有的收尾）。
@@ -517,51 +606,51 @@ fn finish(
 /// 结构化摘要解析（逐条对照旧 `CompactService.extractStructuredSummary`）。
 #[must_use]
 pub fn extract_structured_summary(raw: &str) -> String {
-    if raw.trim().is_empty() {
+    let raw = raw.trim();
+    let Some(body) = raw
+        .strip_prefix("<summary>")
+        .and_then(|s| s.strip_suffix("</summary>"))
+    else {
+        return String::new();
+    };
+    if body.to_ascii_lowercase().contains("<summary")
+        || body.to_ascii_lowercase().contains("</summary")
+    {
         return String::new();
     }
-    if let Some(start) = raw.find("<summary>")
-        && let Some(end) = raw.find("</summary>")
-    {
-        let body_start = start + "<summary>".len();
-        if end > body_start {
-            return raw[body_start..end].trim().to_owned();
-        }
-    }
-    if let Some(end) = raw.find("</analysis>") {
-        return raw[end + "</analysis>".len()..].trim().to_owned();
-    }
-    raw.trim().to_owned()
+    body.trim().to_owned()
 }
 
 /// 摘要质量校验（逐条对照旧 `CompactService.validateSummaryQuality`）。
 ///
-/// 长度 ≥ 100 字符；若原始消息含文件/命令类工具调用（旧
-/// `name().contains("File") || name().contains("Bash")`）则摘要必须至少有一行
-/// 同时含 `/` 与常见源码后缀，否则判定为丢失关键路径信息。
+/// Require at least 100 characters. If source text or actual tool arguments
+/// contain a path, require a path in the summary too. A tool name alone does
+/// not justify inventing a file path that was absent from the source.
 #[must_use]
 pub fn validate_summary_quality(summary: &str, original: &[ChatMessage]) -> bool {
     if summary.chars().count() < MIN_SUMMARY_CHARS {
         return false;
     }
-    let file_path_lines = summary
-        .lines()
-        .filter(|line| {
-            line.contains('/')
-                && (line.contains(".java")
-                    || line.contains(".ts")
-                    || line.contains(".py")
-                    || line.contains(".md"))
+    let has_path = |text: &str| {
+        text.split_whitespace().any(|word| {
+            let path = word
+                .trim_matches(|c: char| c == '"' || c == '\'' || c == ',' || c == ')' || c == '}');
+            (path.contains('/') || path.contains(":\\"))
+                && path.rsplit_once('.').is_some_and(|(_, extension)| {
+                    !extension.is_empty()
+                        && extension.len() <= 8
+                        && extension.chars().all(|c| c.is_ascii_alphanumeric())
+                })
         })
-        .count();
-    let has_file_ops = original.iter().any(|message| {
-        message
-            .tool_calls
-            .iter()
-            .any(|call| call.name.contains("File") || call.name.contains("Bash"))
+    };
+    let source_has_path = original.iter().any(|message| {
+        has_path(&message.content)
+            || message
+                .tool_calls
+                .iter()
+                .any(|call| has_path(&call.arguments))
     });
-    if has_file_ops && file_path_lines == 0 {
-        tracing::warn!("摘要质量不足：原始消息包含文件操作但摘要中无文件路径");
+    if source_has_path && !has_path(summary) {
         return false;
     }
     true
@@ -910,6 +999,35 @@ mod tests {
     }
 
     #[test]
+    fn local_omission_does_not_freeze_optional_history_on_later_compaction() {
+        let original = long_history(20);
+        let first = compact_messages(&original, MODEL, 4_096, false, &NoopSummarizer).unwrap();
+        let marker = first
+            .messages
+            .iter()
+            .find(|message| {
+                message
+                    .metadata
+                    .as_ref()
+                    .is_some_and(|meta| meta["machineHistoryKind"] == "omission")
+            })
+            .unwrap();
+        assert!(!super::is_compact_boundary(marker));
+        let mut next = first.messages.clone();
+        next.extend(long_history(20).into_iter().skip(1));
+        let second = compact_messages(&next, MODEL, 4_096, false, &NoopSummarizer).unwrap();
+        assert!(second.after_tokens < second.before_tokens);
+        for user in original.iter().filter(|message| message.role == Role::User) {
+            assert!(
+                second
+                    .messages
+                    .iter()
+                    .any(|message| message.role == Role::User && message.content == user.content)
+            );
+        }
+    }
+
+    #[test]
     fn compact_reports_not_needed_when_nothing_compactable() {
         // 保留区吃掉全部可动区 → 压缩区为空。
         let messages = vec![ChatMessage::user("hi"), ChatMessage::assistant("yo")];
@@ -934,7 +1052,7 @@ mod tests {
         struct Fixed;
         impl Summarizer for Fixed {
             fn summarize(&self, _messages: &[ChatMessage], _target: u32) -> Option<String> {
-                Some("summary ".repeat(20))
+                Some(format!("<summary>{}</summary>", "summary ".repeat(20)))
             }
         }
         let messages = long_history(20);
@@ -967,14 +1085,22 @@ mod tests {
     #[test]
     fn structured_summary_extraction_handles_both_envelopes() {
         assert_eq!(
-            extract_structured_summary("noise<summary> body </summary>tail"),
+            extract_structured_summary("<summary> body </summary>"),
             "body"
         );
         assert_eq!(
             extract_structured_summary("<analysis>x</analysis>\n  body  "),
-            "body"
+            ""
         );
-        assert_eq!(extract_structured_summary("  plain  "), "plain");
+        assert_eq!(extract_structured_summary("  plain  "), "");
+        assert_eq!(
+            extract_structured_summary("noise<summary>body</summary>"),
+            ""
+        );
+        assert_eq!(
+            extract_structured_summary("<summary><summary>x</summary></summary>"),
+            ""
+        );
         assert_eq!(extract_structured_summary("   "), "");
     }
 
@@ -984,8 +1110,8 @@ mod tests {
             "",
             vec![ToolCallRequest {
                 id: "t1".to_owned(),
-                name: "ReadFile".to_owned(),
-                arguments: "{}".to_owned(),
+                name: "Read".to_owned(),
+                arguments: serde_json::json!({"file_path":"src/main/java/App.java"}).to_string(),
             }],
         )];
         let long = "x".repeat(200);
@@ -1096,5 +1222,84 @@ mod tests {
             ChatMessage::assistant("done"),
         ];
         assert_eq!(repair_tool_pairs(messages.clone()), messages);
+    }
+    #[test]
+    fn mandatory_user_images_metadata_and_literal_markers_survive_compaction() {
+        let original = ChatMessage::user_with_images(
+            "[final] [collapsed] literal user text",
+            vec![zk_llm::ImageSource {
+                media_type: "image/png".into(),
+                data: Some("AQID".into()),
+                url: None,
+            }],
+        )
+        .with_metadata(Some(serde_json::json!({"steering":true})));
+        let mut history = vec![original.clone()];
+        history.extend((0..12).map(|_| ChatMessage::assistant("historical analysis ".repeat(150))));
+        history.push(ChatMessage::user("new request"));
+        let result = compact_messages(&history, MODEL, 4096, false, &NoopSummarizer).unwrap();
+        assert_eq!(
+            result
+                .messages
+                .iter()
+                .find(|m| m.content == original.content),
+            Some(&original)
+        );
+        assert!(result.messages.iter().any(|m| m.content == "new request"));
+    }
+
+    #[test]
+    fn parallel_tool_batch_is_retained_or_omitted_in_its_entirety() {
+        let mut history = vec![ChatMessage::user("original request")];
+        for index in 0..6 {
+            let a = format!("a-{index}");
+            let b = format!("b-{index}");
+            history.push(ChatMessage::assistant_tool_calls(
+                "",
+                vec![
+                    ToolCallRequest {
+                        id: a.clone(),
+                        name: "Echo".into(),
+                        arguments: "{}".into(),
+                    },
+                    ToolCallRequest {
+                        id: b.clone(),
+                        name: "Echo".into(),
+                        arguments: "{}".into(),
+                    },
+                ],
+            ));
+            history.push(ChatMessage::tool(a, "result ".repeat(500)));
+            history.push(ChatMessage::tool(b, "result ".repeat(500)));
+        }
+        let result = compact_messages(&history, MODEL, 10_000, true, &NoopSummarizer).unwrap();
+        for index in 0..6 {
+            let a = format!("a-{index}");
+            let b = format!("b-{index}");
+            let call = result
+                .messages
+                .iter()
+                .any(|m| m.tool_calls.iter().any(|c| c.id == a));
+            assert_eq!(
+                call,
+                result
+                    .messages
+                    .iter()
+                    .any(|m| m.tool_call_id.as_deref() == Some(&a))
+            );
+            assert_eq!(
+                call,
+                result
+                    .messages
+                    .iter()
+                    .any(|m| m.tool_call_id.as_deref() == Some(&b))
+            );
+        }
+        let mut invalid = history;
+        invalid.remove(2);
+        assert_eq!(
+            compact_messages(&invalid, MODEL, 10_000, true, &NoopSummarizer).unwrap_err(),
+            CompactSkip::NoTokenSavings
+        );
     }
 }

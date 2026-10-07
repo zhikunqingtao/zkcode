@@ -164,6 +164,69 @@ fn capability_body(id: &str, enabled: bool) -> String {
 // ── McpController：只读端点在空状态下的形状 ────────────────────────────────
 
 #[tokio::test]
+async fn service_catalog_loads_persisted_switch_and_exposes_no_credentials() {
+    let mut config = Config::test_config();
+    config.mcp_registry_path =
+        std::env::temp_dir().join(format!("zk-service-api-{}.json", uuid::Uuid::new_v4()));
+    let db = Db::open_in_memory().unwrap();
+    db.put_config_value("mcp_service_preferences", r#"{"weather":false}"#)
+        .await
+        .unwrap();
+    let state = AppState::new(db, config);
+    let mut definition: zk_mcp::McpCapabilityDefinition =
+        serde_json::from_str(&capability_body("weather", true)).unwrap();
+    definition.server_key = Some("weather".into());
+    state.mcp_capabilities.add_capability(definition).unwrap();
+    let mut app = build_router(state);
+    let (status, _, body) = call(&mut app, local_get("/api/mcp/services")).await;
+    assert_eq!(status, StatusCode::OK);
+    let view = json_body(&body);
+    let service = view["services"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["name"] == "weather")
+        .unwrap();
+    assert_eq!(service["enabled"], false);
+    assert_eq!(service["status"], "disabled");
+    assert_eq!(service["toolCount"], 0);
+    assert_eq!(service.as_object().unwrap().len(), 6);
+    assert!(service.get("headers").is_none());
+    assert!(service.get("url").is_none());
+
+    // Both request shapes reach the actual manager; the non-started fixture
+    // rejects a mutation rather than returning an optimistic success response.
+    for (path, payload) in [
+        (
+            "/api/mcp/services/weather",
+            Some(r#"{"enabled":true}"#.into()),
+        ),
+        ("/api/mcp/services/weather/toggle?enabled=true", None),
+    ] {
+        let (status, _, _) = call(&mut app, local_patch(path, payload)).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+    let (status, _, body) = call(
+        &mut app,
+        local_post("/api/mcp/capabilities/weather/test", None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(json_body(&body)["code"], "MCP_SERVICE_DISABLED");
+}
+
+#[tokio::test]
+async fn service_catalog_fails_closed_on_corrupt_durable_preferences() {
+    let (mut app, db) = common::app_with_db();
+    db.put_config_value("mcp_service_preferences", "not-json")
+        .await
+        .unwrap();
+    let (status, _, body) = call(&mut app, local_get("/api/mcp/services")).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(json_body(&body)["code"], "MCP_SERVICE_STORAGE_UNAVAILABLE");
+}
+
+#[tokio::test]
 async fn server_read_endpoints_report_empty_state() {
     let mut app = app_with_isolated_registry();
 

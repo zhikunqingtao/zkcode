@@ -9,12 +9,12 @@ import { useMcpStore } from '@/store/mcpStore';
 import type { McpHealthState } from '@/store/mcpStore';
 
 const statusConfig: Record<string, { color: string; label: string; pulse: boolean }> = {
-    CONNECTED:    { color: 'bg-green-500', label: '已连接', pulse: false },
-    DEGRADED:     { color: 'bg-yellow-500', label: '降级', pulse: true },
-    FAILED:       { color: 'bg-red-500', label: '已断开', pulse: false },
-    PENDING:      { color: 'bg-blue-400', label: '连接中', pulse: true },
-    NEEDS_AUTH:   { color: 'bg-orange-400', label: '需认证', pulse: false },
-    DISABLED:     { color: 'bg-gray-400', label: '已禁用', pulse: false },
+    CONNECTED:    { color: 'bg-ok', label: '已连接', pulse: false },
+    DEGRADED:     { color: 'bg-warn', label: '降级', pulse: true },
+    FAILED:       { color: 'bg-err', label: '已断开', pulse: false },
+    PENDING:      { color: 'bg-accent2', label: '连接中', pulse: true },
+    NEEDS_AUTH:   { color: 'bg-warn', label: '需认证', pulse: false },
+    DISABLED:     { color: 'bg-t3', label: '已禁用', pulse: false },
 };
 
 /** 格式化最后成功 ping 时间为相对时间 */
@@ -35,13 +35,13 @@ const McpServerItem: React.FC<{ state: McpHealthState }> = ({ state }) => {
                 <span
                     className={`w-2 h-2 rounded-full ${cfg.color} ${cfg.pulse ? 'animate-pulse' : ''}`}
                 />
-                <span className="text-xs font-medium text-gray-700 dark:text-gray-300 truncate max-w-[120px]">
+                <span className="text-[13px] font-medium text-t1 truncate max-w-[120px]">
                     {state.serverName}
                 </span>
             </div>
-            <div className="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
+            <div className="flex items-center gap-2 text-[13px] text-t2">
                 {state.consecutiveFailures > 0 && (
-                    <span className="text-red-500" title="连续失败次数">
+                    <span className="text-err" title="连续失败次数">
                         ×{state.consecutiveFailures}
                     </span>
                 )}
@@ -64,7 +64,7 @@ export const McpConnectionIndicator: React.FC = () => {
 
     return (
         <div className="flex flex-col gap-0.5 px-2 py-1">
-            <div className="text-[10px] font-semibold text-gray-400 dark:text-gray-500 uppercase tracking-wider mb-0.5">
+            <div className="text-[13px] font-semibold text-t2 uppercase tracking-wider mb-0.5">
                 MCP 服务器
             </div>
             {entries.map(state => (

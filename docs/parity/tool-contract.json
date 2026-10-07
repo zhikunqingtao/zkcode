@@ -1,23 +1,78 @@
 {
   "version": 1,
-  "frozenDefaultCount": 33,
-  "frozenDefaultSchemaSha256": "c755caa676a8ecb5ed332ba1ba9577e410ea4f0932058768a3f3dfa6b29b5f9b",
+  "frozenDefaultCount": 39,
+  "frozenDefaultSchemaSha256": "9cf070a498aea955528188ea7b15fa1fd77a706ca30cb975b3d5d316c770a95c",
   "frozenDefault": [
-    "AskUserQuestion", "Bash", "Config", "CtxInspect", "Edit", "EnterPlanMode",
-    "ExitPlanMode", "GitDiff", "GitLog", "GitStatus", "Glob", "Grep", "ListDir",
-    "ListMcpResources", "Memory", "Monitor", "NotebookEdit", "REPL", "Read",
-    "ReadMcpResource", "Skill", "Sleep", "Snip",
-    "SyntheticOutput", "TerminalCapture", "TodoWrite", "ToolSearch",
-    "VerifyJourney", "VerifyPlanExecution", "Visualization", "WebFetch", "WebSearch", "Write"
+    "AskUserQuestion",
+    "Bash",
+    "Brief",
+    "Config",
+    "CtxInspect",
+    "Edit",
+    "EnterPlanMode",
+    "ExitPlanMode",
+    "GitDiff",
+    "GitLog",
+    "GitStatus",
+    "Glob",
+    "Grep",
+    "HandoffRead",
+    "ListDir",
+    "ListMcpResources",
+    "Memory",
+    "Monitor",
+    "NotebookEdit",
+    "REPL",
+    "Read",
+    "ReadMcpResource",
+    "Skill",
+    "Sleep",
+    "Snip",
+    "SyntheticOutput",
+    "TaskGet",
+    "TaskList",
+    "TaskOutput",
+    "TaskStop",
+    "TerminalCapture",
+    "TodoWrite",
+    "ToolSearch",
+    "VerifyJourney",
+    "VerifyPlanExecution",
+    "Visualization",
+    "WebFetch",
+    "WebSearch",
+    "Write"
   ],
   "featureGates": {
-    "ZK_AGENT_ENABLED": ["Agent", "TaskCreate", "TaskGet", "TaskList", "TaskOutput", "TaskStop", "TaskUpdate", "SendMessage"],
-    "ZK_AGENT_WRITE_ENABLED": ["child:Write", "child:Edit", "child:Bash"],
-    "ZK_SHARED_WORKSPACE_ENABLED": ["Agent:isolation=sharedWorkspace"],
-    "ZK_AUTO_RESUME_SAFE_TASKS": ["runtime:safeTaskAutoResume (not executable)"],
-    "ZK_CRON_ENABLED": ["CronCreate", "CronList", "CronDelete", "runtime:CronScheduler"],
-    "ZK_WORKTREE_ENABLED": ["Worktree"],
-    "ZK_SWARM_ENABLED": ["Swarm REST and dispatch"]
+    "ZK_AGENT_ENABLED": [
+      "Agent",
+      "TaskCreate",
+      "TaskUpdate",
+      "SendMessage"
+    ],
+    "ZK_AGENT_WRITE_ENABLED": [
+      "child:Write",
+      "child:Edit",
+      "child:Bash"
+    ],
+    "ZK_SHARED_WORKSPACE_ENABLED": [
+      "Agent:isolation=sharedWorkspace"
+    ],
+    "ZK_AUTO_RESUME_SAFE_TASKS": [
+      "runtime:safeTaskAutoResume (not executable)"
+    ],
+    "ZK_CRON_ENABLED": [
+      "CronCreate",
+      "CronList",
+      "CronDelete",
+      "runtime:CronScheduler"
+    ],
+    "ZK_WORKTREE_ENABLED": [
+      "Worktree"
+    ],
+    "ZK_SWARM_ENABLED": [
+      "Swarm REST and dispatch"
+    ]
   },
   "planned": []
 }

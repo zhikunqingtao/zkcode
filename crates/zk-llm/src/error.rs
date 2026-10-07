@@ -43,6 +43,12 @@ pub enum ProviderError {
         /// reqwest 错误描述（不含 API key——见模块文档密钥安全不变量）。
         message: String,
     },
+    /// Connection establishment failed before a provider response was available.
+    #[error("provider connection error: {message}")]
+    Connect {
+        /// Transport description, without request headers or credentials.
+        message: String,
+    },
     /// 请求在完成前被协作取消。
     ///
     /// 注意：取消路径由 [`crate::provider`] 的流层静默处理（直接终止流、
@@ -50,6 +56,12 @@ pub enum ProviderError {
     /// 需要显式区分取消语义的调用方（如建立期失败诊断）。
     #[error("provider call cancelled")]
     Cancelled,
+    /// A local request validation failure before any LLM network dispatch.
+    #[error("provider preflight rejected: {message}")]
+    Preflight {
+        /// Machine-readable local validation failure.
+        message: String,
+    },
     /// SSE chunk 或响应体解析失败（致命——不重试）。
     #[error("provider parse error: {message}")]
     Parse {
@@ -65,6 +77,30 @@ pub enum ProviderError {
 }
 
 impl ProviderError {
+    /// Preserve typed connection-establishment failures for the small retry budget.
+    #[must_use]
+    pub fn from_transport(error: &reqwest::Error) -> Self {
+        let message = error.to_string();
+        if error.is_connect() {
+            Self::Connect { message }
+        } else {
+            Self::Network { message }
+        }
+    }
+
+    /// Stable public provider diagnostic; retryability remains the error's own decision.
+    #[must_use]
+    pub fn diagnostic_code(&self) -> &'static str {
+        match self {
+            Self::Http { status: 402, .. } => "PROVIDER_PAYMENT_REQUIRED",
+            Self::Http { status: 403, .. } => "PROVIDER_FORBIDDEN",
+            Self::Http { status: 429, .. } => "PROVIDER_RATE_LIMITED",
+            Self::Http { .. } => "PROVIDER_ERROR",
+            Self::Connect { .. } => "PROVIDER_UNREACHABLE",
+            _ => "query_error",
+        }
+    }
+
     /// 按旧 `handleErrorResponse` 语义从 HTTP 状态构造错误。
     ///
     /// `retryable` 规则：`status == 429 || status >= 500`；`retry_after_ms`
@@ -84,9 +120,15 @@ impl ProviderError {
     #[must_use]
     pub fn is_retryable(&self) -> bool {
         match self {
+            Self::Http {
+                status: 400..=403, ..
+            }
+            | Self::Cancelled
+            | Self::Parse { .. }
+            | Self::Config { .. }
+            | Self::Preflight { .. } => false,
             Self::Http { retryable, .. } => *retryable,
-            Self::Network { .. } => true,
-            Self::Cancelled | Self::Parse { .. } | Self::Config { .. } => false,
+            Self::Network { .. } | Self::Connect { .. } => true,
         }
     }
 }
@@ -105,6 +147,17 @@ mod tests {
         for status in [400u16, 401, 403, 404, 422] {
             let err = ProviderError::http(status, format!("HTTP {status}"), None);
             assert!(!err.is_retryable(), "status {status} should be fatal");
+        }
+        for status in [400, 401, 402, 403] {
+            assert!(
+                !ProviderError::Http {
+                    status,
+                    message: "deterministic rejection".into(),
+                    retry_after_ms: None,
+                    retryable: true,
+                }
+                .is_retryable()
+            );
         }
     }
 

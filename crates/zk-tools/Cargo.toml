@@ -29,7 +29,10 @@ tracing = { workspace = true }
 regex = { workspace = true }
 globset = { workspace = true }
 ignore = { workspace = true }
-nix = { workspace = true }
+nix = { workspace = true, features = ["fs"] }
+base64 = { workspace = true }
+encoding_rs = { workspace = true }
+image = { workspace = true, features = ["bmp"] }
 # Batch 2 P0-1（Edit 工具）：SHA-256 读后写冲突检测（对照旧
 # `FileVersionTracker.computeHash` = MessageDigest SHA-256 + 小写 hex）+
 # unified diff 生成（对照旧 java-diff-utils）。

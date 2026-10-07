@@ -123,7 +123,7 @@ impl std::fmt::Display for McpConfigScope {
 }
 
 /// MCP 服务器配置 — 定义一个 MCP 服务器的连接参数。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct McpServerConfig {
     /// 服务器名称（唯一标识）。
     pub name: String,
@@ -147,6 +147,19 @@ pub struct McpServerConfig {
     pub headers: BTreeMap<String, String>,
     /// 配置作用域。
     pub scope: McpConfigScope,
+}
+
+impl std::fmt::Debug for McpServerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpServerConfig")
+            .field("name", &self.name)
+            .field("transport", &self.transport)
+            .field("scope", &self.scope)
+            .field("argument_count", &self.args.len())
+            .field("environment_count", &self.env.len())
+            .field("header_count", &self.headers.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl McpServerConfig {

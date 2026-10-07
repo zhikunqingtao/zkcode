@@ -157,7 +157,7 @@ def test_non_loopback_hosts_are_not_inferred_to_be_local(server):
     assert cli_main._is_loopback_server(server) is False
 
 
-def test_first_local_run_without_working_dir_uses_server_default(
+def test_first_local_run_without_working_dir_registers_current_project(
     monkeypatch,
     tmp_path,
 ):
@@ -171,8 +171,8 @@ def test_first_local_run_without_working_dir_uses_server_default(
     )
 
     assert result.exit_code == 0, result.output
-    assert fake.project_calls == []
-    assert "projectId" not in fake.query_body
+    assert fake.project_calls == [("list_projects",), ("create_project", tmp_path.name, str(tmp_path))]
+    assert fake.query_body["projectId"] == "created-project"
     assert "sessionId" not in fake.query_body
     assert "workingDirectory" not in fake.query_body
 
@@ -466,7 +466,7 @@ def test_local_working_directory_cannot_be_combined_with_project_id(
     assert client_created is False
 
 
-def test_remote_server_without_local_path_uses_server_default(monkeypatch):
+def test_remote_server_without_project_is_rejected(monkeypatch):
     fake = FakeClient()
     install_client(monkeypatch, fake)
 
@@ -481,11 +481,10 @@ def test_remote_server_without_local_path_uses_server_default(monkeypatch):
         ],
     )
 
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 2, result.output
     assert fake.project_calls == []
-    assert "projectId" not in fake.query_body
-    assert "sessionId" not in fake.query_body
-    assert "workingDirectory" not in fake.query_body
+    assert fake.query_body is None
+    assert "requires --project-id" in result.output
 
 
 def test_explicit_project_skips_local_project_api_and_query_creates_session(
@@ -605,6 +604,7 @@ def test_stream_query_never_sends_working_directory(monkeypatch, tmp_path):
             "hello",
             "--server",
             "https://remote.example",
+            "--project-id", "project-1",
             "--output-format",
             "stream-json",
         ],

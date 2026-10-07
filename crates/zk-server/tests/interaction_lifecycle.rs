@@ -530,3 +530,65 @@ async fn restart_recovers_pending_interaction_and_stays_decidable() {
         "allow_once 不写授权缓存"
     );
 }
+
+#[tokio::test]
+async fn temporary_permission_offers_only_once_and_cannot_persist_a_remembered_grant() {
+    let mut fixture = Fixture::new("ephemeral-authorization").await;
+    let (session, _lease) = fixture
+        .state
+        .db
+        .create_ephemeral_session("test-model", &fixture.workspace, "DEFAULT")
+        .await
+        .unwrap();
+    let run = uuid::Uuid::new_v4().to_string();
+    let sid = session.clone();
+    let rid = run.clone();
+    fixture
+        .state
+        .db
+        .with_writer(move |conn| {
+            runs::start_in_current_write(conn, &rid, &sid, None, Some("main"), "test-model")
+        })
+        .await
+        .unwrap();
+    let admission = fixture.admission.clone();
+    let workspace = fixture.workspace.clone();
+    let input = fixture.guarded_read_input();
+    let sid = session.clone();
+    let rid = run.clone();
+    let pending = tokio::spawn(async move {
+        admission
+            .admit(AdmissionRequest {
+                session_id: &sid,
+                run_id: &rid,
+                tool_use_id: "ephemeral-read",
+                tool_name: "Read",
+                input: &input,
+                working_directory: Some(&workspace),
+            })
+            .await
+    });
+    let record = wait_for_pending(fixture.interactions(), &session).await;
+    let record = deliver_and_ack(fixture.interactions(), &record, "ephemeral-transport").await;
+    let view = DurableInteractionService::view(&record).unwrap();
+    let options = view.options.as_ref().unwrap();
+    assert!(options.iter().all(|option| option["scope"] == "once"));
+    assert_eq!(options.len(), 2);
+    let operation_hash = view.operation_hash.unwrap();
+    for (option, expected) in [
+        ("allow_session", StatusCode::BAD_REQUEST),
+        ("allow_once", StatusCode::OK),
+    ] {
+        let request=common::local_with_headers(&format!("/api/interactions/{}/decisions",record.interaction_id),Method::POST,Some(json!({"expectedVersion":record.version,"optionId":option,"operationHash":operation_hash,"deliveryGeneration":record.delivery_generation}).to_string()),&[("X-Session-Id",&session)]);
+        let (status, _, body) = common::call(&mut fixture.router, request).await;
+        assert_eq!(status, expected, "{}", common::json_body(&body));
+    }
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(3), pending)
+            .await
+            .unwrap()
+            .unwrap(),
+        Admission::Allow { .. }
+    ));
+    assert_eq!(grant_count(&fixture.state.db).await, 0);
+}

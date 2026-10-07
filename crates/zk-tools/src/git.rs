@@ -23,7 +23,7 @@ use futures::future::BoxFuture;
 use serde_json::json;
 
 use crate::input::{bool_or, failure, optional_str, optional_usize, resolve_path, truncate_chars};
-use crate::process::{ProcessOutcome, run_program};
+use crate::process::{ProcessOutcome, run_git_program};
 use crate::tool::{Tool, ToolContext, ToolOutput};
 
 /// Git 命令超时（旧 `GitTool.getMaxExecutionTimeMs() = 300_000`）。
@@ -68,7 +68,7 @@ impl Tool for GitDiffTool {
 
     fn description(&self) -> &'static str {
         "Show git changes: working tree by default, staged changes with staged=true, \
-         or the diff between two refs when ref1/ref2 are given."
+         or the diff between two refs when ref1/ref2 are given. Includes exact new/old changed-line locations as advisory metadata; it does not prove tests passed."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -176,7 +176,14 @@ impl Tool for GitStatusTool {
 
 /// `git diff` argv 组装（ref 区间 / 暂存区 / 工作区三态 + 路径限定）。
 fn diff_args(input: &serde_json::Value) -> Result<Vec<String>, ToolOutput> {
-    let mut args = vec!["diff".to_owned()];
+    let mut args = vec![
+        "diff".to_owned(),
+        "--no-color".into(),
+        "--no-ext-diff".into(),
+        "--no-textconv".into(),
+        "--src-prefix=a/".into(),
+        "--dst-prefix=b/".into(),
+    ];
     if bool_or(input, "stat", false) {
         args.push("--stat".to_owned());
     }
@@ -252,7 +259,7 @@ async fn invoke(args: Vec<String>, input: serde_json::Value, ctx: ToolContext) -
             format!("Not a directory: {}", repo.display()),
         );
     }
-    match run_program("git", &args, &repo, GIT_TIMEOUT, &ctx).await {
+    match run_git_program(&args, &repo, GIT_TIMEOUT, &ctx).await {
         Ok(outcome) => finish(&args, &repo, outcome),
         Err(error) => failure("GIT_SPAWN_FAILED", format!("git: {error}")),
     }
@@ -274,6 +281,16 @@ fn finish(args: &[String], repo: &Path, outcome: ProcessOutcome) -> ToolOutput {
             format!("exit {}: {}", outcome.exit_code, detail.trim()),
         );
     }
+    let locations = if args.first().is_some_and(|arg| arg == "diff")
+        && !args.iter().any(|arg| arg == "--stat")
+    {
+        Some(crate::git_changes::parse(
+            &outcome.stdout,
+            !outcome.truncated,
+        ))
+    } else {
+        None
+    };
     let (mut body, char_truncated) = truncate_chars(outcome.stdout, MAX_GIT_OUTPUT_CHARS);
     let truncated = char_truncated || outcome.truncated;
     if truncated {
@@ -289,6 +306,7 @@ fn finish(args: &[String], repo: &Path, outcome: ProcessOutcome) -> ToolOutput {
             "repoPath": repo.display().to_string(),
             "argv": args,
             "truncated": truncated,
+            "changedLocations": locations,
         }
     }));
     output
@@ -320,18 +338,29 @@ mod tests {
 
     #[test]
     fn diff_args_cover_three_modes() {
-        assert_eq!(diff_args(&json!({})).expect("args"), ["diff"]);
+        let base = diff_args(&json!({})).expect("args");
         assert_eq!(
-            diff_args(&json!({ "staged": true })).expect("args"),
-            ["diff", "--cached"]
+            base,
+            [
+                "diff",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--src-prefix=a/",
+                "--dst-prefix=b/"
+            ]
         );
         assert_eq!(
-            diff_args(&json!({ "ref1": "abc", "stat": true })).expect("args"),
-            ["diff", "--stat", "abc", "HEAD"]
+            diff_args(&json!({ "staged": true })).expect("args")[6..],
+            ["--cached"]
         );
         assert_eq!(
-            diff_args(&json!({ "file_path": "src/lib.rs" })).expect("args"),
-            ["diff", "--", "src/lib.rs"]
+            diff_args(&json!({ "ref1": "abc", "stat": true })).expect("args")[6..],
+            ["--stat", "abc", "HEAD"]
+        );
+        assert_eq!(
+            diff_args(&json!({ "file_path": "src/lib.rs" })).expect("args")[6..],
+            ["--", "src/lib.rs"]
         );
     }
 
@@ -393,5 +422,50 @@ mod tests {
             "{}",
             output.content
         );
+    }
+
+    #[tokio::test]
+    async fn actual_git_patch_locations_match_staged_and_worktree_without_external_diff() {
+        let dir = std::env::temp_dir().join(format!("zk-git-lines-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for args in [
+            vec!["init", "--quiet"],
+            vec!["config", "diff.external", "touch side-effect.txt"],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(&dir)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let name = "中 file.py";
+        std::fs::write(dir.join(name), "def run():\n    return 1\n").unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["add", "--", name])
+                .current_dir(&dir)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let staged = GitDiffTool.execute(json!({"staged":true}), ctx(&dir)).await;
+        assert!(!staged.is_error, "{}", staged.content);
+        let changed = &staged.metadata.as_ref().unwrap()["structuredResult"]["changedLocations"];
+        assert_eq!(changed["complete"], true);
+        assert_eq!(changed["files"][0]["filePath"], name);
+        assert_eq!(changed["files"][0]["changedLines"], json!([1, 2]));
+        std::fs::write(dir.join(name), "def run():\n    return 2\n\n").unwrap();
+        let unstaged = GitDiffTool.execute(json!({}), ctx(&dir)).await;
+        assert!(!unstaged.is_error, "{}", unstaged.content);
+        let changed = &unstaged.metadata.as_ref().unwrap()["structuredResult"]["changedLocations"];
+        assert_eq!(changed["complete"], true);
+        assert_eq!(changed["files"][0]["changedLines"], json!([2, 3]));
+        assert_eq!(changed["files"][0]["removedLines"], json!([2]));
+        assert_eq!(changed["isVerificationEvidence"], false);
+        assert!(!dir.join("side-effect.txt").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

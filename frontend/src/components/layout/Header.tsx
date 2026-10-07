@@ -1,21 +1,46 @@
+import { SessionTitle } from './SessionTitle';
+import { useMessageStore } from '@/store/messageStore';
+import { BrandLogo } from '@/components/ui/BrandLogo';
+import { GlassMaterial } from '@/components/theme/GlassMaterial';
 /**
  * Header — 顶部导航栏组件
  * SPEC: §8.6.1
  *
- * 包含: Logo, SessionTitle, ModelSelector, CostIndicator, SettingsButton
+ * 包含: Logo, SessionTitle, SessionStatus, Metrics(Tokens/Cost), ThemeSwitch, NewSession, Settings
+ * （会话状态与用量指标自底部状态栏右簇上移；连接状态由 SessionTitle 副行呈现，不再重复）
  */
 
-import { useCallback, useEffect } from 'react';
-import { Settings, Plus, Menu, Bot, DollarSign, Sun, Moon, Sparkles } from 'lucide-react';
+import { useEffect } from 'react';
+import { Menu, Sun, Moon, Sparkles, Rocket, Flower2, Landmark, Candy, Keyboard, ChevronDown, Coins, Loader2, Flag } from 'lucide-react';
 import { useSessionStore } from '@/store/sessionStore';
 import { useCostStore } from '@/store/costStore';
 import { useDialogStore } from '@/store/dialogStore';
-import { useConfigStore } from '@/store/configStore';
+import { defaultInkHavocFx, normalizeThemeMode, useConfigStore } from '@/store/configStore';
 import { useModelStore } from '@/store/modelStore';
-import { sendSetModel } from '@/api/stompClient';
-import { dispatchNewAuthorizedSessionRequest } from '@/services/authorizedSession';
-import { useWorkbenchViewStore } from '@/store/workbenchViewStore';
-import { WorkbenchViewSwitch } from '@/components/workbench/WorkbenchViewSwitch';
+import { useBridgeStore } from '@/store/bridgeStore';
+import { useAppUiStore } from '@/store/appUiStore';
+import { clearSessionSelection } from '@/services/sessionActivation';
+import { McpIcon } from '@/components/mcp/McpIcon';
+import { MemoryIcon } from '@/components/memory/MemoryIcon';
+import { SkillIcon } from '@/components/skills/SkillIcon';
+import { SessionStatusCapsule } from '@/components/status/SessionStatusCapsule';
+import { DriftSyncBadge } from '@/components/theme/DriftSyncBadge';
+
+/** §7.4 头部按钮共性：hover/active/焦点环（ring-accent2-ring） */
+const HEADER_BUTTON_CLASS =
+    'px-2 h-7 items-center justify-center max-md:min-h-11 max-md:min-w-11 rounded-[10px] hover:bg-hover2 hover:text-t1 active:scale-95 active:shadow-pressed transition-interactive duration-fast text-t2 ' +
+    'focus-visible:outline-hidden focus-visible:ring-[3px] focus-visible:ring-accent2-ring';
+
+/** 会话状态展示规则（颜色/脉冲/旋转/文案/胶囊语气）已抽取至
+ *  status/sessionStatusMeta——Header 状态胶囊、输入区 SessionStatusCapsule、
+ *  SessionStatusIcon 共用同款视觉约定；此处保留再导出兼容既有引用
+ *  （Header.test、SessionStatusIcon 等）。 */
+export { getSessionStatusMeta, getSessionStatusLabel } from '@/components/status/sessionStatusMeta';
+
+/** 指标间 hairline 竖向分割（同原 StatusBar 右簇 §7.4），装饰性 */
+function MetricDivider({ className = '' }: { className?: string }) {
+    return <span aria-hidden="true" className={`w-px h-3.5 bg-hairline shrink-0 ${className}`} />;
+}
 
 interface HeaderProps {
     onMenuClick?: () => void;
@@ -23,21 +48,24 @@ interface HeaderProps {
 }
 
 export function Header({ onMenuClick, showMenuButton = false }: HeaderProps) {
-    const { sessionId, model, setModel } = useSessionStore();
-    const { sessionCost, totalCost } = useCostStore();
+    const returnHome = () => {
+        clearSessionSelection();
+        useAppUiStore.getState().setMobileNavTab(null);
+    };
+    const { sessionId, model, setModel, purpose } = useSessionStore();
+    const { sessionCost, totalCost, usage } = useCostStore();
+    const { bridgeStatus } = useBridgeStore();
     const { openDialog } = useDialogStore();
     const { theme, setTheme } = useConfigStore();
-    const workbenchEnabled = useWorkbenchViewStore(s => s.enabled);
-    const viewMode = useWorkbenchViewStore(s => s.viewMode);
-    const simpleMode = workbenchEnabled && viewMode === 'simple';
+    // 波次3② 闭关令旗：仅 ink 双主题显示（normalizeTheme 保证 fx 恒有值，瞬态默认兜底）
+    const isInkMode = theme.mode === 'ink-havoc' || theme.mode === 'ink-havoc-night';
+    const inkFx = theme.inkHavocFx ?? defaultInkHavocFx();
 
-    // 动态加载可用模型列表（统一从 modelStore 缓存读取，附带 supportsImages / maxImages 能力）
+    // 动态加载可用模型列表（统一从 modelStore 缓存读取；移动端头部展示当前模型名）
     const {
         models: availableModels,
         defaultModel,
         loaded,
-        loading: modelsLoading,
-        error: modelsError,
         fetchModels,
     } = useModelStore();
 
@@ -53,141 +81,180 @@ export function Header({ onMenuClick, showMenuButton = false }: HeaderProps) {
         }
     }, [loaded, defaultModel, model, setModel]);
 
-    // 判断当前是否为深色模式（含 system 跟随）
-    const isDark = theme.mode === 'dark' ||
-        (theme.mode === 'system' && typeof window !== 'undefined' && window.matchMedia('(prefers-color-scheme: dark)').matches);
-    const isGlass = theme.mode === 'glass';
+    const status = useSessionStore(s => s.status);
+    const sessionTitle = useMessageStore(s => {
+        const block = s.messages.find(m => m.type === 'user')?.content.find(b => b.type === 'text');
+        return block?.type === 'text' ? block.text : '任务';
+    });
+    const currentTheme = {
+        system: { label: '跟随系统', icon: Sun },
+        light: { label: '浅色', icon: Sun },
+        dark: { label: '深色', icon: Moon },
+        glass: { label: '液态玻璃', icon: Sparkles },
+        spaceship: { label: '星舰', icon: Rocket },
+        'ink-havoc': { label: '花果晨', icon: Flower2 },
+        'ink-havoc-night': { label: '灵霄夜', icon: Landmark },
+        jelly: { label: '果冻', icon: Candy },
+    }[normalizeThemeMode(theme.mode)];
+    const ThemeIcon = currentTheme.icon;
+    const currentModelName = availableModels.find(item => item.id === model)?.displayName ?? model ?? '';
+    // Compact presentation only; option labels, ids and model requests remain unchanged.
+    const compactModelName = currentModelName.replace(/\s*[（(][^）)]*[）)]\s*$/, '');
+    const streaming = bridgeStatus === 'connected' && status === 'streaming';
 
-    const toggleTheme = useCallback(() => {
-        // 循环切换: light → dark → glass → light
-        if (theme.mode === 'light') {
-            setTheme({ mode: 'dark' });
-        } else if (theme.mode === 'dark') {
-            setTheme({ mode: 'glass' });
-        } else {
-            setTheme({ mode: 'light' });
-        }
-    }, [theme.mode, setTheme]);
-
-    const handleNewSession = useCallback(() => {
-        dispatchNewAuthorizedSessionRequest();
-    }, []);
-
-    const formatCost = (cost: number) => {
-        if (cost < 0.01) return '<$0.01';
-        return `$${cost.toFixed(2)}`;
-    };
+    const mobileStatus = bridgeStatus !== 'connected'
+        ? ({ disconnected: '连接已断开', reconnecting: '连接中', error: '连接异常' }[bridgeStatus])
+        : ({ idle: '', streaming: '运行中', waiting_permission: '待审批', compacting: '压缩中' }[status]);
+    const mobileStatusTone = bridgeStatus === 'error' || bridgeStatus === 'disconnected'
+        ? 'border-errsoft bg-errsoft text-err'
+        : status === 'waiting_permission'
+            ? 'border-warnsoft bg-warnsoft text-warn'
+            : 'border-accent2-ring bg-accent2-soft text-accent2-ink';
 
     return (
-        <header className="h-14 border-b border-[var(--border)] bg-[var(--bg-secondary)] flex items-center px-2 sm:px-4 shrink-0">
+        <header className="app-header glass-surface relative h-14 border-b border-hairline bg-surface2 flex items-center px-2 md:px-4 shrink-0">
+            <GlassMaterial interactive />
+            <div className="flex md:hidden min-w-0 w-full items-center gap-3 px-1" aria-label="当前会话信息">
+                <button type="button" onClick={onMenuClick} aria-label="打开会话列表" title="打开会话列表" className="flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-[10px] text-t2 hover:bg-hover2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent2-ink"><Menu size={20} /></button>
+                <div className="min-w-0 flex-1">
+                    <div className="truncate text-sm font-medium text-t1" title={sessionTitle}>{sessionTitle}</div>
+                    <div className="mt-0.5 flex min-w-0 items-center gap-2">
+                        <span className="truncate text-[13px] text-t2" title={currentModelName}>{purpose === 'mcp' ? 'MCP 专用会话' : compactModelName || '模型加载中'}</span>
+                        {mobileStatus && (
+                            <span role="status" className={`inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2 py-0.5 text-[13px] font-medium leading-5 ${mobileStatusTone}`}>
+                                {streaming
+                                    ? <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" />
+                                    : <span className="h-1.5 w-1.5 rounded-full bg-current motion-safe:animate-pulse" aria-hidden="true" />}
+                                {mobileStatus}
+                            </span>
+                        )}
+                    </div>
+                </div>
+                <button type="button" onClick={returnHome} aria-label="返回首页" title="返回首页"
+                    className="flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-[10px] hover:bg-hover2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent2-ink">
+                    <BrandLogo className="h-8 w-8" />
+                </button>
+            </div>
             {/* Left: Menu Button (mobile) + Logo */}
-            <div className="flex items-center gap-3">
+            <div className="hidden md:flex items-center gap-3">
                 {showMenuButton && (
                     <button
                         onClick={onMenuClick}
-                        className="p-2 rounded-lg hover:bg-[var(--bg-hover)] lg:hidden"
-                        aria-label="打开侧边栏"
+                        className={`panel-control ${HEADER_BUTTON_CLASS} min-h-11 min-w-11 lg:hidden`}
+                        aria-label="打开会话列表"
                     >
-                        <Menu className="w-5 h-5 text-[var(--text-secondary)]" />
+                        <Menu className="w-5 h-5" />
                     </button>
                 )}
-                <div className="hidden sm:flex items-center gap-2">
-                    <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center">
-                        <Bot className="w-5 h-5 text-white" />
-                    </div>
-                    <span className="font-semibold text-[var(--text-primary)] hidden sm:block">
+                <button type="button" onClick={returnHome} aria-label="返回首页" title="返回首页"
+                    className="hidden md:flex min-h-11 min-w-11 items-center justify-center gap-2 rounded-[10px] hover:bg-hover2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent2-ink">
+                    <BrandLogo />
+                    <span className="font-semibold text-t1 hidden lg:block">
                         zkcode
                     </span>
-                </div>
-            </div>
-
-            {/* Center: Session Title & Model Selector */}
-            <div className="flex-1 flex items-center justify-center gap-3 min-w-0">
-                {workbenchEnabled && <WorkbenchViewSwitch />}
-                {!simpleMode && (
-                    <>
-                        <span className="text-sm text-[var(--text-secondary)] truncate max-w-[150px] hidden md:block">
-                            {sessionId ? `Session: ${sessionId.slice(0, 8)}...` : 'New Session'}
-                        </span>
-                        <select
-                            value={model || ''}
-                            onChange={(e) => {
-                                const newModel = e.target.value;
-                                if (!newModel) return;
-                                setModel(newModel);
-                                void useConfigStore.getState().saveConfig({ defaultModel: newModel });
-                                sendSetModel(newModel);
-                            }}
-                            disabled={modelsLoading || availableModels.length === 0}
-                            className="hidden sm:block px-3 py-1.5 text-sm rounded-lg border border-[var(--border)]
-                                bg-[var(--bg-primary)] text-[var(--text-primary)]
-                                focus:outline-none focus:ring-2 focus:ring-blue-500"
-                        >
-                            {availableModels.length === 0 && (
-                                <option value="">
-                                    {modelsLoading ? '模型加载中…'
-                                        : modelsError ? '模型列表加载失败' : '暂无可用模型'}
-                                </option>
-                            )}
-                            {availableModels.map(m => (
-                                <option key={m.id} value={m.id}>{m.displayName}</option>
-                            ))}
-                        </select>
-                        {modelsError && (
-                            <button
-                                type="button"
-                                onClick={() => void fetchModels()}
-                                className="hidden sm:inline-flex text-xs text-blue-500 hover:underline"
-                                aria-label="重新加载模型列表"
-                            >
-                                重试
-                            </button>
-                        )}
-                    </>
-                )}
-            </div>
-
-            {/* Right: Cost + New Session + Settings */}
-            <div className="flex items-center gap-2">
-                {/* Cost Indicator */}
-                <div className={`${simpleMode ? 'hidden' : 'hidden md:flex'} items-center gap-1 px-3 py-1.5 rounded-lg bg-[var(--bg-primary)] border border-[var(--border)]`}>
-                    <DollarSign className="w-4 h-4 text-green-500" />
-                    <span className="text-sm text-[var(--text-secondary)]">
-                        {formatCost(sessionCost)}
-                    </span>
-                    <span className="text-xs text-[var(--text-muted)]">
-                        / {formatCost(totalCost)}
-                    </span>
-                </div>
-
-                {/* Theme Toggle */}
-                <button
-                    onClick={toggleTheme}
-                    className="hidden sm:inline-flex p-2 rounded-lg hover:bg-[var(--bg-hover)] text-[var(--text-secondary)] transition-colors"
-                    title={isGlass ? '切换到浅色模式' : isDark ? '切换到液态玻璃模式' : '切换到深色模式'}
-                    aria-label={isGlass ? '切换到浅色模式' : isDark ? '切换到液态玻璃模式' : '切换到深色模式'}
-                >
-                    {isGlass ? <Sparkles className="w-5 h-5" /> : isDark ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
                 </button>
+            </div>
 
-                {/* New Session */}
+            {/* Center: Session Title */}
+            <div className="hidden md:flex flex-1 items-center justify-center gap-1.5 md:gap-3 min-w-0">
+                <SessionTitle title={sessionTitle} sessionId={sessionId} connection={bridgeStatus === 'connected' ? '已连接' : ({disconnected: '连接已断开', reconnecting: '连接中', error: '连接异常'}[bridgeStatus])} />
+            </div>
+
+            {/* Right: SessionStatus + Metrics + Theme + New Session + MCP + Shortcuts */}
+            <div className="hidden md:flex items-center gap-2">
+                {/* 会话状态 + 用量指标（自底部状态栏右簇上移；指标细节 ≥lg 展示，空间不足时让位） */}
+                <div className="flex items-center gap-2.5 pr-1 text-[13px] font-mono tabular-nums text-t3">
+                    <SessionStatusCapsule />
+                    {/* 星舰 HUD 事件特效：streaming 时呈现 DRIFT SYNCED 徽章（内部三重门控，其他主题返回 null） */}
+                    <DriftSyncBadge />
+                    <MetricDivider className="hidden lg:block" />
+                    <div className="hidden lg:flex items-center gap-2 tabular-nums">
+                        <span title="输入 Tokens">↑ {usage.inputTokens.toLocaleString()}</span>
+                        <span title="输出 Tokens">↓ {usage.outputTokens.toLocaleString()}</span>
+                        {usage.cacheReadInputTokens > 0 && (
+                            <span title="缓存读取" className="text-accent2-ink">
+                                ⚡ {usage.cacheReadInputTokens.toLocaleString()}
+                            </span>
+                        )}
+                    </div>
+                    <MetricDivider className="hidden lg:block" />
+                    <div className="hidden lg:flex items-center gap-1 tabular-nums" title="当前会话成本">
+                        <Coins className="w-3.5 h-3.5 text-t3" />
+                        <span>${sessionCost.toFixed(3)}</span>
+                    </div>
+                    <MetricDivider className="hidden lg:block" />
+                    <span className="hidden lg:block tabular-nums" title={`全局累计: $${totalCost.toFixed(3)}`}>
+                        ∑ ${totalCost.toFixed(3)}
+                    </span>
+                </div>
+
+                {/* 波次3② 闭关令旗（ink 双主题限定）：挂匾收起装饰专注书写 / 摘匾装饰回归；
+                    专注模式只改变装饰层 */}
+                {isInkMode && (
+                    <button
+                        type="button"
+                        onClick={() => setTheme({ inkHavocFx: { ...inkFx, retreat: !inkFx.retreat } })}
+                        className={`panel-control hidden md:inline-flex ${HEADER_BUTTON_CLASS}${inkFx.retreat ? ' text-accent2-ink' : ''}`}
+                        title="闭关 · 收起装饰，专注书写"
+                        aria-label="闭关 · 收起装饰，专注书写"
+                        aria-pressed={inkFx.retreat}
+                    >
+                        <Flag className="w-4 h-4" aria-hidden="true" />
+                    </button>
+                )}
+
+                {/* 显示当前主题；点击选择，不再循环切换。 */}
                 <button
-                    onClick={handleNewSession}
-                    className="p-2 rounded-lg hover:bg-[var(--bg-hover)] text-[var(--text-secondary)]"
-                    title={simpleMode ? '新建任务' : '新建会话'}
-                    aria-label={simpleMode ? '新建任务' : '新建会话'}
+                    onClick={() => openDialog('settings')}
+                    className={`panel-control hidden md:inline-flex items-center gap-1.5 border border-hairline bg-surfacev2 shadow-raised hover:shadow-raised-hover ${HEADER_BUTTON_CLASS}`}
+                    title="外观设置"
+                    aria-label="外观设置"
+                    aria-haspopup="dialog"
                 >
-                    <Plus className="w-5 h-5" />
+                    <ThemeIcon className="w-4 h-4" aria-hidden="true" />
+                    <span className="text-sm whitespace-nowrap">{currentTheme.label}</span>
+                    <ChevronDown className="w-3.5 h-3.5" aria-hidden="true" />
                 </button>
 
                 {/* Settings */}
                 <button
-                    onClick={() => openDialog('settings')}
-                    className="hidden sm:inline-flex p-2 rounded-lg hover:bg-[var(--bg-hover)] text-[var(--text-secondary)]"
-                    title="设置"
+                    onClick={() => openDialog('mcp')}
+                    className={`panel-control inline-flex ${HEADER_BUTTON_CLASS}`}
+                    title="MCP 管理"
+                    aria-label="MCP 管理"
                 >
-                    <Settings className="w-5 h-5" />
+                    <McpIcon className="h-7 w-auto" />
                 </button>
+
+                {/* Memory */}
+                <button
+                    onClick={() => openDialog('memory')}
+                    className={`panel-control inline-flex ${HEADER_BUTTON_CLASS}`}
+                    title="记忆"
+                    aria-label="记忆"
+                >
+                    <MemoryIcon className="h-7 w-auto" />
+                </button>
+
+                <button
+                    onClick={() => openDialog('skills')}
+                    className={`panel-control inline-flex ${HEADER_BUTTON_CLASS} min-h-11 min-w-11`}
+                    title="Skill 管理"
+                    aria-label="Skill 管理"
+                    aria-haspopup="dialog"
+                >
+                    <SkillIcon className="h-7 w-auto" />
+                </button>
+
+                <button
+                    onClick={() => openDialog('keybindings')}
+                    className={`panel-control hidden md:inline-flex ${HEADER_BUTTON_CLASS}`}
+                    title="快捷键帮助"
+                    aria-label="快捷键帮助"
+                >
+                    <Keyboard className="w-6 h-6" />
+                </button>
+
             </div>
         </header>
     );

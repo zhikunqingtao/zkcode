@@ -17,7 +17,11 @@ export * from './generated/taskRuntimeV4';
 // ==================== 消息类型 — 对齐 §5.1 Java sealed interface Message ====================
 
 export type Message =
-    | { type: 'user';      uuid: string; timestamp: number; content: ContentBlock[]; toolUseResult?: string }
+    | { type: 'user';      uuid: string; timestamp: number; content: ContentBlock[]; toolUseResult?: string;
+        /** 通用元数据（后端持久化并在历史/快照中原样回传）：steering=true 表示
+         *  运行中追加的干预指令，供轮次投影（store/selectors/turnProjection）
+         *  识别，不作为新一轮边界 */
+        meta?: Record<string, unknown> }
     | { type: 'assistant';  uuid: string; timestamp: number; content: ContentBlock[]; stopReason: string; usage: Usage }
     | { type: 'system';     uuid: string; timestamp: number; content: string; subtype?: string;
         errorCode?: string; retryable?: boolean;
@@ -126,6 +130,7 @@ export interface RuntimeRunSnapshot {
 }
 
 export interface RuntimeTaskSnapshot {
+    displayOutput?: string | null;
     [key: string]: unknown;
     id: string;
     sessionId: string;
@@ -147,7 +152,7 @@ export interface SessionRestoredPayload {
     bindingEpoch: number;
     protocolVersion: typeof WS_PROTOCOL_VERSION;
     messages: Message[];
-    metadata: { sessionId: string; model: string; permissionMode: string; status: string };
+    metadata: { sessionId: string; model: string; permissionMode: string; status: string; purpose?: 'chat' | 'mcp' };
     totalCount?: number;
     hasMore?: boolean;
     compactSummary?: string | null;
@@ -176,8 +181,42 @@ export interface MessageCompletePayload {
     replaceAfterMessageId?: string | null;
     committedMessages?: Message[];
 }
+export type AssistantSegmentCompletePayload = {
+    type: 'assistant_segment_complete';
+} & ({
+    /** Native v4 wire shape; identity is committed before this event is sent. */
+    messageId: string;
+    content: ContentBlock[];
+    usage?: Usage;
+    stopReason?: string;
+} | {
+    /** Already materialized segment used by local replay and adapters. */
+    message: Extract<Message, { type: 'assistant' }>;
+});
+export interface SystemMessagePayload {
+    type: 'system_message';
+    message: Extract<Message, { type: 'system' }>;
+}
 export interface PongPayload { type: 'pong'; timestamp: number }
-export interface ErrorPayload { type: 'error'; code: string; message: string; retryable: boolean }
+/**
+ * 任务边界事件 — TodoWrite 任务首次进入 in_progress 时后端持久化一条
+ * task_boundary 系统消息并通过 WS/STOMP 下发。字段名防御性兼容驼峰/下划线。
+ */
+export interface TaskBoundaryPayload {
+    type: 'task_boundary';
+    message_id?: string;
+    messageId?: string;
+    ts?: number;
+    taskId?: string;
+    task_id?: string;
+    title?: string;
+    seq?: number;
+    turnIndex?: number;
+    turn_index?: number;
+}
+/** Provider 错误码 — 与后端 error 事件契约约定的 errorCode 取值 */
+export type ProviderErrorCode = 'PROVIDER_PAYMENT_REQUIRED' | 'PROVIDER_FORBIDDEN' | 'PROVIDER_RATE_LIMITED' | 'PROVIDER_ERROR' | 'PROVIDER_UNREACHABLE';
+export interface ErrorPayload { type: 'error'; code?: string; requestId?: string; message: string; retryable?: boolean; errorCode?: ProviderErrorCode; httpStatus?: number }
 export interface CompactEventPayload { type: 'compact_event'; phase: string; usagePercent: number; currentTokens: number }
 export interface TokenWarningPayload { type: 'token_warning'; currentTokens: number; maxTokens: number; usagePercent: number; warningLevel: string }
 export interface InterruptAckPayload { type: 'interrupt_ack'; reason: string }
@@ -207,7 +246,7 @@ export interface ModelRoutedPayload {
     routedModelName: string;
     reason: string;
 }
-export interface PermissionModeChangedPayload { type: 'permission_mode_changed'; mode: string; previous?: string }
+export interface PermissionModeChangedPayload { type: 'permission_mode_changed'; mode: string; requestId?: string; previous?: string }
 export interface CommandResultPayload { type: 'command_result'; command: string; resultType: 'text' | 'jsx' | 'prompt'; output?: string; data?: Record<string, unknown> }
 export interface RewindCompletePayload { type: 'rewind_complete'; messageId: string; files: string[] }
 export interface TokenBudgetNudgePayload { type: 'token_budget_nudge'; pct: number; currentTokens: number; budgetTokens: number }
@@ -349,7 +388,11 @@ export type ServerMessagePayload =
     | ToolPermissionDeniedPayload
     | WorkflowPhaseUpdatePayload
     | InteractionUpdatedPayload
-    | InteractionTerminalPayload;
+    | InteractionTerminalPayload
+    | AssistantSegmentCompletePayload
+    | SystemMessagePayload
+    | TaskBoundaryPayload;
+
 
 /** WebSocket v4 下行消息：payload 和强制运行时信封的交叉类型。 */
 export type ServerMessage = ServerMessagePayload & RuntimeServerEnvelope;
@@ -381,11 +424,14 @@ export interface ExternalResourceResult {
 
 /** 工具调用状态 — MessageStore 内部状态 */
 export interface ToolCallState {
+    /** UI projection identity; never part of the canonical tool result. */
+    presentationMessageId?: string;
     toolUseId?: string;
     runtimePartitionKey?: string;
     toolName: string;
     input: unknown;
     status: 'preparing' | 'pending' | 'running' | 'completed' | 'error' | 'permission_needed';
+    error?: string;
     result?: ToolResult;
     progress?: string;
     progressHistory?: string[];
@@ -404,6 +450,8 @@ export interface NotificationItem {
     priority: NotificationPriority;
     timeout: number;
     createdAt: number;
+    /** §10.7-②：错误 Toast 的可执行重试动作（有则渲染"重试"主钮） */
+    onRetry?: () => void;
 }
 
 // ==================== 收件箱消息 ====================
@@ -493,6 +541,7 @@ export interface ElicitationRequest {
     version?: number;
     question: string;
     options: unknown;
+    multiSelect?: boolean;
     decisionDeadlineAt?: number;
 }
 
@@ -603,12 +652,43 @@ export interface PermissionRequest {
 
 // ==================== 配置相关 ====================
 
+/** 星舰 HUD 主题专属特效开关（仅 mode='spaceship' 时生效） */
+export interface SpaceshipFxConfig {
+    /** 电影级视觉：雷达/框架/刻度尺等装饰层 */
+    cinematic: boolean;
+    /** 事件特效：TOKEN 警告/开机自检/DRIFT 同步 */
+    eventFx: boolean;
+    /** 动效档：full 完整 / reduced 精简 / off 关闭 */
+    motion: 'full' | 'reduced' | 'off';
+}
+
+/** 大闹天宫重彩戏曲风主题专属特效开关（仅 mode='ink-havoc'/'ink-havoc-night' 时生效） */
+export interface InkHavocFxConfig {
+    /** 浓郁档：描金纹样/角标装饰层显现（html class fx-ink-rich） */
+    cinematic: boolean;
+    /** 动效档：full 完整 / reduced 精简 / off 关闭（语义复用星舰三档） */
+    motion: 'full' | 'reduced' | 'off';
+    /** 闭关模式：装饰层全部退场专注书写（html class ink-retreat；功能反馈保留） */
+    retreat: boolean;
+}
+
+/** 果冻主题专属特效开关（仅 mode='jelly' 时生效） */
+export interface JellyFxConfig {
+    /** 浓郁档：Q 弹与金箔装饰拉满（html class fx-jelly-rich）；克制档=配色+质感无弹动 */
+    cinematic: boolean;
+    /** 动效档：full 完整 / reduced 精简 / off 关闭（语义复用星舰三档） */
+    motion: 'full' | 'reduced' | 'off';
+}
+
 export interface ThemeConfig {
-    mode: 'light' | 'dark' | 'system' | 'glass';
+    mode: 'system' | 'light' | 'dark' | 'glass' | 'spaceship' | 'ink-havoc' | 'ink-havoc-night' | 'jelly';
     accentColor: string;
     fontSize?: string;
     fontFamily?: string;
     borderRadius?: string;
+    spaceshipFx?: SpaceshipFxConfig;
+    inkHavocFx?: InkHavocFxConfig;
+    jellyFx?: JellyFxConfig;
 }
 
 export interface OutputStyleDef {
@@ -636,6 +716,8 @@ export interface Command {
     description: string;
     group?: string;
     hidden?: boolean;
+    /** Canonical Skill identity; name remains the user-facing command label. */
+    skillId?: string;
 }
 
 /** 输入提交事件 — 对齐 §8.2.6a.7 SubmitEvent */
@@ -645,6 +727,13 @@ export interface SubmitEvent {
     references: Map<string, string>;
     isFastMode: boolean;
     effortLevel?: 'low' | 'medium' | 'high';
+}
+
+/** native 文件选择器返回的本地路径引用（仅路径元信息，不上传内容） */
+export interface PickedLocalFile {
+    path: string;
+    name: string;
+    size: number;
 }
 
 /** 本地附件 (含 File 对象，用于上传) */

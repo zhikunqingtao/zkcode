@@ -7,6 +7,9 @@ Complexity Analyzer — F3 代码复杂度分析服务
 
 import asyncio
 import logging
+import hashlib
+from dataclasses import dataclass
+from pathlib import Path
 import os
 import time
 from typing import Optional
@@ -42,6 +45,7 @@ class ComplexityResult(BaseModel):
     root: ComplexityNode
     stats: ComplexityStats
     cached: bool = False
+    truncated: bool = False
 
 
 # ── 风险等级映射 (radon 标准) ──
@@ -81,7 +85,7 @@ def count_loc(file_path: str) -> int:
             pass
     # 降级：简单行数统计（排除空行）
     try:
-        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+        with open(file_path, "r", encoding="utf-8") as f:
             return sum(1 for line in f if line.strip())
     except Exception:
         return 0
@@ -132,8 +136,10 @@ except ImportError:
 
 def analyze_python_file(file_path: str) -> ComplexityNode:
     """使用 radon 分析 Python 文件复杂度"""
-    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-        source = f.read()
+    with open(file_path, "r", encoding="utf-8") as f:
+        source = f.read(1024 * 1024 + 1)
+        if len(source.encode("utf-8")) > 1024 * 1024:
+            raise ValueError("Complexity source exceeds one MiB limit")
 
     loc = count_loc(file_path)
     method_children: list[ComplexityNode] = []
@@ -147,7 +153,7 @@ def analyze_python_file(file_path: str) -> ComplexityNode:
                 for block in cc_results:
                     child = ComplexityNode(
                         name=block.name,
-                        type="method" if block.is_method else ("class" if block.classname else "method"),
+                        type="class" if hasattr(block, "methods") else "method",
                         loc=block.endline - block.lineno + 1 if block.endline else 1,
                         cc=float(block.complexity),
                         mi=0.0,
@@ -156,12 +162,14 @@ def analyze_python_file(file_path: str) -> ComplexityNode:
                     method_children.append(child)
                 file_cc = sum(b.complexity for b in cc_results) / len(cc_results)
         except Exception as e:
-            logger.debug(f"radon cc_visit failed for {file_path}: {e}")
+            raise ValueError("Python complexity parser rejected source") from e
 
         try:
             mi_score = mi_visit(source, multi=True)
-        except Exception:
-            mi_score = 100.0
+        except Exception as e:
+            raise ValueError("Python maintainability parser rejected source") from e
+    elif source.strip():
+        raise RuntimeError("Python complexity analyzer is unavailable")
     else:
         mi_score = 100.0
 
@@ -225,13 +233,13 @@ def _extract_methods_ts(root_node, source: str, language: str) -> list[Complexit
     def walk(node, parent_name: Optional[str] = None):
         if node.type in class_types:
             name_node = node.child_by_field_name("name")
-            cls_name = source[name_node.start_byte:name_node.end_byte] if name_node else "<anonymous>"
+            cls_name = source.encode("utf-8")[name_node.start_byte:name_node.end_byte].decode("utf-8") if name_node else "<anonymous>"
             for child in node.children:
                 walk(child, parent_name=cls_name)
             return
         if node.type in func_types:
             name_node = node.child_by_field_name("name")
-            func_name = source[name_node.start_byte:name_node.end_byte] if name_node else "<anonymous>"
+            func_name = source.encode("utf-8")[name_node.start_byte:name_node.end_byte].decode("utf-8") if name_node else "<anonymous>"
             display = f"{parent_name}.{func_name}" if parent_name else func_name
             branches = _count_branches(node)
             cc_val = branches + 1
@@ -258,8 +266,10 @@ def analyze_ts_java_file(file_path: str, language: str) -> ComplexityNode:
     if not ts_svc.is_available():
         raise RuntimeError("tree-sitter not available")
 
-    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-        source = f.read()
+    with open(file_path, "r", encoding="utf-8") as f:
+        source = f.read(1024 * 1024 + 1)
+        if len(source.encode("utf-8")) > 1024 * 1024:
+            raise ValueError("Complexity source exceeds one MiB limit")
 
     loc = count_loc(file_path)
 
@@ -284,6 +294,8 @@ def analyze_ts_java_file(file_path: str, language: str) -> ComplexityNode:
         ln_loc = math.log(max(loc, 1))
         mi_raw = 171.0 - 5.2 * ln_loc - 0.23 * file_cc - 16.2 * ln_loc
         mi_score = max(0.0, min(100.0, mi_raw))
+    elif source.strip():
+        raise RuntimeError("Python complexity analyzer is unavailable")
     else:
         mi_score = 100.0
 
@@ -330,6 +342,61 @@ _IGNORE_DIRS = {
 _MAX_FILES = 500
 
 
+@dataclass(frozen=True)
+class ComplexityScan:
+    root: str
+    files: tuple[str, ...]
+    truncated: bool
+
+
+def complexity_files(project_root: str, target_path: Optional[str] = None,
+                     languages: Optional[list[str]] = None) -> ComplexityScan:
+    """The analyzer and its worker cache must select exactly the same files."""
+    selected = languages or list(LANG_EXTENSIONS)
+    if any(language not in LANG_EXTENSIONS for language in selected):
+        raise ValueError("Unsupported complexity language")
+    extensions = {ext for language in selected for ext in LANG_EXTENSIONS[language]}
+    root = target_path if target_path else project_root
+    if not os.path.exists(root):
+        raise FileNotFoundError("Complexity target not found")
+    # Preserve explicit-file behavior; language filtering applies to directory scans.
+    if os.path.isfile(root):
+        return ComplexityScan(root, (root,), False)
+    files: list[str] = []
+
+    def walk(path: str):
+        for entry in sorted(os.listdir(path)):
+            if entry in _IGNORE_DIRS or entry.startswith("."):
+                continue
+            full = os.path.join(path, entry)
+            if os.path.islink(full):
+                continue
+            if os.path.isdir(full):
+                yield from walk(full)
+            elif os.path.isfile(full) and os.path.splitext(entry)[1] in extensions:
+                yield full
+
+    for path in walk(root):
+        if len(files) >= _MAX_FILES:
+            return ComplexityScan(root, tuple(files), True)
+        files.append(path)
+    return ComplexityScan(root, tuple(files), False)
+
+
+def complexity_fingerprint(project_root: str, target_path: Optional[str] = None,
+                           languages: Optional[list[str]] = None) -> str:
+    """Hash selected contents, not mtime/size, within the existing killable worker."""
+    scan = complexity_files(project_root, target_path, languages)
+    digest = hashlib.sha256()
+    digest.update(b"truncated\0" if scan.truncated else b"complete\0")
+    for path in scan.files:
+        digest.update(os.fsencode(os.path.relpath(path, project_root)))
+        digest.update(b"\0")
+        with open(path, "rb") as source:
+            digest.update(hashlib.file_digest(source, "sha256").digest())
+    return digest.hexdigest()
+
+
 # ── 核心分析器 ──
 
 
@@ -338,10 +405,10 @@ class ComplexityAnalyzer:
 
     def __init__(self, languages: Optional[list[str]] = None):
         self.languages = languages or ["python", "java", "typescript", "javascript"]
-        self._allowed_exts: set[str] = set()
-        for lang in self.languages:
-            for ext in LANG_EXTENSIONS.get(lang, []):
-                self._allowed_exts.add(ext)
+        if any(language not in LANG_EXTENSIONS for language in self.languages):
+            raise ValueError("Unsupported complexity language")
+        self._files_analyzed = 0
+        self._truncated = False
 
     async def analyze(
         self,
@@ -357,12 +424,9 @@ class ComplexityAnalyzer:
                 timeout=timeout,
             )
         except asyncio.TimeoutError:
-            logger.warning(f"Complexity analysis timed out after {timeout}s for {project_root}")
-            # 返回部分结果
-            result = ComplexityResult(
-                root=ComplexityNode(name=os.path.basename(project_root), type="project"),
-                stats=ComplexityStats(analysis_time_ms=int((time.time() - start) * 1000)),
-            )
+            # A timed-out scanner is not a successful empty project. Public routes
+            # use a killable worker; direct callers also receive a truthful failure.
+            raise TimeoutError("Complexity analysis exceeded its deadline") from None
         elapsed = int((time.time() - start) * 1000)
         result.stats.analysis_time_ms = elapsed
         return result
@@ -373,57 +437,29 @@ class ComplexityAnalyzer:
         target_path: Optional[str] = None,
     ) -> ComplexityResult:
         """同步分析入口"""
-        scan_root = target_path if target_path else project_root
-        if not os.path.exists(scan_root):
-            raise FileNotFoundError(f"Path not found: {scan_root}")
-
-        root_node = self._build_tree(scan_root, project_root)
+        scan = complexity_files(project_root, target_path, self.languages)
+        self._files_analyzed = len(scan.files)
+        self._truncated = scan.truncated
+        root_node = self._build_tree(scan.root, project_root, scan.files)
         stats = self._compute_stats(root_node)
+        return ComplexityResult(root=root_node, stats=stats, truncated=self._truncated)
 
-        return ComplexityResult(root=root_node, stats=stats)
-
-    def _build_tree(self, path: str, project_root: str) -> ComplexityNode:
-        """递归构建复杂度树"""
+    def _build_tree(self, path: str, project_root: str,
+                    files: tuple[str, ...]) -> ComplexityNode:
+        """Build only from the shared selection, without a second directory walk."""
         name = os.path.basename(path) or os.path.basename(project_root)
-
-        if os.path.isfile(path):
+        if files == (path,):
             return self._analyze_file(path)
-
-        # 目录处理
+        groups: dict[str, list[str]] = {}
+        for file_path in files:
+            first = Path(os.path.relpath(file_path, path)).parts[0]
+            groups.setdefault(first, []).append(file_path)
         children: list[ComplexityNode] = []
-        file_count = 0
-        try:
-            entries = sorted(os.listdir(path))
-        except PermissionError:
-            return ComplexityNode(name=name, type="directory", loc=0, cc=0, mi=100)
-
-        for entry in entries:
-            if entry in _IGNORE_DIRS or entry.startswith("."):
-                continue
+        for entry, selected in sorted(groups.items()):
             full_path = os.path.join(path, entry)
-
-            # The route validates the canonical scan root, but nested links can
-            # still be replaced independently. Never recurse into or analyze a
-            # symbolic link from a remotely supplied workspace.
-            if os.path.islink(full_path):
-                continue
-
-            if os.path.isdir(full_path):
-                child = self._build_tree(full_path, project_root)
-                if child.loc > 0:  # 只保留有代码的目录
-                    children.append(child)
-                    file_count += self._count_files(child)
-            elif os.path.isfile(full_path):
-                ext = os.path.splitext(entry)[1]
-                if ext in self._allowed_exts:
-                    if file_count >= _MAX_FILES:
-                        logger.warning(f"File limit ({_MAX_FILES}) reached, skipping remaining files")
-                        break
-                    child = self._analyze_file(full_path)
-                    children.append(child)
-                    file_count += 1
-
-        # 聚合目录指标
+            child = self._build_tree(full_path, project_root, tuple(selected))
+            if child.type == "file" or child.loc > 0:
+                children.append(child)
         return self._aggregate_directory(name, children, path, project_root)
 
     def _analyze_file(self, file_path: str) -> ComplexityNode:
@@ -447,13 +483,8 @@ class ComplexityAnalyzer:
                 node = analyze_ts_java_file(file_path, language)
             _set_cached(file_path, node)
             return node
-        except Exception as e:
-            logger.debug(f"Failed to analyze {file_path}: {e}")
-            loc = count_loc(file_path)
-            return ComplexityNode(
-                name=os.path.basename(file_path), type="file",
-                loc=loc, file_path=file_path, language=language,
-            )
+        except Exception as error:
+            raise ValueError("Complexity file analysis failed") from error
 
     @staticmethod
     def _count_files(node: ComplexityNode) -> int:

@@ -82,23 +82,54 @@ pub struct ApiKeyRing {
 }
 
 /// 轮换环内部状态（游标 + per-key 冷却截止刻度，0 = 无冷却）。
+/// Selection policy for explicitly configured credentials.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum KeySelectionStrategy {
+    /// Rotate credentials, retaining the existing default.
+    #[default]
+    RoundRobin,
+    /// Prefer the first available credential, falling back only while it is cooling.
+    PriorityFailover,
+}
+
 struct RingInner {
+    strategy: KeySelectionStrategy,
     keys: Vec<ApiKey>,
     cursor: AtomicUsize,
     cooldown_until: Mutex<Vec<u64>>,
 }
 
 impl ApiKeyRing {
+    /// Pin independent summary retries to the configured first credential.
+    /// This does not advance the ordinary chat rotation or change its cooldown.
+    #[must_use]
+    pub(crate) fn summary_key(&self) -> Option<ApiKey> {
+        self.inner.keys.first().cloned()
+    }
+
     /// 以密钥列表构造（空白项过滤，对齐旧 `filter(k -> !k.isBlank())`）。
     #[must_use]
     pub fn new(keys: Vec<ApiKey>) -> Self {
-        let keys: Vec<ApiKey> = keys
-            .into_iter()
-            .filter(|key| !key.expose().trim().is_empty())
-            .collect();
+        Self::with_strategy(keys, KeySelectionStrategy::RoundRobin)
+    }
+
+    /// Construct a ring with an explicit selection policy.
+    #[must_use]
+    pub fn with_strategy(keys: Vec<ApiKey>, strategy: KeySelectionStrategy) -> Self {
+        // One credential owns one cooldown slot. Duplicating it must not
+        // bypass a rate limit or change the configured failover priority.
+        let mut unique = Vec::with_capacity(keys.len());
+        for key in keys {
+            let normalized = ApiKey::new(key.expose().trim());
+            if !normalized.is_empty() && !unique.contains(&normalized) {
+                unique.push(normalized);
+            }
+        }
+        let keys = unique;
         let cooldown_until = vec![0_u64; keys.len()];
         Self {
             inner: Arc::new(RingInner {
+                strategy,
                 keys,
                 cursor: AtomicUsize::new(0),
                 cooldown_until: Mutex::new(cooldown_until),
@@ -153,6 +184,13 @@ impl ApiKeyRing {
             return self.inner.keys.first().cloned();
         }
         let cooldown = self.cooldown();
+        if self.inner.strategy == KeySelectionStrategy::PriorityFailover
+            && let Some(index) = cooldown
+                .iter()
+                .position(|until| *until == 0 || now_ms >= *until)
+        {
+            return self.inner.keys.get(index).cloned();
+        }
         for _ in 0..size {
             let index = self
                 .inner
@@ -293,6 +331,31 @@ mod tests {
         }
         assert!(ApiKeyRing::from_csv("  ").is_empty());
         assert!(ApiKeyRing::from_csv("").next_key_at(0).is_none());
+    }
+
+    #[test]
+    fn repeated_credentials_share_one_cooldown_and_preserve_priority() {
+        for strategy in [
+            KeySelectionStrategy::RoundRobin,
+            KeySelectionStrategy::PriorityFailover,
+        ] {
+            let ring = ApiKeyRing::with_strategy(
+                [" k1 ", "k2", "k1", " ", "k2"]
+                    .into_iter()
+                    .map(ApiKey::new)
+                    .collect(),
+                strategy,
+            );
+            assert_eq!(ring.len(), 2);
+            assert_eq!(ring.summary_key().unwrap().expose(), "k1");
+            ring.mark_rate_limited_at(&ApiKey::new("k1"), 0, 1_000);
+            for _ in 0..4 {
+                assert_eq!(ring.next_key_at(1).unwrap().expose(), "k2");
+            }
+            ring.mark_rate_limited_at(&ApiKey::new("k2"), 0, 2_000);
+            assert!(!ring.has_available_key_at(1));
+            assert_eq!(ring.next_key_at(1_001).unwrap().expose(), "k1");
+        }
     }
 
     #[test]

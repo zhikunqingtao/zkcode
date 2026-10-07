@@ -83,6 +83,7 @@ export interface TaskRuntimeSuccessResponse {
   usageSummary: Record<string, unknown>;
   cleanupStatus: RuntimeCleanupStatus;
   waitExpired: boolean;
+  displayOutput?: string | null;
 }
 
 export interface TaskRuntimeErrorResponse {
@@ -167,8 +168,21 @@ export const TASK_RUNTIME_V4_TOOL_INPUT_SCHEMAS = {
   "TaskCreate": {
     "additionalProperties": false,
     "properties": {
+      "command": {
+        "description": "Shell command; required for shell tasks and checked by the normal Bash permission policy",
+        "type": "string"
+      },
       "description": {
         "description": "Task description",
+        "type": "string"
+      },
+      "lifecycle": {
+        "default": "attached",
+        "description": "Attached children end with the parent. Detached tasks retain their own deadline, budget, output and stop control.",
+        "enum": [
+          "attached",
+          "detached"
+        ],
         "type": "string"
       },
       "prompt": {
@@ -177,16 +191,16 @@ export const TASK_RUNTIME_V4_TOOL_INPUT_SCHEMAS = {
       },
       "taskType": {
         "default": "agent",
-        "description": "V4 currently supports attached agent tasks only",
+        "description": "Durable agent or shell task",
         "enum": [
-          "agent"
+          "agent",
+          "shell"
         ],
         "type": "string"
       }
     },
     "required": [
       "description",
-      "prompt",
       "taskType"
     ],
     "type": "object"
@@ -283,6 +297,10 @@ export const TASK_RUNTIME_V4_TOOL_INPUT_SCHEMAS = {
     "properties": {
       "description": {
         "description": "Updated task description",
+        "type": "string"
+      },
+      "output": {
+        "description": "Replace advisory display text, including after execution ends; empty clears it. Limited to 1048576 UTF-16 characters with truncation notice. Does not change execution state, errors, result pages, or usage.",
         "type": "string"
       },
       "plan": {

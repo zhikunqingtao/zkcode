@@ -1,10 +1,11 @@
 /**
- * MobileApprovalSheet — RV-4 移动端审批底部弹层
+ * MobileApprovalSheet — RV-4 移动端审批底部弹层（§8.4 sheet 形态）
  *
  * 订阅 useEvidenceStore.attentions，将后端通过 STOMP 推送的 verify_attention
- * 通知聚合为可审批列表。设计风格对齐 JourneyVerifyPanel：
- * - 紧凑卡片：border rounded p-3
- * - verdict 配色：verified=green / failed=red / inconclusive=amber
+ * 通知聚合为可审批列表。迁移为 §8.4 Bottom Sheet 形态：
+ * - 基于 SheetShell（grabber 36×4 + 顶部 rounded-panel + overlay2 遮罩 + 拖拽/Esc 关闭）
+ * - 收起态保留为底部细条（grabber + 标题 + pending 计数），点击重新展开
+ * - 审批按钮触控 ≥44px（§8.6）
  *
  * 审批/驳回统一走 REST Evidence API；旧的 evidence-decision WS 幽灵入口已删除。
  */
@@ -13,6 +14,7 @@ import React, { useState } from 'react';
 import { useEvidenceStore } from '@/store/evidenceStore';
 import type { VerifyAttention } from '@/store/evidenceStore';
 import { EvidenceBundleView } from '@/components/verify/EvidenceBundleView';
+import { SheetShell } from '@/components/apos/MobileBottomSheet';
 
 export const MobileApprovalSheet: React.FC = () => {
     const attentions = useEvidenceStore((s) => s.attentions);
@@ -40,33 +42,45 @@ export const MobileApprovalSheet: React.FC = () => {
         }
     };
 
+    const pendingBadge = (
+        <span className="px-2 py-0.5 text-[13px] rounded-sm bg-warnsoft text-warnstrong">
+            {attentions.length} pending
+        </span>
+    );
+
     return (
-        <div
-            className={
-                'mobile-approval-sheet fixed bottom-0 left-0 right-0 bg-white shadow-lg ' +
-                'rounded-t-xl p-4 max-h-[60vh] overflow-y-auto z-50 border-t'
-            }
-            role="dialog"
-            aria-label="Verification Attention"
-        >
-            <button
-                type="button"
-                onClick={() => setCollapsed((v) => !v)}
-                aria-label={collapsed ? 'Expand approvals' : 'Collapse approvals'}
-                className="block w-full"
+        <>
+            {/* 收起态细条 — 点击重新展开 sheet */}
+            {collapsed && (
+                <button
+                    type="button"
+                    onClick={() => setCollapsed(false)}
+                    aria-label="Expand approvals"
+                    className="panel-control mobile-approval-sheet fixed bottom-0 left-0 right-0 z-50 block w-full
+                        bg-surfacev2 border-t border-hairline shadow-e3 rounded-t-panel px-4 pt-2
+                        pb-[max(env(safe-area-inset-bottom),8px)]"
+                >
+                    <div className="h-1 w-9 rounded-full bg-[color:color-mix(in_srgb,var(--v2-text-3)_40%,transparent)] mx-auto mb-2" aria-hidden="true" />
+                    <div className="flex items-center justify-between">
+                        <span className="text-sm font-medium text-t1">Verification Attention</span>
+                        {pendingBadge}
+                    </div>
+                </button>
+            )}
+
+            {/* §8.4 sheet 形态审批层 */}
+            <SheetShell
+                isOpen={!collapsed}
+                onClose={() => setCollapsed(true)}
+                ariaLabel="Verification Attention"
+                header={
+                    <div className="flex items-center justify-between px-4 pb-3 border-b border-hairline">
+                        <h3 className="text-t1 text-base font-semibold">Verification Attention</h3>
+                        {pendingBadge}
+                    </div>
+                }
             >
-                <div className="w-12 h-1 bg-gray-300 rounded-full mx-auto mb-3" />
-            </button>
-
-            <div className="flex items-center justify-between mb-3">
-                <h3 className="text-sm font-medium">Verification Attention</h3>
-                <span className="px-2 py-0.5 text-xs rounded bg-amber-100 text-amber-700">
-                    {attentions.length} pending
-                </span>
-            </div>
-
-            {!collapsed && (
-                <div className="space-y-2">
+                <div className="space-y-2 px-4 py-3">
                     {attentions.map((attention) => (
                         <AttentionCard
                             key={attention.bundleId}
@@ -80,8 +94,8 @@ export const MobileApprovalSheet: React.FC = () => {
                         />
                     ))}
                 </div>
-            )}
-        </div>
+            </SheetShell>
+        </>
     );
 };
 
@@ -94,30 +108,34 @@ interface AttentionCardProps {
 }
 
 const AttentionCard: React.FC<AttentionCardProps> = ({ attention, onApprove, onReject, expanded, onToggleDetail }) => (
-    <div className="border rounded-lg p-3">
+    <div className="border border-hairline rounded-[14px] p-3">
         <div className="flex items-center justify-between gap-2 mb-1">
             <VerdictBadge verdict={attention.verdict} />
-            <span className="text-[10px] text-gray-400">
+            <span className="text-[13px] text-t3">
                 {formatRelative(attention.timestamp)}
             </span>
         </div>
 
         {attention.claim && (
-            <div className="text-xs font-medium text-gray-800 truncate">{attention.claim}</div>
+            <div className="text-[13px] font-medium text-t1 truncate">{attention.claim}</div>
         )}
 
         {attention.summary && (
-            <div className="text-xs text-gray-600 mt-1 line-clamp-3">{attention.summary}</div>
+            <div className="text-[13px] text-t2 mt-1 line-clamp-3">{attention.summary}</div>
         )}
 
-        <div className="text-[10px] text-gray-400 mt-1 font-mono truncate">
+        {attentionScopeNote(attention.verdict) && (
+            <div className="text-[13px] text-t3 mt-1">{attentionScopeNote(attention.verdict)}</div>
+        )}
+
+        <div className="text-[13px] text-t3 mt-1 font-mono truncate">
             bundle: {attention.bundleId}
         </div>
 
         <button
             type="button"
             onClick={onToggleDetail}
-            className="mt-1.5 text-xs text-blue-600 hover:text-blue-800 hover:underline"
+            className="panel-control mt-1.5 inline-flex items-center min-h-[44px] text-[13px] text-accent2-ink hover:underline"
         >
             {expanded ? '收起详情' : '查看详情'}
         </button>
@@ -132,14 +150,14 @@ const AttentionCard: React.FC<AttentionCardProps> = ({ attention, onApprove, onR
                 <button
                     type="button"
                     onClick={onApprove}
-                    className="flex-1 px-3 py-1.5 text-xs rounded bg-green-600 text-white hover:bg-green-700 active:bg-green-800"
+                    className="panel-control flex-1 px-3 min-h-[44px] text-[13px] rounded-xl bg-okstrong text-white dark:text-app2 hover:brightness-110 active:scale-[.97] transition-interactive duration-fast"
                 >
                     Approve
                 </button>
                 <button
                     type="button"
                     onClick={onReject}
-                    className="flex-1 px-3 py-1.5 text-xs rounded bg-red-600 text-white hover:bg-red-700 active:bg-red-800"
+                    className="panel-control flex-1 px-3 min-h-[44px] text-[13px] rounded-xl bg-err text-white dark:text-app2 active:scale-[.97] transition-interactive duration-fast"
                 >
                     Reject
                 </button>
@@ -151,16 +169,29 @@ const AttentionCard: React.FC<AttentionCardProps> = ({ attention, onApprove, onR
 const VerdictBadge: React.FC<{ verdict: string }> = ({ verdict }) => {
     const v = (verdict || '').toLowerCase();
     if (v === 'verified' || v === 'passed') {
-        return <span className="px-2 py-0.5 text-xs rounded bg-green-100 text-green-700">Verified</span>;
+        return <span className="px-2 py-0.5 text-[13px] rounded-sm bg-oksoft text-okstrong">Verified</span>;
     }
     if (v === 'failed') {
-        return <span className="px-2 py-0.5 text-xs rounded bg-red-100 text-red-700">Failed</span>;
+        return <span className="px-2 py-0.5 text-[13px] rounded-sm bg-errsoft text-errstrong">Failed</span>;
     }
     if (v === 'inconclusive') {
-        return <span className="px-2 py-0.5 text-xs rounded bg-amber-100 text-amber-700">Inconclusive</span>;
+        return <span className="px-2 py-0.5 text-[13px] rounded-sm bg-warnsoft text-warnstrong">Inconclusive</span>;
     }
-    return <span className="px-2 py-0.5 text-xs rounded bg-blue-100 text-blue-700">{verdict || 'Pending'}</span>;
+    if (v === 'unavailable') {
+        return <span className="px-2 py-0.5 text-[13px] rounded-sm bg-warnsoft text-warnstrong">Unavailable</span>;
+    }
+    return <span className="px-2 py-0.5 text-[13px] rounded-sm bg-accent2-soft text-accent2-ink">范围未知</span>;
 };
+
+/** 与 Workbench/Evidence Viewer 相同的有限范围口径；未知值安全兜底。 */
+function attentionScopeNote(verdict: string): string | null {
+    const v = (verdict || '').toLowerCase();
+    if (v === 'verified' || v === 'passed') return '范围有限：仅表示所列步骤在该次检查中通过';
+    if (v === 'unavailable') return '该次检查未执行，不能据此判定通过';
+    if (v === 'inconclusive') return '结论不确定，不能据此判定通过';
+    if (v === 'failed' || !v) return null;
+    return '判定范围未知';
+}
 
 function formatRelative(iso: string): string {
     const t = new Date(iso).getTime();

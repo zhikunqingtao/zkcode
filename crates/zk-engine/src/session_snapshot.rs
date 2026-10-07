@@ -21,7 +21,11 @@
 //! `IllegalArgumentException`，本端为 [`InvalidSessionId`]）。这是唯一的路径
 //! 守卫：文件名由 `sessionId + ".json"` 直接拼接，穿越序列必须在此拦死。
 //!
-//! # IO 失败一律降级，不上抛
+//! # 临时会话与 IO 失败
+//!
+//! 生产构造绑定 [`Db`] 后，临时会话全文只进入有界内存 `ContentStore`，
+//! 不创建 JSON 文件；失效 scope、存储容量不足和 policy 查询失败显式返回，
+//! 绝不回退磁盘。正常持久会话保留下面的旧 IO 行为。
 //!
 //! 保存 / 加载 / 列出 / 删除的 IO 与解析失败全部只记日志并返回「无结果」
 //! （`Ok(())` / `Ok(None)` / 空表 / `Ok(false)`），与旧实现逐字一致——快照是
@@ -46,11 +50,14 @@
 //!    `Instant` 经 Jackson 输出的小数位随值动态（0/3/6/9 位）。解析侧两端都吃
 //!    任意小数位，故互读兼容。
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use serde::{Deserialize, Deserializer, Serialize};
+use zk_db::content::{ContentRef, ContentRetention};
 use zk_db::time::{format_rfc3339_micros, now_millis, parse_rfc3339_millis};
-use zk_db::{MessageRecord, MessageRole, SessionDetail};
+use zk_db::{Db, DbError, MessageRecord, MessageRole, SessionDetail};
 
 /// 快照子目录名（相对配置目录，旧 `~/.zhiku/snapshots` 的叶子名）。
 pub const SNAPSHOT_DIR_NAME: &str = "snapshots";
@@ -61,6 +68,18 @@ pub const SNAPSHOT_FILE_SUFFIX: &str = ".json";
 #[derive(Clone, Copy, Debug, thiserror::Error)]
 #[error("Invalid sessionId: must not contain path separators or traversal sequences")]
 pub struct InvalidSessionId;
+
+/// Path validation and temporary-content failures are explicit; a missing or
+/// exhausted memory scope must never cause a disk fallback.
+#[derive(Debug, thiserror::Error)]
+pub enum SessionSnapshotError {
+    /// Invalid snapshot path identity.
+    #[error(transparent)]
+    InvalidId(#[from] InvalidSessionId),
+    /// Content policy, scope lifetime or capacity failure.
+    #[error(transparent)]
+    Content(#[from] DbError),
+}
 
 // ==================== 载荷 ====================
 
@@ -181,10 +200,22 @@ impl SessionSnapshot {
 // ==================== 服务 ====================
 
 /// 会话快照存储（旧 `SessionSnapshotService` `@Service` 单例）。
-#[derive(Debug)]
 pub struct SessionSnapshotService {
     /// 快照目录（构造时 `create_dir_all`）。
     snapshot_dir: PathBuf,
+    db: Option<Db>,
+    /// Only random references live here. Bodies and their lifetime remain owned
+    /// by the bounded content store; expired references are pruned before writes.
+    temporary: Mutex<HashMap<String, ContentRef>>,
+}
+
+impl std::fmt::Debug for SessionSnapshotService {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionSnapshotService")
+            .field("snapshot_dir", &self.snapshot_dir)
+            .field("policy_bound", &self.db.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl SessionSnapshotService {
@@ -207,7 +238,25 @@ impl SessionSnapshotService {
                 "Failed to create snapshot directory. Snapshot feature may be unavailable."
             ),
         }
-        Self { snapshot_dir }
+        Self {
+            snapshot_dir,
+            db: None,
+            temporary: Mutex::default(),
+        }
+    }
+
+    /// Bind the immutable session policy before using this service in production.
+    #[must_use]
+    pub fn with_database(mut self, db: Db) -> Self {
+        self.db = Some(db);
+        self
+    }
+
+    async fn is_temporary(&self, session_id: &str) -> Result<bool, SessionSnapshotError> {
+        match &self.db {
+            Some(db) => Ok(db.session_retention(session_id).await? == ContentRetention::Ephemeral),
+            None => Ok(false),
+        }
     }
 
     /// 快照目录。
@@ -228,13 +277,33 @@ impl SessionSnapshotService {
     ///
     /// # Errors
     ///
-    /// `session_id` 不过路径守卫时返回 [`InvalidSessionId`]（唯一失败面）。
+    /// 路径非法、临时内容失效或容量不足时显式失败，不回退持久存储。
     pub async fn save_snapshot(
         &self,
         session_id: &str,
         snapshot: &SessionSnapshot,
-    ) -> Result<(), InvalidSessionId> {
+    ) -> Result<(), SessionSnapshotError> {
         validate_session_id(session_id)?;
+        if self.is_temporary(session_id).await? {
+            let db = self
+                .db
+                .as_ref()
+                .ok_or_else(|| DbError::Invalid("SNAPSHOT_RETENTION_POLICY_UNAVAILABLE".into()))?;
+            let memory = db.memory_content_store();
+            let bytes = serde_json::to_vec(snapshot).map_err(DbError::from)?;
+            let mut refs = self
+                .temporary
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            refs.retain(|session, reference| memory.get(session, reference).is_ok());
+            // Matches the content store's maximum live scopes × attached sessions.
+            if refs.len() >= 128 * 256 && !refs.contains_key(session_id) {
+                return Err(DbError::Invalid("EPHEMERAL_SNAPSHOT_CAPACITY_EXCEEDED".into()).into());
+            }
+            let reference = memory.put(session_id, &bytes)?;
+            refs.insert(session_id.to_owned(), reference);
+            return Ok(());
+        }
         let file = self.snapshot_file(session_id);
         match serde_json::to_vec_pretty(snapshot) {
             Ok(bytes) => match replace_file(&file, &bytes).await {
@@ -266,12 +335,32 @@ impl SessionSnapshotService {
     ///
     /// # Errors
     ///
-    /// `session_id` 不过路径守卫时返回 [`InvalidSessionId`]（唯一失败面）。
+    /// 路径非法或临时内容已失效时显式失败，不回退持久存储。
     pub async fn load_snapshot(
         &self,
         session_id: &str,
-    ) -> Result<Option<SessionSnapshot>, InvalidSessionId> {
+    ) -> Result<Option<SessionSnapshot>, SessionSnapshotError> {
         validate_session_id(session_id)?;
+        if self.is_temporary(session_id).await? {
+            let db = self
+                .db
+                .as_ref()
+                .ok_or_else(|| DbError::Invalid("SNAPSHOT_RETENTION_POLICY_UNAVAILABLE".into()))?;
+            let reference = self
+                .temporary
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(session_id)
+                .cloned();
+            return reference
+                .map(|reference| {
+                    let bytes = db.memory_content_store().get(session_id, &reference)?;
+                    serde_json::from_slice(&bytes)
+                        .map_err(DbError::from)
+                        .map_err(SessionSnapshotError::from)
+                })
+                .transpose();
+        }
         let file = self.snapshot_file(session_id);
         let bytes = match tokio::fs::read(&file).await {
             Ok(bytes) => bytes,
@@ -370,9 +459,24 @@ impl SessionSnapshotService {
     ///
     /// # Errors
     ///
-    /// `session_id` 不过路径守卫时返回 [`InvalidSessionId`]（唯一失败面）。
-    pub async fn delete_snapshot(&self, session_id: &str) -> Result<bool, InvalidSessionId> {
+    /// 路径非法或会话存储策略不可读取时显式失败。
+    pub async fn delete_snapshot(&self, session_id: &str) -> Result<bool, SessionSnapshotError> {
         validate_session_id(session_id)?;
+        // Explicit cleanup must still remove a persistent snapshot after its
+        // conversation was deleted. This exception never reads or creates bodies.
+        let temporary = match self.is_temporary(session_id).await {
+            Ok(temporary) => temporary,
+            Err(SessionSnapshotError::Content(DbError::SessionNotFound(_))) => false,
+            Err(error) => return Err(error),
+        };
+        if temporary {
+            return Ok(self
+                .temporary
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(session_id)
+                .is_some());
+        }
         let file = self.snapshot_file(session_id);
         match tokio::fs::remove_file(&file).await {
             Ok(()) => {
@@ -495,6 +599,7 @@ mod tests {
     /// 造一条 user 文本消息。
     fn message(id: &str, role: MessageRole, seq: i64) -> MessageRecord {
         MessageRecord {
+            meta: None,
             id: id.to_owned(),
             session_id: "s-1".to_owned(),
             role,
@@ -817,6 +922,7 @@ mod tests {
     #[test]
     fn from_session_detail_counts_user_turns_and_fills_metadata() {
         let detail = SessionDetail {
+            purpose: zk_protocol::SessionPurpose::Chat,
             session_id: "s-9".to_owned(),
             model: "claude-opus-4".to_owned(),
             working_dir: "/tmp/work".to_owned(),
@@ -880,6 +986,7 @@ mod tests {
     #[test]
     fn from_session_detail_keeps_null_title() {
         let detail = SessionDetail {
+            purpose: zk_protocol::SessionPurpose::Chat,
             session_id: "s-10".to_owned(),
             model: "m".to_owned(),
             working_dir: "/tmp".to_owned(),

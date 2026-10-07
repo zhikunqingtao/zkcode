@@ -569,7 +569,16 @@ impl SubAgentExecutor {
         // 3. 创建隔离工作目录
         let work_dir = match request.isolation {
             IsolationMode::Worktree => {
-                match self.worktree_manager.create_worktree(agent_id).await {
+                match self
+                    .worktree_manager
+                    .create_worktree_in(
+                        agent_id,
+                        &context.working_directory,
+                        execution.as_ref(),
+                        cancel.clone(),
+                    )
+                    .await
+                {
                     Ok(path) => path.to_string_lossy().into_owned(),
                     Err(e) => {
                         warn!("Worktree creation failed closed for {agent_id}: {e}");
@@ -676,7 +685,14 @@ impl SubAgentExecutor {
                 drop(future);
 
                 if request.isolation == IsolationMode::Worktree {
-                    self.finalize_worktree(&work_dir).await;
+                    let receipt = self
+                        .worktree_manager
+                        .retain(
+                            std::path::Path::new(&work_dir),
+                            "Execution stopped; no delivery or cleanup was attempted.",
+                        )
+                        .await;
+                    warn!("{receipt}");
                 }
                 if execution.is_some()
                     && let Ok((_, Some(text), _)) = graceful_result
@@ -684,7 +700,9 @@ impl SubAgentExecutor {
                 {
                     return AgentResult {
                         status: AgentStatus::Interrupted,
-                        result: Some(text),
+                        result: Some(format!(
+                            "{text}\n\nWorktree location: {work_dir} (retained; no automatic delivery)."
+                        )),
                         prompt: request.prompt.clone(),
                         output_file: None,
                         error_code: Some("SUBAGENT_STOPPED_PARTIAL".to_owned()),
@@ -693,7 +711,7 @@ impl SubAgentExecutor {
                 if timed_out {
                     return AgentResult::timeout(
                         format!(
-                            "<tool_use_error>Sub-agent '{agent_id}' (type={:?}) timed out after {} seconds.</tool_use_error>",
+                            "<tool_use_error>Sub-agent '{agent_id}' (type={:?}) timed out after {} seconds.</tool_use_error>\nExecution directory retained: {work_dir}",
                             request.agent_type,
                             agent_timeout.as_secs()
                         ),
@@ -702,7 +720,9 @@ impl SubAgentExecutor {
                 }
                 return AgentResult {
                     status: AgentStatus::Interrupted,
-                    result: Some(format!("Sub-agent '{agent_id}' was cancelled.")),
+                    result: Some(format!(
+                        "Sub-agent '{agent_id}' was cancelled. Execution directory retained: {work_dir}"
+                    )),
                     prompt: request.prompt.clone(),
                     output_file: None,
                     error_code: Some("USER_CANCELLED".to_owned()),
@@ -710,17 +730,42 @@ impl SubAgentExecutor {
             }
         };
 
-        // 8. Worktree 清理
-        if request.isolation == IsolationMode::Worktree {
-            self.finalize_worktree(&work_dir).await;
-        }
+        let worktree_receipt = if request.isolation == IsolationMode::Worktree {
+            Some(
+                self.worktree_manager
+                    .retain(
+                        std::path::Path::new(&work_dir),
+                        "Execution finished; committed and uncommitted work remain available.",
+                    )
+                    .await,
+            )
+        } else {
+            None
+        };
 
         // 9. 分类状态并构建结果
         let status =
             AgentStatus::classify(stop_reason.as_deref(), assistant_text.is_some(), has_error);
         let error_code = stable_child_error_code(stop_reason.as_deref()).map(str::to_owned);
 
-        let result_text = assistant_text.unwrap_or_else(|| "子代理未返回响应。".to_owned());
+        let mut result_text = assistant_text.unwrap_or_else(|| "子代理未返回响应。".to_owned());
+        if let Some(receipt) = worktree_receipt {
+            result_text.push_str("\n\n");
+            result_text.push_str(&receipt);
+        }
+        if request.isolation == IsolationMode::Worktree
+            && let Some(identity) = execution.as_ref()
+            && let Err(error) = self
+                .worktree_manager
+                .record_delivery_receipt(identity, &result_text)
+                .await
+        {
+            return AgentResult::failed_with_code(
+                format!("{result_text}\nReceipt persistence failed: {error}"),
+                &request.prompt,
+                "WORKTREE_RECEIPT_PERSISTENCE_FAILED",
+            );
+        }
 
         let result = match status {
             AgentStatus::Completed => AgentResult::completed(result_text, &request.prompt),
@@ -775,30 +820,10 @@ impl SubAgentExecutor {
         Duration::from_secs(calculated.min(max))
     }
 
-    /// Finalize an isolated worktree without ever merging into the parent.
-    ///
-    /// A changed worktree is preserved as an explicit hand-off artifact. An
-    /// unchanged one is safe to remove. Inspection/removal failures also
-    /// preserve it, because cleanup uncertainty must fail closed.
-    async fn finalize_worktree(&self, work_dir: &str) {
-        let path = std::path::Path::new(work_dir);
-        match self.worktree_manager.has_changes(path).await {
-            Ok(true) => {
-                crate::agent::worktree::log_preserved_worktree(
-                    path,
-                    "isolated child produced changes; automatic merge is disabled",
-                );
-                return;
-            }
-            Ok(false) => {}
-            Err(error) => {
-                crate::agent::worktree::log_preserved_worktree(path, &error);
-                return;
-            }
-        }
-        if let Err(error) = self.worktree_manager.remove_worktree(path).await {
-            crate::agent::worktree::log_preserved_worktree(path, &error);
-        }
+    /// Manager shared with the explicit Worktree tool surface.
+    #[must_use]
+    pub fn worktree_manager(&self) -> Arc<WorktreeManager> {
+        Arc::clone(&self.worktree_manager)
     }
 }
 
@@ -925,7 +950,7 @@ async fn resolve_child_system_prompt(
         Ok(None) => None,
         Err(error) => {
             tracing::warn!(
-                error = %error,
+                error_type = std::any::type_name_of_val(&error),
                 "failed to load child project context from SQLite; using file fallback"
             );
             None
@@ -955,7 +980,8 @@ pub fn is_globally_denied(tool_name: &str) -> bool {
 /// 子代理可用工具的公开安全合同。
 ///
 /// 注入基础文件 / 检索 / Bash / 只读 Git 工具；**排除**：
-/// - `Agent` / `TaskCreate` / `TaskUpdate` / `TaskStop`（防子代理递归派生）；
+/// - `Agent` / `TaskCreate` / `TaskStop`（防子代理递归派生）；
+/// - 完整 `TaskUpdate`；仅投影后的自身展示输出能力可见。
 /// - `Memory` / `CtxInspect` / `EnterPlanMode` / `ExitPlanMode`（父级专属）。
 ///
 /// 实际注册表由 [`build_sub_agent_registry_with_policy`] 在调用时遍历
@@ -975,6 +1001,7 @@ pub const SUB_AGENT_TOOL_NAMES: &[&str] = &[
     "Snip",
     "TerminalCapture",
     "ToolSearch",
+    "TaskUpdate",
     "Write",
     "Edit",
     "Bash",
@@ -998,7 +1025,15 @@ pub fn build_sub_agent_registry_with_policy(
     source: &zk_tools::ToolRegistry,
     allow_writes: bool,
 ) -> Arc<zk_tools::ToolRegistry> {
-    Arc::new(source.filtered_by(move |name, tool| {
+    Arc::new(source.child_view().filtered_by(move |name, tool| {
+        if name == "TaskUpdate"
+            && matches!(
+                tool.child_access(),
+                zk_tools::ChildToolAccess::SelfTaskDisplay
+            )
+        {
+            return true;
+        }
         if is_globally_denied(name) {
             return false;
         }
@@ -1053,7 +1088,10 @@ fn apply_agent_tool_policy(
             candidates
                 .iter()
                 .copied()
-                .filter(|name| definition.is_tool_allowed(name) && !is_globally_denied(name))
+                .filter(|name| {
+                    definition.is_tool_allowed(name)
+                        && (!is_globally_denied(name) || *name == "TaskUpdate")
+                })
                 .map(str::to_owned)
                 .collect::<std::collections::BTreeSet<_>>(),
         )
@@ -1080,7 +1118,10 @@ fn apply_agent_tool_policy(
             (Some(request_allowed), None) => Some(
                 request_allowed
                     .iter()
-                    .filter(|name| definition.is_tool_allowed(name) && !is_globally_denied(name))
+                    .filter(|name| {
+                        definition.is_tool_allowed(name)
+                            && (!is_globally_denied(name) || *name == "TaskUpdate")
+                    })
                     .cloned()
                     .collect(),
             ),
@@ -1090,7 +1131,7 @@ fn apply_agent_tool_policy(
     effective
 }
 
-fn narrow_child_registry(
+pub(crate) fn narrow_child_registry(
     source: &Arc<zk_tools::ToolRegistry>,
     allowed: Option<&std::collections::BTreeSet<String>>,
     allow_write_tools: bool,
@@ -1124,6 +1165,8 @@ struct ActiveChildRun {
 /// 句柄与预过滤的子代理工具注册表——**不持有父 `Engine` 引用**，避免
 /// `Engine → tools → SubAgentExecutor → factory → Engine` 循环依赖。
 pub struct RealSubAgentEngineFactory {
+    visualization_router: Arc<crate::auto_visualization::VisualizationIntentRouter>,
+    run_tool_scopes: Arc<crate::run_tool_scopes::RunToolScopes>,
     /// DB 句柄（子会话不落库，仅满足 `sub_session` 签名——`Db` 是轻量 Clone 句柄）。
     db: zk_db::Db,
     /// 共享 LLM provider。
@@ -1137,6 +1180,7 @@ pub struct RealSubAgentEngineFactory {
     hooks: Arc<crate::HookService>,
     observability: Arc<dyn crate::ObservabilityRecorder>,
     execution_supervisor: Arc<crate::ExecutionSupervisor>,
+    vision_providers: Option<Arc<dyn zk_llm::VisionProviderView>>,
     compact_summarizer: Arc<dyn crate::context::compact::Summarizer>,
     tool_summarizer: Arc<dyn crate::LightModelSummarizer>,
     /// Session-to-Run ownership used only for fail-closed hard terminalization.
@@ -1148,6 +1192,35 @@ pub struct RealSubAgentEngineFactory {
 }
 
 impl RealSubAgentEngineFactory {
+    /// Propagate explicit visualization routing without broadening child tool permissions.
+    #[must_use]
+    pub fn with_visualization_router(
+        mut self,
+        router: Arc<crate::auto_visualization::VisualizationIntentRouter>,
+    ) -> Self {
+        self.visualization_router = router;
+        self
+    }
+
+    /// Give attached children the parent's run-only connection configuration.
+    #[must_use]
+    pub fn with_run_tool_scopes(
+        mut self,
+        scopes: Arc<crate::run_tool_scopes::RunToolScopes>,
+    ) -> Self {
+        self.run_tool_scopes = scopes;
+        self
+    }
+    /// Use the production vision directory for trusted tool-produced images.
+    #[must_use]
+    pub fn with_vision_provider_view(
+        mut self,
+        providers: Arc<dyn zk_llm::VisionProviderView>,
+    ) -> Self {
+        self.vision_providers = Some(providers);
+        self
+    }
+
     /// 从全量工具注册表按安全策略构造，并显式注入全部生产安全端口。
     #[must_use]
     #[allow(clippy::too_many_arguments)]
@@ -1166,6 +1239,8 @@ impl RealSubAgentEngineFactory {
         tool_summarizer: Arc<dyn crate::LightModelSummarizer>,
     ) -> Self {
         Self {
+            run_tool_scopes: Arc::default(),
+            visualization_router: Arc::default(),
             db,
             provider,
             sub_tools,
@@ -1176,6 +1251,7 @@ impl RealSubAgentEngineFactory {
             hooks,
             observability,
             execution_supervisor,
+            vision_providers: None,
             compact_summarizer,
             tool_summarizer,
             active_runs: Arc::new(DashMap::new()),
@@ -1187,8 +1263,12 @@ impl RealSubAgentEngineFactory {
 
 impl SubAgentEngineFactory for RealSubAgentEngineFactory {
     fn available_tool_names(&self, context: &ChildExecutionContext) -> Vec<String> {
+        let directory = self
+            .run_tool_scopes
+            .directory(&context.parent_run_id)
+            .unwrap_or_else(|| self.sub_tools.clone());
         narrow_child_registry(
-            &self.sub_tools,
+            &directory,
             context.allowed_tools.as_ref(),
             context.allow_write_tools,
             context.write_tool_allowlist.as_ref(),
@@ -1214,6 +1294,9 @@ impl SubAgentEngineFactory for RealSubAgentEngineFactory {
     > {
         let db = self.db.clone();
         let provider = Arc::clone(&self.provider);
+        let run_tool_scopes = self.run_tool_scopes.clone();
+        let scope_context = context.clone();
+        let vision_providers = self.vision_providers.clone();
         let tools = narrow_child_registry(
             &self.sub_tools,
             context.allowed_tools.as_ref(),
@@ -1228,6 +1311,7 @@ impl SubAgentEngineFactory for RealSubAgentEngineFactory {
         let observability = Arc::clone(&self.observability);
         let execution_supervisor = Arc::clone(&self.execution_supervisor);
         let compact_summarizer = Arc::clone(&self.compact_summarizer);
+        let visualization_router = Arc::clone(&self.visualization_router);
         let tool_summarizer = Arc::clone(&self.tool_summarizer);
         let active_runs = Arc::clone(&self.active_runs);
         let abort_reasons = Arc::clone(&self.abort_reasons);
@@ -1303,13 +1387,26 @@ impl SubAgentEngineFactory for RealSubAgentEngineFactory {
                         true,
                     );
                 }
+                if work_dir != authorized_working_dir {
+                    let session = session_id.clone();
+                    let directory = work_dir.clone();
+                    let run = run_id.clone();
+                    if let Err(error) = db.with_writer(move |conn| {
+                        let updated=conn.execute("UPDATE sessions SET working_dir=?1 WHERE id=?2 AND kind='internal' AND EXISTS(SELECT 1 FROM run_envelopes WHERE id=?3 AND session_id=?2 AND status='running')",(directory,session,run))?;
+                        if updated!=1{return Err(zk_db::DbError::Invalid("WORKTREE_SESSION_BINDING_FAILED".into()));}Ok(())
+                    }).await {
+                        active_runs.remove(&session_id);
+                        abort_reasons.remove(&session_id);
+                        return (Some("error".into()),Some(error.to_string()),true);
+                    }
+                }
             } else if let Err(error) = db
                 .create_session_with_id(&session_id, &model, &work_dir)
                 .await
             {
                 active_runs.remove(&session_id);
                 abort_reasons.remove(&session_id);
-                tracing::error!(%session_id, %error, "failed to persist child session");
+                tracing::error!(%session_id, error_type = std::any::type_name_of_val(&error), "failed to persist child session");
                 let mut event = crate::ObservabilityEvent::new("agent", "complete", "error");
                 event.session_id = Some(session_id.clone());
                 event.run_id = Some(run_id.clone());
@@ -1335,7 +1432,7 @@ impl SubAgentEngineFactory for RealSubAgentEngineFactory {
             {
                 active_runs.remove(&session_id);
                 abort_reasons.remove(&session_id);
-                tracing::error!(%run_id, %error, "failed to persist child run");
+                tracing::error!(%run_id, error_type = std::any::type_name_of_val(&error), "failed to persist child run");
                 let mut event = crate::ObservabilityEvent::new("agent", "complete", "error");
                 event.session_id = Some(session_id.clone());
                 event.run_id = Some(run_id.clone());
@@ -1374,8 +1471,16 @@ impl SubAgentEngineFactory for RealSubAgentEngineFactory {
                 hooks,
             )
             .with_execution_supervisor(&execution_supervisor)
+            .with_run_tool_scopes(run_tool_scopes)
+            .with_scope_context(scope_context)
             .with_summarizers(compact_summarizer, tool_summarizer)
+            .with_visualization_router(visualization_router)
             .with_observability(Arc::clone(&observability));
+            let engine = if let Some(providers) = vision_providers {
+                engine.with_vision_provider_view(providers)
+            } else {
+                engine
+            };
             let config = crate::engine::SubAgentRunConfig {
                 agent_id: agent_id.clone(),
                 session_id: session_id.clone(),
@@ -1539,7 +1644,7 @@ impl SubAgentEngineFactory for RealSubAgentEngineFactory {
                 Ok(Some(latest)) => latest.seq.saturating_add(1),
                 Ok(None) => 0,
                 Err(error) => {
-                    tracing::error!(%run_id, %error, "failed to resolve forced checkpoint sequence");
+                    tracing::error!(%run_id, error_type = std::any::type_name_of_val(&error), "failed to resolve forced checkpoint sequence");
                     0
                 }
             };
@@ -1556,7 +1661,7 @@ impl SubAgentEngineFactory for RealSubAgentEngineFactory {
             );
             checkpoint.working_dir = None;
             if let Err(error) = db.save_agent_checkpoint(&checkpoint).await {
-                tracing::error!(%run_id, %error, "failed to persist forced terminal checkpoint");
+                tracing::error!(%run_id, error_type = std::any::type_name_of_val(&error), "failed to persist forced terminal checkpoint");
             }
             if active.precreated {
                 if let Err(error) = db
@@ -1568,7 +1673,7 @@ impl SubAgentEngineFactory for RealSubAgentEngineFactory {
                     )
                     .await
                 {
-                    tracing::error!(%run_id, %error, "failed to persist forced stop event");
+                    tracing::error!(%run_id, error_type = std::any::type_name_of_val(&error), "failed to persist forced stop event");
                 }
             } else {
                 let exit_reason = if reason == "cancelled" {
@@ -1577,7 +1682,7 @@ impl SubAgentEngineFactory for RealSubAgentEngineFactory {
                     zk_db::run::EXIT_INTERNAL_ERROR
                 };
                 if let Err(error) = db.terminate_run(&run_id, exit_reason, Some(reason)).await {
-                    tracing::error!(%run_id, %error, "failed to force child Run terminal");
+                    tracing::error!(%run_id, error_type = std::any::type_name_of_val(&error), "failed to force child Run terminal");
                 }
             }
             sink.push_from(
@@ -1628,7 +1733,6 @@ mod tests {
         for denied in [
             "Agent",
             "TaskCreate",
-            "TaskUpdate",
             "TaskStop",
             "Memory",
             "CtxInspect",
@@ -1830,6 +1934,62 @@ mod tests {
             effective.write_tool_allowlist.as_ref(),
         );
         assert_eq!(production_like.names(), ["CodeIntelLate"]);
+    }
+
+    #[test]
+    fn task_update_is_visible_only_as_the_narrow_child_projection() {
+        use futures::future::BoxFuture;
+        use zk_tools::{ChildToolAccess, Tool, ToolContext, ToolOutput};
+        struct Advisory(bool);
+        impl Tool for Advisory {
+            fn name(&self) -> &'static str {
+                "TaskUpdate"
+            }
+            fn description(&self) -> &'static str {
+                "advisory test"
+            }
+            fn parameters(&self) -> serde_json::Value {
+                serde_json::json!({"selfOnly":self.0})
+            }
+            fn child_access(&self) -> ChildToolAccess {
+                if self.0 {
+                    ChildToolAccess::SelfTaskDisplay
+                } else {
+                    ChildToolAccess::Denied
+                }
+            }
+            fn child_view(&self) -> Option<Arc<dyn Tool>> {
+                Some(Arc::new(Self(true)))
+            }
+            fn execute(&self, _: serde_json::Value, _: ToolContext) -> BoxFuture<'_, ToolOutput> {
+                Box::pin(async { ToolOutput::ok("test") })
+            }
+        }
+        let source = zk_tools::ToolRegistry::new();
+        source.register_dynamic(Arc::new(Advisory(false)));
+        let child = build_sub_agent_registry_with_policy(&source, false);
+        assert!(
+            is_globally_denied("TaskUpdate"),
+            "the full parent tool remains denied"
+        );
+        assert_eq!(
+            source.get("TaskUpdate").unwrap().parameters()["selfOnly"],
+            false
+        );
+        assert_eq!(
+            child.get("TaskUpdate").unwrap().parameters()["selfOnly"],
+            true
+        );
+        let restricted = narrow_child_registry(
+            &child,
+            Some(&std::collections::BTreeSet::from(["Read".into()])),
+            false,
+            None,
+        );
+        assert!(
+            restricted.get("TaskUpdate").is_none(),
+            "explicit caller tools stay an upper bound"
+        );
     }
 
     #[test]

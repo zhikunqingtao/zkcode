@@ -24,7 +24,7 @@ use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, AtomicU8, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicI64, AtomicU8, AtomicU32, Ordering};
 use std::time::Duration;
 
 use nix::errno::Errno;
@@ -183,6 +183,8 @@ pub struct PythonSidecar {
     client: Arc<PythonClient>,
     /// 生命周期锁 + 子进程句柄（一体化：持锁即可独占操作进程）。
     lifecycle: Mutex<Option<Child>>,
+    /// Captured at spawn; `Child::id` becomes `None` after reaping its leader.
+    owned_pgid: AtomicI32,
     state: AtomicU8,
     restart_count: AtomicU32,
     /// 最近一次健康检查时刻（epoch 毫秒；0 表示尚未检查过）。
@@ -197,6 +199,7 @@ impl PythonSidecar {
             config,
             client,
             lifecycle: Mutex::new(None),
+            owned_pgid: AtomicI32::new(0),
             state: AtomicU8::new(ProcessState::Stopped.code()),
             restart_count: AtomicU32::new(0),
             last_health_check: AtomicI64::new(0),
@@ -259,7 +262,9 @@ impl PythonSidecar {
     /// 重启侧车（`restart()`，:156-164：stop → sleep 5s → start）。
     pub async fn restart(&self) -> bool {
         let mut guard = self.lifecycle.lock().await;
-        self.stop_locked(&mut guard).await;
+        if !self.stop_locked(&mut guard).await {
+            return false;
+        }
         tokio::time::sleep(RESTART_DELAY).await;
         self.start_locked(&mut guard).await
     }
@@ -352,9 +357,18 @@ impl PythonSidecar {
 
     /// 持锁启动实现。
     async fn start_locked(&self, guard: &mut Option<Child>) -> bool {
-        if self.state() == ProcessState::Running {
+        if self.state() == ProcessState::Running
+            && guard
+                .as_mut()
+                .is_some_and(|child| matches!(child.try_wait(), Ok(None)))
+        {
             tracing::warn!("python sidecar is already running");
             return true;
+        }
+        if (guard.is_some() || self.owned_pgid.load(Ordering::Acquire) != 0)
+            && !self.stop_locked(guard).await
+        {
+            return false;
         }
         self.set_state(ProcessState::Starting);
         let socket = &self.config.socket;
@@ -382,6 +396,13 @@ impl PythonSidecar {
                 return false;
             }
         };
+        self.owned_pgid.store(
+            child
+                .id()
+                .and_then(|pid| i32::try_from(pid).ok())
+                .unwrap_or(0),
+            Ordering::Release,
+        );
         *guard = Some(child);
         if let Some(child) = guard.as_mut() {
             drain_output(child);
@@ -399,6 +420,7 @@ impl PythonSidecar {
                 && socket.exists()
                 && let Err(error) = enforce_socket_permissions(socket)
             {
+                self.stop_locked(guard).await;
                 self.set_state(ProcessState::Failed);
                 tracing::error!(%error, "python sidecar socket permission hardening failed");
                 return false;
@@ -414,6 +436,7 @@ impl PythonSidecar {
                 return true;
             }
             if !alive || tokio::time::Instant::now() >= deadline {
+                self.stop_locked(guard).await;
                 self.set_state(ProcessState::Failed);
                 tracing::error!("python sidecar failed to start");
                 return false;
@@ -507,59 +530,58 @@ impl PythonSidecar {
     }
 
     /// 持锁停止实现（`stop()` :128-151 + UDS 残留清理）。
-    async fn stop_locked(&self, guard: &mut Option<Child>) {
-        let Some(mut child) = guard.take() else {
+    async fn stop_locked(&self, guard: &mut Option<Child>) -> bool {
+        let pgid = self.owned_pgid.load(Ordering::Acquire);
+        self.client.invalidate_capabilities();
+        if guard.is_none() && pgid == 0 {
             self.set_state(ProcessState::Stopped);
             cleanup_socket(&self.config.socket);
-            return;
-        };
-        if matches!(child.try_wait(), Ok(Some(_))) {
-            self.set_state(ProcessState::Stopped);
-            cleanup_socket(&self.config.socket);
-            return;
+            return true;
         }
-
-        tracing::info!("stopping python sidecar");
-        // Graceful signal goes to uvicorn only. It must run FastAPI lifespan shutdown
-        // before Playwright's driver child exits; the whole group is reserved for the
-        // force-kill fallback below.
-        signal_child(&child, Signal::SIGTERM);
-
-        // Java `waitFor(10, SECONDS)` 的等价：轮询 try_wait 至宽限耗尽。
-        let deadline = tokio::time::Instant::now() + STOP_GRACE;
-        let mut exited = false;
-        while tokio::time::Instant::now() < deadline {
-            if matches!(child.try_wait(), Ok(Some(_)) | Err(_)) {
-                exited = true;
-                break;
+        // A live handle without its captured group cannot be declared released.
+        if pgid <= 0 {
+            self.set_state(ProcessState::Failed);
+            return false;
+        }
+        if let Some(child) = guard.as_mut() {
+            // Let FastAPI lifespan close Playwright before stopping its driver.
+            signal_child(child, Signal::SIGTERM);
+            let deadline = tokio::time::Instant::now() + STOP_GRACE;
+            while tokio::time::Instant::now() < deadline {
+                if matches!(child.try_wait(), Ok(Some(_))) {
+                    break;
+                }
+                tokio::time::sleep(STOP_POLL_INTERVAL).await;
+            }
+        }
+        // Reaping the parent does not prove its process group is empty.
+        if process_group_exists(pgid) {
+            let _ = killpg(Pid::from_raw(pgid), Signal::SIGKILL);
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let parent_gone = guard
+                .as_mut()
+                .is_none_or(|child| matches!(child.try_wait(), Ok(Some(_))));
+            if parent_gone && !process_group_exists(pgid) {
+                *guard = None;
+                self.owned_pgid.store(0, Ordering::Release);
+                cleanup_socket(&self.config.socket);
+                self.set_state(ProcessState::Stopped);
+                return true;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                self.set_state(ProcessState::Failed);
+                tracing::warn!(pgid, "python cleanup remains unconfirmed; owner retained");
+                return false;
             }
             tokio::time::sleep(STOP_POLL_INTERVAL).await;
         }
-        if !exited {
-            // Java `destroyForcibly()` = SIGKILL。
-            signal_group(&child, Signal::SIGKILL);
-            let _ = child.wait().await;
-            tracing::warn!("python sidecar force-killed");
-        }
-
-        self.set_state(ProcessState::Stopped);
-        self.client.invalidate_capabilities();
-        cleanup_socket(&self.config.socket);
-        tracing::info!("python sidecar stopped");
     }
 }
 
-/// 向子进程所在进程组发信号（`process_group(0)` 后 pid == pgid）。
-fn signal_group(child: &Child, signal: Signal) {
-    let Some(pid) = child.id() else {
-        return;
-    };
-    let Ok(raw) = i32::try_from(pid) else {
-        return;
-    };
-    if let Err(error) = killpg(Pid::from_raw(raw), signal) {
-        tracing::debug!(%error, ?signal, "python sidecar signal delivery failed");
-    }
+fn process_group_exists(pgid: i32) -> bool {
+    pgid > 0 && !matches!(killpg(Pid::from_raw(pgid), None), Err(Errno::ESRCH))
 }
 
 fn signal_child(child: &Child, signal: Signal) {
@@ -819,6 +841,60 @@ mod tests {
         cleanup_socket(&socket);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn stopping_reaped_parent_still_releases_owned_orphan_group() {
+        let dir = std::env::temp_dir().join(format!("zk-sidecar-orphan-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = config(dir.clone());
+        let sidecar =
+            PythonSidecar::new(cfg.clone(), Arc::new(PythonClient::new(cfg.socket.clone())));
+        let mut child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg("sleep 30 & exit 0")
+            .process_group(0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let pgid = i32::try_from(child.id().unwrap()).unwrap();
+        child.wait().await.unwrap();
+        assert!(child.id().is_none());
+        assert!(process_group_exists(pgid));
+        sidecar.owned_pgid.store(pgid, Ordering::Release);
+        *sidecar.lifecycle.lock().await = Some(child);
+        sidecar.stop().await;
+        assert_eq!(sidecar.state(), ProcessState::Stopped);
+        assert!(!process_group_exists(pgid));
+        assert!(sidecar.lifecycle.lock().await.is_none());
+        assert_eq!(sidecar.owned_pgid.load(Ordering::Acquire), 0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn missing_group_identity_retains_owner_and_prevents_restart() {
+        let dir = std::env::temp_dir().join(format!("zk-sidecar-owner-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = config(dir.clone());
+        let sidecar =
+            PythonSidecar::new(cfg.clone(), Arc::new(PythonClient::new(cfg.socket.clone())));
+        let child = Command::new("/bin/sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pgid = i32::try_from(child.id().unwrap()).unwrap();
+        *sidecar.lifecycle.lock().await = Some(child);
+        sidecar.stop().await;
+        assert_eq!(sidecar.state(), ProcessState::Failed);
+        assert!(!sidecar.start().await);
+        assert!(sidecar.lifecycle.lock().await.is_some());
+        sidecar.owned_pgid.store(pgid, Ordering::Release);
+        sidecar.stop().await;
+        assert_eq!(sidecar.state(), ProcessState::Stopped);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// 无 Python 环境时 `start()` 落 `FAILED` 且不 panic；`stop()` 幂等。

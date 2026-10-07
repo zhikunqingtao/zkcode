@@ -614,6 +614,82 @@ where
     }
 }
 
+/// Transactional service preferences stored independently from MCP definitions.
+pub struct DbMcpServicePreferences(pub Db);
+
+/// Public OAuth metadata only. Secret bytes are stored by the macOS Keychain port.
+pub struct DbMcpOAuthBindings(pub Db);
+
+impl zk_mcp::oauth::storage::OAuthBindingStore for DbMcpOAuthBindings {
+    fn load<'a>(
+        &'a self,
+        server: &'a str,
+    ) -> futures::future::BoxFuture<
+        'a,
+        Result<Option<zk_mcp::oauth::storage::OAuthBinding>, zk_mcp::oauth::OAuthError>,
+    > {
+        Box::pin(async move {
+            use sha2::{Digest, Sha256};
+            let key = format!("mcp_oauth_binding_{:x}", Sha256::digest(server.as_bytes()));
+            let value = self
+                .0
+                .get_config_value(&key)
+                .await
+                .map_err(|_| zk_mcp::oauth::OAuthError::BindingStorage)?;
+            value.map_or(Ok(None), |value| {
+                serde_json::from_str(&value).map_err(|_| zk_mcp::oauth::OAuthError::BindingStorage)
+            })
+        })
+    }
+    fn save<'a>(
+        &'a self,
+        server: &'a str,
+        binding: Option<zk_mcp::oauth::storage::OAuthBinding>,
+    ) -> futures::future::BoxFuture<'a, Result<(), zk_mcp::oauth::OAuthError>> {
+        Box::pin(async move {
+            use sha2::{Digest, Sha256};
+            let key = format!("mcp_oauth_binding_{:x}", Sha256::digest(server.as_bytes()));
+            let value = serde_json::to_string(&binding)
+                .map_err(|_| zk_mcp::oauth::OAuthError::BindingStorage)?;
+            self.0
+                .put_config_value(&key, &value)
+                .await
+                .map_err(|_| zk_mcp::oauth::OAuthError::BindingStorage)
+        })
+    }
+}
+
+impl zk_mcp::McpServicePreferenceStore for DbMcpServicePreferences {
+    fn load(
+        &self,
+    ) -> futures::future::BoxFuture<'_, Result<std::collections::BTreeMap<String, bool>, String>>
+    {
+        Box::pin(async move {
+            let raw = self
+                .0
+                .get_config_value("mcp_service_preferences")
+                .await
+                .map_err(|e| e.to_string())?;
+            raw.map_or_else(
+                || Ok(std::collections::BTreeMap::new()),
+                |value| serde_json::from_str(&value).map_err(|e| e.to_string()),
+            )
+        })
+    }
+    fn save(
+        &self,
+        values: std::collections::BTreeMap<String, bool>,
+    ) -> futures::future::BoxFuture<'_, Result<(), String>> {
+        Box::pin(async move {
+            let json = serde_json::to_string(&values).map_err(|e| e.to_string())?;
+            self.0
+                .put_config_value("mcp_service_preferences", &json)
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -623,6 +699,27 @@ mod tests {
     use tokio_util::sync::CancellationToken;
     use zk_mcp::{McpConfigScope, McpTransportType};
     use zk_tools::ToolContext;
+
+    #[tokio::test]
+    async fn durable_service_preferences_round_trip_and_reject_invalid_storage() {
+        use zk_mcp::McpServicePreferenceStore;
+        let db = Db::open_in_memory().unwrap();
+        let store = DbMcpServicePreferences(db.clone());
+        assert!(store.load().await.unwrap().is_empty());
+        store
+            .save(std::collections::BTreeMap::from([
+                ("off".into(), false),
+                ("on".into(), true),
+            ]))
+            .await
+            .unwrap();
+        let reopened = DbMcpServicePreferences(db.clone());
+        assert_eq!(reopened.load().await.unwrap().get("off"), Some(&false));
+        db.put_config_value("mcp_service_preferences", r#"{"off":"false"}"#)
+            .await
+            .unwrap();
+        assert!(reopened.load().await.is_err());
+    }
 
     use super::*;
 

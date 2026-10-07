@@ -36,10 +36,13 @@
 //! （`ChatMessage` 纯文本，D-S9-7）。
 
 pub mod admission;
+pub mod auto_visualization;
+pub mod auxiliary_query;
 pub mod concurrency;
 pub mod context;
 mod context_checkpoint;
 pub mod conversation_service;
+pub mod memory_retrieval;
 // Batch 7b Step 4/5：自修正循环（编译错误/测试失败解析器 + 主控）。消费方为
 // 引擎多轮循环，Feature Flag `SELF_CORRECTION_LOOP` 门控。
 pub mod correction;
@@ -54,6 +57,7 @@ pub mod file_history;
 // Batch 5 Step 2：用户级长期记忆（`~/.zk/MEMORY.md` + BM25 检索），对照旧
 // `MemdirService` / `MemorySearchEngine`。生产入口为 `Memory` 工具与
 // `/api/memory*` 端点；**不**参与系统提示注入（理由见模块文档）。
+mod input_images;
 pub mod llm_ledger;
 pub mod llm_summarizer;
 pub mod memdir;
@@ -64,8 +68,10 @@ pub mod observability;
 pub mod project_memory;
 pub mod query_config;
 pub mod recovery;
+pub mod run_tool_scopes;
 pub mod session_snapshot;
 pub mod sink;
+pub mod structured_output;
 pub mod summarizer;
 pub mod system_prompt;
 // Batch 7b Step 1：工具调用追踪器（连续错误 / 滑动窗口 / 相同错误重复）。
@@ -108,8 +114,9 @@ pub use correction::loop_ctrl::{
 pub use correction::{ParsedError, ParsedTestFailure};
 pub use cost::{CostTracker, NoopCostTracker};
 pub use engine::{
-    ConversationRunOptions, DEFAULT_ROOT_DEADLINE, Engine, RootTaskBudgetPolicy,
-    RunCancellationPort, TrustedImageUrlCheck,
+    ConversationCancellation, ConversationLease, ConversationPreferenceSource,
+    ConversationRunOptions, DEFAULT_ROOT_DEADLINE, Engine, ExternalToolCall, ExternalToolResult,
+    RootTaskBudgetPolicy, RunCancellationPort, TrustedImageUrlCheck,
 };
 pub use env_info::environment_section;
 pub use execution_resources::ExecutionSupervisor;
@@ -147,7 +154,7 @@ pub use recovery::{
 };
 pub use session_snapshot::{
     InvalidSessionId, SNAPSHOT_DIR_NAME, SNAPSHOT_FILE_SUFFIX, SessionSnapshot,
-    SessionSnapshotService, SessionSnapshotSummary,
+    SessionSnapshotError, SessionSnapshotService, SessionSnapshotSummary,
 };
 pub use sink::MessageSink;
 pub use summarizer::{
@@ -173,9 +180,10 @@ pub use agent::{
     build_sub_agent_registry_with_policy,
 };
 pub use task::{
-    CLEANUP_GRACE, CancelReceipt, ChildTaskSubmission, DEFAULT_TASK_TIMEOUT, GLOBAL_AGENT_LIMIT,
-    ROOT_AGENT_LIMIT, TaskExecutionContext, TaskExecutionLease, TaskExecutionResult,
-    TaskOutputRequest, TaskOutputResponse, TaskRuntime, TaskRuntimeError, TaskRuntimeShutdownPhase,
+    CLEANUP_GRACE, CancelReceipt, ChildTaskSubmission, DEFAULT_TASK_TIMEOUT,
+    ExternalRootSubmission, GLOBAL_AGENT_LIMIT, ROOT_AGENT_LIMIT, RunTerminalObserver,
+    TaskExecutionContext, TaskExecutionLease, TaskExecutionResult, TaskOutputRequest,
+    TaskOutputResponse, TaskRuntime, TaskRuntimeError, TaskRuntimeShutdownPhase,
     TaskRuntimeShutdownReport, TaskSubmissionReceipt,
 };
 

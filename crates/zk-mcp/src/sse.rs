@@ -350,6 +350,7 @@ impl SseShared {
 pub struct SseTransport {
     client: reqwest::Client,
     headers: BTreeMap<String, String>,
+    request_authorizer: RwLock<Option<Arc<dyn crate::transport::RequestAuthorizer>>>,
     request_id: AtomicI64,
     shared: Arc<SseShared>,
     reader: Mutex<Option<JoinHandle<()>>>,
@@ -395,6 +396,7 @@ impl SseTransport {
         Ok(Self {
             client,
             headers,
+            request_authorizer: RwLock::new(None),
             request_id: AtomicI64::new(1),
             shared: Arc::new(SseShared {
                 sse_url: format!("{base_url}/sse"),
@@ -433,10 +435,18 @@ impl SseTransport {
         self.shared.target_url()
     }
 
-    fn apply_headers(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        self.headers.iter().fold(builder, |builder, (name, value)| {
+    async fn apply_headers(
+        &self,
+        builder: reqwest::RequestBuilder,
+    ) -> Result<reqwest::RequestBuilder, McpProtocolError> {
+        let builder = self.headers.iter().fold(builder, |builder, (name, value)| {
             builder.header(name, value)
-        })
+        });
+        let authorizer = read_lock(&self.request_authorizer).clone();
+        match authorizer {
+            Some(authorizer) => authorizer.authorize(builder).await,
+            None => Ok(builder),
+        }
     }
 
     /// POST 一条 JSON-RPC 报文到会话端点。
@@ -445,6 +455,8 @@ impl SseTransport {
             .map_err(|error| PostFailure::Network(error.to_string()))?;
         let request = self
             .apply_headers(self.client.post(self.shared.target_url()))
+            .await
+            .map_err(|error| PostFailure::Network(error.to_string()))?
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(json);
         let response = request
@@ -498,6 +510,9 @@ fn base_origin(base_url: &str) -> Result<String, McpProtocolError> {
 }
 
 impl McpTransport for SseTransport {
+    fn set_request_authorizer(&self, authorizer: Arc<dyn crate::transport::RequestAuthorizer>) {
+        *write_lock(&self.request_authorizer) = Some(authorizer);
+    }
     fn next_request_id(&self) -> RequestId {
         RequestId::Number(self.request_id.fetch_add(1, Ordering::Relaxed))
     }
@@ -507,6 +522,7 @@ impl McpTransport for SseTransport {
             let (sender, receiver) = oneshot::channel();
             let request = self
                 .apply_headers(self.client.get(&self.shared.sse_url))
+                .await?
                 .header(reqwest::header::ACCEPT, "text/event-stream");
             let handle = tokio::spawn(read_loop(
                 request,

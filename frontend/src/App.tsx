@@ -1,14 +1,19 @@
 import { useCallback, useEffect, useState, useMemo, useRef } from 'react';
 import { AppLayout } from '@/components/layout';
 import { MessageList } from '@/components/message';
+import type { MessageListHandle } from '@/components/message';
+import { EmptyHero } from '@/components/message/EmptyHero';
 import { JourneyVerifyPanel } from '@/components/verify/JourneyVerifyPanel';
 import { PromptInput } from '@/components/input';
 import { DialogManager } from '@/components/DialogManager';
 import { useMessageStore } from '@/store/messageStore';
 import { useSessionStore } from '@/store/sessionStore';
+import { PROMPT_DRAFT_FALLBACK_KEY, usePromptDraftStore } from '@/store/promptDraftStore';
 import { useConfigStore } from '@/store/configStore';
 import { sendToServer, sendRunInput, sendSlashCommand } from '@/api/stompClient';
 import { SkillDetailModal } from '@/components/skills/SkillDetailModal';
+import { findEnabledSkill, useSkillStore } from '@/store/skillStore';
+import { useSkillSync } from '@/hooks/useSkillSync';
 import { MobileApprovalSheet } from '@/components/verify/MobileApprovalSheet';
 import type { SubmitEvent, Message, Command } from '@/types';
 import { generateUUID } from '@/utils/uuid';
@@ -16,29 +21,85 @@ import { useAPOSInitialization } from '@/hooks/useAPOSInitialization';
 import { useActivityStore } from '@/store/activityStore';
 import { useNotificationStore } from '@/store/notificationStore';
 import { ProjectSelectionDialog } from '@/components/project/ProjectSelectionDialog';
+import { InterruptConfirmDialog } from '@/components/dialog/InterruptConfirmDialog';
 import {
   NEW_AUTHORIZED_SESSION_EVENT,
   requestAuthorizedSession,
 } from '@/services/authorizedSession';
 import {
   activateSessionCandidate,
+  captureSessionSelectionGuard,
   getPendingSessionActivation,
 } from '@/services/sessionActivation';
-import { SimpleWorkbench } from '@/components/workbench/SimpleWorkbench';
-import { useWorkbenchViewStore } from '@/store/workbenchViewStore';
+import { useMessageNavigationStore } from '@/store/messageNavigationStore';
 import { useJourneyVerifyStore } from '@/store/journeyVerifyStore';
+import { useTabStatus } from '@/hooks/useTabStatus';
+import { usePageExitGuard } from '@/hooks/usePageExitGuard';
+import { useEditorPreferencesStore } from '@/store/editorPreferencesStore';
+import { useResponsive } from '@/hooks/useResponsive';
+import { useVirtualKeyboard } from '@/hooks/useVirtualKeyboard';
+import { SessionMergePanel } from '@/components/session/SessionMergePanel';
+import { isMergeSource, selectMergeSourceIds, useSessionMergeStore } from '@/store/sessionMergeStore';
+import { SpaceshipHudLayer } from '@/components/theme/SpaceshipHudLayer';
+import { InkHavocFxLayer } from '@/components/theme/InkHavocFxLayer';
+import { JellyFxLayer } from '@/components/theme/JellyFxLayer';
+import { ToastContainer } from '@/components/common/ToastContainer';
 
-interface SkillItem {
-  name: string;
-  description: string;
-  source: string;
-}
+/**
+ * §7.6 移动态虚拟键盘桥（仅 isMobile 时挂载，桌面零副作用）：
+ * 消费 App 统一计算的键盘高度（输入条和 MessageList 共用），
+ * 在键盘弹起瞬间（0→>0）对消息流做一次性滚底，不接管后续滚动，
+ * 与 MessageList「用户上翻时不强制滚底」的既有逻辑正交。
+ */
+const MobileKeyboardBridge: React.FC<{
+  listRef: React.RefObject<MessageListHandle | null>;
+  keyboardHeight: number;
+}> = ({ listRef, keyboardHeight }) => {
+  const prevKeyboardHeightRef = useRef(0);
+
+  useEffect(() => {
+    if (prevKeyboardHeightRef.current === 0 && keyboardHeight > 0) {
+      listRef.current?.scrollToBottom();
+    }
+    prevKeyboardHeightRef.current = keyboardHeight;
+  }, [keyboardHeight, listRef]);
+
+  return null;
+};
 
 function App() {
+  usePageExitGuard();
+  useTabStatus();
+  useSkillSync();
+  useEffect(() => {
+    const load = () => { void useEditorPreferencesStore.getState().load(); };
+    load();
+    window.addEventListener('focus', load);
+    return () => window.removeEventListener('focus', load);
+  }, []);
+
   const { messages, addMessage } = useMessageStore();
   const { status, sessionId } = useSessionStore();
-  const workbenchEnabled = useWorkbenchViewStore(s => s.enabled);
-  const viewMode = useWorkbenchViewStore(s => s.viewMode);
+  const mergeBlocked = useSessionMergeStore(s => !!sessionId && selectMergeSourceIds(s).includes(sessionId));
+  // 手机和平板按可视视口布局，键盘高度仅用于消息滚动。
+  const { isMobile, isTablet } = useResponsive();
+  const { keyboardHeight } = useVirtualKeyboard(isMobile || isTablet);
+  const messageListRef = useRef<MessageListHandle>(null);
+  const composerCleanupRef = useRef<(() => void) | null>(null);
+  const composerRef = useCallback((composer: HTMLDivElement | null) => {
+    composerCleanupRef.current?.();
+    composerCleanupRef.current = null;
+    const workspace = composer?.parentElement;
+    if (!composer || !workspace) return;
+    const update = () => workspace.style.setProperty('--glass-composer-height', `${composer.getBoundingClientRect().height + 12}px`);
+    const observer = new ResizeObserver(update);
+    observer.observe(composer);
+    update();
+    composerCleanupRef.current = () => {
+      observer.disconnect();
+      workspace.style.removeProperty('--glass-composer-height');
+    };
+  }, []);
   const { loadConfig } = useConfigStore();
   const sessionReadinessRef = useRef<Promise<string | null> | null>(null);
   const newSessionRequestRef = useRef<Promise<string | null> | null>(null);
@@ -58,11 +119,11 @@ function App() {
             useJourneyVerifyStore.getState().reset();
           }
           useActivityStore.getState().setCurrentSessionId(sessionId);
-          useWorkbenchViewStore.getState().setActiveSession(sessionId);
+          useMessageNavigationStore.getState().setActiveSession(sessionId);
         } else {
           useActivityStore.getState().clearAll();
           useJourneyVerifyStore.getState().reset();
-          useWorkbenchViewStore.getState().setActiveSession(null);
+          useMessageNavigationStore.getState().setActiveSession(null);
         }
       }
     );
@@ -71,12 +132,12 @@ function App() {
     if (currentId) {
       useActivityStore.getState().setCurrentSessionId(currentId);
     }
-    useWorkbenchViewStore.getState().setActiveSession(currentId);
+    useMessageNavigationStore.getState().setActiveSession(currentId);
     return () => { unsubscribe(); };
   }, []);
 
   // 技能列表
-  const [skills, setSkills] = useState<SkillItem[]>([]);
+  const skills = useSkillStore(state => state.skills);
   const [selectedSkill, setSelectedSkill] = useState<string | null>(null);
 
   // 加载配置
@@ -84,29 +145,23 @@ function App() {
     loadConfig();
   }, [loadConfig]);
 
-  // 动态加载技能列表
-  useEffect(() => {
-    fetch('/api/skills')
-      .then(r => r.json())
-      .then((data: SkillItem[]) => setSkills(data))
-      .catch(() => {});
-  }, []);
 
   // 内置命令
   const builtinCommands: Command[] = useMemo(() => [
     { name: 'help', description: '显示帮助信息', group: 'Commands' },
     { name: 'clear', description: '清除对话记录', group: 'Commands' },
     { name: 'compact', description: '压缩对话上下文', group: 'Commands' },
-    { name: 'model', description: '切换 AI 模型', group: 'Commands' },
+    { name: 'model', description: '查看可用模型；切换请使用模型选择器', group: 'Commands' },
   ], []);
 
   // 将技能转换为 Command 格式
   const allCommands: Command[] = useMemo(() => {
-    const skillCommands: Command[] = skills.map(s => ({
+    const skillCommands: Command[] = skills.filter(s => s.enabled && s.userInvocable !== false).map(s => ({
       name: `skill ${s.name}`,
       description: s.description,
       group: 'Skills',
       hidden: false,
+      skillId: s.id,
     }));
     return [...builtinCommands, ...skillCommands];
   }, [builtinCommands, skills]);
@@ -138,11 +193,15 @@ function App() {
         return result.status === 'activated' ? result.sessionId : null;
       }
       let sessionId = useSessionStore.getState().sessionId;
+      let newSessionDraftId: string | undefined;
       if (!sessionId) {
+        const selectionIsCurrent = captureSessionSelectionGuard();
+        newSessionDraftId = usePromptDraftStore.getState().drafts[PROMPT_DRAFT_FALLBACK_KEY]?.id;
         sessionId = await requestAuthorizedSession();
+        if (!selectionIsCurrent()) return null;
       }
       if (!sessionId) return null;
-      const activation = await activateSessionCandidate(sessionId);
+      const activation = await activateSessionCandidate(sessionId, { newSessionDraftId });
       if (activation.status === 'activated') return sessionId;
       if (activation.status === 'superseded') return null;
       throw activation.error;
@@ -158,6 +217,7 @@ function App() {
 
   // 发送消息
   const handleSubmit = useCallback(async (event: SubmitEvent) => {
+    if (useSessionStore.getState().purpose === 'mcp') return false;
     let currentSessionId: string | null;
     try {
       currentSessionId = await ensureSessionReady();
@@ -168,7 +228,11 @@ function App() {
         : '无法准备授权会话，请检查服务后重试。');
       return false;
     }
-    if (!currentSessionId) return false;
+    if (!currentSessionId || useSessionStore.getState().purpose === 'mcp') return false;
+    if (isMergeSource(currentSessionId)) {
+      addSessionError('会话正在合并，完成后可以继续发送。');
+      return false;
+    }
 
     const currentStatus = useSessionStore.getState().status;
     if (currentStatus === 'streaming' || currentStatus === 'waiting_permission') {
@@ -183,10 +247,19 @@ function App() {
       }
       const interventionText = event.text?.trim();
       if (!interventionText) return false;
-      if (!sendRunInput(generateUUID(), interventionText)) {
+      const runInputRequestId = generateUUID();
+      // meta.steering=true 随指令持久化到后端并在历史/快照中原样回传 ——
+      // 刷新后 steeringMessageIds（纯内存登记）丢失时，轮次投影仍能凭
+      // meta 识别 steering 边界，不将该消息误判为新一轮指令。
+      if (!sendRunInput(runInputRequestId, interventionText, { steering: true })) {
         addSessionError('运行中指令未发送，请检查 WebSocket 连接后重试。');
         return false;
       }
+      // 发送成功即登记 steering requestId：本路径不创建本地消息，消息由
+      // run_input_applied 回执（dispatch.ts）落库；提前登记可覆盖回执在断线期间
+      // 丢失的场景 —— 重连后 session_restored 快照中的该 user 消息（后端沿用
+      // requestId 作为 uuid）仍能被轮次投影识别为 steering 而非新一轮指令。
+      useMessageStore.getState().markSteeringMessage(currentSessionId, runInputRequestId);
       return true;
     }
     if (currentStatus === 'compacting') return false;
@@ -233,6 +306,12 @@ function App() {
   }, [addMessage, addSessionError, ensureSessionReady]);
 
   const rejectCommandWhileBusy = useCallback((): boolean => {
+    if (isMergeSource(useSessionStore.getState().sessionId)) {
+      const notifications = useNotificationStore.getState();
+      notifications.removeNotification('command-blocked-merge');
+      notifications.addNotification({ key: 'command-blocked-merge', level: 'warning', message: '会话正在合并，暂不能执行命令。' });
+      return true;
+    }
     if (useSessionStore.getState().status === 'idle') return false;
     const notifications = useNotificationStore.getState();
     notifications.removeNotification('command-blocked-while-running');
@@ -246,14 +325,26 @@ function App() {
   }, []);
 
   // 处理命令
-  const handleSlashCommand = useCallback(async (command: string) => {
+  const handleSlashCommand = useCallback(async (command: string, selectedSkillId?: string) => {
+    if (useSessionStore.getState().purpose === 'mcp') return false;
     if (rejectCommandWhileBusy()) return false;
     const raw = command.startsWith('/') ? command.slice(1) : command;
     // 技能命令：/skill <name> → 打开详情弹窗
     if (raw.startsWith('skill ')) {
       const skillName = raw.slice(6).trim();
       if (skillName) {
-        setSelectedSkill(skillName);
+        await useSkillStore.getState().loadSkills({ background: true });
+        const currentSkills = useSkillStore.getState().skills;
+        // Palette selections identify an exact skill, even if display aliases collide.
+        // Only manually typed commands may resolve aliases using backend id-first semantics.
+        const skill = selectedSkillId === undefined
+          ? findEnabledSkill(currentSkills, skillName)
+          : currentSkills.find(item => item.id === selectedSkillId && item.enabled);
+        if (!skill) {
+          addSessionError('该技能不可用，请在 Skill 管理中检查启用状态。');
+          return false;
+        }
+        setSelectedSkill(skill.id);
         return true;
       }
     }
@@ -269,7 +360,11 @@ function App() {
     }
 
     const parts = raw.split(/\s+/);
-    if (!sendSlashCommand(parts[0], parts.slice(1).join(' '))) {
+    // /review 保留首个 token 之后的原始内部格式（换行、连续空格、引号、= 号）。
+    const reviewMatch = /^review(?:\s+([\s\S]*))?$/i.exec(raw);
+    const commandName = reviewMatch ? 'review' : parts[0];
+    const args = reviewMatch ? (reviewMatch[1] ?? '') : parts.slice(1).join(' ');
+    if (!sendSlashCommand(commandName, args)) {
       addSessionError('命令未发送，请检查 WebSocket 连接后重试。');
       return false;
     }
@@ -287,8 +382,14 @@ function App() {
   }, [addMessage, addSessionError, ensureSessionReady, rejectCommandWhileBusy]);
 
   // 执行技能
-  const executeSkill = useCallback(async (skillName: string, userInput: string) => {
+  const executeSkill = useCallback(async (skillId: string, userInput: string) => {
     if (rejectCommandWhileBusy()) return;
+    await useSkillStore.getState().loadSkills({ background: true });
+    const skill = useSkillStore.getState().skills.find(item => item.id === skillId && item.enabled && item.userInvocable !== false);
+    if (!skill) {
+      addSessionError('该技能不可用，请在 Skill 管理中检查启用状态。');
+      return;
+    }
     try {
       const sessionId = await ensureSessionReady();
       if (!sessionId) return;
@@ -298,7 +399,8 @@ function App() {
         : '无法执行技能，请检查服务后重试。');
       return;
     }
-    const args = userInput ? `${skillName} ${userInput}` : skillName;
+    const skillToken = /[\s"\\]/u.test(skill.id) ? JSON.stringify(skill.id) : skill.id;
+    const args = userInput ? `${skillToken} ${userInput}` : skillToken;
     if (!sendSlashCommand('skill', args)) {
       addSessionError('技能命令未发送，请检查 WebSocket 连接后重试。');
       return;
@@ -313,9 +415,12 @@ function App() {
       }
       const operation = (async () => {
         try {
+          const selectionIsCurrent = captureSessionSelectionGuard();
+          const newSessionDraftId = useSessionStore.getState().sessionId
+            ? undefined : usePromptDraftStore.getState().drafts[PROMPT_DRAFT_FALLBACK_KEY]?.id;
           const newSessionId = await requestAuthorizedSession();
-          if (!newSessionId) return null;
-          const activation = await activateSessionCandidate(newSessionId);
+          if (!newSessionId || !selectionIsCurrent()) return null;
+          const activation = await activateSessionCandidate(newSessionId, { newSessionDraftId });
           if (activation.status === 'superseded') return null;
           if (activation.status === 'failed') throw activation.error;
           window.dispatchEvent(new Event('session-list-updated'));
@@ -346,52 +451,71 @@ function App() {
     );
   }, [startNewAuthorizedSession]);
 
-  // 中断请求
-  const handleInterrupt = useCallback(() => {
+  // 真正执行中断（仅在二次确认通过后调用）
+  const executeInterrupt = useCallback(() => {
     // 通过 store 中断前端状态
     useSessionStore.getState().abort();
     // 发送 WebSocket 中断消息到后端
     sendToServer('/app/interrupt', { isSubmitInterrupt: false });
   }, []);
 
+  // 停止按钮先确认；输入框 Ctrl+C 直接执行中断。
+  const [interruptConfirmOpen, setInterruptConfirmOpen] = useState(false);
+  const handleInterrupt = useCallback(() => {
+    setInterruptConfirmOpen(true);
+  }, []);
+
+  // 边界：弹窗打开期间 run 自然结束（status → idle/compacting）时自动关闭，
+  // 避免用户对着已结束的 run 点「确认停止」，多发一帧 /app/interrupt，
+  // 后端回 interrupt_ack 后在聊天里留下多余的「已中断 AI 响应」系统消息。
+  useEffect(() => {
+    if (interruptConfirmOpen && status !== 'streaming' && status !== 'waiting_permission') {
+      setInterruptConfirmOpen(false);
+    }
+  }, [interruptConfirmOpen, status]);
+
   return (
     <>
+      <SessionMergePanel />
+      {/* 星舰 HUD 电影级装饰层：spaceship + cinematic 门控，fixed overlay，与 GlassMaterial 并存不冲突 */}
+      <SpaceshipHudLayer />
+      {/* 大闹天宫浓郁档装饰层：ink 双模式 + cinematic 门控，fixed overlay（角标/回纹带/帘幕） */}
+      <InkHavocFxLayer />
+      {/* 果冻主题装饰层 + Q 弹行为桥：jelly + cinematic 门控，fixed overlay（晕染/金箔碎点/果冻滴） */}
+      <JellyFxLayer />
       <AppLayout>
-        <div className="h-full flex flex-col">
-          <div className="flex-1 overflow-hidden">
-            {workbenchEnabled && viewMode === 'simple' ? (
-              <SimpleWorkbench sessionId={sessionId} messages={messages} status={status} />
-            ) : messages.length === 0 ? (
-                <div className="h-full flex items-center justify-center text-[var(--text-muted)]">
-                  <div className="text-center">
-                    <div className="text-4xl mb-3">💬</div>
-                    <div className="text-lg font-medium text-[var(--text-primary)]">开始对话</div>
-                    <div className="text-sm mt-2">
-                      输入消息或按 <kbd className="px-2 py-0.5 bg-[var(--bg-secondary)] rounded">/</kbd> 查看命令
-                    </div>
-                  </div>
-                </div>
-              ) : (
-                <MessageList />
-              )}
+        <div className="chat-workspace h-full flex flex-col">
+          <div className="chat-content flex-1 overflow-hidden">
+            {!sessionId || messages.length === 0 ? (
+              <EmptyHero />
+            ) : (
+              <MessageList ref={messageListRef} keyboardHeight={keyboardHeight} />
+            )}
           </div>
 
-          {(!workbenchEnabled || viewMode === 'development') && <JourneyVerifyPanel />}
+          {/* §7.6 移动虚拟键盘桥：仅移动挂载，键盘弹起时滚底 */}
+          {isMobile && <MobileKeyboardBridge listRef={messageListRef} keyboardHeight={keyboardHeight} />}
 
-          {/* Input */}
-          <div className="border-t border-[var(--border)] p-4 bg-[var(--bg-secondary)]">
+          {/* 移动端输入区占据独立空间，桌面保留悬浮布局。 */}
+          <div ref={composerRef} className="chat-composer-dock">
+            <JourneyVerifyPanel />
+            <div className={isMobile
+              ? 'chat-composer-inset prompt-input-container px-3 pt-1'
+              : 'chat-composer-inset border-t border-hairline bg-app2 p-4'}>
             <PromptInput
+              sessionId={sessionId}
+              onImmediateInterrupt={executeInterrupt}
               onSubmit={handleSubmit}
               onSlashCommand={handleSlashCommand}
               onInterrupt={handleInterrupt}
-              disabled={false}
+              disabled={mergeBlocked}
               runActive={status === 'streaming' || status === 'waiting_permission'}
               compacting={status === 'compacting'}
               permissionMode="read_write"
               messages={messages}
               commands={allCommands}
-              simpleMode={workbenchEnabled && viewMode === 'simple'}
             />
+            </div>
           </div>
         </div>
       </AppLayout>
@@ -411,6 +535,26 @@ function App() {
       {/* Global Dialogs */}
       <DialogManager />
       <ProjectSelectionDialog />
+
+      {/* 通知 Toast 容器（§8.2.6a）：notificationStore 唯一渲染者。
+          波次1增强①盖印仪式前置——此前未挂载导致通知只进不出，此处补齐挂载；
+          ink 浓郁档下 toast 左侧朱印由 InkSealStamp 承载 */}
+      <ToastContainer />
+
+      {/* 停止任务二次确认 — 桌面/平板 Dialog，手机 Bottom Sheet */}
+      <InterruptConfirmDialog
+        open={interruptConfirmOpen}
+        onClose={() => setInterruptConfirmOpen(false)}
+        onConfirm={() => {
+          setInterruptConfirmOpen(false);
+          // 二次读取 store 实时状态：防止「effect 关闭弹窗」与「本次点击」之间的
+          // 竞态导致对已结束的 run 发中断帧。
+          const currentStatus = useSessionStore.getState().status;
+          if (currentStatus === 'streaming' || currentStatus === 'waiting_permission') {
+            executeInterrupt();
+          }
+        }}
+      />
     </>
   );
 }

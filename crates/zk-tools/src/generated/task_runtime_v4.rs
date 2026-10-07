@@ -4,7 +4,7 @@
 
 use serde_json::{Value, json};
 
-pub(crate) const TASK_RUNTIME_SUCCESS_SCHEMA_JSON: &str = r#"{"additionalProperties":true,"properties":{"cleanupStatus":{"enum":["notRequired","pending","confirmed","unconfirmed"],"type":"string"},"parentTaskId":{"type":["string","null"]},"partial":{"type":"boolean"},"reason":{"type":["string","null"]},"resultRef":{"type":["string","null"]},"resultVersion":{"minimum":1,"type":["integer","null"]},"runId":{"type":["string","null"]},"status":{"enum":["queued","running","waitingDependencies","waitingInteraction","cancelling","needsAttention","succeeded","partial","failed","cancelled"],"type":"string"},"taskId":{"description":"Canonical UUID v4 task ID","format":"uuid","pattern":"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$","type":"string"},"usageSummary":{"additionalProperties":true,"type":"object"},"waitExpired":{"type":"boolean"}},"required":["taskId","runId","parentTaskId","status","reason","resultVersion","partial","resultRef","usageSummary","cleanupStatus","waitExpired"],"type":"object"}"#;
+pub(crate) const TASK_RUNTIME_SUCCESS_SCHEMA_JSON: &str = r#"{"additionalProperties":true,"properties":{"cleanupStatus":{"enum":["notRequired","pending","confirmed","unconfirmed"],"type":"string"},"displayOutput":{"description":"Mutable advisory display text; never replaces the immutable TaskResult or error","type":["string","null"]},"parentTaskId":{"type":["string","null"]},"partial":{"type":"boolean"},"reason":{"type":["string","null"]},"resultRef":{"type":["string","null"]},"resultVersion":{"minimum":1,"type":["integer","null"]},"runId":{"type":["string","null"]},"status":{"enum":["queued","running","waitingDependencies","waitingInteraction","cancelling","needsAttention","succeeded","partial","failed","cancelled"],"type":"string"},"taskId":{"description":"Canonical UUID v4 task ID","format":"uuid","pattern":"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$","type":"string"},"usageSummary":{"additionalProperties":true,"type":"object"},"waitExpired":{"type":"boolean"}},"required":["taskId","runId","parentTaskId","status","reason","resultVersion","partial","resultRef","usageSummary","cleanupStatus","waitExpired"],"type":"object"}"#;
 pub(crate) const TASK_RUNTIME_ERROR_SCHEMA_JSON: &str = r#"{"additionalProperties":false,"properties":{"code":{"type":"string"},"details":{"additionalProperties":true,"type":"object"},"message":{"type":"string"},"retryable":{"type":"boolean"}},"required":["code","message","retryable","details"],"type":"object"}"#;
 
 pub(crate) fn task_runtime_success_schema() -> Value {
@@ -74,12 +74,14 @@ pub(crate) fn agent_input_schema() -> Value {
         .expect("generated Agent input schema must be valid JSON")
 }
 
-const TASK_CREATE_INPUT_SCHEMA_JSON: &str = r#"{"additionalProperties":false,"properties":{"description":{"description":"Task description","type":"string"},"prompt":{"description":"Task prompt / instructions","type":"string"},"taskType":{"default":"agent","description":"V4 currently supports attached agent tasks only","enum":["agent"],"type":"string"}},"required":["description","prompt","taskType"],"type":"object"}"#;
+const TASK_CREATE_INPUT_SCHEMA_JSON: &str = r#"{"additionalProperties":false,"properties":{"command":{"description":"Shell command; required for shell tasks and checked by the normal Bash permission policy","type":"string"},"description":{"description":"Task description","type":"string"},"lifecycle":{"default":"attached","description":"Attached children end with the parent. Detached tasks retain their own deadline, budget, output and stop control.","enum":["attached","detached"],"type":"string"},"prompt":{"description":"Task prompt / instructions","type":"string"},"taskType":{"default":"agent","description":"Durable agent or shell task","enum":["agent","shell"],"type":"string"}},"required":["description","taskType"],"type":"object"}"#;
 #[rustfmt::skip]
 pub(crate) const TASK_CREATE_ALLOWED_FIELDS: &[&str] = &[
     "description",
     "prompt",
     "taskType",
+    "command",
+    "lifecycle",
 ];
 #[rustfmt::skip]
 pub(crate) const TASK_CREATE_LEGACY_FIELDS: &[&str] = &[
@@ -91,8 +93,15 @@ pub(crate) const TASK_CREATE_LEGACY_FIELDS: &[&str] = &[
 #[rustfmt::skip]
 pub(crate) const TASK_CREATE_TASK_TYPE_VALUES: &[&str] = &[
     "agent",
+    "shell",
 ];
 pub(crate) const TASK_CREATE_TASK_TYPE_DEFAULT: &str = "agent";
+#[rustfmt::skip]
+pub(crate) const TASK_CREATE_LIFECYCLE_VALUES: &[&str] = &[
+    "attached",
+    "detached",
+];
+pub(crate) const TASK_CREATE_LIFECYCLE_DEFAULT: &str = "attached";
 
 pub(crate) fn task_create_input_schema() -> Value {
     serde_json::from_str(TASK_CREATE_INPUT_SCHEMA_JSON)
@@ -182,18 +191,18 @@ pub(crate) fn task_stop_input_schema() -> Value {
         .expect("generated TaskStop input schema must be valid JSON")
 }
 
-const TASK_UPDATE_INPUT_SCHEMA_JSON: &str = r#"{"additionalProperties":false,"properties":{"description":{"description":"Updated task description","type":"string"},"plan":{"description":"Advisory execution plan","type":"string"},"reportedProgress":{"description":"Advisory progress only; cannot change lifecycle state","maximum":1,"minimum":0,"type":"number"},"taskId":{"description":"Canonical UUID v4 task ID","format":"uuid","pattern":"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$","type":"string"}},"required":["taskId"],"type":"object"}"#;
+const TASK_UPDATE_INPUT_SCHEMA_JSON: &str = r#"{"additionalProperties":false,"properties":{"description":{"description":"Updated task description","type":"string"},"output":{"description":"Replace advisory display text, including after execution ends; empty clears it. Limited to 1048576 UTF-16 characters with truncation notice. Does not change execution state, errors, result pages, or usage.","type":"string"},"plan":{"description":"Advisory execution plan","type":"string"},"reportedProgress":{"description":"Advisory progress only; cannot change lifecycle state","maximum":1,"minimum":0,"type":"number"},"taskId":{"description":"Canonical UUID v4 task ID","format":"uuid","pattern":"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$","type":"string"}},"required":["taskId"],"type":"object"}"#;
 #[rustfmt::skip]
 pub(crate) const TASK_UPDATE_ALLOWED_FIELDS: &[&str] = &[
     "taskId",
     "description",
+    "output",
     "plan",
     "reportedProgress",
 ];
 #[rustfmt::skip]
 pub(crate) const TASK_UPDATE_LEGACY_FIELDS: &[&str] = &[
     "status",
-    "output",
     "error",
 ];
 pub(crate) const TASK_UPDATE_REPORTED_PROGRESS_MINIMUM: f64 = 0.0;

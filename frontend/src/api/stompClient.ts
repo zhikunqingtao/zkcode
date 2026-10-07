@@ -26,6 +26,7 @@ import type { ServerMessage, Attachment } from '@/types';
  * （与 zk-protocol server_message.rs 的 57 个下行 type 逐字一致）
  */
 const VALID_MESSAGE_TYPES: ReadonlySet<string> = new Set([
+    'assistant_segment_complete', 'system_message', 'task_boundary',
     'stream_delta', 'thinking_delta', 'tool_use_start', 'tool_use_input', 'tool_use_progress', 'tool_result',
     'error', 'compact_complete', 'message_complete', 'compact_start', 'rate_limit',
     'permission_request', 'tool_permission_denied', 'cost_update', 'task_update', 'agent_spawn', 'agent_update',
@@ -547,8 +548,8 @@ export function sendUserMessage(text: string, attachments?: Attachment[], refere
 }
 
 /** 向当前运行中的根任务追加指令，不中断当前调用。 */
-export function sendRunInput(requestId: string, text: string): boolean {
-    return sendToServer('/app/run-input', { requestId, text });
+export function sendRunInput(requestId: string, text: string, meta?: Record<string, unknown>): boolean {
+    return sendToServer('/app/run-input', { requestId, text, meta });
 }
 
 /** #3 发送中断 → interrupt */
@@ -557,13 +558,13 @@ export function sendInterrupt(): void {
 }
 
 /** #4 切换模型 → set_model */
-export function sendSetModel(model: string): void {
-    send('/app/model', { model });
+export function sendSetModel(model: string): boolean {
+    return sendToServer('/app/model', { model });
 }
 
 /** #5 切换权限模式 → set_permission_mode */
-export function sendSetPermissionMode(mode: string): boolean {
-    return sendToServer('/app/permission-mode', { mode });
+export function sendSetPermissionMode(mode: string, requestId?: string): boolean {
+    return sendToServer('/app/permission-mode', { mode, requestId });
 }
 
 /** #6 Slash 命令 → slash_command */

@@ -25,6 +25,7 @@ fn text(content: &str) -> StoredBlock {
 /// user 消息便捷构造。
 fn user_msg(content: &str) -> NewMessage {
     NewMessage {
+        meta: None,
         role: MessageRole::User,
         content: vec![text(content)],
         stop_reason: None,
@@ -36,6 +37,7 @@ fn user_msg(content: &str) -> NewMessage {
 /// assistant 消息便捷构造（带 usage）。
 fn assistant_msg(content: &str, input: i64, output: i64) -> NewMessage {
     NewMessage {
+        meta: None,
         role: MessageRole::Assistant,
         content: vec![text(content)],
         stop_reason: Some("end_turn".to_owned()),
@@ -457,6 +459,72 @@ async fn append_with_id_is_idempotent() {
         .await
         .unwrap();
     assert_eq!(next.seq_num, 2);
+}
+
+#[tokio::test]
+async fn repeated_message_identity_rejects_changed_payload_or_session_atomically() {
+    let db = zk_db::Db::open_in_memory().unwrap();
+    let session = db.create_session("m", "/w").await.unwrap();
+    let foreign = db.create_session("m", "/w").await.unwrap();
+    let mut first = user_msg("once");
+    first.meta = Some(serde_json::json!({"a":1,"b":2}));
+    db.append_message_with_id("stable", &session.id, first.clone())
+        .await
+        .unwrap();
+    let id = session.id.clone();
+    db.with_writer(move |conn| {
+        conn.execute(
+            r#"UPDATE messages SET metadata_json='{"b":2,"a":1}' WHERE id='stable'"#,
+            [],
+        )?;
+        conn.execute(
+            "UPDATE sessions SET updated_at='2026-10-07T00:00:00.000000Z' WHERE id=?1",
+            [&id],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    assert!(
+        db.append_message_with_id("stable", &session.id, first.clone())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let mut changed_text = first.clone();
+    changed_text.content = user_msg("changed").content;
+    let mut changed_meta = first.clone();
+    changed_meta.meta = Some(serde_json::json!({"a":9,"b":2}));
+    let mut changed_role = first.clone();
+    changed_role.role = zk_db::MessageRole::Assistant;
+    let mut changed_usage = first.clone();
+    changed_usage.input_tokens = 1;
+    for changed in [changed_text, changed_meta, changed_role, changed_usage] {
+        assert!(
+            matches!(db.append_message_with_id("stable", &session.id, changed).await, Err(zk_db::DbError::Conflict(code)) if code=="MESSAGE_ID_CONFLICT")
+        );
+    }
+    assert!(
+        matches!(db.append_message_with_id("stable", &foreign.id, first).await, Err(zk_db::DbError::Conflict(code)) if code=="MESSAGE_ID_CONFLICT")
+    );
+    let detail = db.get_session(&session.id).await.unwrap().unwrap();
+    assert_eq!(detail.messages.len(), 1);
+    assert_eq!(detail.messages[0].content, user_msg("once").content);
+    assert_eq!(
+        db.append_message(&session.id, user_msg("next"))
+            .await
+            .unwrap()
+            .seq_num,
+        2
+    );
+    assert!(
+        db.get_session(&foreign.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .messages
+            .is_empty()
+    );
 }
 
 // ═══ rewind（deleteAfterSeqNum）与单条读取 ═══

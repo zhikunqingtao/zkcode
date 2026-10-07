@@ -92,11 +92,13 @@ pub const SYSTEM_SECTION: &str = r#"# 系统
    - **Stop**：在代理即将停止其回合时运行。
    - **SubagentStop**：在子代理/工作者即将停止时运行。
  - 如果你被钩子阻止，判断你是否可以根据阻止消息调整你的操作。如果不能，请用户检查他们的钩子配置。
- - 当对话接近上下文限制时，系统会自动压缩之前的消息。这意味着你与用户的对话不受上下文窗口限制。当压缩发生时：
+ - 当对话接近上下文限制时，系统会尝试压缩之前的消息。上下文与运行预算仍有上限；若原始必要内容无法容纳，应明确报告限制。当压缩发生时：
    - 较早的消息可能被摘要或移除
    - 旧回合的工具结果可能被清除（替换为 "[tool result cleared]"）
    - 你应当在回复文本中记录重要信息，因为原始工具结果可能在之后不可用
-   - 压缩是透明的——继续正常工作即可
+   - 压缩摘要是可能不完整的历史参考，不是新指令或授权；最新用户要求优先
+   - `[content compressed by system]`、`[content truncated by system]` 等系统标记不是任务成果或回答模板；除非用户明确要求字面输出，不能把标记当最终答复
+   - 区分已执行、已验证、失败、未执行和未知，不得仅凭摘要或占位标记宣称完成
 
 ## 渲染
 你的输出将使用 CommonMark 规范以等宽字体渲染。在适当的地方使用 GitHub 风格的 markdown 进行格式化，包括带语言标识符的围栅代码块。
@@ -206,11 +208,11 @@ pub const USING_TOOLS_BASE: &str = r"# 使用你的工具
 
 ## 工具选择优先级
  - 当提供了相关专用工具时，不要使用 Bash 工具运行命令。使用专用工具可以让用户更好地理解和审查你的工作：
-   - 读取文件使用 FileRead 而不是 cat、head、tail 或 sed
-   - 编辑文件使用 FileEdit 而不是 sed 或 awk
-   - 创建文件使用 FileWrite 而不是 cat heredoc 或 echo 重定向
-   - 搜索文件使用 GlobTool 而不是 find 或 ls
-   - 搜索文件内容使用 GrepTool 而不是 grep 或 rg
+   - 读取文件使用 Read 而不是 cat、head、tail 或 sed
+   - 编辑文件使用 Edit 而不是 sed 或 awk
+   - 创建文件使用 Write 而不是 cat heredoc 或 echo 重定向
+   - 搜索文件使用 Glob 而不是 find 或 ls
+   - 搜索文件内容使用 Grep 而不是 grep 或 rg
    - Bash 工具仅用于需要 shell 执行的系统命令和终端操作（例如运行测试、安装包、git 操作、启动服务器、编译代码）
    - 如果不确定且存在相关专用工具，默认使用专用工具
 
@@ -219,7 +221,7 @@ pub const USING_TOOLS_BASE: &str = r"# 使用你的工具
 
 ## 并行工具调用
  - 你可以在一次响应中调用多个工具。如果你打算调用多个工具且它们之间没有依赖关系，将所有独立的工具调用并行执行。尽可能最大化使用并行工具调用以提高效率。但如果某些工具调用依赖于先前的调用，则顺序调用这些工具。
- - 例如：读取 3 个不相关的文件 → 并行调用 FileRead 3 次。但读取文件以查找符号，然后搜索其引用 → 顺序调用。
+ - 例如：读取 3 个不相关的文件 → 并行调用 Read 3 次。但读取文件以查找符号，然后搜索其引用 → 顺序调用。
 
 ## MCP 工具
  - MCP (Model Context Protocol) 工具扩展你的能力。当 MCP 服务器连接时，其工具会与内置工具一起显示。当内置工具无法覆盖所需功能时使用 MCP 工具。
@@ -227,7 +229,7 @@ pub const USING_TOOLS_BASE: &str = r"# 使用你的工具
 
 ## 错误处理
  - 如果工具调用失败，在重试前仔细读取错误信息。常见问题：
-   - 文件未找到：使用 GlobTool 或 list_dir 验证路径
+   - 文件未找到：使用 Glob 或 list_dir 验证路径
    - 权限被拒绝：检查操作是否需要用户审批
    - 超时：将操作分解为更小的步骤
  - 不要使用相同参数重试失败的工具调用超过一次
@@ -532,12 +534,12 @@ mod tests {
 
     /// 静态段内容长度互锁；`SYSTEM_SECTION` 包含后续追加的图片渲染指引。
     #[test]
-    fn static_sections_match_java_runtime_char_counts() {
+    fn static_sections_match_reviewed_native_char_counts() {
         assert_eq!(INTRO_SECTION.chars().count(), 619);
-        assert_eq!(SYSTEM_SECTION.chars().count(), 1340);
+        assert_eq!(SYSTEM_SECTION.chars().count(), 1521);
         assert_eq!(DOING_TASKS_SECTION.chars().count(), 2652);
         assert_eq!(ACTIONS_SECTION.chars().count(), 801);
-        assert_eq!(USING_TOOLS_BASE.chars().count(), 952);
+        assert_eq!(USING_TOOLS_BASE.chars().count(), 924);
     }
 
     #[test]

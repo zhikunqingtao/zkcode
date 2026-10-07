@@ -38,9 +38,6 @@ use zk_engine::engine::history_to_chat_messages;
 use crate::command::context::CommandContext;
 use crate::command::traits::{Command, CommandResult, CommandType};
 
-/// 旧 `context.currentModel() != null ? currentModel : "default"` 的兜底值。
-const DEFAULT_MODEL: &str = "default";
-
 /// `/compact` 命令。
 pub(super) struct CompactCommand;
 
@@ -84,8 +81,9 @@ impl Command for CompactCommand {
                 return CommandResult::text("Nothing to compact — conversation is empty.");
             }
             let messages = history_to_chat_messages(&detail.messages);
+            let providers = ctx.state.providers.load();
             let model = if ctx.current_model.trim().is_empty() {
-                DEFAULT_MODEL
+                providers.default_model()
             } else {
                 ctx.current_model.as_str()
             };
@@ -176,6 +174,7 @@ mod tests {
 
     fn user_text(text: &str) -> NewMessage {
         NewMessage {
+            meta: None,
             role: MessageRole::User,
             content: vec![StoredBlock::Text {
                 text: text.to_owned(),

@@ -74,12 +74,52 @@ impl AuthorizationSubjectResolver {
             // 旧源 `AuthorizationSubjectResolver.java:37-39`（`isBlank()` → 纯空白亦拒绝）。
             return Err(ancestry_invalid("Tool execution requires a persisted Run"));
         };
-        if let Some(root) = self.cached(current_run_id) {
-            return Ok(subject_of(&root, current_run_id));
+        let root = if let Some(root) = self.cached(current_run_id) {
+            root
+        } else {
+            let root = self.load_root(current_run_id).await?;
+            self.remember(current_run_id, &root);
+            root
+        };
+        let mut subject = subject_of(&root, current_run_id);
+        // Only a durable binding created by the Worktree manager may narrow this
+        // exact child Run to its isolated snapshot. Keep root identity and grants.
+        let run_id = current_run_id.to_owned();
+        let binding = self.db.with_reader(move |conn| {
+            let exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='managed_worktrees')", [], |row| row.get(0))?;
+            if !exists { return Ok(None); }
+            let mut statement = conn.prepare("SELECT record_json FROM managed_worktrees WHERE json_extract(record_json,'$.owner_run')=?1 AND json_extract(record_json,'$.phase')='executing' AND json_extract(record_json,'$.worker_active')=1")?;
+            let rows = statement.query_map([run_id], |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+            if rows.len() > 1 { return Err(zk_db::DbError::Invalid("WORKTREE_RUN_BINDING_AMBIGUOUS".into())); }
+            Ok(rows.into_iter().next())
+        }).await?;
+        if let Some(binding) = binding {
+            let binding: serde_json::Value = serde_json::from_str(&binding)
+                .map_err(|_| ancestry_invalid("Managed worktree binding is invalid"))?;
+            let path = |field: &str| -> AuthzResult<PathBuf> {
+                let value = binding[field]
+                    .as_str()
+                    .ok_or_else(|| ancestry_invalid("Managed worktree identity is missing"))?;
+                std::fs::canonicalize(value)
+                    .map_err(|_| ancestry_invalid("Managed worktree identity is unavailable"))
+            };
+            let parent = path("parent_cwd")?;
+            let target = path("root")?;
+            let tree = path("path")?;
+            let cwd = path("cwd")?;
+            if parent != root.authorization_root
+                || !cwd.starts_with(&tree)
+                || !self.workspaces.is_validated_git_repository_root(&tree)
+                || self.workspaces.resolve(&target)?.workspace_key
+                    != self.workspaces.resolve(&tree)?.workspace_key
+            {
+                return Err(ancestry_invalid(
+                    "Managed worktree does not match this Run's authorized project",
+                ));
+            }
+            subject.authorization_root = cwd;
         }
-        let root = self.load_root(current_run_id).await?;
-        self.remember(current_run_id, &root);
-        Ok(subject_of(&root, current_run_id))
+        Ok(subject)
     }
 
     /// 清空缓存（Run 生命周期结束或工作区重绑定后调用）。

@@ -34,6 +34,8 @@ tracing = { workspace = true }
 # zk-authz::hashing：铁律禁止 zk-db → zk-authz 的反向依赖。
 sha2 = { workspace = true }
 url = { workspace = true }
+# Safe statvfs wrapper for merge writes on the database filesystem.
+nix = { workspace = true, features = ["fs"] }
 
 [dev-dependencies]
 # 集成测试断言游标 Base64 内容与临时目录随机名（rusqlite/tokio 随主依赖可用）。

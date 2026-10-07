@@ -23,5 +23,6 @@ zk_use_macos_toolchain() {
     zk_prepend_path "/opt/homebrew/opt/$ZK_ENV_PYTHON_FORMULA/bin"
     zk_prepend_path "/usr/local/opt/$ZK_ENV_NODE_FORMULA/bin"
     zk_prepend_path "/opt/homebrew/opt/$ZK_ENV_NODE_FORMULA/bin"
+    zk_prepend_path "/Applications/LibreOffice.app/Contents/MacOS"
     export PATH
 }

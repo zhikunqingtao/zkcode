@@ -16,7 +16,7 @@ import {
 } from 'vitest';
 import PromptInput from './PromptInput';
 import type { Command, SubmitEvent } from '@/types';
-import { useWorkbenchViewStore } from '@/store/workbenchViewStore';
+import { useAppUiStore } from '@/store/appUiStore';
 import { useSpeechAvailabilityStore } from '@/store/speechAvailabilityStore';
 import { useSessionStore } from '@/store/sessionStore';
 import { useModelStore } from '@/store/modelStore';
@@ -37,7 +37,7 @@ function renderInput(
     onSubmit: (event: unknown) => Promise<boolean>,
     onSlashCommand = vi.fn().mockResolvedValue(true),
     commands: Command[] = [],
-    state: { runActive?: boolean; compacting?: boolean; simpleMode?: boolean } = {},
+    state: { runActive?: boolean; compacting?: boolean } = {},
 ) {
     render(
         <PromptInput
@@ -50,15 +50,25 @@ function renderInput(
             permissionMode="read_write"
             messages={[]}
             commands={commands}
-            simpleMode={state.simpleMode}
         />,
     );
 }
 
 describe('PromptInput asynchronous submit', () => {
+    it('keeps MCP Activity available without a chat composer or model controls', () => {
+        useSessionStore.setState({ purpose: 'mcp' });
+        const submit = vi.fn(); const slash = vi.fn();
+        renderInput(submit, slash);
+        expect(screen.getByRole('status')).toHaveTextContent('MCP 专用会话');
+        expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+        expect(screen.getByRole('button', { name: '查看 Activity 与权限请求' })).toBeEnabled();
+        fireEvent.click(screen.getByRole('button', { name: '查看 Activity 与权限请求' }));
+        expect(useAppUiStore.getState().pendingVisualizationTab).toBe('apos');
+        expect(submit).not.toHaveBeenCalled(); expect(slash).not.toHaveBeenCalled();
+    });
     beforeEach(() => {
         voiceButtonMock.callbacks.length = 0;
-        useSessionStore.setState({ sessionId: 'session-a', model: 'qwen3.8-max' });
+        useSessionStore.setState({ sessionId: 'session-a', model: 'qwen3.8-max', purpose: 'chat' });
         useModelStore.setState({
             models: [{
                 id: 'qwen3.8-max',
@@ -79,12 +89,6 @@ describe('PromptInput asynchronous submit', () => {
             defaultModel: 'qwen3.8-max',
             loaded: true,
             loading: false,
-        });
-        useWorkbenchViewStore.setState({
-            enabled: true,
-            activeSessionId: 'session-a',
-            defaultView: 'simple',
-            viewMode: 'simple',
         });
         Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
             configurable: true,
@@ -149,12 +153,10 @@ describe('PromptInput asynchronous submit', () => {
         expect(input).toHaveValue('keep this draft');
     });
 
-    it('uses result-oriented copy in the simple workbench', () => {
-        renderInput(vi.fn().mockResolvedValue(true), undefined, [], {
-            simpleMode: true,
-        });
+    it('keeps command discovery visible in the developer composer', () => {
+        renderInput(vi.fn().mockResolvedValue(true));
         expect(screen.getByRole('textbox', { name: '输入消息' }))
-            .toHaveAttribute('placeholder', '描述你希望完成或继续修改的事情…');
+            .toHaveAttribute('placeholder', expect.stringContaining('/ 查看命令'));
     });
 
     it('inserts a voice transcript at the current selection', async () => {
@@ -242,7 +244,7 @@ describe('PromptInput asynchronous submit', () => {
         });
 
         fireEvent.keyDown(window, { key: 'k', ctrlKey: true });
-        fireEvent.click(screen.getByRole('button', {
+        fireEvent.click(screen.getByRole('option', {
             name: /\/compact/,
         }));
 
@@ -325,7 +327,7 @@ describe('PromptInput asynchronous submit', () => {
         });
 
         fireEvent.click(screen.getByRole('button', {
-            name: '移除本地文件 报告 "最终".docx',
+            name: '移除本地路径 报告 "最终".docx',
         }));
         expect(screen.queryByTitle(localPath)).not.toBeInTheDocument();
 

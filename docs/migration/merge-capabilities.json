@@ -1,0 +1,653 @@
+{
+  "sourceRange": "3e536438..053adf90",
+  "targetBaseline": "08cbdc45",
+  "scope": "session merge and handoff",
+  "capabilities": [
+    {
+      "id": "merge-coordination",
+      "capability": "幂等创建、epoch fencing、取消/发布唯一胜者、重启可恢复",
+      "sourceCommit": "053adf90",
+      "sourcePath": "backend/src/main/java/com/aicodeassistant/session/merge/SessionMergeService.java",
+      "implementation": [
+        "crates/zk-db/src/session_merge.rs",
+        "crates/zk-server/src/api/session_merge.rs"
+      ],
+      "status": "implemented_named_native_regressions_passed",
+      "verification": {
+        "status": "passed_named_native_regressions",
+        "tests": [
+          "merge_publication_is_idempotent_scoped_and_inherits_primary_permission",
+          "merge_restart_resume_and_cancel_fence_old_workers",
+          "merge_cancel_and_publish_have_exactly_one_winner"
+        ],
+        "evidenceRef": "#currentExecutionEvidence/nativeWorkspace",
+        "clippyEvidenceRef": "#currentExecutionEvidence/strictClippy",
+        "limits": "Only listed native assertions are evidenced. Source Java/remote API execution is not implied. Formal dev lifecycle passed independently; release browser E2E covers only its four explicit cases. Product matrix records additional component/native coverage and remaining limits."
+      },
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/session/merge/SessionMergeService.java",
+        "backend/src/main/java/com/aicodeassistant/controller/SessionMergeController.java"
+      ],
+      "previousValidation": {
+        "status": "implemented",
+        "verification": "cargo test -p zk-db --test migration_integrity --locked; root reports passing transaction/cancellation tests"
+      }
+    },
+    {
+      "id": "snapshot-package",
+      "capability": "sealed SQLite替代文件包；来源/子会话/运行/工具/元数据/附件资产独立封存",
+      "sourceCommit": "053adf90",
+      "sourcePath": "backend/src/main/java/com/aicodeassistant/session/merge/MergePackageService.java",
+      "implementation": [
+        "crates/zk-db/src/session_merge.rs",
+        "crates/zk-db/src/session_merge_snapshot.rs"
+      ],
+      "status": "implemented_named_native_regressions_passed",
+      "verification": {
+        "status": "passed_named_native_regressions",
+        "tests": [
+          "merge_projection_filters_archive_blocks_and_edit_preview_without_changing_sealed_bytes",
+          "remerging_inherits_sealed_ancestors_without_borrowing_their_access",
+          "native_images_survive_source_deletion_and_reopen_without_trusting_forged_metadata",
+          "corrupt_trusted_payload_or_source_metadata_rolls_back_the_complete_snapshot"
+        ],
+        "evidenceRef": "#currentExecutionEvidence/nativeWorkspace",
+        "clippyEvidenceRef": "#currentExecutionEvidence/strictClippy",
+        "limits": "Only listed native assertions are evidenced. Source Java/remote API execution is not implied. Formal dev lifecycle passed independently; release browser E2E covers only its four explicit cases. Product matrix records additional component/native coverage and remaining limits."
+      },
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/session/merge/MergePackageService.java"
+      ],
+      "previousValidation": {
+        "status": "implemented_equivalent",
+        "verification": "Snapshot/projection integrity8 passed before later Handoff catalog rewrite: /tmp/zk-merge-source-integrity.txt. Raw archive bytes preserved, model projection excludes thinking/provider state/Edit UI preview. Root owns latest Handoff rerun."
+      }
+    },
+    {
+      "id": "extract-all",
+      "capability": "遍历全部封存文本，不按总对话长度截断；按模型容量连续拆分",
+      "sourceCommit": "053adf90",
+      "sourcePath": "backend/src/main/java/com/aicodeassistant/session/merge/MergeSummaryService.java",
+      "implementation": [
+        "crates/zk-server/src/session_merge_summary.rs"
+      ],
+      "status": "implemented_named_native_regressions_passed",
+      "verification": {
+        "status": "passed_named_native_regressions",
+        "tests": [
+          "session_merge_summary::tests::generation_budget_preserves_visible_and_reasoning_capacity",
+          "session_merge_summary::tests::splitting_is_unicode_safe_overlapping_and_never_discards_source_bytes"
+        ],
+        "evidenceRef": "#currentExecutionEvidence/nativeWorkspace",
+        "clippyEvidenceRef": "#currentExecutionEvidence/strictClippy",
+        "limits": "Only listed native assertions are evidenced. Source Java/remote API execution is not implied. Formal dev lifecycle passed independently; release browser E2E covers only its four explicit cases. Product matrix records additional component/native coverage and remaining limits."
+      },
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/session/merge/MergeSummaryService.java"
+      ],
+      "previousValidation": {
+        "status": "implemented",
+        "verification": "8 summary tests passed, including generation_budget_preserves_visible_and_reasoning_capacity and splitting_is_unicode_safe_overlapping_and_never_discards_source_bytes; /tmp/zk-summary-budget-tests.txt"
+      }
+    },
+    {
+      "id": "extract-schema",
+      "capability": "严格栏目/状态/JSON与输入别名证据校验；程序产生ref和UTF8 byte spans",
+      "sourceCommit": "053adf90",
+      "sourcePath": "backend/src/main/java/com/aicodeassistant/session/merge/MergeSummaryService.java",
+      "implementation": [
+        "crates/zk-server/src/session_merge_summary.rs"
+      ],
+      "status": "implemented_named_native_regressions_passed",
+      "verification": {
+        "status": "passed_named_native_regressions",
+        "tests": [
+          "session_merge_summary::tests::model_aliases_cannot_forge_references_statuses_or_spans"
+        ],
+        "evidenceRef": "#currentExecutionEvidence/nativeWorkspace",
+        "clippyEvidenceRef": "#currentExecutionEvidence/strictClippy",
+        "limits": "Only listed native assertions are evidenced. Source Java/remote API execution is not implied. Formal dev lifecycle passed independently; release browser E2E covers only its four explicit cases. Product matrix records additional component/native coverage and remaining limits."
+      },
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/session/merge/MergeSummaryService.java",
+        "backend/src/main/java/com/aicodeassistant/session/merge/MergeHandoffData.java"
+      ],
+      "previousValidation": {
+        "status": "implemented",
+        "verification": "session_merge_summary::tests::model_aliases_cannot_forge_references_statuses_or_spans"
+      }
+    },
+    {
+      "id": "summary-tree",
+      "capability": "分块extract、分层aggregate、两层无收缩时目录回退；细节始终保留",
+      "sourceCommit": "053adf90",
+      "sourcePath": "backend/src/main/java/com/aicodeassistant/session/merge/MergeSummaryService.java",
+      "implementation": [
+        "crates/zk-server/src/session_merge_summary.rs"
+      ],
+      "status": "implemented_named_native_regressions_passed",
+      "verification": {
+        "status": "passed_named_native_regressions",
+        "tests": [
+          "session_merge_summary::tests::summaries_are_tool_free_durable_charged_and_reused_after_resume"
+        ],
+        "evidenceRef": "#currentExecutionEvidence/nativeWorkspace",
+        "clippyEvidenceRef": "#currentExecutionEvidence/strictClippy",
+        "limits": "Only listed native assertions are evidenced. Source Java/remote API execution is not implied. Formal dev lifecycle passed independently; release browser E2E covers only its four explicit cases. Product matrix records additional component/native coverage and remaining limits."
+      },
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/session/merge/MergeSummaryService.java"
+      ],
+      "previousValidation": {
+        "status": "implemented",
+        "verification": "session_merge_summary::tests::summaries_are_tool_free_durable_charged_and_reused_after_resume"
+      }
+    },
+    {
+      "id": "durable-units",
+      "capability": "输入hash、pending/split/completed状态与结果hash；恢复复用已完成unit",
+      "sourceCommit": "053adf90",
+      "sourcePath": "backend/src/main/java/com/aicodeassistant/session/merge/MergeProgressRepository.java",
+      "implementation": [
+        "crates/zk-db/src/session_merge_summary.rs"
+      ],
+      "status": "implemented_named_native_regressions_passed",
+      "verification": {
+        "status": "passed_named_native_regressions",
+        "tests": [
+          "session_merge_summary::tests::split_plans_are_atomic_and_stale_epochs_cannot_commit_or_rewrite_completed_units"
+        ],
+        "evidenceRef": "#currentExecutionEvidence/nativeWorkspace",
+        "clippyEvidenceRef": "#currentExecutionEvidence/strictClippy",
+        "limits": "Only listed native assertions are evidenced. Source Java/remote API execution is not implied. Formal dev lifecycle passed independently; release browser E2E covers only its four explicit cases. Product matrix records additional component/native coverage and remaining limits."
+      },
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/session/merge/MergeProgressRepository.java",
+        "backend/src/main/java/com/aicodeassistant/session/merge/MergeHandoffData.java"
+      ],
+      "previousValidation": {
+        "status": "implemented",
+        "verification": "session_merge_summary::tests::split_plans_are_atomic_and_stale_epochs_cannot_commit_or_rewrite_completed_units"
+      }
+    },
+    {
+      "id": "provider-costs",
+      "capability": "仅指定模型/provider，无工具请求；每物理attempt沿原Task/Run/LLM账本准入结算",
+      "sourceCommit": "053adf90",
+      "sourcePath": "backend/src/main/java/com/aicodeassistant/session/merge/MergeSummaryService.java",
+      "implementation": [
+        "crates/zk-server/src/session_merge_summary.rs",
+        "crates/zk-db/src/session_merge_summary.rs"
+      ],
+      "status": "implemented_named_native_regressions_passed",
+      "verification": {
+        "status": "passed_named_native_regressions",
+        "tests": [
+          "session_merge_summary::tests::summaries_are_tool_free_durable_charged_and_reused_after_resume",
+          "session_merge_summary::tests::missing_usage_blocks_retry_and_resume_without_fabricating_zero",
+          "registry::tests::isolated_provider_preserves_empty_catalog_routing_without_fallback"
+        ],
+        "evidenceRef": "#currentExecutionEvidence/nativeWorkspace",
+        "clippyEvidenceRef": "#currentExecutionEvidence/strictClippy",
+        "limits": "Only listed native assertions are evidenced. Source Java/remote API execution is not implied. Formal dev lifecycle passed independently; release browser E2E covers only its four explicit cases. Product matrix records additional component/native coverage and remaining limits."
+      },
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/session/merge/MergeSummaryService.java",
+        "backend/src/main/java/com/aicodeassistant/session/merge/MergeHandoffData.java"
+      ],
+      "previousValidation": {
+        "status": "implemented",
+        "verification": "summary tests assert toolless execution attribution, nonzero physical cost, preserved bills after source deletion, unknown usage blocks retry; legacy empty catalog single-provider routing covered"
+      }
+    },
+    {
+      "id": "budget-resume",
+      "capability": "跨epoch累计token/cost；每epoch活动期限、每请求300秒；暂停时间不耗尽恢复期限",
+      "sourceCommit": "053adf90",
+      "sourcePath": "backend/src/main/java/com/aicodeassistant/session/merge/MergeSummaryService.java",
+      "implementation": [
+        "crates/zk-server/src/session_merge_summary.rs"
+      ],
+      "status": "implemented_named_native_regressions_passed",
+      "verification": {
+        "status": "passed_named_native_regressions",
+        "tests": [
+          "session_merge_summary::tests::paused_wall_time_does_not_expire_a_new_epoch_and_completed_units_still_reuse",
+          "session_merge_summary::tests::physical_admission_prevents_spend_above_the_explicit_merge_budget"
+        ],
+        "evidenceRef": "#currentExecutionEvidence/nativeWorkspace",
+        "clippyEvidenceRef": "#currentExecutionEvidence/strictClippy",
+        "limits": "Only listed native assertions are evidenced. Source Java/remote API execution is not implied. Formal dev lifecycle passed independently; release browser E2E covers only its four explicit cases. Product matrix records additional component/native coverage and remaining limits."
+      },
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/session/merge/MergeSummaryService.java"
+      ],
+      "previousValidation": {
+        "status": "implemented",
+        "verification": "paused_wall_time_does_not_expire_a_new_epoch_and_completed_units_still_reuse; physical_admission_prevents_spend_above_the_explicit_merge_budget"
+      }
+    },
+    {
+      "id": "cancellation",
+      "capability": "取消检查贯穿分块、provider stream、退避与发布；主动cancel并安全drain",
+      "sourceCommit": "053adf90",
+      "sourcePath": "backend/src/main/java/com/aicodeassistant/session/merge/SessionMergeService.java",
+      "implementation": [
+        "crates/zk-server/src/session_merge_summary.rs",
+        "crates/zk-server/src/api/session_merge.rs"
+      ],
+      "status": "implemented_named_native_regressions_passed",
+      "verification": {
+        "status": "passed_named_native_regressions",
+        "tests": [
+          "session_merge_summary::tests::cancellation_aborts_the_active_provider_and_cannot_publish",
+          "merge_cancel_and_publish_have_exactly_one_winner"
+        ],
+        "evidenceRef": "#currentExecutionEvidence/nativeWorkspace",
+        "clippyEvidenceRef": "#currentExecutionEvidence/strictClippy",
+        "limits": "Only listed native assertions are evidenced. Source Java/remote API execution is not implied. Formal dev lifecycle passed independently; release browser E2E covers only its four explicit cases. Product matrix records additional component/native coverage and remaining limits."
+      },
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/session/merge/SessionMergeService.java"
+      ],
+      "previousValidation": {
+        "status": "implemented",
+        "verification": "cancellation_aborts_the_active_provider_and_cannot_publish; idempotent same-epoch worker guard prevents duplicate charge"
+      }
+    },
+    {
+      "id": "handoff-queries",
+      "capability": "封存资料list/search/read/asset、范围过滤与游标绑定、完整性校验",
+      "sourceCommit": "053adf90",
+      "sourcePath": "backend/src/main/java/com/aicodeassistant/session/merge/HandoffReadService.java",
+      "implementation": [
+        "crates/zk-db/src/session_merge.rs",
+        "crates/zk-db/src/session_handoff_catalog.rs",
+        "crates/zk-server/src/handoff.rs"
+      ],
+      "status": "implemented_named_native_regressions_passed",
+      "verification": {
+        "status": "passed_named_native_regressions",
+        "tests": [
+          "handoff_pages_every_match_and_evidence_span_with_a_full_json_response_limit",
+          "handoff_search_scan_budget_returns_a_progressing_cursor_without_losing_later_matches",
+          "handoff_preserves_owned_files_and_paginates_original_text_after_source_deletion",
+          "sealed_asset_download_requires_target_session_and_survives_source_deletion"
+        ],
+        "evidenceRef": "#currentExecutionEvidence/nativeWorkspace",
+        "clippyEvidenceRef": "#currentExecutionEvidence/strictClippy",
+        "limits": "Only listed native assertions are evidenced. Source Java/remote API execution is not implied. Formal dev lifecycle passed independently; release browser E2E covers only its four explicit cases. Product matrix records additional component/native coverage and remaining limits."
+      },
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/session/merge/HandoffReadService.java",
+        "backend/src/main/java/com/aicodeassistant/tool/impl/HandoffReadTool.java"
+      ],
+      "previousValidation": {
+        "status": "implemented_pending_final_validation",
+        "verification": "Source test audit identified span resolution, all same-record matches, whole-wrapper16KiB and deadline/scan gaps; root rewrote catalog/query handling and runs final integrity regressions. No blanket final pass claimed."
+      }
+    },
+    {
+      "id": "reference-authority",
+      "capability": "历史仅参考，权限来自主会话模式，历史grant/待审批不复制；billing禁止正常chat",
+      "sourceCommit": "053adf90",
+      "sourcePath": "backend/src/main/java/com/aicodeassistant/session/merge/SessionMergeService.java",
+      "implementation": [
+        "crates/zk-db/src/session_merge.rs",
+        "crates/zk-db/src/session_merge_summary.rs",
+        "crates/zk-server/src/api/session_merge.rs"
+      ],
+      "status": "implemented_named_native_regressions_passed",
+      "verification": {
+        "status": "passed_named_native_regressions",
+        "tests": [
+          "merge_publication_is_idempotent_scoped_and_inherits_primary_permission",
+          "handoff_context::tests::brief_requires_published_root_binding_and_original_hash",
+          "native_handoff_read_needs_no_new_permission_but_mcp_cannot_spoof_it"
+        ],
+        "evidenceRef": "#currentExecutionEvidence/nativeWorkspace",
+        "clippyEvidenceRef": "#currentExecutionEvidence/strictClippy",
+        "limits": "Only listed native assertions are evidenced. Source Java/remote API execution is not implied. Formal dev lifecycle passed independently; release browser E2E covers only its four explicit cases. Product matrix records additional component/native coverage and remaining limits."
+      },
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/session/merge/SessionMergeService.java"
+      ],
+      "previousValidation": {
+        "status": "implemented",
+        "verification": "Root permissions tests plus hidden billing source-deletion test"
+      }
+    },
+    {
+      "id": "ui-recovery",
+      "capability": "合并弹窗、来源筛选、模型选择、恢复/取消、费用/unknown提示和新会话恢复",
+      "sourceCommit": "053adf90",
+      "sourcePath": "frontend/src/components/session/SessionMergePanel.tsx",
+      "implementation": [
+        "frontend/src/components/session/SessionMergePanel.tsx",
+        "frontend/src/store/sessionMergeStore.ts"
+      ],
+      "status": "implemented",
+      "verification": {
+        "status": "frontend_unit_and_actual_backend_e2e_passed",
+        "evidenceRef": "#currentExecutionEvidence/frontendUnit",
+        "historicalE2E": {
+          "evidence": {
+            "path": "/tmp/zk-frontend-production-audit-final.txt",
+            "sha256": "53011d2cdcac03fe57d6f301c3b249eee3cb3a6ee6032c585061079b48e150c6"
+          },
+          "result": "4 passed against the earlier real Rust build; not the current final backend."
+        },
+        "limits": "Actual merge browser case proves charged durable handoff, reload/idempotent recovery and primary permission inheritance; not every cancel/restart race UI combination.",
+        "latestIntegrationEvidenceRef": "#currentExecutionEvidence/latestBackendE2E"
+      },
+      "sourcePaths": [
+        "frontend/src/components/session/SessionMergePanel.tsx"
+      ],
+      "previousValidation": {
+        "status": "implemented",
+        "verification": "20 panel tests plus 4 production E2E pass; 3 density handoff cards remain visible after replay"
+      }
+    },
+    {
+      "id": "old-history",
+      "capability": "旧zkcode会话数据迁移/兼容/备份",
+      "sourceCommit": "053adf90",
+      "sourcePath": "backend/src/main/java/com/aicodeassistant/session/merge/MergePackageService.java",
+      "implementation": [],
+      "status": "excluded",
+      "verification": "User explicitly says no historical users/data; current data restore remains required",
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/session/merge/MergePackageService.java"
+      ]
+    },
+    {
+      "id": "handoff-context-projection",
+      "capability": "Historical handoff injected as transient User data, bounded by min(2048, 10% context), scoped tool restrictions and no persisted System authority",
+      "sourceCommit": "053adf90",
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/engine/HandoffContextService.java"
+      ],
+      "implementation": [
+        "crates/zk-db/src/handoff_context.rs",
+        "crates/zk-engine/src/context/handoff.rs",
+        "crates/zk-engine/src/engine.rs",
+        "crates/zk-engine/src/context_checkpoint.rs"
+      ],
+      "status": "implemented_named_native_regressions_passed",
+      "verification": {
+        "status": "passed_named_native_regressions",
+        "tests": [
+          "context::handoff::tests::handoff_is_bounded_reference_and_restricted_tools_do_not_claim_access",
+          "context_checkpoint::tests::transient_handoff_is_reloaded_from_sealed_binding_not_checkpointed",
+          "sealed_handoff_replay_is_transient_user_reference_and_not_system_authority",
+          "context::image_budget::tests::actual_request_budget_keeps_user_images_and_reduces_only_trusted_injections"
+        ],
+        "evidenceRef": "#currentExecutionEvidence/nativeWorkspace",
+        "clippyEvidenceRef": "#currentExecutionEvidence/strictClippy",
+        "limits": "Only listed native assertions are evidenced. Source Java/remote API execution is not implied. Formal dev lifecycle passed independently; release browser E2E covers only its four explicit cases. Product matrix records additional component/native coverage and remaining limits."
+      },
+      "previousValidation": {
+        "status": "implemented_pending_final_regression",
+        "verification": "Runtime agent reports DB 140 + engine 539 passed in /tmp/zk-runtime-audit-final.log, including sealed_handoff ownership/hash and handoff_is_bounded_reference_and_restricted_tools_do_not_claim_access. Later checkpoint/history isolation and real system/tool/output request-budget changes await the runtime final batch; not marked fully verified."
+      }
+    },
+    {
+      "id": "disk-reserve",
+      "capability": "Reserve 1 GiB free space before merge snapshot/assets/summary writes, atomic failure",
+      "sourceCommit": "053adf90",
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/session/merge/MergeTextBudget.java"
+      ],
+      "implementation": [
+        "crates/zk-db/src/session_merge_budget.rs",
+        "crates/zk-db/src/session_merge.rs",
+        "crates/zk-db/src/session_merge_snapshot.rs",
+        "crates/zk-db/src/session_merge_summary.rs",
+        "crates/zk-server/src/api/session_merge.rs",
+        "frontend/src/store/sessionMergeStore.ts"
+      ],
+      "status": "implemented_named_native_regressions_passed",
+      "verification": {
+        "status": "passed_named_native_regressions",
+        "tests": [
+          "session_merge_budget::tests::real_probe_uses_the_database_parent_directory",
+          "session_merge_budget::tests::reserve_counts_buffered_writes_and_live_space_without_spending_the_floor",
+          "session_merge_budget::tests::rejected_transaction_does_not_leave_a_partial_snapshot",
+          "session_merge_budget::tests::memory_skips_the_host_probe_and_disk_probe_failures_are_not_success"
+        ],
+        "evidenceRef": "#currentExecutionEvidence/nativeWorkspace",
+        "clippyEvidenceRef": "#currentExecutionEvidence/strictClippy",
+        "limits": "Only listed native assertions are evidenced. Source Java/remote API execution is not implied. Formal dev lifecycle passed independently; release browser E2E covers only its four explicit cases. Product matrix records additional component/native coverage and remaining limits."
+      },
+      "previousValidation": {
+        "status": "implemented_equivalent",
+        "verification": "4 disk-budget tests: actual SQLite directory, cumulative available bytes, 1 GiB floor, overflow/probe failure, in-memory bypass and transaction rollback; durable-unit 1 and snapshot-integrity 7 pass; API 507/503 mapping 1 pass; frontend store/panel 75 pass including native error code recovery."
+      }
+    }
+  ],
+  "pending": [
+    "Remote provider credentials were not exercised by scripted local provider tests.",
+    "Tailwind 3 dependency audit remains a separate user-decision gate."
+  ],
+  "sourceAssertionAudit": "docs/migration/frontend-backend-test-audit.json",
+  "currentExecutionEvidence": {
+    "nativeWorkspace": {
+      "command": "ZK_RUN_GIT_TESTS=true CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --workspace --all-features --locked --no-fail-fast",
+      "status": "passed",
+      "result": "106 harness summaries; 2852 passed, 0 failed, 8 ignored. Ignored cases are not verified.",
+      "evidence": {
+        "path": "/tmp/zk-workspace-tests-resume7.txt",
+        "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7"
+      }
+    },
+    "strictClippy": {
+      "command": "CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo clippy --workspace --all-features --all-targets --locked -- -D warnings",
+      "status": "passed",
+      "evidence": {
+        "path": "/tmp/zk-workspace-clippy-resume10.txt",
+        "sha256": "d2c539975b17f1983e2c2f9465869204726adf8cf656244c3e35b4ca27489d0c"
+      }
+    },
+    "machineContracts": {
+      "command": "./scripts/parity/check-contracts.sh",
+      "status": "passed",
+      "evidence": {
+        "path": "/tmp/zk-release-contracts-resume7.log",
+        "sha256": "dd7dca9f28ae775b866302044d05a2c4700f78b16d8efd9ce8ec2ee7f9173de5"
+      },
+      "downstreamKinds": 60,
+      "databaseTables": 56,
+      "defaultTools": 34,
+      "compiledToolSchemaSha256": "315d341299f27dbe83a7e2ce808b994b72b9a701914e955920ddbf0abfd36e35"
+    },
+    "frontendUnit": {
+      "command": "cd frontend && npm test -- --run --reporter=verbose",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "135 files;1190 passed;16 unchanged baseline skips not counted as verified;141.86s",
+      "evidence": {
+        "path": "/tmp/zk-frontend-product-final-tests.txt",
+        "sha256": "2cfd332e58298aa51e36b6ad5b5d6504a7c68d970c88857208a579ab8e1ec819"
+      }
+    },
+    "latestBackendE2E": {
+      "command": "cd frontend && ZK_E2E_SERVER_BINARY=/Users/guoqingtao/Desktop/dev/code/zkcode/target/release/zk-server npm run test:e2e:production",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "4 passed in19.3s; actual release Rust binary, installed Chrome, fresh isolated SQLite and scripted local provider.",
+      "evidence": {
+        "path": "/tmp/zk-frontend-production-release-final.txt",
+        "sha256": "f72567c6cabc2dedae57f04c3b1d8ab2d96c76921a5dc49f15f8b4f880ed0e17"
+      },
+      "binaryEvidence": {
+        "path": "/Users/guoqingtao/Desktop/dev/code/zkcode/target/release/zk-server",
+        "sha256": "5c7985aba8e25b2356f343c401f21b72b191f3a6c99ef7b8e3a23198a8817491",
+        "version": "zk-server 0.1.0 (git 08cbdc45e12cc28f3f13aaafbd0b056b980dfb1a, built 1791332366, schema 2, ws 4)",
+        "sha256Before": "5c7985aba8e25b2356f343c401f21b72b191f3a6c99ef7b8e3a23198a8817491",
+        "sha256After": "5c7985aba8e25b2356f343c401f21b72b191f3a6c99ef7b8e3a23198a8817491"
+      },
+      "binaryHashBeforeEqualsAfter": true,
+      "cases": [
+        "real backend: upgraded diagram and math renderers display the assistant response",
+        "real backend: browser chat is durable before message_complete",
+        "real backend: settings, Skill management, and revisioned memory use native contracts",
+        "real backend: merge UI produces a charged, durable handoff and inherits primary permission"
+      ],
+      "limits": "These four browser cases do not cover every product scenario, external provider availability, source browser references, or source Java tests. Flat intermediate assistant-segment behavior has focused native-wire unit coverage; the plain chat E2E covers final completion and task boundary.",
+      "binaryIdentityRecord": {
+        "path": "/tmp/zk-frontend-release-binary-evidence.json",
+        "sha256": "51cda4f879900e2ea6f8890c72847f87eb7d576392ef7091158d47f15bd19e2c"
+      }
+    },
+    "previousDebugBackendE2E": {
+      "command": "cd frontend && ZK_E2E_SERVER_BINARY=/Users/guoqingtao/Desktop/dev/code/zkcode/target/debug/zk-server npm run test:e2e:production",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "4 passed in 21.3s using installed Chrome, fresh isolated SQLite, actual latest Rust server and scripted local provider.",
+      "evidence": {
+        "path": "/tmp/zk-frontend-production-latest.txt",
+        "sha256": "f83589d871f65cfa5e20186ca70ee81d14ff5d2f63b1edcf1b8a2e7f248aa4f5"
+      },
+      "binaryEvidence": {
+        "path": "/Users/guoqingtao/Desktop/dev/code/zkcode/target/debug/zk-server",
+        "sha256": "de3da835bd01a7a7fe3ecd6c6261af12d9b99a7690d0d47cd431332ecdd3c6d6",
+        "identityScope": "Historical executable used for /tmp/zk-frontend-production-latest.txt, recorded before/after execution; this path was rebuilt later. Never infer historical identity from the current file."
+      },
+      "binaryHashBeforeEqualsAfter": true,
+      "cases": [
+        "real backend: upgraded diagram and math renderers display the assistant response",
+        "real backend: browser chat is durable before message_complete",
+        "real backend: settings, Skill management, and revisioned memory use native contracts",
+        "real backend: merge UI produces a charged, durable handoff and inherits primary permission"
+      ],
+      "limits": "These four browser cases do not cover every product scenario, external provider availability, source browser references, or source Java tests. Flat intermediate assistant-segment behavior has focused native-wire unit coverage; the plain chat E2E covers final completion and task boundary.",
+      "identityCorrection": "Corrected documentation writer that accidentally hashed the later rebuilt debug path rather than the executable identity recorded during the run."
+    },
+    "formalDevLifecycle": {
+      "status": "passed",
+      "sync": {
+        "status": "passed",
+        "result": "exit0; supported local environment synced and debug binary built",
+        "evidence": {
+          "path": "/tmp/zk-dev-sync-online-latest.log",
+          "sha256": "55c5e8b42f9d845c601d6d3cf32545b23cd474cd007262256ab2fc1cba0d0948"
+        },
+        "command": "./dev sync --build"
+      },
+      "doctor": {
+        "status": "passed",
+        "result": "ok=true; every reported check is true",
+        "evidence": {
+          "path": "/tmp/zk-doctor-deep-final.json",
+          "sha256": "19b4b8cb97c26935d64ef0ceacebc8e00d77925a92a5b139f4ca0ed231dafa5a"
+        },
+        "command": "./dev doctor --deep --json"
+      }
+    },
+    "defaultWorkspace": {
+      "status": "passed",
+      "result": "106 harnesses;2852 passed,0 failed,8 ignored; ZK_RUN_GIT_TESTS=true",
+      "evidence": {
+        "path": "/tmp/zk-workspace-tests-default-final.txt",
+        "sha256": "c0c9fb73f284c8b10c830886ec5e4f416d92dad7a5ba20f1f0a704ed0752a567"
+      }
+    },
+    "engineNoDefaultFeatures": {
+      "status": "passed",
+      "result": "616 passed; optional image thumbnail feature disabled",
+      "evidence": {
+        "path": "/tmp/zk-engine-no-default-final.txt",
+        "sha256": "bdd59d268e7d6123198fa92c90b7df41a76811fc3b7e103c0aabf2ac9fb39eae"
+      }
+    },
+    "nativeJourney": {
+      "status": "passed",
+      "result": "1 passed; real Rust→UDS→Python→Chromium and HTTP managed previews/evidence/resource cleanup",
+      "evidence": {
+        "path": "/tmp/zk-verify-journey-native-final.txt",
+        "sha256": "d7a59ab06950e8b15d1b1dcb4b350f5f845c1f515dc651f2a1d573c0f55b1d07"
+      }
+    },
+    "previousFrontendUnit": {
+      "command": "cd frontend && npm run test:run",
+      "status": "passed",
+      "result": "135 files; 1185 passed, 16 skipped. Skips are not verified.",
+      "evidence": {
+        "path": "/tmp/zk-frontend-native-segment-full.txt",
+        "sha256": "72c0e93f5abb385473d216d15cc43b1e56f27eeefc0ca36138139f502bd1ae89"
+      }
+    }
+  },
+  "currentExecutionScope": "Named native assertions passed in the complete workspace run and strict Clippy passed. Formal dev sync/build and deep doctor passed. Release-binary browser E2E passed only its four explicit cases. Product acceptance is itemized in product-acceptance-matrix.json. Source Java permutations, paid remote services and the remaining baseline skipped frontend assertions are not claimed passed. Previous validation remains historical.",
+  "previousValidation": [
+    {
+      "command": "cargo test -p zk-server session_merge_summary --lib --locked",
+      "result": "8 passed, including model reasoning+visible output budget; physical billing, unknown usage, cancellation, resume and all-byte split preserved",
+      "log": "/tmp/zk-summary-budget-tests.txt"
+    },
+    {
+      "command": "cargo test -p zk-db session_merge_summary --lib --locked",
+      "result": "1 passed; atomic split, identity hash, completed immutability and stale epoch fencing",
+      "log": "/tmp/zk-merge-units-tests.txt"
+    },
+    {
+      "command": "cargo test -p zk-llm isolated_provider_preserves --lib --locked",
+      "result": "1 passed; empty catalog legacy single-provider route, no fallback",
+      "log": "/tmp/zk-isolated-provider-test.txt"
+    },
+    {
+      "command": "cd frontend && ZK_E2E_PORT_BASE=18082 npm run test:e2e:production",
+      "result": "4 passed with fresh SQLite/actual Rust server/scripted provider; includes paid merge, replay idempotency, permission inheritance and refreshed visible handoff",
+      "log": "/tmp/zk-frontend-production-audit-final.txt"
+    },
+    {
+      "command": "cd frontend && npx vitest run src/components/session/SessionMergePanel.test.tsx",
+      "result": "20 passed"
+    },
+    {
+      "command": "cd frontend && npx vitest run src/store/selectors/__tests__/turnProjection.test.ts src/components/message/turn/__tests__/TurnCard.test.tsx",
+      "result": "69 passed, including handoff visibility in all 3 densities",
+      "log": "/tmp/zk-turn-native-boundary-tests.txt"
+    },
+    {
+      "command": "cargo test -p zk-db session_merge_budget --lib --locked",
+      "result": "4 passed; actual directory budget, 1 GiB floor, cumulative reservations, rollback, in-memory skip and failure",
+      "log": "/tmp/zk-merge-disk-tests.txt"
+    },
+    {
+      "command": "cargo test -p zk-db session_merge_summary --lib --locked",
+      "result": "1 passed after disk budget wiring",
+      "log": "/tmp/zk-merge-disk-unit-recheck.txt"
+    },
+    {
+      "command": "cargo test -p zk-db --test migration_integrity --locked",
+      "result": "8 passed after archive-only model projection fix; subsequent Handoff catalog rewrite under root final verification",
+      "log": "/tmp/zk-merge-source-integrity.txt"
+    },
+    {
+      "command": "cargo test -p zk-server disk --lib --locked",
+      "result": "1 passed; 507/503 error mapping never exposes internal directory",
+      "log": "/tmp/zk-merge-disk-api-tests.txt"
+    },
+    {
+      "command": "cd frontend && npx vitest run src/store/sessionMergeStore.test.ts src/components/session/SessionMergePanel.test.tsx",
+      "result": "75 passed; native missing operation and disk rollback recovery",
+      "log": "/tmp/zk-merge-disk-ui-tests.txt"
+    }
+  ],
+  "validation": {
+    "evidenceRefs": [
+      "#currentExecutionEvidence/nativeWorkspace",
+      "#currentExecutionEvidence/strictClippy"
+    ],
+    "status": "named_assertions_recorded_per_capability",
+    "latestBackendE2E": "release_binary_passed_four_explicit_cases",
+    "formalDevLifecycle": "passed"
+  },
+  "previousPending": [
+    "Runtime-owned transient User handoff projection final regression (implemented; new checkpoint/history/budget refinements).",
+    "Root-owned new Handoff catalog/query final verification after source assertion audit.",
+    "Workspace final gates; Tailwind3 dependency audit awaits user major-upgrade decision."
+  ],
+  "productAcceptanceMatrix": "docs/migration/product-acceptance-matrix.json"
+}

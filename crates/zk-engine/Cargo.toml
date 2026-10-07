@@ -12,6 +12,7 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
+jsonschema = { workspace = true }
 # 依赖方向（S9 铁律）：zk-engine → {zk-core, zk-protocol, zk-llm, zk-tools, zk-db}，
 # 禁止依赖 zk-server；下行推送经 MessageSink 窄接口解耦（server 侧为
 # WsHub 实现）。
@@ -82,3 +83,5 @@ image-budget = ["dep:image"]
 # 并逐字复刻 zk-authz `load_root` 的祖先链 SQL——铁律禁止 zk-engine → zk-authz。
 # 仅测试期依赖，不改动生产 crate 拓扑。
 rusqlite = { workspace = true }
+
+tracing-subscriber = { workspace = true }

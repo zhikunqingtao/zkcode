@@ -10,12 +10,16 @@ import { immer } from 'zustand/middleware/immer';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import { subscribeWithSelector } from 'zustand/middleware';
 import { broadcastMiddleware } from './broadcastMiddleware';
-import type { ThemeConfig, OutputStyleDef, Config } from '@/types';
+import { DEFAULT_ACCENT_HEX } from '@/theme/accents';
+import type { ThemeConfig, SpaceshipFxConfig, InkHavocFxConfig, JellyFxConfig, OutputStyleDef, Config } from '@/types';
 
 export interface ConfigStoreState {
     // 状态
     theme: ThemeConfig;
+    themePreferenceSet: boolean;
     locale: string;
+    asrContextEnabled: boolean;
+    setAsrContextEnabled: (enabled: boolean) => void;
     autoCompact: { enabled: boolean; threshold: number };
     verbose: boolean;
     expandedView: boolean;
@@ -34,13 +38,102 @@ export interface ConfigStoreState {
 
 const DEFAULT_THEME: ThemeConfig = {
     mode: 'system',
-    accentColor: '#3b82f6',
+    // §3.4：默认强调色为青瓷，单一事实来源在 theme/accents.ts
+    accentColor: DEFAULT_ACCENT_HEX,
     fontSize: 'medium',
     fontFamily: 'monospace',
     borderRadius: 'md',
+    spaceshipFx: defaultSpaceshipFx(),
+    inkHavocFx: defaultInkHavocFx(),
+    jellyFx: defaultJellyFx(),
 };
 
 export const DEFAULT_MODEL = 'qwen3.8-max-0902';
+/** 旧 system 偏好按当前系统外观迁移一次；未知值回退浅色。 */
+export function normalizeThemeMode(mode: unknown): ThemeConfig['mode'] {
+    if (mode === 'system' || mode === 'light' || mode === 'dark' || mode === 'glass' || mode === 'spaceship'
+        || mode === 'ink-havoc' || mode === 'ink-havoc-night' || mode === 'jelly') return mode;
+    if (mode === 'system' && typeof window !== 'undefined'
+        && typeof window.matchMedia === 'function'
+        && window.matchMedia('(prefers-color-scheme: dark)').matches) return 'dark';
+    return 'light';
+}
+
+/** 星舰 HUD 特效默认值：系统偏好减少动态时 motion 默认 'reduced'（仍可手动切回 full） */
+export function defaultSpaceshipFx(): SpaceshipFxConfig {
+    const reduced = typeof window !== 'undefined'
+        && typeof window.matchMedia === 'function'
+        && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    return { cinematic: false, eventFx: false, motion: reduced ? 'reduced' : 'full' };
+}
+
+/** spaceshipFx 字段级归一：非法值逐项回退 base/默认，保证三档 motion 恒为合法值 */
+export function normalizeSpaceshipFx(value: unknown, base: SpaceshipFxConfig = defaultSpaceshipFx()): SpaceshipFxConfig {
+    const update = value && typeof value === 'object' && !Array.isArray(value)
+        ? value as Partial<SpaceshipFxConfig> : {};
+    const motion = update.motion === 'full' || update.motion === 'reduced' || update.motion === 'off'
+        ? update.motion : base.motion;
+    return {
+        cinematic: typeof update.cinematic === 'boolean' ? update.cinematic : base.cinematic,
+        eventFx: typeof update.eventFx === 'boolean' ? update.eventFx : base.eventFx,
+        motion,
+    };
+}
+
+/** inkHavocFx 默认值：系统偏好减少动态时 motion 默认 'reduced'（仍可手动切回 full）；闭关默认关闭 */
+export function defaultInkHavocFx(): InkHavocFxConfig {
+    const reduced = typeof window !== 'undefined'
+        && typeof window.matchMedia === 'function'
+        && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    return { cinematic: false, motion: reduced ? 'reduced' : 'full', retreat: false };
+}
+
+/** inkHavocFx 字段级归一：非法值逐项回退 base/默认，保证三档 motion 恒为合法值 */
+export function normalizeInkHavocFx(value: unknown, base: InkHavocFxConfig = defaultInkHavocFx()): InkHavocFxConfig {
+    const update = value && typeof value === 'object' && !Array.isArray(value)
+        ? value as Partial<InkHavocFxConfig> : {};
+    const motion = update.motion === 'full' || update.motion === 'reduced' || update.motion === 'off'
+        ? update.motion : base.motion;
+    return {
+        cinematic: typeof update.cinematic === 'boolean' ? update.cinematic : base.cinematic,
+        retreat: typeof update.retreat === 'boolean' ? update.retreat : base.retreat,
+        motion,
+    };
+}
+
+/** 果冻主题特效默认值：系统偏好减少动态时 motion 默认 'reduced'（仍可手动切回 full） */
+export function defaultJellyFx(): JellyFxConfig {
+    const reduced = typeof window !== 'undefined'
+        && typeof window.matchMedia === 'function'
+        && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    return { cinematic: false, motion: reduced ? 'reduced' : 'full' };
+}
+
+/** jellyFx 字段级归一：非法值逐项回退 base/默认，保证三档 motion 恒为合法值 */
+export function normalizeJellyFx(value: unknown, base: JellyFxConfig = defaultJellyFx()): JellyFxConfig {
+    const update = value && typeof value === 'object' && !Array.isArray(value)
+        ? value as Partial<JellyFxConfig> : {};
+    const motion = update.motion === 'full' || update.motion === 'reduced' || update.motion === 'off'
+        ? update.motion : base.motion;
+    return {
+        cinematic: typeof update.cinematic === 'boolean' ? update.cinematic : base.cinematic,
+        motion,
+    };
+}
+
+export function normalizeTheme(value: unknown, base: ThemeConfig = DEFAULT_THEME): ThemeConfig {
+    const raw = value && typeof value === 'object' && !Array.isArray(value) ? value as Partial<ThemeConfig> : {};
+    // 字符串形式的 mode 先断言进联合类型，合法性由下方 normalizeThemeMode 白名单兜底
+    const update: Partial<ThemeConfig> = typeof value === 'string' ? { mode: value as ThemeConfig['mode'] } : raw;
+    return {
+        ...base,
+        ...update,
+        mode: normalizeThemeMode(update.mode ?? base.mode),
+        spaceshipFx: normalizeSpaceshipFx(raw.spaceshipFx, base.spaceshipFx ?? defaultSpaceshipFx()),
+        inkHavocFx: normalizeInkHavocFx(raw.inkHavocFx, base.inkHavocFx ?? defaultInkHavocFx()),
+        jellyFx: normalizeJellyFx(raw.jellyFx, base.jellyFx ?? defaultJellyFx()),
+    };
+}
 
 export const useConfigStore = create<ConfigStoreState>()(
     subscribeWithSelector(
@@ -49,7 +142,9 @@ export const useConfigStore = create<ConfigStoreState>()(
                 'ai-coder-config-broadcast',
                 (s) => ({
                     theme: s.theme,
+                    themePreferenceSet: s.themePreferenceSet,
                     locale: s.locale,
+                    asrContextEnabled: s.asrContextEnabled,
                     autoCompact: s.autoCompact,
                     verbose: s.verbose,
                     expandedView: s.expandedView,
@@ -59,15 +154,18 @@ export const useConfigStore = create<ConfigStoreState>()(
             )(
                 immer((set) => ({
                 theme: { ...DEFAULT_THEME },
+                themePreferenceSet: false,
                 locale: 'zh-CN',
+                asrContextEnabled: false,
+                setAsrContextEnabled: (enabled) => set(d => { d.asrContextEnabled = enabled; }),
                 autoCompact: { enabled: true, threshold: 80 },
                 verbose: false,
                 expandedView: false,
                 outputStyle: { availableStyles: [] as OutputStyleDef[], activeStyleName: null as string | null },
                 defaultModel: DEFAULT_MODEL,
 
-                setTheme: (update) => set(d => { Object.assign(d.theme, update); }),
-                resetTheme: () => set(d => { d.theme = { ...DEFAULT_THEME }; }),
+                setTheme: (update) => set(d => { d.theme = normalizeTheme(update, d.theme); d.themePreferenceSet = true; }),
+                resetTheme: () => set(d => { d.theme = { ...DEFAULT_THEME }; d.themePreferenceSet = true; }),
                 setLocale: (locale) => set(d => { d.locale = locale; }),
                 loadConfig: async () => {
                     // §8.3 loadConfig 实现: 3 次指数退避 + localStorage 降级
@@ -79,13 +177,10 @@ export const useConfigStore = create<ConfigStoreState>()(
                             if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
                             const config = await resp.json();
                             set(d => {
-                                if (config.theme) {
-                                    // Normalize v1 string format to v2 object format
-                                    if (typeof config.theme === 'string') {
-                                        d.theme = { ...d.theme, mode: config.theme };
-                                    } else {
-                                        d.theme = config.theme;
-                                    }
+                                // 用户在本机选择的外观优先，避免刷新时被服务端默认主题覆盖。
+                                if (config.theme && !d.themePreferenceSet) {
+                                    // 服务端主题可为模式字符串或完整配置。
+                                    d.theme = normalizeTheme(config.theme, d.theme);
                                 }
                                 if (config.locale) d.locale = config.locale;
                                 if (config.autoCompact) d.autoCompact = config.autoCompact;
@@ -108,13 +203,10 @@ export const useConfigStore = create<ConfigStoreState>()(
                         try {
                             const config = JSON.parse(cached);
                             set(d => {
-                                if (config.theme) {
-                                    // Normalize v1 string format to v2 object format
-                                    if (typeof config.theme === 'string') {
-                                        d.theme = { ...d.theme, mode: config.theme };
-                                    } else {
-                                        d.theme = config.theme;
-                                    }
+                                // 用户在本机选择的外观优先，避免刷新时被服务端默认主题覆盖。
+                                if (config.theme && !d.themePreferenceSet) {
+                                    // 服务端主题可为模式字符串或完整配置。
+                                    d.theme = normalizeTheme(config.theme, d.theme);
                                 }
                                 if (config.locale) d.locale = config.locale;
                                 if (config.autoCompact) d.autoCompact = config.autoCompact;
@@ -131,6 +223,7 @@ export const useConfigStore = create<ConfigStoreState>()(
                 saveConfig: async (updates) => {
                     // P2-11: try-catch + 回滚
                     const prevState = useConfigStore.getState();
+                    if (updates.theme !== undefined) updates = { ...updates, theme: normalizeTheme(updates.theme, prevState.theme) };
                     const snapshot = {
                         theme: prevState.theme,
                         locale: prevState.locale,
@@ -163,27 +256,33 @@ export const useConfigStore = create<ConfigStoreState>()(
                 storage: createJSONStorage(() => localStorage),
                 partialize: (s) => ({
                     theme: s.theme,
+                    themePreferenceSet: s.themePreferenceSet,
                     locale: s.locale,
+                    asrContextEnabled: s.asrContextEnabled,
                     autoCompact: s.autoCompact,
                     verbose: s.verbose,
                     expandedView: s.expandedView,
                     outputStyle: s.outputStyle,
                     defaultModel: s.defaultModel,
                 }),
-                version: 2,
+                version: 3,
                 migrate: (persisted: unknown, version: number) => {
-                    const data = persisted as Record<string, unknown>;
+                    const data = (persisted ?? {}) as Record<string, unknown>;
                     if (version <= 1) {
-                        const oldTheme = typeof data.theme === 'string' ? data.theme : 'system';
                         return {
                             ...data,
-                            theme: { mode: oldTheme, accentColor: '#3b82f6', fontSize: 'medium', fontFamily: 'monospace', borderRadius: 'md' },
+                            // §3.4/§9.6：兜底默认与 DEFAULT_THEME 统一为靛蓝
+                            theme: normalizeTheme(data.theme),
                             autoCompact: (data.autoCompact as Record<string, unknown>) ?? { enabled: true, threshold: 80 },
                             expandedView: data.expandedView ?? false,
                             outputStyle: data.outputStyle ?? { availableStyles: [], activeStyleName: null },
                         };
                     }
-                    return data;
+                    return { ...data, theme: normalizeTheme(data.theme) };
+                },
+                merge: (persisted, current) => {
+                    const data = persisted as Partial<ConfigStoreState> | undefined;
+                    return { ...current, ...data, theme: normalizeTheme(data?.theme ?? current.theme) };
                 },
             }
         )

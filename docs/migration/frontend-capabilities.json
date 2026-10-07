@@ -1,0 +1,1475 @@
+{
+  "verificationPrecedence": {
+    "current": "#/fullAlignmentVerification",
+    "historical": "Other verification/evidence fields and path target fingerprints describe their recorded implementation snapshot; preserve their original hashes and binary identities."
+  },
+  "scope": "frontend",
+  "sourceRange": "3e536438..053adf90",
+  "targetBaseline": "08cbdc45",
+  "verification": [
+    {
+      "command": "cd frontend && npm run test:run",
+      "result": "135 files, 1185 passed, 16 skipped (unchanged skips; not counted as verified)",
+      "log": "/tmp/zk-frontend-native-segment-full.txt",
+      "evidence": {
+        "path": "/tmp/zk-frontend-native-segment-full.txt",
+        "sha256": "72c0e93f5abb385473d216d15cc43b1e56f27eeefc0ca36138139f502bd1ae89"
+      },
+      "status": "previous_snapshot_passed"
+    },
+    {
+      "command": "cd frontend && npx vitest run src/store/memoryStore.test.ts src/components/verify/EvidenceBundleView.test.tsx src/components/dialog/SettingsPanel.test.tsx src/services/authorizedSession.test.ts src/services/sessionActivation.test.ts",
+      "result": "5 files / 68 passed after final native-contract corrections",
+      "log": "/tmp/zk-frontend-contract-tests2.txt",
+      "evidence": {
+        "path": "/tmp/zk-frontend-contract-tests2.txt",
+        "sha256": "9c69e5f8ff90ee069ece261482c10d87e7ea9ce883d86429d163126552b575a8"
+      }
+    },
+    {
+      "command": "cd frontend && ZK_E2E_PORT_BASE=18082 npm run test:e2e:production",
+      "result": "4 passed; fresh isolated SQLite and actual Rust server, scripted local provider; diagram/KaTeX, chat persistence and native task boundary, settings/memory/Skill and paid merge/reload",
+      "log": "/tmp/zk-frontend-production-audit-final.txt",
+      "evidence": {
+        "path": "/tmp/zk-frontend-production-audit-final.txt",
+        "sha256": "53011d2cdcac03fe57d6f301c3b249eee3cb3a6ee6032c585061079b48e150c6"
+      },
+      "status": "passed_snapshot_pending_latest_backend_rerun",
+      "notes": "These four cases passed against the then-current real Rust binary. Later backend implementation and native-segment contract changes require a new actual-backend E2E run; this snapshot is not final release evidence."
+    },
+    {
+      "command": "cd frontend && npm exec --no -- vitest run src/store/__tests__/assistantSegments.test.ts src/store/__tests__/imageNotice.test.ts",
+      "result": "2 files / 10 passed: native flat assistant segments and persisted root system messages",
+      "log": "/tmp/zk-native-segment-contract-tests.txt",
+      "evidence": {
+        "path": "/tmp/zk-native-segment-contract-tests.txt",
+        "sha256": "46eb4c94e465ac18995036aa85dd4eef66fbf23966b87803ac20e292839079d7"
+      }
+    },
+    {
+      "command": "cd frontend && npm run lint",
+      "result": "passed; ESLint 0 warnings",
+      "log": "/tmp/zk-frontend-native-segment-lint.txt",
+      "evidence": {
+        "path": "/tmp/zk-frontend-native-segment-lint.txt",
+        "sha256": "b60802a2486a38abed82876ac6a1e311e4fc7c1c79b586671b867ae4dab4a448"
+      }
+    },
+    {
+      "command": "cd frontend && npm run build",
+      "result": "passed; TypeScript and Vite build, existing large-chunk warning only",
+      "log": "/tmp/zk-frontend-native-segment-build.txt",
+      "evidence": {
+        "path": "/tmp/zk-frontend-native-segment-build.txt",
+        "sha256": "6c4d1cf7990beb3becba17691b9504e8ead144169012541fed531398ec026ea1"
+      }
+    },
+    {
+      "command": "cd frontend && ZK_E2E_SERVER_BINARY=/Users/guoqingtao/Desktop/dev/code/zkcode/target/debug/zk-server npm run test:e2e:production",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "4 passed in 21.3s using installed Chrome, fresh isolated SQLite, actual latest Rust server and scripted local provider.",
+      "evidence": {
+        "path": "/tmp/zk-frontend-production-latest.txt",
+        "sha256": "f83589d871f65cfa5e20186ca70ee81d14ff5d2f63b1edcf1b8a2e7f248aa4f5"
+      },
+      "binaryEvidence": {
+        "path": "/Users/guoqingtao/Desktop/dev/code/zkcode/target/debug/zk-server",
+        "sha256": "de3da835bd01a7a7fe3ecd6c6261af12d9b99a7690d0d47cd431332ecdd3c6d6",
+        "identityScope": "Historical executable used for /tmp/zk-frontend-production-latest.txt, recorded before/after execution; this path was rebuilt later. Never infer historical identity from the current file."
+      },
+      "binaryHashBeforeEqualsAfter": true,
+      "cases": [
+        "real backend: upgraded diagram and math renderers display the assistant response",
+        "real backend: browser chat is durable before message_complete",
+        "real backend: settings, Skill management, and revisioned memory use native contracts",
+        "real backend: merge UI produces a charged, durable handoff and inherits primary permission"
+      ],
+      "limits": "These four browser cases do not cover every product scenario, external provider availability, source browser references, or source Java tests. Flat intermediate assistant-segment behavior has focused native-wire unit coverage; the plain chat E2E covers final completion and task boundary.",
+      "log": "/tmp/zk-frontend-production-latest.txt",
+      "identityCorrection": "Corrected documentation writer that accidentally hashed the later rebuilt debug path rather than the executable identity recorded during the run."
+    },
+    {
+      "command": "cd frontend && ZK_E2E_SERVER_BINARY=/Users/guoqingtao/Desktop/dev/code/zkcode/target/release/zk-server npm run test:e2e:production",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "4 passed in19.3s; actual release Rust binary, installed Chrome, fresh isolated SQLite and scripted local provider.",
+      "evidence": {
+        "path": "/tmp/zk-frontend-production-release-final.txt",
+        "sha256": "f72567c6cabc2dedae57f04c3b1d8ab2d96c76921a5dc49f15f8b4f880ed0e17"
+      },
+      "binaryEvidence": {
+        "path": "/Users/guoqingtao/Desktop/dev/code/zkcode/target/release/zk-server",
+        "sha256": "5c7985aba8e25b2356f343c401f21b72b191f3a6c99ef7b8e3a23198a8817491",
+        "version": "zk-server 0.1.0 (git 08cbdc45e12cc28f3f13aaafbd0b056b980dfb1a, built 1791332366, schema 2, ws 4)",
+        "sha256Before": "5c7985aba8e25b2356f343c401f21b72b191f3a6c99ef7b8e3a23198a8817491",
+        "sha256After": "5c7985aba8e25b2356f343c401f21b72b191f3a6c99ef7b8e3a23198a8817491"
+      },
+      "binaryHashBeforeEqualsAfter": true,
+      "cases": [
+        "real backend: upgraded diagram and math renderers display the assistant response",
+        "real backend: browser chat is durable before message_complete",
+        "real backend: settings, Skill management, and revisioned memory use native contracts",
+        "real backend: merge UI produces a charged, durable handoff and inherits primary permission"
+      ],
+      "limits": "These four browser cases do not cover every product scenario, external provider availability, source browser references, or source Java tests. Flat intermediate assistant-segment behavior has focused native-wire unit coverage; the plain chat E2E covers final completion and task boundary.",
+      "binaryIdentityRecord": {
+        "path": "/tmp/zk-frontend-release-binary-evidence.json",
+        "sha256": "51cda4f879900e2ea6f8890c72847f87eb7d576392ef7091158d47f15bd19e2c"
+      },
+      "log": "/tmp/zk-frontend-production-release-final.txt"
+    },
+    {
+      "command": "cd frontend && npm test -- --run --reporter=verbose",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "135 files;1190 passed;16 unchanged baseline skips not counted as verified;141.86s",
+      "evidence": {
+        "path": "/tmp/zk-frontend-product-final-tests.txt",
+        "sha256": "2cfd332e58298aa51e36b6ad5b5d6504a7c68d970c88857208a579ab8e1ec819"
+      },
+      "log": "/tmp/zk-frontend-product-final-tests.txt"
+    },
+    {
+      "command": "cd frontend && npm run lint",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "passed; ESLint no warnings",
+      "evidence": {
+        "path": "/tmp/zk-frontend-product-final-lint.txt",
+        "sha256": "b60802a2486a38abed82876ac6a1e311e4fc7c1c79b586671b867ae4dab4a448"
+      },
+      "log": "/tmp/zk-frontend-product-final-lint.txt"
+    },
+    {
+      "command": "cd frontend && npx vitest run src/App.review-command.test.tsx --reporter=verbose",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "29 passed; includes5 newly added meaningful interrupt cases using real App, PromptInput and InterruptConfirmDialog",
+      "evidence": {
+        "path": "/tmp/zk-frontend-interrupt-tests.txt",
+        "sha256": "86ed5af6411636df6504d122a77b990f85c4bc3c52cc74f828ed1838d2c442cd"
+      },
+      "log": "/tmp/zk-frontend-interrupt-tests.txt"
+    },
+    {
+      "command": "cd frontend && npm run test:theme-regression",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "20 scenarios;12508 color/isolation assertions; no business requests",
+      "browser": "installed Chrome154.0.8037.98",
+      "evidence": {
+        "path": "/tmp/zk-theme-browser-final-chrome.log",
+        "sha256": "86e435ef0f869e7ba7a3318cf0bd95151ab6c50004f7ef87f16b5631ab91c296"
+      },
+      "log": "/tmp/zk-theme-browser-final-chrome.log"
+    },
+    {
+      "command": "cd frontend && npm run test:jelly-regression",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "42 scenarios passed",
+      "browser": "installed Chrome154.0.8037.98",
+      "evidence": {
+        "path": "/tmp/zk-jelly-browser-final-chrome.log",
+        "sha256": "0f3f5e13033729148a98c05e331562f7811337abdc593f9d59c43e47caf43ca2"
+      },
+      "log": "/tmp/zk-jelly-browser-final-chrome.log"
+    }
+  ],
+  "capabilities": [
+    {
+      "id": "ui-foundation",
+      "capability": "Design tokens, accessible shared controls, typography and responsive layout",
+      "sourceCommit": "053adf90",
+      "sourcePaths": [
+        "frontend/src/styles/globals.css",
+        "frontend/src/components/ui"
+      ],
+      "implementation": [
+        "frontend/src/styles/globals.css",
+        "frontend/src/components/ui",
+        "frontend/src/components/layout"
+      ],
+      "status": "implemented",
+      "verification": {
+        "command": "cd frontend && npm run test:run",
+        "result": "135 files, 1185 passed, 16 skipped (unchanged skips; not counted as verified)",
+        "log": "/tmp/zk-frontend-native-segment-full.txt",
+        "evidence": {
+          "path": "/tmp/zk-frontend-native-segment-full.txt",
+          "sha256": "72c0e93f5abb385473d216d15cc43b1e56f27eeefc0ca36138139f502bd1ae89"
+        }
+      },
+      "notes": "",
+      "latestThemeBrowserEvidence": {
+        "theme": {
+          "command": "cd frontend && npm run test:theme-regression",
+          "status": "passed",
+          "exitCode": 0,
+          "result": "20 scenarios;12508 color/isolation assertions; no business requests",
+          "browser": "installed Chrome154.0.8037.98",
+          "evidence": {
+            "path": "/tmp/zk-theme-browser-final-chrome.log",
+            "sha256": "86e435ef0f869e7ba7a3318cf0bd95151ab6c50004f7ef87f16b5631ab91c296"
+          }
+        },
+        "jelly": {
+          "command": "cd frontend && npm run test:jelly-regression",
+          "status": "passed",
+          "exitCode": 0,
+          "result": "42 scenarios passed",
+          "browser": "installed Chrome154.0.8037.98",
+          "evidence": {
+            "path": "/tmp/zk-jelly-browser-final-chrome.log",
+            "sha256": "0f3f5e13033729148a98c05e331562f7811337abdc593f9d59c43e47caf43ca2"
+          }
+        }
+      }
+    },
+    {
+      "id": "themes",
+      "capability": "Glass/spaceship/ink/jelly themes, lifecycle cleanup and system preference preserved",
+      "sourceCommit": "053adf90",
+      "sourcePaths": [
+        "frontend/src/components/theme",
+        "frontend/src/store/configStore.ts"
+      ],
+      "implementation": [
+        "frontend/src/components/theme",
+        "frontend/src/store/configStore.ts",
+        "frontend/src/styles"
+      ],
+      "status": "implemented",
+      "verification": {
+        "command": "cd frontend && npm run test:run",
+        "result": "135 files, 1185 passed, 16 skipped (unchanged skips; not counted as verified)",
+        "log": "/tmp/zk-frontend-native-segment-full.txt",
+        "evidence": {
+          "path": "/tmp/zk-frontend-native-segment-full.txt",
+          "sha256": "72c0e93f5abb385473d216d15cc43b1e56f27eeefc0ca36138139f502bd1ae89"
+        }
+      },
+      "notes": "system retained. Cinematic and event effects default off; opt-in lifecycle tests explicit.",
+      "latestThemeBrowserEvidence": {
+        "theme": {
+          "command": "cd frontend && npm run test:theme-regression",
+          "status": "passed",
+          "exitCode": 0,
+          "result": "20 scenarios;12508 color/isolation assertions; no business requests",
+          "browser": "installed Chrome154.0.8037.98",
+          "evidence": {
+            "path": "/tmp/zk-theme-browser-final-chrome.log",
+            "sha256": "86e435ef0f869e7ba7a3318cf0bd95151ab6c50004f7ef87f16b5631ab91c296"
+          }
+        },
+        "jelly": {
+          "command": "cd frontend && npm run test:jelly-regression",
+          "status": "passed",
+          "exitCode": 0,
+          "result": "42 scenarios passed",
+          "browser": "installed Chrome154.0.8037.98",
+          "evidence": {
+            "path": "/tmp/zk-jelly-browser-final-chrome.log",
+            "sha256": "0f3f5e13033729148a98c05e331562f7811337abdc593f9d59c43e47caf43ca2"
+          }
+        }
+      }
+    },
+    {
+      "id": "theme-exclusions",
+      "capability": "Framed PNG export and retreat ceremony",
+      "sourceCommit": "053adf90",
+      "sourcePaths": [
+        "frontend/src/components/theme/InkMountStudio.tsx",
+        "frontend/src/components/theme/InkRetreatCeremony.tsx"
+      ],
+      "implementation": [],
+      "status": "excluded",
+      "verification": {
+        "result": "excluded per user"
+      },
+      "notes": "",
+      "latestThemeBrowserEvidence": {
+        "theme": {
+          "command": "cd frontend && npm run test:theme-regression",
+          "status": "passed",
+          "exitCode": 0,
+          "result": "20 scenarios;12508 color/isolation assertions; no business requests",
+          "browser": "installed Chrome154.0.8037.98",
+          "evidence": {
+            "path": "/tmp/zk-theme-browser-final-chrome.log",
+            "sha256": "86e435ef0f869e7ba7a3318cf0bd95151ab6c50004f7ef87f16b5631ab91c296"
+          }
+        },
+        "jelly": {
+          "command": "cd frontend && npm run test:jelly-regression",
+          "status": "passed",
+          "exitCode": 0,
+          "result": "42 scenarios passed",
+          "browser": "installed Chrome154.0.8037.98",
+          "evidence": {
+            "path": "/tmp/zk-jelly-browser-final-chrome.log",
+            "sha256": "0f3f5e13033729148a98c05e331562f7811337abdc593f9d59c43e47caf43ca2"
+          }
+        }
+      }
+    },
+    {
+      "id": "turns",
+      "capability": "Balanced default, density selectors, navigation, task boundaries and assistant segments",
+      "sourceCommit": "053adf90",
+      "sourcePaths": [
+        "frontend/src/components/message",
+        "frontend/src/store/turnViewStore.ts"
+      ],
+      "implementation": [
+        "frontend/src/components/message",
+        "frontend/src/store/turnViewStore.ts",
+        "frontend/src/store/messageStore.ts",
+        "frontend/src/api/dispatch.ts"
+      ],
+      "status": "implemented",
+      "verification": {
+        "command": "cd frontend && npm run test:run",
+        "result": "135 files, 1185 passed, 16 skipped (unchanged skips; not counted as verified)",
+        "log": "/tmp/zk-frontend-native-segment-full.txt",
+        "evidence": {
+          "path": "/tmp/zk-frontend-native-segment-full.txt",
+          "sha256": "72c0e93f5abb385473d216d15cc43b1e56f27eeefc0ca36138139f502bd1ae89"
+        }
+      },
+      "notes": "Native root/child stream partitions, replay dedup and tool-result preservation retained; authoritative segment duplicate regression added. Actual flat Rust messageId/content/usage/stopReason is normalized before sealing; duplicate completion and a child Run cannot consume the subsequent root stream. See the per-path contract notes and native-shape regression."
+    },
+    {
+      "id": "transport",
+      "capability": "Native WebSocket V4 eventContext/task/run routing and recovery",
+      "sourceCommit": "053adf90",
+      "sourcePaths": [
+        "frontend/src/api/dispatch.ts",
+        "frontend/src/api/stompClient.ts"
+      ],
+      "implementation": [
+        "frontend/src/api/dispatch.ts",
+        "frontend/src/api/stompClient.ts"
+      ],
+      "status": "preserved_equivalent",
+      "verification": {
+        "nativeContract": {
+          "command": "cd frontend && npm exec --no -- vitest run src/store/__tests__/assistantSegments.test.ts src/store/__tests__/imageNotice.test.ts",
+          "result": "2 files / 10 passed; actual flat Rust segment and root-only persisted system-message shapes",
+          "log": "/tmp/zk-native-segment-contract-tests.txt",
+          "evidence": {
+            "path": "/tmp/zk-native-segment-contract-tests.txt",
+            "sha256": "46eb4c94e465ac18995036aa85dd4eef66fbf23966b87803ac20e292839079d7"
+          }
+        },
+        "priorIntegrationSnapshot": {
+          "command": "cd frontend && ZK_E2E_PORT_BASE=18082 npm run test:e2e:production",
+          "result": "4 passed; fresh isolated SQLite and actual Rust server, scripted local provider; diagram/KaTeX, chat persistence and native task boundary, settings/memory/Skill and paid merge/reload",
+          "log": "/tmp/zk-frontend-production-audit-final.txt",
+          "evidence": {
+            "path": "/tmp/zk-frontend-production-audit-final.txt",
+            "sha256": "53011d2cdcac03fe57d6f301c3b249eee3cb3a6ee6032c585061079b48e150c6"
+          },
+          "status": "passed_snapshot_pending_latest_backend_rerun",
+          "notes": "These four cases passed against the then-current real Rust binary. Later backend implementation and native-segment contract changes require a new actual-backend E2E run; this snapshot is not final release evidence."
+        }
+      },
+      "notes": "No STOMP dependency or transport migration; assistant_segment_complete/system_message/task_boundary adapted to native envelope. Native flat assistant_segment_complete fields (messageId/content/usage/stopReason) normalize before sealing; duplicate completion and child Run cannot consume the next root buffer. Verified by assistantSegments.test.ts native-shape regression.",
+      "latestIntegrationEvidence": {
+        "command": "cd frontend && ZK_E2E_SERVER_BINARY=/Users/guoqingtao/Desktop/dev/code/zkcode/target/release/zk-server npm run test:e2e:production",
+        "status": "passed",
+        "exitCode": 0,
+        "result": "4 passed in19.3s; actual release Rust binary, installed Chrome, fresh isolated SQLite and scripted local provider.",
+        "evidence": {
+          "path": "/tmp/zk-frontend-production-release-final.txt",
+          "sha256": "f72567c6cabc2dedae57f04c3b1d8ab2d96c76921a5dc49f15f8b4f880ed0e17"
+        },
+        "binaryEvidence": {
+          "path": "/Users/guoqingtao/Desktop/dev/code/zkcode/target/release/zk-server",
+          "sha256": "5c7985aba8e25b2356f343c401f21b72b191f3a6c99ef7b8e3a23198a8817491",
+          "version": "zk-server 0.1.0 (git 08cbdc45e12cc28f3f13aaafbd0b056b980dfb1a, built 1791332366, schema 2, ws 4)",
+          "sha256Before": "5c7985aba8e25b2356f343c401f21b72b191f3a6c99ef7b8e3a23198a8817491",
+          "sha256After": "5c7985aba8e25b2356f343c401f21b72b191f3a6c99ef7b8e3a23198a8817491"
+        },
+        "binaryHashBeforeEqualsAfter": true,
+        "cases": [
+          "real backend: upgraded diagram and math renderers display the assistant response",
+          "real backend: browser chat is durable before message_complete",
+          "real backend: settings, Skill management, and revisioned memory use native contracts",
+          "real backend: merge UI produces a charged, durable handoff and inherits primary permission"
+        ],
+        "limits": "These four browser cases do not cover every product scenario, external provider availability, source browser references, or source Java tests. Flat intermediate assistant-segment behavior has focused native-wire unit coverage; the plain chat E2E covers final completion and task boundary.",
+        "binaryIdentityRecord": {
+          "path": "/tmp/zk-frontend-release-binary-evidence.json",
+          "sha256": "51cda4f879900e2ea6f8890c72847f87eb7d576392ef7091158d47f15bd19e2c"
+        }
+      },
+      "previousDebugIntegrationEvidence": {
+        "command": "cd frontend && ZK_E2E_SERVER_BINARY=/Users/guoqingtao/Desktop/dev/code/zkcode/target/debug/zk-server npm run test:e2e:production",
+        "status": "passed",
+        "exitCode": 0,
+        "result": "4 passed in 21.3s using installed Chrome, fresh isolated SQLite, actual latest Rust server and scripted local provider.",
+        "evidence": {
+          "path": "/tmp/zk-frontend-production-latest.txt",
+          "sha256": "f83589d871f65cfa5e20186ca70ee81d14ff5d2f63b1edcf1b8a2e7f248aa4f5"
+        },
+        "binaryEvidence": {
+          "path": "/Users/guoqingtao/Desktop/dev/code/zkcode/target/debug/zk-server",
+          "sha256": "de3da835bd01a7a7fe3ecd6c6261af12d9b99a7690d0d47cd431332ecdd3c6d6",
+          "identityScope": "Historical executable used for /tmp/zk-frontend-production-latest.txt, recorded before/after execution; this path was rebuilt later. Never infer historical identity from the current file."
+        },
+        "binaryHashBeforeEqualsAfter": true,
+        "cases": [
+          "real backend: upgraded diagram and math renderers display the assistant response",
+          "real backend: browser chat is durable before message_complete",
+          "real backend: settings, Skill management, and revisioned memory use native contracts",
+          "real backend: merge UI produces a charged, durable handoff and inherits primary permission"
+        ],
+        "limits": "Only the corresponding settings/Skill/memory, normal-chat/task-boundary and charged-merge browser assertions were exercised. No broad UI/source-browser-fixture coverage is inferred.",
+        "identityCorrection": "Corrected documentation writer that accidentally hashed the later rebuilt debug path rather than the executable identity recorded during the run."
+      }
+    },
+    {
+      "id": "drafts",
+      "capability": "Drafts survive rejected/cancelled sends and async session changes",
+      "sourceCommit": "053adf90",
+      "sourcePaths": [
+        "frontend/src/store/promptDraftStore.ts",
+        "frontend/src/components/input/PromptInput"
+      ],
+      "implementation": [
+        "frontend/src/store/promptDraftStore.ts",
+        "frontend/src/components/input/PromptInput",
+        "frontend/src/services/authorizedSession.ts"
+      ],
+      "status": "implemented",
+      "verification": {
+        "command": "cd frontend && npm run test:run",
+        "result": "135 files, 1185 passed, 16 skipped (unchanged skips; not counted as verified)",
+        "log": "/tmp/zk-frontend-native-segment-full.txt",
+        "evidence": {
+          "path": "/tmp/zk-frontend-native-segment-full.txt",
+          "sha256": "72c0e93f5abb385473d216d15cc43b1e56f27eeefc0ca36138139f502bd1ae89"
+        }
+      },
+      "notes": ""
+    },
+    {
+      "id": "file-paths",
+      "capability": "Native local-path picker, quoted path payload, relative images and image model limits",
+      "sourceCommit": "053adf90",
+      "sourcePaths": [
+        "frontend/src/components/input/PromptInput",
+        "frontend/src/components/message/ImageBlock.tsx"
+      ],
+      "implementation": [
+        "frontend/src/components/input/PromptInput",
+        "frontend/src/components/message/ImageBlock.tsx",
+        "frontend/src/components/workbench/FilePreviewDialog.tsx",
+        "frontend/src/components/message/TextBlock.tsx"
+      ],
+      "status": "preserved_equivalent",
+      "verification": {
+        "command": "cd frontend && npm run test:run",
+        "result": "135 files, 1185 passed, 16 skipped (unchanged skips; not counted as verified)",
+        "log": "/tmp/zk-frontend-native-segment-full.txt",
+        "evidence": {
+          "path": "/tmp/zk-frontend-native-segment-full.txt",
+          "sha256": "72c0e93f5abb385473d216d15cc43b1e56f27eeefc0ca36138139f502bd1ae89"
+        }
+      },
+      "notes": "Late pick results discarded on session/run switch; existing Markdown renderer sourcePath retained. Source image-copy/body-portal and no-referrer retained; GFM task-list visual markers adapted while authenticated relative-image fetching and ObjectURL cleanup are preserved."
+    },
+    {
+      "id": "voice",
+      "capability": "Selection replacement, cancellable recorder and async ownership",
+      "sourceCommit": "053adf90",
+      "sourcePaths": [
+        "frontend/src/components/input/VoiceInputButton.tsx",
+        "frontend/src/hooks/useVoiceRecorder.ts"
+      ],
+      "implementation": [
+        "frontend/src/components/input/VoiceInputButton.tsx",
+        "frontend/src/hooks/useVoiceRecorder.ts",
+        "frontend/src/components/input/PromptInput"
+      ],
+      "status": "preserved_equivalent",
+      "verification": {
+        "command": "cd frontend && npm run test:run",
+        "result": "135 files, 1185 passed, 16 skipped (unchanged skips; not counted as verified)",
+        "log": "/tmp/zk-frontend-native-segment-full.txt",
+        "evidence": {
+          "path": "/tmp/zk-frontend-native-segment-full.txt",
+          "sha256": "72c0e93f5abb385473d216d15cc43b1e56f27eeefc0ca36138139f502bd1ae89"
+        }
+      },
+      "notes": "ASR optional three-turn context captured at recording start, default off, root conversation only."
+    },
+    {
+      "id": "stop",
+      "capability": "Stop button confirmation and immediate Ctrl+C",
+      "sourceCommit": "053adf90",
+      "sourcePaths": [
+        "frontend/src/components/input/PromptInput"
+      ],
+      "implementation": [
+        "frontend/src/components/input/PromptInput"
+      ],
+      "status": "implemented",
+      "verification": {
+        "command": "cd frontend && npm run test:run",
+        "result": "135 files, 1185 passed, 16 skipped (unchanged skips; not counted as verified)",
+        "log": "/tmp/zk-frontend-native-segment-full.txt",
+        "evidence": {
+          "path": "/tmp/zk-frontend-native-segment-full.txt",
+          "sha256": "72c0e93f5abb385473d216d15cc43b1e56f27eeefc0ca36138139f502bd1ae89"
+        }
+      },
+      "notes": "",
+      "latestInterruptEvidence": {
+        "command": "cd frontend && npx vitest run src/App.review-command.test.tsx --reporter=verbose",
+        "status": "passed",
+        "exitCode": 0,
+        "result": "29 passed; includes5 newly added meaningful interrupt cases using real App, PromptInput and InterruptConfirmDialog",
+        "evidence": {
+          "path": "/tmp/zk-frontend-interrupt-tests.txt",
+          "sha256": "86ed5af6411636df6504d122a77b990f85c4bc3c52cc74f828ed1838d2c442cd"
+        },
+        "log": "/tmp/zk-frontend-interrupt-tests.txt"
+      }
+    },
+    {
+      "id": "model-config",
+      "capability": "Current session versus new-session default, API Keys and five permission modes",
+      "sourceCommit": "053adf90",
+      "sourcePaths": [
+        "frontend/src/hooks/useSessionModelSelection.ts",
+        "frontend/src/hooks/useSessionPermissionSelection.ts"
+      ],
+      "implementation": [
+        "frontend/src/hooks/useSessionModelSelection.ts",
+        "frontend/src/hooks/useSessionPermissionSelection.ts",
+        "frontend/src/components/dialog/SettingsPanel.tsx",
+        "frontend/src/services/authorizedSession.ts"
+      ],
+      "status": "implemented",
+      "verification": {
+        "unit": {
+          "command": "cd frontend && npx vitest run src/store/memoryStore.test.ts src/components/verify/EvidenceBundleView.test.tsx src/components/dialog/SettingsPanel.test.tsx src/services/authorizedSession.test.ts src/services/sessionActivation.test.ts",
+          "result": "5 files / 68 passed after final native-contract corrections",
+          "log": "/tmp/zk-frontend-contract-tests2.txt",
+          "evidence": {
+            "path": "/tmp/zk-frontend-contract-tests2.txt",
+            "sha256": "9c69e5f8ff90ee069ece261482c10d87e7ea9ce883d86429d163126552b575a8"
+          }
+        },
+        "integration": {
+          "command": "cd frontend && ZK_E2E_PORT_BASE=18082 npm run test:e2e:production",
+          "result": "4 passed; fresh isolated SQLite and actual Rust server, scripted local provider; diagram/KaTeX, chat persistence and native task boundary, settings/memory/Skill and paid merge/reload",
+          "log": "/tmp/zk-frontend-production-audit-final.txt",
+          "evidence": {
+            "path": "/tmp/zk-frontend-production-audit-final.txt",
+            "sha256": "53011d2cdcac03fe57d6f301c3b249eee3cb3a6ee6032c585061079b48e150c6"
+          },
+          "status": "passed_snapshot_pending_latest_backend_rerun",
+          "notes": "These four cases passed against the then-current real Rust binary. Later backend implementation and native-segment contract changes require a new actual-backend E2E run; this snapshot is not final release evidence."
+        }
+      },
+      "notes": "Failed WS sends rollback; model override survives cancelled authorization; permission acknowledgements requestId-scoped.",
+      "latestIntegrationEvidence": {
+        "command": "cd frontend && ZK_E2E_SERVER_BINARY=/Users/guoqingtao/Desktop/dev/code/zkcode/target/release/zk-server npm run test:e2e:production",
+        "status": "passed",
+        "exitCode": 0,
+        "result": "4 passed in19.3s; actual release Rust binary, installed Chrome, fresh isolated SQLite and scripted local provider.",
+        "evidence": {
+          "path": "/tmp/zk-frontend-production-release-final.txt",
+          "sha256": "f72567c6cabc2dedae57f04c3b1d8ab2d96c76921a5dc49f15f8b4f880ed0e17"
+        },
+        "binaryEvidence": {
+          "path": "/Users/guoqingtao/Desktop/dev/code/zkcode/target/release/zk-server",
+          "sha256": "5c7985aba8e25b2356f343c401f21b72b191f3a6c99ef7b8e3a23198a8817491",
+          "version": "zk-server 0.1.0 (git 08cbdc45e12cc28f3f13aaafbd0b056b980dfb1a, built 1791332366, schema 2, ws 4)",
+          "sha256Before": "5c7985aba8e25b2356f343c401f21b72b191f3a6c99ef7b8e3a23198a8817491",
+          "sha256After": "5c7985aba8e25b2356f343c401f21b72b191f3a6c99ef7b8e3a23198a8817491"
+        },
+        "binaryHashBeforeEqualsAfter": true,
+        "cases": [
+          "real backend: upgraded diagram and math renderers display the assistant response",
+          "real backend: browser chat is durable before message_complete",
+          "real backend: settings, Skill management, and revisioned memory use native contracts",
+          "real backend: merge UI produces a charged, durable handoff and inherits primary permission"
+        ],
+        "limits": "These four browser cases do not cover every product scenario, external provider availability, source browser references, or source Java tests. Flat intermediate assistant-segment behavior has focused native-wire unit coverage; the plain chat E2E covers final completion and task boundary.",
+        "binaryIdentityRecord": {
+          "path": "/tmp/zk-frontend-release-binary-evidence.json",
+          "sha256": "51cda4f879900e2ea6f8890c72847f87eb7d576392ef7091158d47f15bd19e2c"
+        }
+      },
+      "previousDebugIntegrationEvidence": {
+        "command": "cd frontend && ZK_E2E_SERVER_BINARY=/Users/guoqingtao/Desktop/dev/code/zkcode/target/debug/zk-server npm run test:e2e:production",
+        "status": "passed",
+        "exitCode": 0,
+        "result": "4 passed in 21.3s using installed Chrome, fresh isolated SQLite, actual latest Rust server and scripted local provider.",
+        "evidence": {
+          "path": "/tmp/zk-frontend-production-latest.txt",
+          "sha256": "f83589d871f65cfa5e20186ca70ee81d14ff5d2f63b1edcf1b8a2e7f248aa4f5"
+        },
+        "binaryEvidence": {
+          "path": "/Users/guoqingtao/Desktop/dev/code/zkcode/target/debug/zk-server",
+          "sha256": "de3da835bd01a7a7fe3ecd6c6261af12d9b99a7690d0d47cd431332ecdd3c6d6",
+          "identityScope": "Historical executable used for /tmp/zk-frontend-production-latest.txt, recorded before/after execution; this path was rebuilt later. Never infer historical identity from the current file."
+        },
+        "binaryHashBeforeEqualsAfter": true,
+        "cases": [
+          "real backend: upgraded diagram and math renderers display the assistant response",
+          "real backend: browser chat is durable before message_complete",
+          "real backend: settings, Skill management, and revisioned memory use native contracts",
+          "real backend: merge UI produces a charged, durable handoff and inherits primary permission"
+        ],
+        "limits": "Only the corresponding settings/Skill/memory, normal-chat/task-boundary and charged-merge browser assertions were exercised. No broad UI/source-browser-fixture coverage is inferred.",
+        "identityCorrection": "Corrected documentation writer that accidentally hashed the later rebuilt debug path rather than the executable identity recorded during the run."
+      }
+    },
+    {
+      "id": "workbenches",
+      "capability": "Simple/development switch, AgentRunTree, ResearchQualitySummary",
+      "sourceCommit": "053adf90",
+      "sourcePaths": [
+        "frontend/src/components/workbench/SimpleWorkbench.tsx",
+        "frontend/src/components/workbench/TaskOverviewCard.tsx",
+        "frontend/src/hooks/useSimpleWorkbenchData.ts"
+      ],
+      "implementation": [
+        "frontend/src/components/workbench/SimpleWorkbench.tsx",
+        "frontend/src/components/workbench/AgentRunTree.tsx",
+        "frontend/src/components/workbench/ResearchQualitySummary.tsx",
+        "frontend/src/hooks/useSimpleWorkbenchData.ts",
+        "frontend/src/components/workbench/TaskOverviewCard.tsx"
+      ],
+      "status": "preserved_equivalent",
+      "verification": {
+        "command": "cd frontend && npm run test:run",
+        "result": "135 files, 1185 passed, 16 skipped (unchanged skips; not counted as verified)",
+        "log": "/tmp/zk-frontend-native-segment-full.txt",
+        "focused": {
+          "result": "3 passed; main Run versus subtree usage plus advisory task display/error separation",
+          "log": "/tmp/zk-task-display-final-ui-tests.txt",
+          "evidence": {
+            "path": "/tmp/zk-task-display-final-ui-tests.txt",
+            "sha256": "3f0d19bab9f598d6510eaae7f77a5d2c2ea6072accf58a1b1c2a60931872e501"
+          }
+        },
+        "evidence": {
+          "path": "/tmp/zk-frontend-native-segment-full.txt",
+          "sha256": "72c0e93f5abb385473d216d15cc43b1e56f27eeefc0ca36138139f502bd1ae89"
+        }
+      },
+      "notes": "Source main-Run observed usage uses selected current.rootRun.inputTokens/outputTokens/usageComplete. AgentRunTree preserves native subtree sum labelled 含子任务合计. Regression distinguishes 42 main-Run tokens from 142 subtree tokens; partial/missing reporting and UNBOUND integrity remain explicit."
+    },
+    {
+      "id": "sidebar",
+      "capability": "Sessions grouped/search/order, clean destructive confirmation and merge entry",
+      "sourceCommit": "053adf90",
+      "sourcePaths": [
+        "frontend/src/components/layout/Sidebar.tsx"
+      ],
+      "implementation": [
+        "frontend/src/components/layout/Sidebar.tsx",
+        "frontend/src/utils/sessionGroups.ts",
+        "frontend/src/utils/pageSessionOrder.ts"
+      ],
+      "status": "implemented",
+      "verification": {
+        "command": "cd frontend && npm run test:run",
+        "result": "135 files, 1185 passed, 16 skipped (unchanged skips; not counted as verified)",
+        "log": "/tmp/zk-frontend-native-segment-full.txt",
+        "evidence": {
+          "path": "/tmp/zk-frontend-native-segment-full.txt",
+          "sha256": "72c0e93f5abb385473d216d15cc43b1e56f27eeefc0ca36138139f502bd1ae89"
+        }
+      },
+      "notes": "Fixed deletion code excluded. Development/simple defaults preserved."
+    },
+    {
+      "id": "merge-ui",
+      "capability": "Recoverable create/resume/cancel session merge UI, request idempotency and locks",
+      "sourceCommit": "053adf90",
+      "sourcePaths": [
+        "frontend/src/components/session/SessionMergePanel.tsx",
+        "frontend/src/store/sessionMergeStore.ts"
+      ],
+      "implementation": [
+        "frontend/src/components/session/SessionMergePanel.tsx",
+        "frontend/src/store/sessionMergeStore.ts"
+      ],
+      "status": "implemented",
+      "verification": {
+        "command": "cd frontend && npm run test:run",
+        "result": "135 files, 1185 passed, 16 skipped (unchanged skips; not counted as verified)",
+        "log": "/tmp/zk-frontend-native-segment-full.txt",
+        "evidence": {
+          "path": "/tmp/zk-frontend-native-segment-full.txt",
+          "sha256": "72c0e93f5abb385473d216d15cc43b1e56f27eeefc0ca36138139f502bd1ae89"
+        }
+      },
+      "notes": "UI uses SQLite handoff provenance; full extraction/aggregation backend verification recorded in merge-capabilities.json, not claimed by UI test.",
+      "latestIntegrationEvidence": {
+        "command": "cd frontend && ZK_E2E_SERVER_BINARY=/Users/guoqingtao/Desktop/dev/code/zkcode/target/release/zk-server npm run test:e2e:production",
+        "status": "passed",
+        "exitCode": 0,
+        "result": "4 passed in19.3s; actual release Rust binary, installed Chrome, fresh isolated SQLite and scripted local provider.",
+        "evidence": {
+          "path": "/tmp/zk-frontend-production-release-final.txt",
+          "sha256": "f72567c6cabc2dedae57f04c3b1d8ab2d96c76921a5dc49f15f8b4f880ed0e17"
+        },
+        "binaryEvidence": {
+          "path": "/Users/guoqingtao/Desktop/dev/code/zkcode/target/release/zk-server",
+          "sha256": "5c7985aba8e25b2356f343c401f21b72b191f3a6c99ef7b8e3a23198a8817491",
+          "version": "zk-server 0.1.0 (git 08cbdc45e12cc28f3f13aaafbd0b056b980dfb1a, built 1791332366, schema 2, ws 4)",
+          "sha256Before": "5c7985aba8e25b2356f343c401f21b72b191f3a6c99ef7b8e3a23198a8817491",
+          "sha256After": "5c7985aba8e25b2356f343c401f21b72b191f3a6c99ef7b8e3a23198a8817491"
+        },
+        "binaryHashBeforeEqualsAfter": true,
+        "cases": [
+          "real backend: upgraded diagram and math renderers display the assistant response",
+          "real backend: browser chat is durable before message_complete",
+          "real backend: settings, Skill management, and revisioned memory use native contracts",
+          "real backend: merge UI produces a charged, durable handoff and inherits primary permission"
+        ],
+        "limits": "These four browser cases do not cover every product scenario, external provider availability, source browser references, or source Java tests. Flat intermediate assistant-segment behavior has focused native-wire unit coverage; the plain chat E2E covers final completion and task boundary.",
+        "binaryIdentityRecord": {
+          "path": "/tmp/zk-frontend-release-binary-evidence.json",
+          "sha256": "51cda4f879900e2ea6f8890c72847f87eb7d576392ef7091158d47f15bd19e2c"
+        }
+      },
+      "previousDebugIntegrationEvidence": {
+        "command": "cd frontend && ZK_E2E_SERVER_BINARY=/Users/guoqingtao/Desktop/dev/code/zkcode/target/debug/zk-server npm run test:e2e:production",
+        "status": "passed",
+        "exitCode": 0,
+        "result": "4 passed in 21.3s using installed Chrome, fresh isolated SQLite, actual latest Rust server and scripted local provider.",
+        "evidence": {
+          "path": "/tmp/zk-frontend-production-latest.txt",
+          "sha256": "f83589d871f65cfa5e20186ca70ee81d14ff5d2f63b1edcf1b8a2e7f248aa4f5"
+        },
+        "binaryEvidence": {
+          "path": "/Users/guoqingtao/Desktop/dev/code/zkcode/target/debug/zk-server",
+          "sha256": "de3da835bd01a7a7fe3ecd6c6261af12d9b99a7690d0d47cd431332ecdd3c6d6",
+          "identityScope": "Historical executable used for /tmp/zk-frontend-production-latest.txt, recorded before/after execution; this path was rebuilt later. Never infer historical identity from the current file."
+        },
+        "binaryHashBeforeEqualsAfter": true,
+        "cases": [
+          "real backend: upgraded diagram and math renderers display the assistant response",
+          "real backend: browser chat is durable before message_complete",
+          "real backend: settings, Skill management, and revisioned memory use native contracts",
+          "real backend: merge UI produces a charged, durable handoff and inherits primary permission"
+        ],
+        "limits": "Only the corresponding settings/Skill/memory, normal-chat/task-boundary and charged-merge browser assertions were exercised. No broad UI/source-browser-fixture coverage is inferred.",
+        "identityCorrection": "Corrected documentation writer that accidentally hashed the later rebuilt debug path rather than the executable identity recorded during the run."
+      }
+    },
+    {
+      "id": "skills",
+      "capability": "Global Skill management/details/toggle with retry and errors",
+      "sourceCommit": "053adf90",
+      "sourcePaths": [
+        "frontend/src/components/skills",
+        "frontend/src/store/skillStore.ts"
+      ],
+      "implementation": [
+        "frontend/src/components/skills",
+        "frontend/src/store/skillStore.ts",
+        "frontend/src/App.tsx"
+      ],
+      "status": "implemented",
+      "verification": {
+        "unit": {
+          "command": "cd frontend && npm run test:run",
+          "result": "135 files, 1185 passed, 16 skipped (unchanged skips; not counted as verified)",
+          "log": "/tmp/zk-frontend-native-segment-full.txt",
+          "evidence": {
+            "path": "/tmp/zk-frontend-native-segment-full.txt",
+            "sha256": "72c0e93f5abb385473d216d15cc43b1e56f27eeefc0ca36138139f502bd1ae89"
+          }
+        },
+        "integration": {
+          "command": "cd frontend && ZK_E2E_PORT_BASE=18082 npm run test:e2e:production",
+          "result": "4 passed; fresh isolated SQLite and actual Rust server, scripted local provider; diagram/KaTeX, chat persistence and native task boundary, settings/memory/Skill and paid merge/reload",
+          "log": "/tmp/zk-frontend-production-audit-final.txt",
+          "evidence": {
+            "path": "/tmp/zk-frontend-production-audit-final.txt",
+            "sha256": "53011d2cdcac03fe57d6f301c3b249eee3cb3a6ee6032c585061079b48e150c6"
+          },
+          "status": "passed_snapshot_pending_latest_backend_rerun",
+          "notes": "These four cases passed against the then-current real Rust binary. Later backend implementation and native-segment contract changes require a new actual-backend E2E run; this snapshot is not final release evidence."
+        }
+      },
+      "notes": "Rust array response; userInvocable false blocked from manual slash execution; disabled/stateError fail closed.",
+      "latestIntegrationEvidence": {
+        "command": "cd frontend && ZK_E2E_SERVER_BINARY=/Users/guoqingtao/Desktop/dev/code/zkcode/target/release/zk-server npm run test:e2e:production",
+        "status": "passed",
+        "exitCode": 0,
+        "result": "4 passed in19.3s; actual release Rust binary, installed Chrome, fresh isolated SQLite and scripted local provider.",
+        "evidence": {
+          "path": "/tmp/zk-frontend-production-release-final.txt",
+          "sha256": "f72567c6cabc2dedae57f04c3b1d8ab2d96c76921a5dc49f15f8b4f880ed0e17"
+        },
+        "binaryEvidence": {
+          "path": "/Users/guoqingtao/Desktop/dev/code/zkcode/target/release/zk-server",
+          "sha256": "5c7985aba8e25b2356f343c401f21b72b191f3a6c99ef7b8e3a23198a8817491",
+          "version": "zk-server 0.1.0 (git 08cbdc45e12cc28f3f13aaafbd0b056b980dfb1a, built 1791332366, schema 2, ws 4)",
+          "sha256Before": "5c7985aba8e25b2356f343c401f21b72b191f3a6c99ef7b8e3a23198a8817491",
+          "sha256After": "5c7985aba8e25b2356f343c401f21b72b191f3a6c99ef7b8e3a23198a8817491"
+        },
+        "binaryHashBeforeEqualsAfter": true,
+        "cases": [
+          "real backend: upgraded diagram and math renderers display the assistant response",
+          "real backend: browser chat is durable before message_complete",
+          "real backend: settings, Skill management, and revisioned memory use native contracts",
+          "real backend: merge UI produces a charged, durable handoff and inherits primary permission"
+        ],
+        "limits": "These four browser cases do not cover every product scenario, external provider availability, source browser references, or source Java tests. Flat intermediate assistant-segment behavior has focused native-wire unit coverage; the plain chat E2E covers final completion and task boundary.",
+        "binaryIdentityRecord": {
+          "path": "/tmp/zk-frontend-release-binary-evidence.json",
+          "sha256": "51cda4f879900e2ea6f8890c72847f87eb7d576392ef7091158d47f15bd19e2c"
+        }
+      },
+      "previousDebugIntegrationEvidence": {
+        "command": "cd frontend && ZK_E2E_SERVER_BINARY=/Users/guoqingtao/Desktop/dev/code/zkcode/target/debug/zk-server npm run test:e2e:production",
+        "status": "passed",
+        "exitCode": 0,
+        "result": "4 passed in 21.3s using installed Chrome, fresh isolated SQLite, actual latest Rust server and scripted local provider.",
+        "evidence": {
+          "path": "/tmp/zk-frontend-production-latest.txt",
+          "sha256": "f83589d871f65cfa5e20186ca70ee81d14ff5d2f63b1edcf1b8a2e7f248aa4f5"
+        },
+        "binaryEvidence": {
+          "path": "/Users/guoqingtao/Desktop/dev/code/zkcode/target/debug/zk-server",
+          "sha256": "de3da835bd01a7a7fe3ecd6c6261af12d9b99a7690d0d47cd431332ecdd3c6d6",
+          "identityScope": "Historical executable used for /tmp/zk-frontend-production-latest.txt, recorded before/after execution; this path was rebuilt later. Never infer historical identity from the current file."
+        },
+        "binaryHashBeforeEqualsAfter": true,
+        "cases": [
+          "real backend: upgraded diagram and math renderers display the assistant response",
+          "real backend: browser chat is durable before message_complete",
+          "real backend: settings, Skill management, and revisioned memory use native contracts",
+          "real backend: merge UI produces a charged, durable handoff and inherits primary permission"
+        ],
+        "limits": "Only the corresponding settings/Skill/memory, normal-chat/task-boundary and charged-merge browser assertions were exercised. No broad UI/source-browser-fixture coverage is inferred.",
+        "identityCorrection": "Corrected documentation writer that accidentally hashed the later rebuilt debug path rather than the executable identity recorded during the run."
+      }
+    },
+    {
+      "id": "memory",
+      "capability": "Revisioned global/project SQLite memory editor, cards/raw view, conflict guard",
+      "sourceCommit": "053adf90",
+      "sourcePaths": [
+        "frontend/src/components/memory/MemoryPage.tsx",
+        "frontend/src/store/memoryStore.ts"
+      ],
+      "implementation": [
+        "frontend/src/components/memory/MemoryPage.tsx",
+        "frontend/src/store/memoryStore.ts"
+      ],
+      "status": "implemented",
+      "verification": {
+        "unit": {
+          "command": "cd frontend && npx vitest run src/store/memoryStore.test.ts src/components/verify/EvidenceBundleView.test.tsx src/components/dialog/SettingsPanel.test.tsx src/services/authorizedSession.test.ts src/services/sessionActivation.test.ts",
+          "result": "5 files / 68 passed after final native-contract corrections",
+          "log": "/tmp/zk-frontend-contract-tests2.txt",
+          "evidence": {
+            "path": "/tmp/zk-frontend-contract-tests2.txt",
+            "sha256": "9c69e5f8ff90ee069ece261482c10d87e7ea9ce883d86429d163126552b575a8"
+          }
+        },
+        "integration": {
+          "command": "cd frontend && ZK_E2E_PORT_BASE=18082 npm run test:e2e:production",
+          "result": "4 passed; fresh isolated SQLite and actual Rust server, scripted local provider; diagram/KaTeX, chat persistence and native task boundary, settings/memory/Skill and paid merge/reload",
+          "log": "/tmp/zk-frontend-production-audit-final.txt",
+          "evidence": {
+            "path": "/tmp/zk-frontend-production-audit-final.txt",
+            "sha256": "53011d2cdcac03fe57d6f301c3b249eee3cb3a6ee6032c585061079b48e150c6"
+          },
+          "status": "passed_snapshot_pending_latest_backend_rerun",
+          "notes": "These four cases passed against the then-current real Rust binary. Later backend implementation and native-segment contract changes require a new actual-backend E2E run; this snapshot is not final release evidence."
+        }
+      },
+      "notes": "Uses title/updatedAt native fields; 409 preserves draft; late responses cannot overwrite another scope; save pending disables editing.",
+      "latestIntegrationEvidence": {
+        "command": "cd frontend && ZK_E2E_SERVER_BINARY=/Users/guoqingtao/Desktop/dev/code/zkcode/target/release/zk-server npm run test:e2e:production",
+        "status": "passed",
+        "exitCode": 0,
+        "result": "4 passed in19.3s; actual release Rust binary, installed Chrome, fresh isolated SQLite and scripted local provider.",
+        "evidence": {
+          "path": "/tmp/zk-frontend-production-release-final.txt",
+          "sha256": "f72567c6cabc2dedae57f04c3b1d8ab2d96c76921a5dc49f15f8b4f880ed0e17"
+        },
+        "binaryEvidence": {
+          "path": "/Users/guoqingtao/Desktop/dev/code/zkcode/target/release/zk-server",
+          "sha256": "5c7985aba8e25b2356f343c401f21b72b191f3a6c99ef7b8e3a23198a8817491",
+          "version": "zk-server 0.1.0 (git 08cbdc45e12cc28f3f13aaafbd0b056b980dfb1a, built 1791332366, schema 2, ws 4)",
+          "sha256Before": "5c7985aba8e25b2356f343c401f21b72b191f3a6c99ef7b8e3a23198a8817491",
+          "sha256After": "5c7985aba8e25b2356f343c401f21b72b191f3a6c99ef7b8e3a23198a8817491"
+        },
+        "binaryHashBeforeEqualsAfter": true,
+        "cases": [
+          "real backend: upgraded diagram and math renderers display the assistant response",
+          "real backend: browser chat is durable before message_complete",
+          "real backend: settings, Skill management, and revisioned memory use native contracts",
+          "real backend: merge UI produces a charged, durable handoff and inherits primary permission"
+        ],
+        "limits": "These four browser cases do not cover every product scenario, external provider availability, source browser references, or source Java tests. Flat intermediate assistant-segment behavior has focused native-wire unit coverage; the plain chat E2E covers final completion and task boundary.",
+        "binaryIdentityRecord": {
+          "path": "/tmp/zk-frontend-release-binary-evidence.json",
+          "sha256": "51cda4f879900e2ea6f8890c72847f87eb7d576392ef7091158d47f15bd19e2c"
+        }
+      },
+      "previousDebugIntegrationEvidence": {
+        "command": "cd frontend && ZK_E2E_SERVER_BINARY=/Users/guoqingtao/Desktop/dev/code/zkcode/target/debug/zk-server npm run test:e2e:production",
+        "status": "passed",
+        "exitCode": 0,
+        "result": "4 passed in 21.3s using installed Chrome, fresh isolated SQLite, actual latest Rust server and scripted local provider.",
+        "evidence": {
+          "path": "/tmp/zk-frontend-production-latest.txt",
+          "sha256": "f83589d871f65cfa5e20186ca70ee81d14ff5d2f63b1edcf1b8a2e7f248aa4f5"
+        },
+        "binaryEvidence": {
+          "path": "/Users/guoqingtao/Desktop/dev/code/zkcode/target/debug/zk-server",
+          "sha256": "de3da835bd01a7a7fe3ecd6c6261af12d9b99a7690d0d47cd431332ecdd3c6d6",
+          "identityScope": "Historical executable used for /tmp/zk-frontend-production-latest.txt, recorded before/after execution; this path was rebuilt later. Never infer historical identity from the current file."
+        },
+        "binaryHashBeforeEqualsAfter": true,
+        "cases": [
+          "real backend: upgraded diagram and math renderers display the assistant response",
+          "real backend: browser chat is durable before message_complete",
+          "real backend: settings, Skill management, and revisioned memory use native contracts",
+          "real backend: merge UI produces a charged, durable handoff and inherits primary permission"
+        ],
+        "limits": "Only the corresponding settings/Skill/memory, normal-chat/task-boundary and charged-merge browser assertions were exercised. No broad UI/source-browser-fixture coverage is inferred.",
+        "identityCorrection": "Corrected documentation writer that accidentally hashed the later rebuilt debug path rather than the executable identity recorded during the run."
+      }
+    },
+    {
+      "id": "mcp",
+      "capability": "MCP manager and prompts access",
+      "sourceCommit": "053adf90",
+      "sourcePaths": [
+        "frontend/src/components/mcp/McpManagementPage.tsx"
+      ],
+      "implementation": [
+        "frontend/src/components/mcp/McpManagementPage.tsx",
+        "frontend/src/components/settings/McpCapabilityPanel.tsx",
+        "frontend/src/components/settings/PromptsTab.tsx"
+      ],
+      "status": "preserved_equivalent",
+      "verification": {
+        "command": "cd frontend && npm run test:run",
+        "result": "135 files, 1185 passed, 16 skipped (unchanged skips; not counted as verified)",
+        "log": "/tmp/zk-frontend-native-segment-full.txt",
+        "evidence": {
+          "path": "/tmp/zk-frontend-native-segment-full.txt",
+          "sha256": "72c0e93f5abb385473d216d15cc43b1e56f27eeefc0ca36138139f502bd1ae89"
+        }
+      },
+      "notes": "Native capabilities contract reused; Java services and pretend toggles excluded."
+    },
+    {
+      "id": "evidence",
+      "capability": "Instance-isolated evidence, limits wording and authenticated screenshot preview",
+      "sourceCommit": "053adf90",
+      "sourcePaths": [
+        "frontend/src/components/verify/EvidenceBundleView.tsx"
+      ],
+      "implementation": [
+        "frontend/src/components/verify/EvidenceBundleView.tsx"
+      ],
+      "status": "implemented",
+      "verification": {
+        "command": "cd frontend && npx vitest run src/store/memoryStore.test.ts src/components/verify/EvidenceBundleView.test.tsx src/components/dialog/SettingsPanel.test.tsx src/services/authorizedSession.test.ts src/services/sessionActivation.test.ts",
+        "result": "5 files / 68 passed after final native-contract corrections",
+        "log": "/tmp/zk-frontend-contract-tests2.txt",
+        "evidence": {
+          "path": "/tmp/zk-frontend-contract-tests2.txt",
+          "sha256": "9c69e5f8ff90ee069ece261482c10d87e7ea9ce883d86429d163126552b575a8"
+        }
+      },
+      "notes": "X-Session-Id fetch /api/evidence/blob/{sha}?preview=true then ObjectURL, PNG/JPEG only, cleanup; UUID attachments remain download."
+    },
+    {
+      "id": "activity",
+      "capability": "Persisted approval/rejection controls with truthful errors",
+      "sourceCommit": "053adf90",
+      "sourcePaths": [
+        "frontend/src/api/activityApi.ts",
+        "frontend/src/components/apos/ActivityDecisionStatus.tsx"
+      ],
+      "implementation": [
+        "frontend/src/api/activityApi.ts",
+        "frontend/src/store/activityStore.ts",
+        "frontend/src/components/apos/ActivityDecisionStatus.tsx"
+      ],
+      "status": "implemented",
+      "verification": {
+        "command": "cd frontend && npm run test:run",
+        "result": "135 files, 1185 passed, 16 skipped (unchanged skips; not counted as verified)",
+        "log": "/tmp/zk-frontend-native-segment-full.txt",
+        "evidence": {
+          "path": "/tmp/zk-frontend-native-segment-full.txt",
+          "sha256": "72c0e93f5abb385473d216d15cc43b1e56f27eeefc0ca36138139f502bd1ae89"
+        }
+      },
+      "notes": "PUT session/activity scoped decision; server result identity validated before success."
+    },
+    {
+      "id": "tool-display",
+      "capability": "Tool cards, structured diff, grouped reads, command output and errors",
+      "sourceCommit": "053adf90",
+      "sourcePaths": [
+        "frontend/src/components/message/ToolCallBlock.tsx",
+        "frontend/src/utils/structuredToolResult.ts"
+      ],
+      "implementation": [
+        "frontend/src/components/message/ToolCallBlock.tsx",
+        "frontend/src/utils/structuredToolResult.ts",
+        "frontend/src/components/message/AssistantMessage.tsx"
+      ],
+      "status": "implemented",
+      "verification": {
+        "command": "cd frontend && npm run test:run",
+        "result": "135 files, 1185 passed, 16 skipped (unchanged skips; not counted as verified)",
+        "log": "/tmp/zk-frontend-native-segment-full.txt",
+        "evidence": {
+          "path": "/tmp/zk-frontend-native-segment-full.txt",
+          "sha256": "72c0e93f5abb385473d216d15cc43b1e56f27eeefc0ca36138139f502bd1ae89"
+        }
+      },
+      "notes": "Existing native tool/result and read grouping retained; real server Edit diff parsed."
+    },
+    {
+      "id": "publishing-exclusions",
+      "capability": "OSS/Meoo/flyai publication UI, remote file uploads and cards",
+      "sourceCommit": "053adf90",
+      "sourcePaths": [],
+      "implementation": [],
+      "status": "excluded",
+      "verification": {
+        "result": "excluded per user"
+      },
+      "notes": "No publishing dependency/card/transport introduced; existing generic ExternalResource renderer retained."
+    },
+    {
+      "id": "historical-data",
+      "capability": "Old session migration, backup or compatibility workflows",
+      "sourceCommit": "053adf90",
+      "sourcePaths": [],
+      "implementation": [],
+      "status": "excluded",
+      "verification": {
+        "result": "excluded per user"
+      },
+      "notes": "Newly produced data recovery and replay explicitly retained and E2E verified."
+    },
+    {
+      "id": "task-display",
+      "capability": "Advisory TaskUpdate.output and task-tree display, separate from immutable result/status/error",
+      "sourceCommit": "053adf90",
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/tool/task/TaskState.java",
+        "backend/src/main/java/com/aicodeassistant/tool/task/TaskUpdateTool.java"
+      ],
+      "implementation": [
+        "frontend/src/components/workbench/AgentRunTree.tsx",
+        "frontend/src/hooks/useSimpleWorkbenchData.ts",
+        "frontend/src/types/generated/taskRuntimeV4.ts"
+      ],
+      "status": "implemented_equivalent",
+      "verification": {
+        "command": "cd frontend && npm run test:run",
+        "result": "135 files /1185 passed /16 skipped; advisory text and failure remain distinct; clearing text preserves failure",
+        "log": "/tmp/zk-frontend-native-segment-full.txt",
+        "evidence": {
+          "path": "/tmp/zk-frontend-native-segment-full.txt",
+          "sha256": "72c0e93f5abb385473d216d15cc43b1e56f27eeefc0ca36138139f502bd1ae89"
+        }
+      },
+      "notes": "Full source backend and trusted child projection coverage is recorded in task-display-capabilities.json. Native AgentRunTree consumption is an explicit Rust adaptation of the source task snapshot output, not an imported Java UI component."
+    }
+  ],
+  "pending": [
+    "Tailwind 3 transitive braces vulnerability remains; Tailwind 4 major upgrade awaits user decision through root.",
+    "The34 upstream browser reference paths are not a blanket execution claim. Native theme/Jelly harnesses and their4 source fixture/script paths were actually exercised; other reference scenarios remain mapped to applicable native tests or explicitly unexecuted. See product-acceptance-matrix.json."
+  ],
+  "skippedTests": 16,
+  "validation": [
+    {
+      "command": "cd frontend && npm run lint",
+      "result": "passed",
+      "log": "/tmp/zk-frontend-native-segment-lint.txt",
+      "evidence": {
+        "path": "/tmp/zk-frontend-native-segment-lint.txt",
+        "sha256": "b60802a2486a38abed82876ac6a1e311e4fc7c1c79b586671b867ae4dab4a448"
+      }
+    },
+    {
+      "command": "cd frontend && npm run build",
+      "result": "passed; existing large chunk warning",
+      "log": "/tmp/zk-frontend-native-segment-build.txt",
+      "evidence": {
+        "path": "/tmp/zk-frontend-native-segment-build.txt",
+        "sha256": "6c4d1cf7990beb3becba17691b9504e8ead144169012541fed531398ec026ea1"
+      }
+    },
+    {
+      "command": "cd frontend && npm run test:run",
+      "result": "135 files, 1185 passed, 16 skipped",
+      "log": "/tmp/zk-frontend-native-segment-full.txt",
+      "evidence": {
+        "path": "/tmp/zk-frontend-native-segment-full.txt",
+        "sha256": "72c0e93f5abb385473d216d15cc43b1e56f27eeefc0ca36138139f502bd1ae89"
+      },
+      "status": "previous_snapshot_passed"
+    },
+    {
+      "command": "cd frontend && ZK_E2E_PORT_BASE=18082 npm run test:e2e:production",
+      "result": "4 passed: diagram/KaTeX, durable native chat, settings/Skill/memory, paid merge/replay",
+      "log": "/tmp/zk-frontend-production-audit-final.txt",
+      "notes": "These four cases passed against the then-current real Rust binary. Later backend implementation and native-segment contract changes require a new actual-backend E2E run; this snapshot is not final release evidence.",
+      "evidence": {
+        "path": "/tmp/zk-frontend-production-audit-final.txt",
+        "sha256": "53011d2cdcac03fe57d6f301c3b249eee3cb3a6ee6032c585061079b48e150c6"
+      },
+      "status": "passed_snapshot_pending_latest_backend_rerun"
+    },
+    {
+      "command": "cd frontend && ZK_E2E_SERVER_BINARY=/Users/guoqingtao/Desktop/dev/code/zkcode/target/debug/zk-server npm run test:e2e:production",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "4 passed in 21.3s using installed Chrome, fresh isolated SQLite, actual latest Rust server and scripted local provider.",
+      "evidence": {
+        "path": "/tmp/zk-frontend-production-latest.txt",
+        "sha256": "f83589d871f65cfa5e20186ca70ee81d14ff5d2f63b1edcf1b8a2e7f248aa4f5"
+      },
+      "binaryEvidence": {
+        "path": "/Users/guoqingtao/Desktop/dev/code/zkcode/target/debug/zk-server",
+        "sha256": "de3da835bd01a7a7fe3ecd6c6261af12d9b99a7690d0d47cd431332ecdd3c6d6",
+        "identityScope": "Historical executable used for /tmp/zk-frontend-production-latest.txt, recorded before/after execution; this path was rebuilt later. Never infer historical identity from the current file."
+      },
+      "binaryHashBeforeEqualsAfter": true,
+      "cases": [
+        "real backend: upgraded diagram and math renderers display the assistant response",
+        "real backend: browser chat is durable before message_complete",
+        "real backend: settings, Skill management, and revisioned memory use native contracts",
+        "real backend: merge UI produces a charged, durable handoff and inherits primary permission"
+      ],
+      "limits": "These four browser cases do not cover every product scenario, external provider availability, source browser references, or source Java tests. Flat intermediate assistant-segment behavior has focused native-wire unit coverage; the plain chat E2E covers final completion and task boundary.",
+      "log": "/tmp/zk-frontend-production-latest.txt",
+      "identityCorrection": "Corrected documentation writer that accidentally hashed the later rebuilt debug path rather than the executable identity recorded during the run."
+    },
+    {
+      "command": "cd frontend && ZK_E2E_SERVER_BINARY=/Users/guoqingtao/Desktop/dev/code/zkcode/target/release/zk-server npm run test:e2e:production",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "4 passed in19.3s; actual release Rust binary, installed Chrome, fresh isolated SQLite and scripted local provider.",
+      "evidence": {
+        "path": "/tmp/zk-frontend-production-release-final.txt",
+        "sha256": "f72567c6cabc2dedae57f04c3b1d8ab2d96c76921a5dc49f15f8b4f880ed0e17"
+      },
+      "binaryEvidence": {
+        "path": "/Users/guoqingtao/Desktop/dev/code/zkcode/target/release/zk-server",
+        "sha256": "5c7985aba8e25b2356f343c401f21b72b191f3a6c99ef7b8e3a23198a8817491",
+        "version": "zk-server 0.1.0 (git 08cbdc45e12cc28f3f13aaafbd0b056b980dfb1a, built 1791332366, schema 2, ws 4)",
+        "sha256Before": "5c7985aba8e25b2356f343c401f21b72b191f3a6c99ef7b8e3a23198a8817491",
+        "sha256After": "5c7985aba8e25b2356f343c401f21b72b191f3a6c99ef7b8e3a23198a8817491"
+      },
+      "binaryHashBeforeEqualsAfter": true,
+      "cases": [
+        "real backend: upgraded diagram and math renderers display the assistant response",
+        "real backend: browser chat is durable before message_complete",
+        "real backend: settings, Skill management, and revisioned memory use native contracts",
+        "real backend: merge UI produces a charged, durable handoff and inherits primary permission"
+      ],
+      "limits": "These four browser cases do not cover every product scenario, external provider availability, source browser references, or source Java tests. Flat intermediate assistant-segment behavior has focused native-wire unit coverage; the plain chat E2E covers final completion and task boundary.",
+      "binaryIdentityRecord": {
+        "path": "/tmp/zk-frontend-release-binary-evidence.json",
+        "sha256": "51cda4f879900e2ea6f8890c72847f87eb7d576392ef7091158d47f15bd19e2c"
+      },
+      "log": "/tmp/zk-frontend-production-release-final.txt"
+    },
+    {
+      "command": "cd frontend && npm test -- --run --reporter=verbose",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "135 files;1190 passed;16 unchanged baseline skips not counted as verified;141.86s",
+      "evidence": {
+        "path": "/tmp/zk-frontend-product-final-tests.txt",
+        "sha256": "2cfd332e58298aa51e36b6ad5b5d6504a7c68d970c88857208a579ab8e1ec819"
+      },
+      "log": "/tmp/zk-frontend-product-final-tests.txt"
+    },
+    {
+      "command": "cd frontend && npm run lint",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "passed; ESLint no warnings",
+      "evidence": {
+        "path": "/tmp/zk-frontend-product-final-lint.txt",
+        "sha256": "b60802a2486a38abed82876ac6a1e311e4fc7c1c79b586671b867ae4dab4a448"
+      },
+      "log": "/tmp/zk-frontend-product-final-lint.txt"
+    },
+    {
+      "command": "cd frontend && npx vitest run src/App.review-command.test.tsx --reporter=verbose",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "29 passed; includes5 newly added meaningful interrupt cases using real App, PromptInput and InterruptConfirmDialog",
+      "evidence": {
+        "path": "/tmp/zk-frontend-interrupt-tests.txt",
+        "sha256": "86ed5af6411636df6504d122a77b990f85c4bc3c52cc74f828ed1838d2c442cd"
+      },
+      "log": "/tmp/zk-frontend-interrupt-tests.txt"
+    },
+    {
+      "command": "cd frontend && npm run test:theme-regression",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "20 scenarios;12508 color/isolation assertions; no business requests",
+      "browser": "installed Chrome154.0.8037.98",
+      "evidence": {
+        "path": "/tmp/zk-theme-browser-final-chrome.log",
+        "sha256": "86e435ef0f869e7ba7a3318cf0bd95151ab6c50004f7ef87f16b5631ab91c296"
+      },
+      "log": "/tmp/zk-theme-browser-final-chrome.log"
+    },
+    {
+      "command": "cd frontend && npm run test:jelly-regression",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "42 scenarios passed",
+      "browser": "installed Chrome154.0.8037.98",
+      "evidence": {
+        "path": "/tmp/zk-jelly-browser-final-chrome.log",
+        "sha256": "0f3f5e13033729148a98c05e331562f7811337abdc593f9d59c43e47caf43ca2"
+      },
+      "log": "/tmp/zk-jelly-browser-final-chrome.log"
+    }
+  ],
+  "pathAudit": "docs/migration/frontend-path-audit.json",
+  "fingerprintValidation": {
+    "pathAudit": "docs/migration/frontend-path-audit.json",
+    "pathsChecked": 427,
+    "identitiesChecked": 1708,
+    "mismatches": 0,
+    "note": "Source fixed range and current target fingerprints independently recomputed; no frontend production source changes or extra test executions in this documentation refresh."
+  },
+  "productAcceptanceMatrix": "docs/migration/product-acceptance-matrix.json",
+  "currentFrontendVerification": {
+    "unit": {
+      "command": "cd frontend && npm test -- --run --reporter=verbose",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "135 files;1190 passed;16 unchanged baseline skips not counted as verified;141.86s",
+      "evidence": {
+        "path": "/tmp/zk-frontend-product-final-tests.txt",
+        "sha256": "2cfd332e58298aa51e36b6ad5b5d6504a7c68d970c88857208a579ab8e1ec819"
+      }
+    },
+    "lint": {
+      "command": "cd frontend && npm run lint",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "passed; ESLint no warnings",
+      "evidence": {
+        "path": "/tmp/zk-frontend-product-final-lint.txt",
+        "sha256": "b60802a2486a38abed82876ac6a1e311e4fc7c1c79b586671b867ae4dab4a448"
+      }
+    },
+    "build": {
+      "status": "passed_source_unchanged",
+      "evidence": {
+        "path": "/tmp/zk-frontend-native-segment-build.txt",
+        "sha256": "6c4d1cf7990beb3becba17691b9504e8ead144169012541fed531398ec026ea1"
+      },
+      "limits": "No frontend production source changes after this successful TypeScript/Vite build. Later changes were test assertions and Chrome selection in browser test harnesses only."
+    },
+    "themeBrowser": {
+      "command": "cd frontend && npm run test:theme-regression",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "20 scenarios;12508 color/isolation assertions; no business requests",
+      "browser": "installed Chrome154.0.8037.98",
+      "evidence": {
+        "path": "/tmp/zk-theme-browser-final-chrome.log",
+        "sha256": "86e435ef0f869e7ba7a3318cf0bd95151ab6c50004f7ef87f16b5631ab91c296"
+      }
+    },
+    "jellyBrowser": {
+      "command": "cd frontend && npm run test:jelly-regression",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "42 scenarios passed",
+      "browser": "installed Chrome154.0.8037.98",
+      "evidence": {
+        "path": "/tmp/zk-jelly-browser-final-chrome.log",
+        "sha256": "0f3f5e13033729148a98c05e331562f7811337abdc593f9d59c43e47caf43ca2"
+      }
+    },
+    "releaseE2E": {
+      "command": "cd frontend && ZK_E2E_SERVER_BINARY=/Users/guoqingtao/Desktop/dev/code/zkcode/target/release/zk-server npm run test:e2e:production",
+      "status": "passed",
+      "exitCode": 0,
+      "result": "4 passed in19.3s; actual release Rust binary, installed Chrome, fresh isolated SQLite and scripted local provider.",
+      "evidence": {
+        "path": "/tmp/zk-frontend-production-release-final.txt",
+        "sha256": "f72567c6cabc2dedae57f04c3b1d8ab2d96c76921a5dc49f15f8b4f880ed0e17"
+      },
+      "binaryEvidence": {
+        "path": "/Users/guoqingtao/Desktop/dev/code/zkcode/target/release/zk-server",
+        "sha256": "5c7985aba8e25b2356f343c401f21b72b191f3a6c99ef7b8e3a23198a8817491",
+        "version": "zk-server 0.1.0 (git 08cbdc45e12cc28f3f13aaafbd0b056b980dfb1a, built 1791332366, schema 2, ws 4)",
+        "sha256Before": "5c7985aba8e25b2356f343c401f21b72b191f3a6c99ef7b8e3a23198a8817491",
+        "sha256After": "5c7985aba8e25b2356f343c401f21b72b191f3a6c99ef7b8e3a23198a8817491"
+      },
+      "binaryHashBeforeEqualsAfter": true,
+      "cases": [
+        "real backend: upgraded diagram and math renderers display the assistant response",
+        "real backend: browser chat is durable before message_complete",
+        "real backend: settings, Skill management, and revisioned memory use native contracts",
+        "real backend: merge UI produces a charged, durable handoff and inherits primary permission"
+      ],
+      "limits": "These four browser cases do not cover every product scenario, external provider availability, source browser references, or source Java tests. Flat intermediate assistant-segment behavior has focused native-wire unit coverage; the plain chat E2E covers final completion and task boundary.",
+      "binaryIdentityRecord": {
+        "path": "/tmp/zk-frontend-release-binary-evidence.json",
+        "sha256": "51cda4f879900e2ea6f8890c72847f87eb7d576392ef7091158d47f15bd19e2c"
+      }
+    },
+    "historicalSnapshot": true,
+    "supersededBy": "#/fullAlignmentVerification"
+  },
+  "acceptanceLimits": "See product-acceptance-matrix.json for11 required local-product capability rows,57 exact executed native/component assertions plus actual theme/Jelly browser runs and16 baseline skipped placeholders. No blanket browser coverage or source-Java execution claim.",
+  "fullAlignmentVerification": {
+    "status": "frozen_frontend_and_post_adapter_release_browser_gates_passed",
+    "details": "docs/migration/full-alignment-frontend.md",
+    "sourceCommit": "053adf9071dc1996aa1ebfa30c0a23d587ffad5c",
+    "unitFull": {
+      "path": "/tmp/zk-frontend-alignment-frozen-unit.txt",
+      "sha256": "6a9465fb91646482334658d565bb6e43781a22aa7dd2700a8a012f3e91681f83",
+      "exitCode": 0,
+      "result": "156 files, 1295 passed, zero skipped; 241.48 seconds; exit 0"
+    },
+    "lint": {
+      "path": "/tmp/zk-frontend-alignment-frozen-lint.txt",
+      "sha256": "b60802a2486a38abed82876ac6a1e311e4fc7c1c79b586671b867ae4dab4a448",
+      "exitCode": 0,
+      "result": "zero warnings; exit 0"
+    },
+    "build": {
+      "path": "/tmp/zk-frontend-alignment-frozen-build.txt",
+      "sha256": "e9f23082510ab2f44fbf79672b75ba3bcfd998156bada6648dd6f59e2033f937",
+      "exitCode": 0,
+      "result": "13.34 seconds; exit 0; existing large chunk warning"
+    },
+    "pythonFullCoverage": {
+      "path": "/tmp/zk-python-alignment-final-coverage.txt",
+      "sha256": "c36a07d7903e2ce700bbca684922e0081e01e62d1493faeb860e13be9ffc00ca",
+      "exitCode": 0,
+      "passed": 335,
+      "coveragePercent": 75.83
+    },
+    "sourceTreeIdentity": {
+      "sourceSha256": "a3bb63bff6ef933a0648f2bc2299abe34aecaf18d42a63b8e66be55f94cea71c",
+      "files": 502,
+      "beforeEqualsAfter": true,
+      "algorithm": "SHA256 of sorted src file relative paths, NUL delimiter, then file bytes"
+    },
+    "limitations": [
+      "Prior targetCurrent path fingerprints and older binary identities remain historical snapshots; no blind refresh.",
+      "The final six-case product and three-case analysis suites test the listed real local Rust/Python/browser chains; they do not claim exhaustive third-party renderer internals or every dynamic language behavior.",
+      "Other workstreams and credential-dependent live model validations remain governed by full-alignment-gates.json; this domain does not infer their results."
+    ],
+    "releaseBinary": {
+      "path": "/Users/guoqingtao/Desktop/dev/code/zkcode/target/release/zk-server",
+      "version": "zk-server 0.1.0 (git 08cbdc45e12cc28f3f13aaafbd0b056b980dfb1a, built 1791332366, schema 2, ws 4)",
+      "beforeSha256": "cca0d0a64e2ab3bad9bf95fdc22fcb02f278d89c8b9e78286d4c0960a89e3251",
+      "afterSha256": "cca0d0a64e2ab3bad9bf95fdc22fcb02f278d89c8b9e78286d4c0960a89e3251",
+      "unchanged": true
+    },
+    "releaseBrowser": {
+      "production": {
+        "log": "/tmp/zk-post-adapter-production-e2e.txt",
+        "sha256": "cfbe74f16458554432cc4b94cd39d982c7a8ff41883c79b6733baa8920fdad7f",
+        "passed": 6,
+        "seconds": 29.1,
+        "exitCode": 0
+      },
+      "analysis": {
+        "log": "/tmp/zk-post-adapter-analysis-e2e.txt",
+        "sha256": "b52821d6e8d9eecbe3336bf29100912a0e8af0cfb43a4ac9a1dbe45eccd7728e",
+        "passed": 3,
+        "seconds": 30.6,
+        "exitCode": 0
+      }
+    },
+    "releaseBrowserPreviousFailure": {
+      "log": "/tmp/zk-alignment-release-production-e2e.txt",
+      "result": "5 passed; 1 failed due to obsolete Qwen-low fixture assumption",
+      "resolution": "Only fixture changed: Qwen unsupported rejected explicitly; supported DeepSeek low reaches loopback wire with thinking enabled, persists, resets auto, and remains isolated from new sessions. No production or release binary change."
+    },
+    "runtimeAdapterRevalidation": {
+      "status": "passed",
+      "metadata": "/tmp/zk-post-adapter-browser-binary-evidence.json",
+      "fixtureChanged": false,
+      "result": "6 production and 3 analysis cases passed; before/after release hash unchanged"
+    },
+    "releaseBrowserHistory": [
+      {
+        "binary": {
+          "path": "/Users/guoqingtao/Desktop/dev/code/zkcode/target/release/zk-server",
+          "version": "zk-server 0.1.0 (git 08cbdc45e12cc28f3f13aaafbd0b056b980dfb1a, built 1791332366, schema 2, ws 4)",
+          "beforeSha256": "822adfed182e047c0cc31ac4b9e1c41a14d474f19d249f331f27aa83a92a6315",
+          "afterSha256": "822adfed182e047c0cc31ac4b9e1c41a14d474f19d249f331f27aa83a92a6315",
+          "unchanged": true
+        },
+        "browser": {
+          "production": {
+            "log": "/tmp/zk-alignment-release-production-e2e-final.txt",
+            "sha256": "ce95505eec2f4b4dc8ba5918e93a016b03b73cd7ca3e70afdb93fc2c1ad150ba",
+            "passed": 6,
+            "seconds": 24.8,
+            "exitCode": 0
+          },
+          "analysis": {
+            "log": "/tmp/zk-alignment-release-analysis-e2e.txt",
+            "sha256": "470364627f8867e43dbbd0fa59b74217c10928963ea86d26ce275e68e6fe65af",
+            "passed": 3,
+            "seconds": 58.0,
+            "exitCode": 0
+          }
+        },
+        "reason": "Passed before subsequent Rust provider-thinking adapter fixes; superseded by complete suites on cca0 release."
+      }
+    ]
+  },
+  "fullAlignmentVerificationHistory": [
+    {
+      "status": "latest_frontend_production_tree_verified_backend_release_e2e_pending",
+      "details": "docs/migration/full-alignment-frontend.md",
+      "sourceCommit": "053adf9071dc1996aa1ebfa30c0a23d587ffad5c",
+      "unitFull": {
+        "log": "/tmp/zk-browser-replay-final-tests.txt",
+        "sha256": "583d525fd012761f0b206699d89cb6220b65242cd95e06835aa6460aedcb0aa2",
+        "result": "155 files, 1279 passed, 7 legacy empty placeholders skipped; exit 0"
+      },
+      "testOnlyFollowup": {
+        "log": "/tmp/zk-coordinator-final-tests.txt",
+        "sha256": "dedcd04c7e7c6c1570bd2f658ee503f144fd1d388e545620ad43849ca5f5cccf",
+        "result": "10 passed; includes three new state-flow assertions; removes seven empty placeholders after assessing replacement or lack of a production consumer"
+      },
+      "limitations": [
+        "The two unit runs use the same production source tree. Do not describe 1282 as the result of one full-suite invocation.",
+        "Prior evidence, binary identities and targetCurrent path fingerprints belong to their recorded earlier snapshot; they are not refreshed blindly for this implementation round.",
+        "Final six-case production and two-case analysis E2E must use the new stable Rust binary with before/after identity checks."
+      ]
+    }
+  ]
+}

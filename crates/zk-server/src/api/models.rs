@@ -217,9 +217,9 @@ mod tests {
     #[test]
     fn catalog_size_and_wire_shape() {
         let models = catalog();
-        assert_eq!(models.len(), 21);
+        assert_eq!(models.len(), zk_llm::declared_models().len());
         let ids: std::collections::HashSet<&str> = models.iter().map(|m| m.id.as_str()).collect();
-        assert_eq!(ids.len(), 21);
+        assert_eq!(ids.len(), models.len());
         assert_eq!(
             models
                 .iter()

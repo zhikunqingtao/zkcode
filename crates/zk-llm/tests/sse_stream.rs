@@ -88,9 +88,12 @@ async fn plain_multichunk_delta_stream_matches_exactly() {
         "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":0}}\n\n";
     assert_eq!(
         run_fixture(tail_only).await,
-        vec![ProviderEvent::UsageUpdate {
-            usage: Usage::default()
-        }]
+        vec![
+            ProviderEvent::UsageUpdate {
+                usage: Usage::default()
+            },
+            incomplete_error()
+        ]
     );
 }
 
@@ -413,9 +416,9 @@ async fn stream_is_lazy_until_first_poll() {
 // ═══════════ Fixture 13：空字节流 → 零事件终止 ═══════════
 
 #[tokio::test]
-async fn empty_byte_stream_yields_no_events() {
+async fn empty_byte_stream_is_incomplete() {
     let events = run_fixture("").await;
-    assert!(events.is_empty());
+    assert_eq!(events, vec![incomplete_error()]);
 }
 
 // ═══════════ 附：背压无害性——消费节奏远慢于生产，事件序列仍精确 ═══════════
@@ -442,6 +445,15 @@ async fn slow_consumer_with_delay_preserves_sequence() {
         vec![
             ProviderEvent::TextDelta { text: "a".into() },
             ProviderEvent::TextDelta { text: "b".into() },
+            incomplete_error(),
         ]
     );
+}
+
+fn incomplete_error() -> ProviderEvent {
+    ProviderEvent::Error {
+        error: ProviderError::Network {
+            message: "INCOMPLETE_CHAT_STREAM: finish_reason missing".into(),
+        },
+    }
 }

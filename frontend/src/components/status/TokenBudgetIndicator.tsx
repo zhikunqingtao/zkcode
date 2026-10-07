@@ -11,15 +11,15 @@ import { useMessageStore } from '@/store/messageStore';
 
 /** 颜色阈值：pct < 50% 绿色，50-75% 黄色，>75% 红色 */
 const getBarColor = (pct: number): string => {
-    if (pct < 50) return 'bg-green-500';
-    if (pct < 75) return 'bg-yellow-500';
-    return 'bg-red-500';
+    if (pct < 50) return 'bg-ok';
+    if (pct < 75) return 'bg-warn';
+    return 'bg-err';
 };
 
 const getTextColor = (pct: number): string => {
-    if (pct < 50) return 'text-green-600';
-    if (pct < 75) return 'text-yellow-600';
-    return 'text-red-600';
+    if (pct < 50) return 'text-ok';
+    if (pct < 75) return 'text-warn';
+    return 'text-err';
 };
 
 export const TokenBudgetIndicator: React.FC = () => {
@@ -31,18 +31,18 @@ export const TokenBudgetIndicator: React.FC = () => {
     const clampedPct = Math.min(pct, 100);
 
     return (
-        <div className="w-full bg-gray-100 dark:bg-gray-800 rounded-lg px-3 py-2 transition-all duration-300 animate-in fade-in">
+        <div className="w-full bg-sunken2 rounded-[10px] px-3 py-2 transition-[width] duration-slow animate-in fade-in">
             <div className="flex items-center justify-between mb-1">
-                <span className="text-xs font-medium text-gray-700 dark:text-gray-300">
+                <span className="text-[13px] font-medium text-t1">
                     Token 预算
                 </span>
-                <span className={`text-xs font-mono ${getTextColor(pct)}`}>
+                <span className={`text-[13px] font-mono ${getTextColor(pct)}`}>
                     {currentTokens.toLocaleString()} / {budgetTokens.toLocaleString()} ({pct}%)
                 </span>
             </div>
-            <div className="h-1.5 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
+            <div className="h-1.5 bg-sunken2 rounded-full overflow-hidden">
                 <div
-                    className={`h-full ${getBarColor(pct)} rounded-full transition-all duration-500 ease-out`}
+                    className={`h-full ${getBarColor(pct)} rounded-full transition-[width] duration-sheet ease-out`}
                     style={{ width: `${clampedPct}%` }}
                 />
             </div>

@@ -1,8 +1,9 @@
 ---
 name: prompt-engineering
 description: 系统化优化 prompt 的结构、清晰度与有效性，应用业界公认的提示工程模式提升输出质量
-allowed-tools: []
-arguments: [raw_prompt]
+allowed-tools:
+arguments:
+  - raw_prompt
 argument-hint: "待优化的原始 prompt 文本，如 '帮我写个登录接口' 或 '生成一份周报'"
 when_to_use: 当用户希望改进自己写给 AI 的提示词、提升 AI 输出质量、或诊断为什么 AI 没有按预期工作时
 effort: medium

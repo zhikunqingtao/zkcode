@@ -11,8 +11,8 @@ use axum::Json;
 use utoipa::OpenApi;
 
 use crate::api::{
-    activity, attachment, config, doctor, file, grant, history, interaction, mcp, mcp_capability,
-    memory, models, project, run, session, skill, speech, system, tool,
+    activity, attachment, code_analysis, config, doctor, file, grant, history, interaction, mcp,
+    mcp_capability, memory, models, project, run, session, skill, speech, system, tool,
 };
 
 /// Phase 1 端点聚合文档（title/version 取 crate 元数据）。
@@ -23,6 +23,16 @@ use crate::api::{
         description = "Phase 1 REST 契约（响应形状权威：docs/baseline/samples/）"
     ),
     paths(
+        code_analysis::generate_diagram,
+        super::code_complexity::complexity,
+        super::git_read::log,
+        super::git_read::diff,
+        super::git_read::blame,
+        super::git_read::cancel,
+        code_analysis::analyze_endpoints,
+        code_analysis::trace_path,
+        code_analysis::change_impact,
+        code_analysis::cancel_analysis,
         session::create_session,
         session::list_sessions,
         session::get_session_detail,
@@ -31,6 +41,10 @@ use crate::api::{
         session::compact_session,
         session::export_session,
         session::list_session_messages,
+        session::tool_presentations,
+        super::hook_config::get,
+        super::hook_config::put,
+        history::preview_rewind,
         system::health,
         system::health_live,
         system::health_ready,
@@ -71,6 +85,18 @@ use crate::api::{
         speech::tts_status,
         speech::synthesize,
         mcp::list_servers,
+        super::mcp_context::create,
+        super::mcp_context::close,
+        super::mcp_context::capabilities::get,
+        super::mcp_context::capabilities::request,
+        super::repl::status,
+        super::repl::stop,
+        mcp::list_services,
+        mcp::toggle_service,
+        mcp::toggle_service_compat,
+        mcp::oauth_status,
+        mcp::oauth_authorize,
+        mcp::oauth_logout,
         mcp::add_server,
         mcp::delete_server,
         mcp::restart_server,
@@ -151,6 +177,8 @@ mod tests {
         assert!(paths.contains_key("/api/asr/recognize"));
         assert!(paths.contains_key("/api/tts/status"));
         assert!(paths.contains_key("/api/tts/synthesize"));
-        assert_eq!(paths.len(), 63);
+        assert!(paths.contains_key("/api/sessions/{id}/hooks"));
+        assert!(paths.contains_key("/api/sessions/{sessionId}/history/rewind/preview"));
+        assert_eq!(paths.len(), 87);
     }
 }

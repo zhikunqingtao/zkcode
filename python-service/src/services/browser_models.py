@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 class BrowserRequestBase(BaseModel):
     """所有浏览器请求的基类 — 必含 session_id"""
     session_id: str = Field(default="default", description="Browser session ID")
+    ephemeral_content: bool = False
     timeout: Optional[int] = Field(default=None, description="Timeout in milliseconds")
     strict_session: bool = Field(default=False, description="If true, fail when session does not exist instead of auto-creating")
 
@@ -106,6 +107,7 @@ class SemanticSnapshotRequest(BrowserRequestBase):
 
 
 class CloseSessionRequest(BaseModel):
+    ephemeral_content: bool = False
     session_id: str = Field(..., description="Session ID to close")
 
 

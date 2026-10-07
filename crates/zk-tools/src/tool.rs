@@ -28,6 +28,8 @@ pub enum ChildToolAccess {
     Denied,
     /// Expose in the default read-only child directory.
     ReadOnly,
+    /// A narrowed control-plane tool that can only replace its own task's display note.
+    SelfTaskDisplay,
     /// Expose only when the separately gated child-write capability is active.
     WriteGated,
 }
@@ -116,6 +118,18 @@ pub trait ExecutionResourceObserver: Send + Sync {
         lease: ExecutionResourceLease,
         terminal: ExecutionResourceTerminal,
     ) -> BoxFuture<'static, Result<(), String>>;
+
+    /// Reconcile an earlier ambiguous cleanup using the original in-memory
+    /// owner and a newly confirmed physical release. Implementations must verify
+    /// all ownership fields and the external identity with a versioned CAS.
+    fn reconcile_released(
+        &self,
+        _owner: ExecutionResourceOwner,
+        _lease: ExecutionResourceLease,
+        _external_id: String,
+    ) -> BoxFuture<'static, Result<(), String>> {
+        Box::pin(async { Err("EXECUTION_RESOURCE_RECONCILIATION_UNAVAILABLE".into()) })
+    }
 }
 
 #[derive(Clone)]
@@ -128,12 +142,17 @@ struct ExecutionResourceBinding {
 #[derive(Default)]
 struct ExecutionResourceTracker {
     leases: Mutex<HashMap<String, ExecutionResourceLease>>,
+    registered: Mutex<std::collections::HashSet<String>>,
     saw_resource: std::sync::atomic::AtomicBool,
-    unconfirmed: std::sync::atomic::AtomicBool,
+    unconfirmed: Mutex<std::collections::HashSet<String>>,
 }
 
 impl ExecutionResourceTracker {
     fn insert(&self, lease: ExecutionResourceLease) {
+        self.registered
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(lease.resource_id.clone());
         self.saw_resource
             .store(true, std::sync::atomic::Ordering::Release);
         self.leases
@@ -147,14 +166,24 @@ impl ExecutionResourceTracker {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(resource_id);
-        if !confirmed {
-            self.unconfirmed
-                .store(true, std::sync::atomic::Ordering::Release);
+        let mut unconfirmed = self
+            .unconfirmed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if confirmed {
+            unconfirmed.remove(resource_id);
+        } else {
+            unconfirmed.insert(resource_id.to_owned());
         }
     }
 
     fn status(&self) -> ToolCleanupStatus {
-        if self.unconfirmed.load(std::sync::atomic::Ordering::Acquire) {
+        if !self
+            .unconfirmed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty()
+        {
             return ToolCleanupStatus::Unconfirmed;
         }
         if !self
@@ -177,10 +206,10 @@ impl ExecutionResourceTracker {
             .leases
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if !leases.is_empty() {
-            self.unconfirmed
-                .store(true, std::sync::atomic::Ordering::Release);
-        }
+        self.unconfirmed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend(leases.keys().cloned());
         leases.drain().map(|(_, lease)| lease).collect()
     }
 }
@@ -192,9 +221,33 @@ pub const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_mins(2);
 /// [`Tool::timeout`] 返回值超过此值时由执行器钳制）。
 pub const MAX_TOOL_TIMEOUT: Duration = Duration::from_mins(10);
 
+#[cfg(test)]
+mod cleanup_retry_tests {
+    use super::*;
+    #[test]
+    fn confirming_one_retried_lease_never_clears_another_unconfirmed_resource() {
+        let tracker = ExecutionResourceTracker::default();
+        for id in ["first", "second"] {
+            tracker.insert(ExecutionResourceLease {
+                resource_id: id.into(),
+            });
+        }
+        tracker.complete("first", false);
+        assert_eq!(tracker.status(), ToolCleanupStatus::Unconfirmed);
+        let abandoned = tracker.drain_pending_as_unconfirmed();
+        assert_eq!(abandoned.len(), 1);
+        tracker.complete("first", true);
+        assert_eq!(tracker.status(), ToolCleanupStatus::Unconfirmed);
+        tracker.complete("second", true);
+        assert_eq!(tracker.status(), ToolCleanupStatus::Confirmed);
+    }
+}
+
 /// Trusted timeout ownership; runtime-managed tasks have their own durable deadline.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ToolTimeoutPolicy {
+    /// Durable interaction phases own expiry; cancellation still ends the tool.
+    DurableInteraction,
     /// The executor applies the ordinary leaf-tool hard limit.
     Executor,
     /// `TaskRuntime` owns the deadline; the executor only supplies a watchdog.
@@ -348,6 +401,7 @@ impl ToolOutput {
 /// 时 `working_dir` = 进程当前目录、`session_id` / `tool_use_id` = `None`。
 #[derive(Clone)]
 pub struct ToolContext {
+    ephemeral_content: bool,
     /// 本次调用的取消令牌（run 令牌的 child；工具实现应在长操作中协作检查）。
     pub cancel: CancellationToken,
     progress: ProgressSender,
@@ -359,6 +413,7 @@ pub struct ToolContext {
     /// invocation. Built-in writers compare this identity again immediately
     /// before rename so a post-authorization path swap cannot redirect writes.
     authorized_write_path: Option<PathBuf>,
+    authorized_shell_cwd: Option<PathBuf>,
     execution_resources: Option<ExecutionResourceBinding>,
     execution_owners: Option<ExecutionOwnerRegistry>,
     /// Invocation-scoped directory snapshot.  A filtered child registry puts
@@ -374,6 +429,17 @@ enum ProgressSender {
 }
 
 impl ToolContext {
+    /// Preserve the host's content-retention decision in tools and child contexts.
+    #[must_use]
+    pub const fn with_ephemeral_content(mut self, ephemeral: bool) -> Self {
+        self.ephemeral_content = ephemeral;
+        self
+    }
+    /// Body-bearing side products must stay in memory for ephemeral executions.
+    #[must_use]
+    pub const fn is_ephemeral(&self) -> bool {
+        self.ephemeral_content
+    }
     /// 装配上下文（执行器内部构造；测试可直构）。
     ///
     /// `working_dir` 取进程当前目录（取不到时回落 `.`），`session_id` /
@@ -383,12 +449,14 @@ impl ToolContext {
     pub fn new(cancel: CancellationToken, progress: mpsc::UnboundedSender<String>) -> Self {
         Self {
             cancel,
+            ephemeral_content: false,
             progress: ProgressSender::Unbounded(progress),
             working_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             session_id: None,
             tool_use_id: None,
             run_id: None,
             authorized_write_path: None,
+            authorized_shell_cwd: None,
             execution_resources: None,
             execution_owners: None,
             tool_catalog: None,
@@ -406,12 +474,14 @@ impl ToolContext {
     ) -> Self {
         Self {
             cancel,
+            ephemeral_content: false,
             progress: ProgressSender::Bounded(progress),
             working_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             session_id: None,
             tool_use_id: None,
             run_id: None,
             authorized_write_path: None,
+            authorized_shell_cwd: None,
             execution_resources: None,
             execution_owners: None,
             tool_catalog: None,
@@ -487,6 +557,19 @@ impl ToolContext {
         self.authorized_write_path.as_deref()
     }
 
+    /// Bind Bash to the canonical cwd frozen by the server authorization gateway.
+    #[must_use]
+    pub fn with_authorized_shell_cwd(mut self, path: impl Into<PathBuf>) -> Self {
+        self.authorized_shell_cwd = Some(path.into());
+        self
+    }
+
+    /// Trusted cwd identity, independent from all model-controlled tool fields.
+    #[must_use]
+    pub fn authorized_shell_cwd(&self) -> Option<&Path> {
+        self.authorized_shell_cwd.as_deref()
+    }
+
     /// Bind the exact effective tool-directory snapshot for this invocation.
     #[must_use]
     pub fn with_tool_catalog(mut self, catalog: Arc<Vec<ToolSpec>>) -> Self {
@@ -514,6 +597,24 @@ impl ToolContext {
             tracker: Arc::new(ExecutionResourceTracker::default()),
         });
         self
+    }
+
+    /// Preserve the durable owner and observer while tracking one independent
+    /// scope's cleanup. The database remains authoritative across all scopes.
+    #[must_use]
+    pub fn fork_execution_resource_tracking(mut self) -> Self {
+        if let Some(binding) = self.execution_resources.as_mut() {
+            binding.tracker = Arc::new(ExecutionResourceTracker::default());
+        }
+        self
+    }
+
+    /// Durable resource owner injected by the host; this accessor grants no permissions.
+    #[must_use]
+    pub fn execution_resource_owner(&self) -> Option<&ExecutionResourceOwner> {
+        self.execution_resources
+            .as_ref()
+            .map(|binding| &binding.owner)
     }
 
     pub(crate) fn with_execution_owner_registry(mut self, owners: ExecutionOwnerRegistry) -> Self {
@@ -643,6 +744,47 @@ impl ToolContext {
         }
     }
 
+    /// Confirm a retained resource after a previous cleanup was ambiguous.
+    /// Only the same tracking scope can reconcile its own previously failed lease.
+    /// The caller must already have positively confirmed physical release.
+    ///
+    /// # Errors
+    /// Fails closed for unknown leases or a persistence/ownership conflict.
+    pub async fn reconcile_execution_resource(
+        &self,
+        lease: &ExecutionResourceLease,
+        external_id: String,
+    ) -> Result<(), String> {
+        let binding = self
+            .execution_resources
+            .as_ref()
+            .ok_or("EXECUTION_RESOURCE_OWNER_REQUIRED")?;
+        if !binding
+            .tracker
+            .registered
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(&lease.resource_id)
+        {
+            return Err("EXECUTION_RESOURCE_RECONCILIATION_NOT_OWNED".into());
+        }
+        if !binding
+            .tracker
+            .unconfirmed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(&lease.resource_id)
+        {
+            return Err("EXECUTION_RESOURCE_RECONCILIATION_NOT_OWNED".into());
+        }
+        binding
+            .observer
+            .reconcile_released(binding.owner.clone(), lease.clone(), external_id)
+            .await?;
+        binding.tracker.complete(&lease.resource_id, true);
+        Ok(())
+    }
+
     /// Attach an external process/transport identity to a reservation which was
     /// durably allocated before the physical resource could be created.
     ///
@@ -681,12 +823,16 @@ impl ToolContext {
             return;
         };
         for lease in binding.tracker.drain_pending_as_unconfirmed() {
-            if let Err(error) = binding
+            if binding
                 .observer
                 .finish(lease, ExecutionResourceTerminal::Unconfirmed)
                 .await
+                .is_err()
             {
-                tracing::error!(%error, "failed to persist unconfirmed execution resource");
+                tracing::error!(
+                    code = "EXECUTION_RESOURCE_UNCONFIRMED_PERSIST_FAILED",
+                    "failed to persist unconfirmed execution resource"
+                );
             }
         }
     }
@@ -720,6 +866,34 @@ pub trait Tool: Send + Sync {
     /// JSON Schema 入参定义。
     fn parameters(&self) -> serde_json::Value;
 
+    /// Only native implementations may opt into authenticated image production.
+    /// Trusted host adapter may produce bounded observations sealed only after
+    /// the actual invocation succeeds. Remote tool metadata never opts into this.
+    fn produces_machine_evidence(&self) -> bool {
+        false
+    }
+
+    /// Only a native implementation with pre-execution path freezing may return Bash artifact receipts.
+    fn produces_declared_artifacts(&self) -> bool {
+        false
+    }
+
+    /// Only the native visualization producer may publish authenticated UI envelopes.
+    fn produces_visualizations(&self) -> bool {
+        false
+    }
+
+    /// Whether this native binding validates Skill model and tool-policy directives.
+    /// Remote metadata and tool names never grant this capability.
+    fn produces_skill_directives(&self) -> bool {
+        false
+    }
+
+    /// Remote result metadata and tool names never grant this capability.
+    fn produces_trusted_images(&self) -> bool {
+        false
+    }
+
     /// 本工具的执行超时（默认 [`DEFAULT_TOOL_TIMEOUT`]；执行器按
     /// [`MAX_TOOL_TIMEOUT`] 钳制上限）。
     fn timeout(&self) -> Duration {
@@ -743,6 +917,12 @@ pub trait Tool: Send + Sync {
     /// untrusted remote metadata.
     fn child_access(&self) -> ChildToolAccess {
         ChildToolAccess::Denied
+    }
+
+    /// Optional narrower instance for a child catalog. The directory retains
+    /// the original instance's revocation and generation boundary.
+    fn child_view(&self) -> Option<Arc<dyn Tool>> {
+        None
     }
 
     /// 执行工具（入参为 LLM 产出的 JSON；入参校验由实现自担，校验失败

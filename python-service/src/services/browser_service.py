@@ -20,6 +20,7 @@ import logging
 import os
 import time
 from datetime import datetime, timedelta
+from functools import partial
 from typing import Optional
 from urllib.parse import urlsplit
 
@@ -110,6 +111,15 @@ _INTERACTIVE_QUERY_SCRIPT = """
 """
 
 
+class BrowserAdmissionError(RuntimeError):
+    """Expected admission refusal, safe to expose as a stable error code."""
+
+    def __init__(self, code: str, message: str, status_code: int = 503):
+        super().__init__(message)
+        self.code = code
+        self.status_code = status_code
+
+
 class BrowserSession:
     """单个浏览器会话 — 对应一个独立的 BrowserContext"""
 
@@ -120,13 +130,33 @@ class BrowserSession:
         self.last_activity = created_at
         self.dialog_handler_set = False
         self._pending_dialog = None
+        self.closing = False
+        self.closed = False
+        self.close_task: Optional[asyncio.Task] = None
+        self.owner_task: Optional[asyncio.Task] = None
+        self.ephemeral_content = False
 
     def touch(self):
         """更新最后活动时间"""
         self.last_activity = datetime.now()
 
     def is_expired(self, idle_timeout: timedelta) -> bool:
-        return datetime.now() - self.last_activity > idle_timeout
+        return self.owner_task is None and datetime.now() - self.last_activity > idle_timeout
+
+
+class _SessionCreation:
+    """A capacity reservation, retained until creation or rollback has finished."""
+
+    def __init__(self):
+        self.owner = asyncio.current_task()
+        self.cancelled = False
+        self.cleanup_confirmed = True
+        self.result_ready = asyncio.Event()
+        self.done = asyncio.Event()
+        self.session: Optional[BrowserSession] = None
+        self.error: Optional[BaseException] = None
+        self.allocation: Optional[asyncio.Task] = None
+        self.rollback: Optional[asyncio.Task] = None
 
 
 class BrowserService:
@@ -145,7 +175,17 @@ class BrowserService:
         self._playwright: Optional[Playwright] = None
         self._browser: Optional[Browser] = None
         self._sessions: dict[str, BrowserSession] = {}
+        self._creating: dict[str, _SessionCreation] = {}
+        self._unclosed_contexts: dict[BrowserContext, str] = {}
+        self._resource_close_tasks: dict[object, asyncio.Task] = {}
+        self._starting: Optional[asyncio.Task] = None
+        self._startup_cleanup: Optional[asyncio.Task] = None
+        self._playwright_exit = None
         self._lock = asyncio.Lock()
+        self._lifecycle_lock = asyncio.Lock()
+        self._stopping = False
+        self._recovery_pending = False
+        self.cleanup_timeout = 5.0
         self._cleanup_task: Optional[asyncio.Task] = None
         self._js_errors: dict[str, list[dict]] = {}  # session_id → collected JS errors
 
@@ -174,147 +214,432 @@ class BrowserService:
 
     async def startup(self):
         """启动 Playwright 和浏览器进程"""
-        self._playwright = await async_playwright().start()
-        launcher = getattr(self._playwright, self.browser_type)
-        launch_kwargs = {
-            "headless": self.headless,
-            "args": [
-                "--disable-gpu",
-                "--disable-extensions",
-            ],
-        }
-        # 使用系统浏览器 channel（如 chrome），避免需要 playwright install
-        if self.browser_channel:
-            launch_kwargs["channel"] = self.browser_channel
-        self._browser = await launcher.launch(**launch_kwargs)
-        # 启动定期清理任务
-        self._cleanup_task = asyncio.create_task(self._periodic_cleanup())
-        logger.info(
-            f"BrowserService started: {self.browser_type}, headless={self.headless}"
-        )
+        async with self._lifecycle_lock:
+            await self._startup_locked()
+
+    async def _startup_locked(self):
+        if (self._browser or self._playwright or self._creating
+                or self._unclosed_contexts or self._resource_close_tasks
+                or self._starting or self._startup_cleanup or self._playwright_exit):
+            raise RuntimeError("BrowserService is already started or has unreleased resources")
+        self._stopping = False
+        manager = async_playwright()
+        self._playwright_exit = partial(manager.__aexit__, None, None, None)
+        try:
+            self._starting = asyncio.create_task(manager.start())
+            self._playwright = await asyncio.shield(self._starting)
+            self._starting = None
+            launcher = getattr(self._playwright, self.browser_type)
+            launch_kwargs = {
+                "headless": self.headless,
+                "args": ["--disable-gpu", "--disable-extensions"],
+            }
+            if self.browser_channel:
+                launch_kwargs["channel"] = self.browser_channel
+            self._browser = await launcher.launch(**launch_kwargs)
+            self._cleanup_task = asyncio.create_task(self._periodic_cleanup())
+        except BaseException:
+            self._stopping = True
+            self._startup_cleanup = asyncio.create_task(self._rollback_startup())
+            self._startup_cleanup.add_done_callback(lambda task: None if task.cancelled() else task.exception())
+            await self._finish_cleanup(self._wait_cleanup_task(self._startup_cleanup))
+            raise
+        self._recovery_pending = False
+        logger.info(f"BrowserService started: {self.browser_type}, headless={self.headless}")
 
     async def shutdown(self):
         """关闭所有资源"""
-        cleanup_task = self._cleanup_task
-        self._cleanup_task = None
-        if cleanup_task:
-            cleanup_task.cancel()
-            try:
-                await cleanup_task
-            except asyncio.CancelledError:
-                pass
-            except Exception as e:
-                logger.warning(f"Browser cleanup task failed during shutdown: {e}")
+        async with self._lifecycle_lock:
+            self._recovery_pending = False  # Explicit shutdown ends any pending restart.
+            pending = self._startup_cleanup
+            if pending:
+                await self._finish_cleanup(self._wait_cleanup_task(pending))
+                if not pending.done():
+                    return
+            await self._finish_cleanup(self._shutdown_resources())
 
-        for sid in list(self._sessions.keys()):
+    async def recover_failed_cleanup(self) -> bool:
+        """Explicit recovery only; never restart a browser with healthy sessions."""
+        async with self._lifecycle_lock:
+            async with self._lock:
+                if (self._creating or self._starting or self._startup_cleanup
+                        or any(not s.closing or s.owner_task is not None
+                               for s in self._sessions.values())):
+                    return False
+                if (not self._recovery_pending and not self._unclosed_contexts
+                        and not self._resource_close_tasks):
+                    return False
+                # Keep restart intent if cleanup completes but startup fails or is cancelled.
+                self._recovery_pending = True
+                self._stopping = True  # Close admission before any awaited cleanup.
+            await self._finish_cleanup(self._shutdown_resources())
+            # The existing guard forbids restart if ancestors did not confirm release.
+            await self._startup_locked()
+            return True
+
+    async def _rollback_startup(self):
+        try:
+            if self._starting:
+                try:
+                    self._playwright = await self._starting
+                except (Exception, asyncio.CancelledError):
+                    pass  # The retained context manager can release partial start.
+                finally:
+                    self._starting = None
+            await self._shutdown_resources()
+        finally:
+            self._startup_cleanup = None
+
+    async def _shutdown_resources(self):
+        async with self._lock:
+            self._stopping = True
+            session_ids = set(self._sessions) | set(self._creating)
+        if self._cleanup_task:
+            self._cleanup_task.cancel()
+            close_cleanup = lambda: self._cleanup_task
+            await self._close_resource(close_cleanup, "cleanup task")
+            # Cancellation is the expected completion of the maintenance loop.
+            self._forget_released_close(close_cleanup)
+            self._cleanup_task = None
+        for sid in session_ids:
             try:
                 await self.close_session(sid)
-            except Exception as e:
-                logger.warning(f"Browser session {sid} failed to close: {e}")
+            except Exception as exc:
+                logger.warning("Shutdown could not close session %s (%s)", sid, type(exc).__name__)
+        for context, label in list(self._unclosed_contexts.items()):
+            await self._close_context(context, label)
+        if self._browser:
+            if await self._close_resource(self._browser.close, "browser"):
+                self._release_browser_ownership()
+        if self._playwright:
+            if await self._close_resource(self._playwright.stop, "playwright"):
+                self._release_browser_ownership()
+                self._playwright = None
+                self._playwright_exit = None
+        elif self._playwright_exit:
+            if await self._close_resource(self._playwright_exit, "starting playwright"):
+                self._release_browser_ownership()
+                self._playwright_exit = None
+        # Closing the driver resolves in-flight new_context RPCs. Let their one
+        # rollback task settle; retain any still-pending reservation for diagnosis.
+        for reservation in list(self._creating.values()):
+            if reservation.rollback:
+                await self._wait_cleanup_task(reservation.rollback)
+        logger.info("BrowserService shutdown cleanup finished")
 
-        browser = self._browser
+    def _forget_released_close(self, close):
+        """An ancestor released this resource; retain its task until it settles."""
+        task = self._resource_close_tasks.get(close)
+        if task is None:
+            return
+
+        def finished(completed):
+            if self._resource_close_tasks.get(close) is completed:
+                self._resource_close_tasks.pop(close)
+
+        if task.done():
+            finished(task)
+        else:
+            task.add_done_callback(finished)
+
+    def _release_browser_ownership(self):
+        """Only confirmed browser/driver shutdown supersedes failed child closes."""
+        if self._browser:
+            self._forget_released_close(self._browser.close)
+        contexts = {session.context for session in self._sessions.values()}
+        contexts.update(self._unclosed_contexts)
+        for context in contexts:
+            self._forget_released_close(context.close)
         self._browser = None
-        if browser:
-            try:
-                await browser.close()
-            except Exception as e:
-                logger.warning(f"Browser process failed to close: {e}")
+        self._sessions.clear()
+        self._js_errors.clear()
+        self._unclosed_contexts.clear()
 
-        playwright = self._playwright
-        self._playwright = None
-        if playwright:
+    async def _finish_cleanup(self, operation):
+        """Do not let cancellation interrupt cleanup; re-raise it afterwards."""
+        task = asyncio.create_task(operation)
+        cancelled = False
+        while not task.done():
             try:
-                await playwright.stop()
-            except Exception as e:
-                logger.warning(f"Playwright failed to stop: {e}")
-        logger.info("BrowserService shutdown complete")
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                if task.cancelled():
+                    raise
+                cancelled = True
+            except Exception:
+                break
+        if cancelled:
+            task.exception()  # retrieve cleanup failure without losing cancellation
+            raise asyncio.CancelledError
+        return task.result()
+
+    async def _close_resource(self, close, label: str) -> bool:
+        """Bound each driver call, including a driver that ignores cancellation."""
+        task = self._resource_close_tasks.get(close)
+        if task is None:
+            try:
+                task = asyncio.ensure_future(close())
+            except Exception as exc:
+                logger.warning("Error closing %s (%s)", label, type(exc).__name__)
+                return False
+            self._resource_close_tasks[close] = task
+
+            def finished(completed):
+                # A failed close may have latched Playwright's closed flag before
+                # releasing anything. Never retry it as a fresh, successful no-op.
+                succeeded = not completed.cancelled() and completed.exception() is None
+                if succeeded and self._resource_close_tasks.get(close) is completed:
+                    self._resource_close_tasks.pop(close)
+
+            task.add_done_callback(finished)
+        done, _ = await asyncio.wait({task}, timeout=self.cleanup_timeout)
+        if not done:
+            # Do not cancel driver cleanup: Playwright can mark itself closed
+            # before its await finishes. Retrying a cancelled close could then
+            # return success without releasing anything. Retain this one task.
+            logger.warning("Timed out closing %s", label)
+            return False
+        try:
+            task.result()
+            return True
+        except asyncio.CancelledError:
+            return False
+        except Exception as exc:
+            logger.warning("Error closing %s (%s)", label, type(exc).__name__)
+            return False
+
+    async def _close_context(self, context: BrowserContext, label: str) -> bool:
+        browser = self._browser
+        closed = await self._close_resource(context.close, label)
+        if browser is None or self._browser is not browser:
+            # Confirmed ancestor shutdown supersedes this close, including a late
+            # allocation or a concurrent waiter resuming after shutdown cleared it.
+            self._forget_released_close(context.close)
+            closed = True
+        if closed:
+            self._unclosed_contexts.pop(context, None)
+        else:
+            self._unclosed_contexts[context] = label
+        return closed
 
     # ═══ 会话管理 ═══
 
     async def get_or_create_session(self, session_id: str) -> BrowserSession:
-        """获取现有会话或创建新会话
-
-        关键设计：Playwright I/O (new_context / new_page) 必须在锁外执行，
-        否则会长时间持有锁导致事件循环饥饿，阻塞后续 HTTP 请求。
-        """
-        # ── 快速路径：会话已存在，短暂持锁 ──
-        async with self._lock:
-            if session_id in self._sessions:
-                session = self._sessions[session_id]
+        """Reserve capacity atomically; all Playwright I/O stays outside the lock."""
+        from services.content_privacy import is_ephemeral_request
+        if is_ephemeral_request():
+            async with self._lock:
+                session = self._sessions.get(session_id)
+                if session is None or session.closing or not session.ephemeral_content:
+                    raise BrowserAdmissionError("EPHEMERAL_SESSION_NOT_FOUND", "Temporary browser context unavailable")
                 session.touch()
                 return session
+        async def initialize(context):
+            page = await context.new_page()
+            page.set_default_timeout(self.default_timeout)
+            await page.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+            """)
+            page.on("pageerror", lambda exc: self._collect_js_error(session_id, exc))
+            page.on("console", lambda msg: self._on_console(session_id, msg))
+            return BrowserSession(context, page, datetime.now())
 
-            # 会话数达上限，先驱逐最老的
-            if len(self._sessions) >= self.max_sessions:
-                oldest_sid = min(
-                    self._sessions,
-                    key=lambda s: self._sessions[s].last_activity,
-                )
-                await self._close_session_unsafe(oldest_sid)
-                logger.warning(f"Session limit reached, evicted oldest: {oldest_sid}")
+        return await self._create_session(session_id, {
+            "viewport": {"width": self.viewport_width, "height": self.viewport_height},
+            "user_agent": self.user_agent, "locale": self.locale,
+            "timezone_id": self.timezone_id, "ignore_https_errors": True,
+        }, initialize)
 
-        # ── 慢速路径：Playwright I/O 在锁外执行 ──
-        context = await self._browser.new_context(
-            viewport={"width": self.viewport_width, "height": self.viewport_height},
-            user_agent=self.user_agent,
-            locale=self.locale,
-            timezone_id=self.timezone_id,
-            ignore_https_errors=True,
-        )
-        page = await context.new_page()
-        page.set_default_timeout(self.default_timeout)
-
-        # 注入反 webdriver 检测脚本（在任何页面加载前生效）
-        await page.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-        """)
-
-        # 注入 JS 错误收集（同步回调，不持锁，不做 I/O）
-        self._js_errors.setdefault(session_id, [])
-        page.on("pageerror", lambda exc, sid=session_id: self._collect_js_error(sid, exc))
-        page.on("console", lambda msg, sid=session_id: self._on_console(sid, msg))
-
-        session = BrowserSession(context, page, datetime.now())
-
-        # ── 短暂持锁写入 dict（双重检查防并发重复创建）──
-        async with self._lock:
-            if session_id in self._sessions:
-                # 另一个协程已抢先创建，丢弃当前的
-                await context.close()
-                existing = self._sessions[session_id]
-                existing.touch()
-                return existing
-            self._sessions[session_id] = session
-
-        logger.info(
-            f"New browser session: {session_id} (total: {len(self._sessions)})"
-        )
+    async def create_owned_ephemeral_session(self, session_id: str):
+        """Create an incognito context owned by one Rust Run, without recording/downloads."""
+        from services.content_privacy import require_body_free_browser_logging
+        require_body_free_browser_logging()
+        async def initialize(context):
+            page = await context.new_page()
+            page.set_default_timeout(self.default_timeout)
+            page.on("pageerror", lambda exc: self._collect_js_error(session_id, exc))
+            page.on("console", lambda msg: self._on_console(session_id, msg))
+            session = BrowserSession(context, page, datetime.now())
+            session.ephemeral_content = True
+            return session
+        session = await self._create_session(session_id, {
+            "viewport": {"width": self.viewport_width, "height": self.viewport_height},
+            "user_agent": self.user_agent, "locale": self.locale,
+            "timezone_id": self.timezone_id, "ignore_https_errors": True,
+            "accept_downloads": False, "service_workers": "block",
+        }, initialize)
+        if not session.ephemeral_content:
+            raise BrowserAdmissionError("BROWSER_SESSION_CONFLICT", "Context belongs to another operation", 409)
         return session
 
-    async def close_session(self, session_id: str) -> bool:
+    async def _create_session(self, session_id, context_kwargs, initialize, *, journey=False):
         async with self._lock:
-            return await self._close_session_unsafe(session_id)
+            if self._stopping or not self._browser:
+                raise BrowserAdmissionError("BROWSER_NOT_RUNNING", "BrowserService is not running")
+            if session_id in self._sessions:
+                existing = self._sessions[session_id]
+                if journey or existing.closing:
+                    raise BrowserAdmissionError("BROWSER_SESSION_CONFLICT", f"Browser session '{session_id}' already exists or is closing", 409)
+                existing.touch()
+                return existing
+            pending = self._creating.get(session_id)
+            if pending:
+                if journey:
+                    raise BrowserAdmissionError("BROWSER_SESSION_CONFLICT", f"Browser session '{session_id}' is being created", 409)
+            else:
+                if session_id in self._unclosed_contexts.values():
+                    raise BrowserAdmissionError("BROWSER_CLEANUP_PENDING", f"Browser session '{session_id}' has unfinished cleanup")
+                # Unclosed rollback contexts still consume capacity; never silently evict a user.
+                if len(self._sessions) + len(self._creating) + len(self._unclosed_contexts) >= self.max_sessions:
+                    raise BrowserAdmissionError("BROWSER_CAPACITY_REACHED", "Browser session capacity reached")
+                reservation = _SessionCreation()
+                self._creating[session_id] = reservation
 
-    async def _close_session_unsafe(self, session_id: str) -> bool:
-        session = self._sessions.pop(session_id, None)
-        if session:
-            try:
-                await session.context.close()
-            except Exception as e:
-                logger.warning(f"Error closing session {session_id}: {e}")
-            # 清理该 session 收集的 JS 错误
-            self._js_errors.pop(session_id, None)
-            return True
-        return False
+        if pending:
+            # Ordinary callers share the original creation, not another allocation.
+            # A cancelled waiter cannot cancel the owner or retry after close.
+            await pending.result_ready.wait()
+            async with self._lock:
+                if pending.error is not None:
+                    raise pending.error
+                existing = self._sessions.get(session_id)
+                if (pending.cancelled or self._stopping or existing is None
+                        or existing is not pending.session or existing.closing):
+                    raise RuntimeError(f"Browser session '{session_id}' was closed during creation")
+                existing.touch()
+                return existing
+
+        context = None
+        try:
+            # Cancelling a Playwright RPC does not cancel creation in Chromium.
+            # Keep its result obtainable so rollback can close a late context.
+            reservation.allocation = asyncio.create_task(self._browser.new_context(**context_kwargs))
+            context = await asyncio.shield(reservation.allocation)
+            session = await initialize(context)
+            session.owner_task = reservation.owner if journey else None
+            async with self._lock:
+                if self._stopping or reservation.cancelled or reservation.owner.cancelling():
+                    raise asyncio.CancelledError
+                self._sessions[session_id] = session
+                self._creating.pop(session_id)
+                reservation.session = session
+                reservation.result_ready.set()
+                reservation.done.set()
+            logger.info("New browser session: %s (total: %s)", session_id, len(self._sessions))
+            return session
+        except BaseException as exc:
+            reservation.error = exc
+            # Notify callers independently of rollback, which may still own a
+            # late allocation indefinitely and must continue reserving capacity.
+            reservation.result_ready.set()
+            reservation.rollback = asyncio.create_task(self._abort_creation(session_id, reservation, context))
+            reservation.rollback.add_done_callback(lambda task: None if task.cancelled() else task.exception())
+            await self._finish_cleanup(self._wait_cleanup_task(reservation.rollback))
+            raise
+
+    async def _wait_cleanup_task(self, task):
+        """Wait a bounded time without cancelling the sole late-result owner."""
+        done, _ = await asyncio.wait({task}, timeout=self.cleanup_timeout)
+        if done:
+            task.result()
+        else:
+            logger.warning("Browser cleanup task remains pending; ownership is retained")
+
+    async def _abort_creation(self, session_id, reservation, context):
+        try:
+            if context is None and reservation.allocation is not None:
+                try:
+                    context = await reservation.allocation
+                except (Exception, asyncio.CancelledError):
+                    # The RPC itself failed (e.g. driver shutdown): no context
+                    # was returned. An ordinary caller cancellation is shielded.
+                    pass
+            if context is not None:
+                reservation.cleanup_confirmed = await self._close_context(context, session_id)
+        finally:
+            async with self._lock:
+                if self._creating.get(session_id) is reservation:
+                    self._creating.pop(session_id)
+                self._js_errors.pop(session_id, None)
+                reservation.done.set()
+
+    async def close_session(self, session_id: str, expected_session=None) -> bool:
+        return await self._finish_cleanup(self._close_session(
+            session_id, expected_session, requester=asyncio.current_task()))
+
+    async def _close_session(self, session_id, expected_session=None, *, expired_only=False, requester=None):
+        async with self._lock:
+            session = self._sessions.get(session_id)
+            if expected_session is not None and session is not expected_session:
+                return False
+            reservation = self._creating.get(session_id)
+            unclosed = [context for context, sid in self._unclosed_contexts.items() if sid == session_id]
+            if reservation:
+                reservation.cancelled = True
+                reservation.owner.cancel()
+            elif session:
+                if expired_only and not session.is_expired(self.idle_timeout):
+                    return False
+                if session.closed:
+                    return True
+                session.closing = True
+                # External close must also stop the Journey; otherwise its next
+                # step could recreate the just-closed resource through navigate.
+                if (expected_session is None and session.owner_task is not None
+                        and session.owner_task is not requester):
+                    session.owner_task.cancel()
+                if session.close_task is None:
+                    session.close_task = asyncio.create_task(self._close_registered_session(session_id, session))
+                close_task = session.close_task
+            elif not unclosed:
+                return False
+        if reservation:
+            closed = await self._close_resource(reservation.done.wait, f"creating session {session_id}")
+            closed = closed and reservation.cleanup_confirmed
+        elif session:
+            closed = await asyncio.shield(close_task)
+        else:
+            closed = True
+            for context in unclosed:
+                closed = await self._close_context(context, session_id) and closed
+        if not closed:
+            raise RuntimeError(f"Browser session '{session_id}' cleanup was not confirmed")
+        return True
+
+    async def _close_registered_session(self, session_id, session):
+        try:
+            closed = await self._close_resource(session.context.close, f"session {session_id}")
+            if closed:
+                async with self._lock:
+                    session.closed = True
+                    # Retain a closing entry until the executing Journey releases
+                    # its lease, even if a driver swallows task cancellation.
+                    if self._sessions.get(session_id) is session and session.owner_task is None:
+                        self._sessions.pop(session_id)
+                        self._js_errors.pop(session_id, None)
+            return closed
+        finally:
+            session.close_task = None
+
+    async def release_session(self, session_id: str, session: BrowserSession):
+        """End the Journey lease without destroying its failure-snapshot context."""
+        async with self._lock:
+            if self._sessions.get(session_id) is session:
+                session.owner_task = None
+                if session.closed:
+                    self._sessions.pop(session_id)
+                    self._js_errors.pop(session_id, None)
+                session.touch()
 
     async def validate_session(self, session_id: str) -> bool:
         """检查 session 是否存在且有效"""
         async with self._lock:
-            return session_id in self._sessions
+            session = self._sessions.get(session_id)
+            return session is not None and not session.closing
 
     async def _strict_session_guard(self, session_id: str) -> Optional[dict]:
         """strict_session=True 时的守卫，返回错误 dict 或 None 表示通过"""
-        if session_id not in self._sessions:
+        if not await self.validate_session(session_id):
             return {
                 "success": False,
                 "error_code": "SESSION_NOT_FOUND",
@@ -330,19 +655,25 @@ class BrowserService:
         while True:
             try:
                 await asyncio.sleep(60)
-                async with self._lock:
-                    expired = [
-                        sid
-                        for sid, s in self._sessions.items()
-                        if s.is_expired(self.idle_timeout)
-                    ]
-                    for sid in expired:
-                        await self._close_session_unsafe(sid)
-                        logger.info(f"Expired session cleaned: {sid}")
+                await self._cleanup_expired_sessions()
             except asyncio.CancelledError:
                 break  # 正常关闭
             except Exception as e:
-                logger.error(f"Cleanup error: {e}")  # 异常不中断清理循环
+                logger.error("Cleanup error (%s)", type(e).__name__)  # 异常不中断清理循环
+
+    async def _cleanup_expired_sessions(self):
+        async with self._lock:
+            expired = [(sid, s) for sid, s in self._sessions.items() if s.is_expired(self.idle_timeout)]
+        for sid, session in expired:
+            try:
+                await self._finish_cleanup(self._close_session(sid, session, expired_only=True))
+            except Exception as exc:
+                logger.warning("Expired session cleanup failed for %s (%s)", sid, type(exc).__name__)
+        for context, label in list(self._unclosed_contexts.items()):
+            try:
+                await self._finish_cleanup(self._close_context(context, label))
+            except Exception as exc:
+                logger.warning("Unfinished context cleanup failed for %s (%s)", label, type(exc).__name__)
 
     # ═══ 浏览器操作方法 ═══
 
@@ -385,6 +716,11 @@ class BrowserService:
             raw = await element.screenshot(type="png")
         else:
             raw = await session.page.screenshot(full_page=full_page, type="png")
+
+        # Temporary screenshots stay exclusively in the response body.
+        if getattr(session, "ephemeral_content", False):
+            return {"screenshot_base64": base64.b64encode(raw).decode(),
+                    "size": len(raw), "ephemeral": True}
 
         # 保存截图到文件
         screenshot_dir = os.path.join(
@@ -740,10 +1076,17 @@ class BrowserService:
         - aria_snapshot 运行时错误并非致命，tree 为空但交互清单仍会返回
         """
         if strict_session:
-            guard = await self._strict_session_guard(session_id)
-            if guard:
-                return guard
-        session = await self.get_or_create_session(session_id)
+            # A late failure snapshot must never recreate a resource closed by
+            # timeout/cancellation; lookup and retrieval are one atomic action.
+            async with self._lock:
+                session = self._sessions.get(session_id)
+                if session is not None and not session.closing:
+                    session.touch()
+                else:
+                    return {"success": False, "error_code": "SESSION_NOT_FOUND",
+                            "error_message": f"Session '{session_id}' does not exist."}
+        else:
+            session = await self.get_or_create_session(session_id)
         page = session.page
 
         scope = selector if selector and selector.strip() else None
@@ -762,7 +1105,7 @@ class BrowserService:
         try:
             aria_yaml = await locator.first.aria_snapshot()
         except PlaywrightError as e:
-            logger.warning(f"aria_snapshot failed: {e}")
+            logger.warning("aria_snapshot failed (%s)", type(e).__name__)
 
         # 交互元素提取 + 节点总数
         try:
@@ -771,7 +1114,7 @@ class BrowserService:
                 {"scope": scope, "limit": 200},
             )
         except PlaywrightError as e:
-            logger.warning(f"interactive query failed: {e}")
+            logger.warning("interactive query failed (%s)", type(e).__name__)
             stats = {"nodeCount": 0, "interactive": []}
 
         node_count = int(stats.get("nodeCount") or 0) if isinstance(stats, dict) else 0
@@ -795,20 +1138,24 @@ class BrowserService:
                 result["screenshot_base64"] = base64.b64encode(raw).decode()
                 result["screenshot_size"] = len(raw)
             except Exception as e:
-                logger.debug(f"snapshot_semantic screenshot skipped: {e}")
+                logger.debug("snapshot_semantic screenshot skipped (%s)", type(e).__name__)
                 result["screenshot_base64"] = None
         return result
 
     # ═══ Journey 专用会话创建 ═══
 
-    async def _create_context_for_journey(self, session_id: str, record_opts: dict, viewport: dict):
+    async def _create_context_for_journey(self, session_id: str, record_opts: dict, viewport: dict, *, ephemeral_content: bool = False):
         """为 journey 创建带录制能力的新 context（必须在 new_context 时传入 record 参数）"""
         import tempfile
 
+        if ephemeral_content and any(record_opts.values()):
+            raise BrowserAdmissionError("EPHEMERAL_RECORDING_UNSUPPORTED", "Temporary browser recordings are unavailable", 409)
         context_kwargs = {
             "viewport": viewport,
             "ignore_https_errors": True,
         }
+        if ephemeral_content:
+            context_kwargs["accept_downloads"] = False
 
         # 录制选项必须在 new_context 时传入
         if record_opts.get("video"):
@@ -821,37 +1168,24 @@ class BrowserService:
             har_path = os.path.join(har_dir, f"{session_id}.har")
             context_kwargs["record_har_path"] = har_path
 
-        # 在锁外创建 context（与 get_or_create_session 慢路径同模式）
-        context = await self._browser.new_context(**context_kwargs)
+        async def initialize(context):
+            await context.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', { get: () => false });
+            """)
+            page = await context.new_page()
+            page.set_default_timeout(self.default_timeout)
+            self._js_errors[session_id] = []
+            page.on("pageerror", lambda error: self._collect_js_error(session_id, error))
+            page.on("console", lambda msg: self._on_console(session_id, msg))
+            if record_opts.get("trace"):
+                await context.tracing.start(screenshots=True, snapshots=True)
+            session = BrowserSession(context=context, page=page, created_at=datetime.now())
+            session.ephemeral_content = ephemeral_content
+            session._record_opts = record_opts
+            session._context_kwargs = context_kwargs
+            return session
 
-        # 注入反 webdriver 检测
-        await context.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', { get: () => false });
-        """)
-
-        page = await context.new_page()
-        page.set_default_timeout(self.default_timeout)
-
-        # Journey 与普通 browser session 复用同一错误存储，避免两个查询入口
-        # 返回不同结果。
-        self._js_errors[session_id] = []
-        page.on("pageerror", lambda exc, sid=session_id: self._collect_js_error(sid, exc))
-        page.on("console", lambda msg, sid=session_id: self._on_console(sid, msg))
-
-        # trace
-        if record_opts.get("trace"):
-            await context.tracing.start(screenshots=True, snapshots=True)
-
-        # 构造 session 并挂载额外属性
-        session = BrowserSession(context=context, page=page, created_at=datetime.now())
-        session._record_opts = record_opts  # type: ignore[attr-defined]
-        session._context_kwargs = context_kwargs  # type: ignore[attr-defined]
-
-        async with self._lock:
-            self._sessions[session_id] = session
-
-        logger.info(f"Journey session created: {session_id}")
-        return session
+        return await self._create_session(session_id, context_kwargs, initialize, journey=True)
 
     # ═══ JS 错误收集内部方法 ═══
 
@@ -875,7 +1209,7 @@ class BrowserService:
             })
             if len(errors) > 100:
                 self._js_errors[session_id] = errors[-100:]
-            logger.debug(f"[{session_id}] JS page error collected: {str(exc)[:200]}")
+            logger.debug("JS page error collected for %s", session_id)
         except Exception:
             pass  # 回调中绝不抛异常
 

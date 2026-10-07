@@ -34,6 +34,11 @@ pub trait VisionProviderView: Send + Sync {
     /// 某 provider 注册的模型清单（注册序）。
     fn provider_models(&self, provider: &str) -> Vec<String>;
 
+    /// All configured models, in deterministic registry order.
+    fn available_models(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// 基于一个逻辑视图解析本次请求的视觉模型。
     ///
     /// 热替换实现可覆盖此方法，在同一 registry 快照上完成全部查询，避免密钥
@@ -44,6 +49,9 @@ pub trait VisionProviderView: Send + Sync {
 }
 
 impl VisionProviderView for ProviderRegistry {
+    fn available_models(&self) -> Vec<String> {
+        self.models().to_vec()
+    }
     fn model_owner(&self, model: &str) -> Option<String> {
         ProviderRegistry::model_owner(self, model).map(str::to_owned)
     }
@@ -68,6 +76,14 @@ where
 {
     if capabilities_for(current_model).supports_images {
         return None; // 当前模型已支持图片，无需路由。
+    }
+
+    // An explicit override wins; preserve the established default family/provider
+    // ordering when the user has not configured one.
+    if let Ok(preferred) = std::env::var("ZK_VISION_FALLBACK_MODEL")
+        && is_available_vision_model(view, preferred.trim())
+    {
+        return Some(preferred.trim().to_owned());
     }
 
     // 1. DeepSeek 系列优先保持模型家族一致。可用性必须以 provider 实际配置
@@ -99,6 +115,13 @@ where
     if is_available_vision_model(view, FALLBACK_VISION_MODEL) {
         tracing::info!("Vision route: {current_model} -> {FALLBACK_VISION_MODEL} (fallback)");
         return Some(FALLBACK_VISION_MODEL.to_owned());
+    }
+    if let Some(candidate) = view
+        .available_models()
+        .into_iter()
+        .find(|model| is_available_vision_model(view, model))
+    {
+        return Some(candidate);
     }
     tracing::info!("Vision route: no configured vision model available for {current_model}");
     None

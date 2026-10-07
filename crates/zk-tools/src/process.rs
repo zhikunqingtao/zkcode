@@ -11,7 +11,8 @@
 //! - 旧靠 JVM `ProcessHandle.descendants()` 逐个 destroy，本实现改为
 //!   **进程组**语义：`Command::process_group(0)` 让子进程成为新进程组组长
 //!   （等价 `setsid` 的可达效果），终止时对**整组**发信号
-//!   （`nix::sys::signal::killpg`），孙进程不再逃逸。选此路线的硬原因：
+//!   （`nix::sys::signal::killpg`），清理仍在该组中的后代。自行更换进程组的
+//!   后代不在此保证内；不能把仅主进程退出解释为整组已清理。选此路线的硬原因：
 //!   workspace lint `unsafe_code = "forbid"`，禁止 `pre_exec` +
 //!   `libc::setsid` 裸调用；`process_group` / `killpg` 均为安全 API；
 //! - 宽限期取 5s（任务判据）而非旧 1s。
@@ -21,7 +22,7 @@ use std::path::Path;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
 use tokio::sync::oneshot;
 
@@ -81,6 +82,10 @@ const SIGTERM_EXIT_CODE: i32 = SIGNAL_EXIT_BASE + 15;
 
 /// 一次子进程执行的终态。
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "Timeout, cancellation, stream truncation and scope termination are independent observed facts."
+)]
 pub struct ProcessOutcome {
     /// 标准输出（上限内）。
     pub stdout: String,
@@ -92,6 +97,8 @@ pub struct ProcessOutcome {
     pub timed_out: bool,
     /// 是否因取消令牌被终止。
     pub cancelled: bool,
+    /// Whether the whole owned process scope was confirmed terminated.
+    pub termination_confirmed: bool,
     /// 是否有任一流触达采集上限。
     pub truncated: bool,
 }
@@ -119,8 +126,8 @@ pub async fn run_shell(
     .await
 }
 
-/// 直接以 argv 形式执行程序（**不经 shell**——Git 族工具用，入参不参与
-/// shell 解析，天然无注入面）。
+/// 以 argv 形式执行程序。内部启动门控不解析程序参数；持久化 PID 归属
+/// 并检查取消后才 exec 真正的程序。
 ///
 /// # Errors
 /// 子进程 spawn 失败（程序不在 PATH / 工作目录不存在等）时返回。
@@ -131,6 +138,53 @@ pub async fn run_program(
     timeout: Duration,
     ctx: &ToolContext,
 ) -> std::io::Result<ProcessOutcome> {
+    run_program_supervised(program, args, working_dir, timeout, ctx, false)
+        .await
+        .map(|(outcome, _)| outcome)
+}
+
+/// Execute a shell once without a script or cwd file. A separate kernel socket
+/// carries the final physical cwd; stdout/stderr retain their ordinary meaning.
+///
+/// # Errors
+/// Process admission/spawn errors propagate. An absent cwd means the command
+/// replaced the exit trap, closed its private descriptor, or did not finish.
+pub async fn run_shell_memory(
+    command: &str,
+    working_dir: &Path,
+    timeout: Duration,
+    ctx: &ToolContext,
+) -> std::io::Result<(ProcessOutcome, Option<std::path::PathBuf>)> {
+    // -p prevents implicit BASH_ENV/SHELLOPTS startup side effects. User text is
+    // parsed exactly once by -c, never eval'd, sourced from disk or put in a heredoc.
+    let script = format!(
+        "trap '__zk_status=$?; builtin pwd -P >&3; builtin printf \"\\0\" >&3; exit \"$__zk_status\"' EXIT\n{command}\n"
+    );
+    run_program_supervised(
+        "bash",
+        &[
+            "--noprofile".into(),
+            "--norc".into(),
+            "-p".into(),
+            "-c".into(),
+            script,
+        ],
+        working_dir,
+        timeout,
+        ctx,
+        true,
+    )
+    .await
+}
+
+async fn run_program_supervised(
+    program: &str,
+    args: &[String],
+    working_dir: &Path,
+    timeout: Duration,
+    ctx: &ToolContext,
+    memory_cwd: bool,
+) -> std::io::Result<(ProcessOutcome, Option<std::path::PathBuf>)> {
     ctx.execution_owner_ready().map_err(std::io::Error::other)?;
     let program = program.to_owned();
     let args = args.to_vec();
@@ -158,8 +212,23 @@ pub async fn run_program(
     let cleanup_ctx = ctx.clone();
     let (result_tx, result_rx) = oneshot::channel();
     let owned = async move {
-        let result = match spawn(&program, &args, &working_dir) {
-            Ok(child) => supervise_program(child, timeout, &supervisor_ctx, lease).await,
+        let result = match spawn(&program, &args, &working_dir, memory_cwd) {
+            Ok((child, mut gate)) => {
+                match supervise_program(child, timeout, &supervisor_ctx, lease, &mut gate).await {
+                    Ok(outcome) => {
+                        let cwd = if outcome.termination_confirmed
+                            && !outcome.cancelled
+                            && !outcome.timed_out
+                        {
+                            gate.read_cwd().await
+                        } else {
+                            None
+                        };
+                        Ok((outcome, cwd))
+                    }
+                    Err(error) => Err(error),
+                }
+            }
             Err(error) => {
                 if let Some(lease) = lease {
                     let _ = supervisor_ctx
@@ -188,6 +257,7 @@ async fn supervise_program(
     timeout: Duration,
     ctx: &ToolContext,
     lease: Option<crate::tool::ExecutionResourceLease>,
+    gate: &mut StartGate,
 ) -> std::io::Result<ProcessOutcome> {
     let Some(pid) = child.id() else {
         if let Some(lease) = lease {
@@ -208,6 +278,27 @@ async fn supervise_program(
             .await;
         return Err(std::io::Error::other(error));
     }
+    if !ctx.cancel.is_cancelled() {
+        let admitted = gate.release(&mut child).await;
+        if let Err(error) = admitted {
+            let confirmed = terminate(&mut child, pid).await;
+            if let Some(lease) = lease {
+                ctx.finish_execution_resource(
+                    lease,
+                    if confirmed {
+                        ExecutionResourceTerminal::Released
+                    } else {
+                        ExecutionResourceTerminal::Unconfirmed
+                    },
+                )
+                .await
+                .map_err(std::io::Error::other)?;
+            }
+            return Err(error);
+        }
+    }
+    // The gate consumes the only input; the actual program still sees /dev/null.
+    drop(child.stdin.take());
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let progress = ctx.clone();
@@ -262,6 +353,7 @@ async fn supervise_program(
         timed_out,
         cancelled,
         truncated: out_truncated || err_truncated,
+        termination_confirmed: cleanup_confirmed,
     })
 }
 
@@ -274,12 +366,73 @@ async fn supervise_program(
 /// 工具（Bash / Git / 未来新增）都必经此处；且 edition 2024 下
 /// `std::env::remove_var` 为 `unsafe`，workspace `unsafe_code = "forbid"` 禁用，
 /// `env_remove` 是唯一合规路径。
-fn spawn(program: &str, args: &[String], working_dir: &Path) -> std::io::Result<Child> {
-    let mut builder = Command::new(program);
+#[derive(Default)]
+struct StartGate {
+    #[cfg(unix)]
+    channel: Option<tokio::net::UnixStream>,
+}
+
+impl StartGate {
+    async fn release(&mut self, child: &mut Child) -> std::io::Result<()> {
+        #[cfg(unix)]
+        if let Some(channel) = self.channel.as_mut() {
+            return channel.write_all(b"start\n").await;
+        }
+        match child.stdin.as_mut() {
+            Some(input) => input.write_all(b"start\n").await,
+            None => Err(std::io::Error::other("process start gate unavailable")),
+        }
+    }
+
+    async fn read_cwd(self) -> Option<std::path::PathBuf> {
+        #[cfg(unix)]
+        if let Some(channel) = self.channel {
+            let mut bytes = Vec::new();
+            tokio::time::timeout(
+                PIPE_RECLAIM_GRACE,
+                channel.take(4097).read_to_end(&mut bytes),
+            )
+            .await
+            .ok()?
+            .ok()?;
+            if bytes.len() > 4096 || bytes.pop() != Some(0) || bytes.contains(&0) {
+                return None;
+            }
+            let value = String::from_utf8(bytes).ok()?;
+            let path = std::path::PathBuf::from(value.strip_suffix('\n')?);
+            if path.is_absolute() && path.is_dir() {
+                return Some(path);
+            }
+        }
+        None
+    }
+}
+
+fn spawn(
+    program: &str,
+    args: &[String],
+    working_dir: &Path,
+    memory_cwd: bool,
+) -> std::io::Result<(Child, StartGate)> {
+    let program = executable_path(program, working_dir)?;
+    // Privileged shell mode skips inherited ENV/BASH_ENV startup code before
+    // admission; exec preserves the real program's argv, environment and PID.
+    let mut builder = Command::new("/bin/sh");
     builder
+        .args([
+            "-p",
+            "-c",
+            if memory_cwd {
+                "IFS= read -r gate && [ \"$gate\" = start ] || exit 125; exec 3<&0; exec \"$@\" </dev/null"
+            } else {
+                "IFS= read -r gate && [ \"$gate\" = start ] || exit 125; exec \"$@\" </dev/null"
+            },
+            "zk-process-gate",
+        ])
+        .arg(program)
         .args(args)
         .current_dir(working_dir)
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
@@ -288,7 +441,54 @@ fn spawn(program: &str, args: &[String], working_dir: &Path) -> std::io::Result<
     }
     #[cfg(unix)]
     builder.process_group(0);
-    builder.spawn()
+    let mut gate = StartGate::default();
+    if memory_cwd {
+        #[cfg(unix)]
+        {
+            use std::os::fd::OwnedFd;
+            let (parent, child) = std::os::unix::net::UnixStream::pair()?;
+            parent.set_nonblocking(true)?;
+            gate.channel = Some(tokio::net::UnixStream::from_std(parent)?);
+            builder.stdin(Stdio::from(OwnedFd::from(child)));
+        }
+        #[cfg(not(unix))]
+        return Err(std::io::Error::other("MEMORY_SHELL_UNSUPPORTED"));
+    }
+    Ok((builder.spawn()?, gate))
+}
+
+// Resolve before starting the gate, preserving ordinary missing/non-executable
+// program errors rather than turning them into a successful launch with exit 127.
+fn executable_path(program: &str, working_dir: &Path) -> std::io::Result<std::path::PathBuf> {
+    let cwd = std::fs::canonicalize(working_dir)?;
+    let paths = if program.contains('/') {
+        vec![cwd.join(program)]
+    } else {
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into()))
+            .map(|directory| cwd.join(directory).join(program))
+            .collect()
+    };
+    let mut denied = false;
+    for path in paths {
+        if !path.is_file() {
+            denied |= path.exists();
+            continue;
+        }
+        #[cfg(unix)]
+        if nix::unistd::access(&path, nix::unistd::AccessFlags::X_OK).is_err() {
+            denied = true;
+            continue;
+        }
+        return Ok(path);
+    }
+    Err(std::io::Error::new(
+        if denied {
+            std::io::ErrorKind::PermissionDenied
+        } else {
+            std::io::ErrorKind::NotFound
+        },
+        format!("executable unavailable: {program}"),
+    ))
 }
 
 /// 按固定块读取一条流；短输出完整保留，长输出在同一个
@@ -297,18 +497,34 @@ async fn pump<R>(reader: Option<R>, progress: Option<ToolContext>) -> (String, b
 where
     R: tokio::io::AsyncRead + Unpin,
 {
+    pump_with_utf8(reader, progress, false, MAX_CAPTURE_BYTES).await
+}
+
+async fn pump_with_utf8<R>(
+    reader: Option<R>,
+    progress: Option<ToolContext>,
+    strict_utf8: bool,
+    capture_limit: usize,
+) -> (String, bool)
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
     let Some(mut reader) = reader else {
         return (String::new(), false);
     };
     let mut chunk = [0_u8; READ_CHUNK_BYTES];
-    let head_limit = (MAX_CAPTURE_BYTES - TRUNCATION_MARKER.len()) / 2;
-    let tail_limit = MAX_CAPTURE_BYTES - TRUNCATION_MARKER.len() - head_limit;
-    let mut collected = Vec::with_capacity(MAX_CAPTURE_BYTES.min(64 * 1024));
-    let mut tail = VecDeque::with_capacity(tail_limit);
+    let head_limit = (capture_limit - TRUNCATION_MARKER.len()) / 2;
+    let tail_limit = capture_limit - TRUNCATION_MARKER.len() - head_limit;
+    let mut collected = Vec::with_capacity(capture_limit.min(64 * 1024));
+    let mut tail = VecDeque::with_capacity(tail_limit.min(64 * 1024));
     let mut truncated = false;
     loop {
         let read = match reader.read(&mut chunk).await {
-            Ok(0) | Err(_) => break,
+            Ok(0) => break,
+            Err(_) => {
+                truncated = true;
+                break;
+            }
             Ok(read) => read,
         };
         if let Some(ctx) = progress.as_ref() {
@@ -328,7 +544,7 @@ where
                 }
             }
         }
-        if !truncated && collected.len().saturating_add(read) <= MAX_CAPTURE_BYTES {
+        if !truncated && collected.len().saturating_add(read) <= capture_limit {
             collected.extend_from_slice(&chunk[..read]);
             continue;
         }
@@ -357,6 +573,9 @@ where
         collected.extend_from_slice(TRUNCATION_MARKER);
         collected.extend(tail);
     }
+    if strict_utf8 && std::str::from_utf8(&collected).is_err() {
+        truncated = true;
+    }
     (String::from_utf8_lossy(&collected).into_owned(), truncated)
 }
 
@@ -364,6 +583,10 @@ where
 ///
 /// 组 ID = 子进程 pid（[`spawn`] 内 `process_group(0)` 使其成为组长）；
 /// 非 unix 平台退化为直接 kill 子进程。
+pub async fn terminate_process_group(child: &mut Child, pid: u32) -> bool {
+    terminate(child, pid).await
+}
+
 async fn terminate(child: &mut Child, pid: u32) -> bool {
     #[cfg(unix)]
     {
@@ -442,8 +665,12 @@ async fn collect_pumps(
     stderr_task: &mut tokio::task::JoinHandle<(String, bool)>,
 ) -> ((String, bool), (String, bool)) {
     if let Ok(streams) = tokio::time::timeout(PIPE_RECLAIM_GRACE, async {
-        let stdout = (&mut *stdout_task).await.unwrap_or_default();
-        let stderr = (&mut *stderr_task).await.unwrap_or_default();
+        let stdout = (&mut *stdout_task)
+            .await
+            .unwrap_or_else(|_| ("stdout reader failed".into(), true));
+        let stderr = (&mut *stderr_task)
+            .await
+            .unwrap_or_else(|_| ("stderr reader failed".into(), true));
         (stdout, stderr)
     })
     .await
@@ -512,6 +739,8 @@ mod tests {
         registered: tokio::sync::Notify,
         finished: tokio::sync::Notify,
         reject_registration: bool,
+        reject_binding: bool,
+        cancel_on_binding: Option<CancellationToken>,
     }
 
     impl ExecutionResourceObserver for RecordingResourceObserver {
@@ -554,7 +783,21 @@ mod tests {
                 )));
             };
             allocation.external_id = Some(external_id);
-            Box::pin(std::future::ready(Ok(())))
+            let reject = self.reject_binding;
+            let cancel = self.cancel_on_binding.clone();
+            Box::pin(async move {
+                if let Some(cancel) = &cancel {
+                    cancel.cancel();
+                }
+                if reject || cancel.is_some() {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                if reject {
+                    Err("injected PID binding failure".into())
+                } else {
+                    Ok(())
+                }
+            })
         }
 
         fn finish(
@@ -630,6 +873,112 @@ mod tests {
                 .as_slice(),
             [(resource_id, ExecutionResourceTerminal::Released)]
         );
+    }
+
+    #[tokio::test]
+    async fn process_and_git_start_gates_prevent_side_effects_during_binding_failure_or_cancel() {
+        for runner in ["shell", "git", "memory-shell"] {
+            for reject in [false, true] {
+                let path =
+                    std::env::temp_dir().join(format!("zk-start-gate-{}", uuid::Uuid::new_v4()));
+                std::fs::create_dir(&path).unwrap();
+                let cancel = CancellationToken::new();
+                let observer = Arc::new(RecordingResourceObserver {
+                    reject_binding: reject,
+                    cancel_on_binding: (!reject).then(|| cancel.clone()),
+                    ..RecordingResourceObserver::default()
+                });
+                let context = supervised_ctx(cancel, Arc::clone(&observer));
+                let result = if runner == "git" {
+                    run_git_program(
+                        &[
+                            "-c".into(),
+                            "alias.probe=!printf leaked > unexpected".into(),
+                            "probe".into(),
+                        ],
+                        &path,
+                        Duration::from_secs(5),
+                        &context,
+                    )
+                    .await
+                } else if runner == "memory-shell" {
+                    run_shell_memory(
+                        "printf leaked > unexpected",
+                        &path,
+                        Duration::from_secs(5),
+                        &context,
+                    )
+                    .await
+                    .map(|(outcome, _)| outcome)
+                } else {
+                    run_shell(
+                        "printf leaked > unexpected",
+                        &path,
+                        Duration::from_secs(5),
+                        &context,
+                    )
+                    .await
+                };
+                if reject {
+                    assert!(
+                        result
+                            .unwrap_err()
+                            .to_string()
+                            .contains("EXECUTION_RESOURCE_BIND_FAILED")
+                    );
+                } else {
+                    assert!(result.unwrap().cancelled);
+                }
+                assert!(
+                    !path.join("unexpected").exists(),
+                    "command ran before ownership admission"
+                );
+                let pid = observer.allocations.lock().unwrap()[0]
+                    .1
+                    .external_id
+                    .as_ref()
+                    .unwrap()
+                    .parse()
+                    .unwrap();
+                assert!(!process_group_exists(pid), "start gate process leaked");
+                std::fs::remove_dir(path).unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn start_gate_preserves_literal_argv_cwd_and_spawn_errors() {
+        let (context, _) = ctx();
+        let path = std::env::temp_dir().join(format!("zk argv ' 空格 {}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&path).unwrap();
+        let outcome = run_program(
+            "/bin/sh",
+            &[
+                "-c".into(),
+                "printf '%s' \"$1\"; exit 7".into(),
+                "name".into(),
+                "$(touch unexpected) '中文'".into(),
+            ],
+            &path,
+            Duration::from_secs(5),
+            &context,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.stdout, "$(touch unexpected) '中文'");
+        assert_eq!(outcome.exit_code, 7);
+        assert!(!path.join("unexpected").exists());
+        let error = run_program(
+            "./missing-program",
+            &[],
+            &path,
+            Duration::from_secs(5),
+            &context,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        std::fs::remove_dir(path).unwrap();
     }
 
     #[tokio::test]
@@ -886,3 +1235,7 @@ mod tests {
         assert!(outcome.stdout.ends_with("TAIL"));
     }
 }
+
+#[path = "git_process.rs"]
+mod git_process;
+pub use git_process::{run_git_human_program, run_git_program};

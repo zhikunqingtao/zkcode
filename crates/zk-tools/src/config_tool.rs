@@ -146,8 +146,8 @@ impl Tool for ConfigTool {
     }
 
     fn description(&self) -> &'static str {
-        "Read and modify runtime configuration settings. \
-         Supports get, set, and list actions."
+        "Read and modify this tool's in-memory store with get, set, and list actions. \
+         Values are not persisted or applied to application settings; model does not switch the session model."
     }
 
     fn parameters(&self) -> Value {
@@ -211,7 +211,7 @@ impl ConfigTool {
         if value == RESET_SENTINEL {
             lock().insert(key.to_owned(), default_value.clone());
             return ToolOutput::ok(format!(
-                "Setting '{key}' reset to default: {}",
+                "Setting '{key}' reset to default: {} (runtime store only; not applied to application settings)",
                 render(default_value)
             ));
         }
@@ -241,7 +241,7 @@ impl ConfigTool {
             "Config updated"
         );
         ToolOutput::ok(format!(
-            "Setting '{key}' updated: {} → {}",
+            "Setting '{key}' updated: {} → {} (runtime store only; not applied to application settings)",
             render(&previous),
             render(&typed)
         ))
@@ -257,7 +257,8 @@ fn action_of(input: &Value) -> &str {
 fn list() -> ToolOutput {
     use std::fmt::Write as _;
 
-    let mut text = String::from("Available settings:\n");
+    let mut text =
+        String::from("Stored values (runtime store only; not applied to application settings):\n");
     for (key, value) in lock().iter() {
         // 写入 String 永不失败。
         let _ = writeln!(text, "  {key} = {}", render(value));
@@ -278,7 +279,10 @@ fn get(input: &Value) -> ToolOutput {
         .get(key)
         .cloned()
         .unwrap_or_else(|| default_value.clone());
-    ToolOutput::ok(format!("Setting '{key}' = {}", render(&value)))
+    ToolOutput::ok(format!(
+        "Setting '{key}' = {} (runtime store only; not applied to application settings)",
+        render(&value)
+    ))
 }
 
 /// 类型强制（旧 `coerceType`：默认值为布尔 → `Boolean.parseBoolean`；为整数 →
@@ -351,7 +355,7 @@ mod tests {
         assert!(!output.is_error);
         assert_eq!(
             output.content,
-            "Available settings:\n\
+            "Stored values (runtime store only; not applied to application settings):\n\
              \x20 autoCompact = true\n\
              \x20 language = auto\n\
              \x20 maxTokens = 8192\n\
@@ -367,11 +371,20 @@ mod tests {
         let _guard = reset_store().await;
         let tool = ConfigTool::new();
         let theme = call(&tool, json!({ "key": "theme" })).await;
-        assert_eq!(theme.content, "Setting 'theme' = system");
+        assert_eq!(
+            theme.content,
+            "Setting 'theme' = system (runtime store only; not applied to application settings)"
+        );
         let tokens = call(&tool, json!({ "action": "get", "key": "maxTokens" })).await;
-        assert_eq!(tokens.content, "Setting 'maxTokens' = 8192");
+        assert_eq!(
+            tokens.content,
+            "Setting 'maxTokens' = 8192 (runtime store only; not applied to application settings)"
+        );
         let compact = call(&tool, json!({ "action": "get", "key": "autoCompact" })).await;
-        assert_eq!(compact.content, "Setting 'autoCompact' = true");
+        assert_eq!(
+            compact.content,
+            "Setting 'autoCompact' = true (runtime store only; not applied to application settings)"
+        );
     }
 
     #[tokio::test]
@@ -383,7 +396,10 @@ mod tests {
             json!({ "action": "set", "key": "maxTokens", "value": "4096" }),
         )
         .await;
-        assert_eq!(tokens.content, "Setting 'maxTokens' updated: 8192 → 4096");
+        assert_eq!(
+            tokens.content,
+            "Setting 'maxTokens' updated: 8192 → 4096 (runtime store only; not applied to application settings)"
+        );
 
         let compact = call(
             &tool,
@@ -392,7 +408,7 @@ mod tests {
         .await;
         assert_eq!(
             compact.content,
-            "Setting 'autoCompact' updated: true → false"
+            "Setting 'autoCompact' updated: true → false (runtime store only; not applied to application settings)"
         );
 
         // 整数解析失败保留原字符串（旧 `NumberFormatException → return value`）。
@@ -401,7 +417,10 @@ mod tests {
             json!({ "action": "set", "key": "maxTurns", "value": "many" }),
         )
         .await;
-        assert_eq!(bad_number.content, "Setting 'maxTurns' updated: 100 → many");
+        assert_eq!(
+            bad_number.content,
+            "Setting 'maxTurns' updated: 100 → many (runtime store only; not applied to application settings)"
+        );
     }
 
     #[tokio::test]
@@ -418,10 +437,13 @@ mod tests {
             json!({ "action": "set", "key": "theme", "value": "default" }),
         )
         .await;
-        assert_eq!(reset.content, "Setting 'theme' reset to default: system");
+        assert_eq!(
+            reset.content,
+            "Setting 'theme' reset to default: system (runtime store only; not applied to application settings)"
+        );
         assert_eq!(
             call(&tool, json!({ "key": "theme" })).await.content,
-            "Setting 'theme' = system"
+            "Setting 'theme' = system (runtime store only; not applied to application settings)"
         );
     }
 
@@ -463,7 +485,7 @@ mod tests {
         .await;
         assert_eq!(
             accepted.content,
-            "Setting 'model' updated: standard → gpt-9"
+            "Setting 'model' updated: standard → gpt-9 (runtime store only; not applied to application settings)"
         );
         let still_invalid = call(
             &with_catalog,

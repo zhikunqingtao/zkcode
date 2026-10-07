@@ -113,10 +113,11 @@ pub struct AppState {
     /// 准入中间件（[`crate::middleware::access_guard`]）与 `/api/auth/token`
     /// 共用同一实例——中间件校验的 token 与端点下发的 token 必须同源。
     pub access_tokens: Arc<AccessTokenManager>,
-    /// 技能注册表（3B.7；14 内置技能编译期嵌入故装配即非空，磁盘六级来源由
-    /// main 启动期扫描后增量注册。REST 目录端点与 WS `slash_command` 共用同
-    /// 一实例，热重载写入对两侧立即可见）。
+    /// Global Skill definitions and transactional switches. Project/plugin
+    /// definitions remain in the independent authorized `skill_catalog` views.
     pub skills: Arc<SkillRegistry>,
+    /// Per-session project definitions over the shared global Skill preferences.
+    pub skill_catalog: Arc<crate::skill::catalog::SkillCatalog>,
     /// 工具注册表的惰性单例格（Batch 1 Step 1-5）。
     ///
     /// 经 [`AppState::tools`] 首次访问时装配，此后 REST 工具域端点与
@@ -126,6 +127,8 @@ pub struct AppState {
     tools: Arc<OnceLock<Arc<ToolRegistry>>>,
     /// WS/REST/SSE/CLI 共用的对话服务，由 `wire_engine` 绑定唯一 Engine 后回填。
     conversation: Arc<OnceLock<Arc<ConversationService>>>,
+    /// In-memory per-Run tool overlays; never a global credential store.
+    pub(crate) run_tool_scopes: Arc<zk_engine::run_tool_scopes::RunToolScopes>,
     /// 工具会话级启用位覆盖表（Batch 1 Step 1-5；旧 `ToolSessionState`
     /// `@Component` 单例的等价物，`PATCH /api/tools/{name}` 写、
     /// `GET /api/tools?sessionId=` 读）。
@@ -148,6 +151,9 @@ pub struct AppState {
     /// 环。故 sink 只持 `Arc<ToolRegistry>`、observer 只持这同一个 `OnceLock`，
     /// 由 [`AppState::mcp`] 首次访问时装配并回填。
     mcp: Arc<OnceLock<Arc<McpClientManager>>>,
+    pub(crate) repl_services: Arc<crate::repl_service::ReplServices>,
+    pub(crate) mcp_contexts: Arc<crate::api::mcp_context::Contexts>,
+    pub(crate) query_streams: Arc<crate::api::query::QueryStreams>,
     /// MCP 能力注册表（Batch 4B；旧 `McpCapabilityRegistryService` 单例）。
     ///
     /// `/api/mcp/capabilities` 域十端点与管理器的注册表激活（`enableFromRegistry`
@@ -185,6 +191,7 @@ pub struct AppState {
     startup_epoch: Arc<AtomicI64>,
     /// Agent/Task/Swarm 共用的生产子代理执行器与任务服务，随 `ToolRegistry` 惰性装配。
     agent_runtime: Arc<OnceLock<Arc<crate::engine_bridge::AgentRuntime>>>,
+    team_runtime: Arc<OnceLock<Arc<crate::team_runtime::TeamRuntime>>>,
     /// Cron 工具唯一 `SQLite` 端口；不持有调度或执行状态。
     pub(crate) cron_service: Arc<SqliteCronService>,
     /// 进程内唯一 Cron scheduler。只有显式配置且 Agent runtime 已真实装配时回填。
@@ -414,6 +421,10 @@ impl AppState {
     /// 指定 WS 参数装配（集成测试注入 `WsConfig::fast_for_tests`）。
     #[doc(hidden)]
     #[must_use]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Single construction site makes shared runtime, authorization, and resource ownership explicit"
+    )]
     pub fn new_with_ws(db: Db, config: Config, ws: WsConfig) -> Self {
         let python = Arc::new(PythonClient::new(config.python_uds_path.clone()));
         let config = Arc::new(config);
@@ -443,7 +454,8 @@ impl AppState {
         let snapshot_dir = config.snapshot_dir.clone().unwrap_or_else(|| {
             std::env::temp_dir().join(format!("zkcode-test-snapshots-{}", uuid::Uuid::new_v4()))
         });
-        let session_snapshots = Arc::new(SessionSnapshotService::with_dir(snapshot_dir));
+        let session_snapshots =
+            Arc::new(SessionSnapshotService::with_dir(snapshot_dir).with_database(db.clone()));
         let observability: Arc<dyn ObservabilityRecorder> =
             Arc::new(BoundedObservabilityRecorder::new(
                 4096,
@@ -458,6 +470,12 @@ impl AppState {
             hub.clone(),
             Arc::clone(&observability),
         );
+        assert!(
+            task_runtime.configure_terminal_observer(Arc::new(
+                crate::artifact_integrity::ArtifactIntegrityObserver(db.clone())
+            )),
+            "terminal artifact observer is configured once"
+        );
         // Permission interactions and every transport cancellation share the
         // exact same TaskRuntime instance used by the execution engines.
         let authz = Arc::new(AuthzStack::build(
@@ -470,7 +488,14 @@ impl AppState {
         // 缺失只 warn 回空表）；与引擎触发点共用同一实例（`wire_engine` 注入）。
         let hooks = Arc::new(
             HookService::load_from_dir(std::path::Path::new(&config.workspace_default_root))
+                .with_admission(Arc::new(crate::hook_admission::HostHookAdmission(
+                    Arc::clone(&authz),
+                )))
                 .with_observability(Arc::clone(&observability)),
+        );
+        assert!(
+            task_runtime.configure_hooks(Arc::clone(&hooks)),
+            "TaskRuntime hooks are configured once"
         );
         let browser_replay_dir = std::path::Path::new(&config.workspace_default_root)
             .join(".zk")
@@ -480,7 +505,40 @@ impl AppState {
                 .with_observability(Arc::clone(&observability)),
         );
         let execution_supervisor = Arc::new(ExecutionSupervisor::new(db.clone()));
+        assert!(
+            task_runtime.configure_hook_supervisor(&execution_supervisor),
+            "TaskRuntime hook supervisor is configured once"
+        );
         let cron_service = Arc::new(SqliteCronService::new(db.clone()));
+        let skills = Arc::new(SkillRegistry::with_persisted_state(db.clone()));
+        let skill_catalog = Arc::new(crate::skill::catalog::SkillCatalog::new(
+            skills.clone(),
+            db.clone(),
+        ));
+        let startup_epoch = Arc::new(AtomicI64::new(0));
+        let repl_services = Arc::new(crate::repl_service::ReplServices::new(
+            db.clone(),
+            task_runtime.clone(),
+            execution_supervisor.clone(),
+            startup_epoch.clone(),
+        ));
+        let run_tool_scopes = Arc::new(zk_engine::run_tool_scopes::RunToolScopes::new(vec![
+            Arc::new(crate::skill::catalog::SkillScopeFactory(
+                skill_catalog.clone(),
+            )),
+            Arc::new(zk_tools::lsp::LspRunScopeFactory::new(
+                zk_tools::lsp::default_manifest_path(),
+            )),
+            Arc::new(zk_tools::bash::shell_state::ShellMemoryScopeFactory),
+            Arc::new(zk_tools::repl::ReplRunScopeFactory),
+            Arc::new(crate::repl_service::ReplServiceBridgeFactory(
+                repl_services.clone(),
+            )),
+            Arc::new(crate::python::tools::BrowserRunScopeFactory::new(
+                python.clone(),
+                db.clone(),
+            )),
+        ]));
         Self {
             db,
             config,
@@ -496,14 +554,19 @@ impl AppState {
             authz,
             access_tokens,
             // 仅含内置技能：磁盘扫描留给 main（集成测试不受运行目录内容影响，
-            // 目录端点在测试中恒为确定的 14 条）。
-            skills: Arc::new(SkillRegistry::with_builtin_skills()),
+            // 目录端点在测试中恒为确定的 13 条）。
+            skills,
+            skill_catalog,
             tools: Arc::new(OnceLock::new()),
             conversation: Arc::new(OnceLock::new()),
+            run_tool_scopes,
             tool_session_state: Arc::new(ToolSessionState::new()),
             commands: Arc::new(CommandRegistry::with_builtin_commands()),
             costs: Arc::new(AtomicCostTracker::new()),
             mcp: Arc::new(OnceLock::new()),
+            repl_services,
+            mcp_contexts: Arc::default(),
+            query_streams: Arc::default(),
             mcp_capabilities,
             mcp_progress,
             mcp_approval,
@@ -513,8 +576,9 @@ impl AppState {
             observability,
             execution_supervisor,
             task_runtime,
-            startup_epoch: Arc::new(AtomicI64::new(0)),
+            startup_epoch,
             agent_runtime: Arc::new(OnceLock::new()),
+            team_runtime: Arc::new(OnceLock::new()),
             cron_service,
             cron_scheduler: Arc::new(OnceLock::new()),
             hooks,
@@ -541,6 +605,19 @@ impl AppState {
     pub(crate) fn agent_runtime(&self) -> Option<Arc<crate::engine_bridge::AgentRuntime>> {
         let _ = self.tools();
         self.agent_runtime.get().cloned()
+    }
+
+    pub(crate) fn team_runtime(&self) -> Option<Arc<crate::team_runtime::TeamRuntime>> {
+        let agent = self.agent_runtime()?;
+        Some(Arc::clone(self.team_runtime.get_or_init(|| {
+            Arc::new(crate::team_runtime::TeamRuntime::new(
+                self.db.clone(),
+                &agent,
+                self.startup_epoch(),
+                self.config.agent_write_enabled && self.config.worktree_enabled,
+                Arc::clone(self.coordinator.event_bus()),
+            ))
+        })))
     }
 
     /// Install the durable startup epoch before any execution surface is wired.
@@ -604,21 +681,16 @@ impl AppState {
             && self.execution_supervisor.workspace_leases_ready()
     }
 
-    /// Whether the legacy Team/Swarm adapter has passed the unified runtime gate.
-    ///
-    /// Swarm is deliberately fail-closed even when `ZK_SWARM_ENABLED=true` and
-    /// the Agent runtime is assembled.  Its current coordinator still owns a
-    /// second process-local worker lifecycle, can abort worker futures outside
-    /// the [`TaskRuntime`], and has not passed the durable result/receipt,
-    /// cancellation, budget, recovery, and independent-verification suites.
-    /// Keeping this check separate from configuration prevents health and API
-    /// surfaces from advertising an implementation that is not yet executable.
+    /// Whether explicitly enabled teams can use the one durable Agent runtime.
+    /// Queue, worker, cancellation, mailbox and isolated-write acceptance tests
+    /// cover this adapter; existing configuration and feature flags remain required.
     #[must_use]
     pub(crate) fn swarm_executable(&self) -> bool {
-        if !self.config.swarm_enabled {
-            return false;
-        }
-        false
+        self.config.swarm_enabled
+            && self.config.agent_enabled
+            && self.feature_flags.is_enabled("ENABLE_AGENT_SWARMS")
+            && self.startup_epoch() > 0
+            && self.agent_runtime().is_some()
     }
 
     /// Return the one production Cron scheduler only when both the explicit
@@ -707,6 +779,13 @@ impl AppState {
                 demo_catalog,
             );
             McpClientManager::builder(Arc::clone(&self.mcp_approval), tool_sink)
+                    .oauth(zk_mcp::oauth::OAuthCoordinator::new(
+                        Arc::new(crate::mcp::DbMcpOAuthBindings(self.db.clone())),
+                        Arc::new(zk_mcp::oauth::storage::KeychainSecretStore),
+                    ))
+                    .service_preferences(Arc::new(crate::mcp::DbMcpServicePreferences(
+                        self.db.clone(),
+                    )))
                     .resolver(zk_mcp::McpConfigurationResolver::new(Some(
                         std::path::PathBuf::from(&self.config.workspace_default_root),
                     )))

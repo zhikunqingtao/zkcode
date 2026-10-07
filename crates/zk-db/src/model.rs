@@ -110,6 +110,15 @@ impl ImageSource {
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StoredBlock {
+    /// Opaque provider continuation items; not visible message text or new instructions.
+    ProviderResponseState {
+        /// Origin provider.
+        provider: String,
+        /// Exact local model identifier.
+        model: String,
+        /// Signed or encrypted items in their original order.
+        output: Vec<serde_json::Value>,
+    },
     /// 文本块。
     Text {
         /// 文本内容。
@@ -226,6 +235,18 @@ pub fn goal_preview(content_json: Option<&str>) -> Option<String> {
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionSummary {
+    /// Server-derived purpose; independent of client-writable metadata.
+    #[serde(default)]
+    pub purpose: zk_protocol::SessionPurpose,
+    /// True when durable tasks or Runs are active.
+    #[serde(default)]
+    pub running: bool,
+    /// Active merge reservation, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_operation_id: Option<String>,
+    /// Durable mode; absent sessions use the conservative DEFAULT policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<String>,
     /// 会话 ID（UUIDv4）。
     pub id: String,
     /// 标题（可空）。
@@ -254,6 +275,9 @@ pub struct SessionSummary {
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionDetail {
+    /// Server-derived purpose; independent of client-writable metadata.
+    #[serde(default)]
+    pub purpose: zk_protocol::SessionPurpose,
     /// 会话 ID。
     pub session_id: String,
     /// 模型标识。
@@ -286,6 +310,9 @@ pub struct SessionDetail {
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MessageRecord {
+    /// UI metadata only; never an authorization source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<serde_json::Value>,
     /// 消息 ID（UUIDv4）。
     pub id: String,
     /// 所属会话 ID。
@@ -310,6 +337,8 @@ pub struct MessageRecord {
 /// 追加消息的写入参数（id / `created_at` / `seq_num` 由仓储分配）。
 #[derive(Clone, Debug, PartialEq)]
 pub struct NewMessage {
+    /// Metadata committed atomically with the message.
+    pub meta: Option<serde_json::Value>,
     /// 角色。
     pub role: MessageRole,
     /// 内容块（将序列化为存储形状 `content_json`）。
@@ -521,6 +550,10 @@ mod tests {
     fn summary_serialization_matches_sample_shape() {
         // 字段名集合与实采样例 GET_api-sessions.json 逐字对齐。
         let summary = SessionSummary {
+            purpose: zk_protocol::SessionPurpose::Chat,
+            running: false,
+            permission_mode: None,
+            merge_operation_id: None,
             id: "s1".into(),
             title: None,
             goal_preview: None,
@@ -548,10 +581,13 @@ mod tests {
                 "id",
                 "messageCount",
                 "model",
+                "purpose",
+                "running",
                 "updatedAt",
                 "workingDirectory"
             ]
         );
+        assert_eq!(value["purpose"], "chat");
         // 毫秒领域值序列化为恒 6 位微秒（样例微秒尾 532 在此精度下为 000）。
         assert_eq!(
             value["createdAt"].as_str(),
@@ -567,6 +603,7 @@ mod tests {
     #[test]
     fn detail_serialization_matches_sample_shape() {
         let detail = SessionDetail {
+            purpose: zk_protocol::SessionPurpose::Chat,
             session_id: "s1".into(),
             model: "m".into(),
             working_dir: "/w".into(),
@@ -592,6 +629,7 @@ mod tests {
         let mut expected = vec![
             "sessionId",
             "model",
+            "purpose",
             "workingDir",
             "title",
             "status",
@@ -606,5 +644,6 @@ mod tests {
         expected.sort_unstable();
         assert_eq!(keys, expected);
         assert!(value["title"].is_null());
+        assert_eq!(value["purpose"], "chat");
     }
 }

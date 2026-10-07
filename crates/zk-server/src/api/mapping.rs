@@ -42,7 +42,11 @@ const IMAGE_PIXELS_PER_TOKEN: i64 = 750;
 /// 存储内容块列表 → REST 线上内容块列表。
 #[must_use]
 pub(crate) fn api_blocks(blocks: &[StoredBlock]) -> Vec<ApiBlock> {
-    blocks.iter().map(api_block).collect()
+    blocks
+        .iter()
+        .filter(|block| !matches!(block, StoredBlock::ProviderResponseState { .. }))
+        .map(api_block)
+        .collect()
 }
 
 fn api_block(block: &StoredBlock) -> ApiBlock {
@@ -63,8 +67,7 @@ fn api_block(block: &StoredBlock) -> ApiBlock {
             content: content.clone(),
             is_error: *is_error,
             // 旧紧凑构造器保证 metadata 恒非 null（缺省 `Map.of()`）。
-            metadata: metadata
-                .clone()
+            metadata: zk_db::convert::public_tool_result_metadata(metadata.clone())
                 .unwrap_or_else(|| Value::Object(Map::new())),
         },
         StoredBlock::Thinking { thinking } => ApiBlock::Thinking {
@@ -90,6 +93,7 @@ fn api_block(block: &StoredBlock) -> ApiBlock {
             }
         }
         StoredBlock::RedactedThinking { data } => ApiBlock::RedactedThinking { data: data.clone() },
+        StoredBlock::ProviderResponseState { .. } => unreachable!("provider state is private"),
     }
 }
 
@@ -99,6 +103,7 @@ pub(crate) fn api_message(record: &MessageRecord) -> ApiMessage {
     let timestamp = format_rfc3339_micros(record.created_at);
     match record.role {
         MessageRole::User => ApiMessage::User {
+            meta: record.meta.clone(),
             uuid: record.id.clone(),
             timestamp,
             content: api_blocks(&record.content),
@@ -122,6 +127,13 @@ pub(crate) fn api_message(record: &MessageRecord) -> ApiMessage {
             },
         },
         MessageRole::System => ApiMessage::System {
+            subtype: record
+                .meta
+                .as_ref()
+                .and_then(|m| m.get("subtype"))
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            metadata: record.meta.clone(),
             uuid: record.id.clone(),
             timestamp,
             content: system_text(&record.content),
@@ -252,6 +264,10 @@ fn session_root(
     times: &dyn Fn(i64) -> Value,
 ) -> Map<String, Value> {
     let mut root = Map::new();
+    root.insert(
+        "purpose".into(),
+        Value::String(detail.purpose.as_str().into()),
+    );
     root.insert("sessionId".into(), Value::String(detail.session_id.clone()));
     root.insert("model".into(), Value::String(detail.model.clone()));
     root.insert(
@@ -469,6 +485,8 @@ pub(crate) fn compact_deterministic(messages: &[MessageRecord]) -> CompactOutcom
     let tokens_before = estimate_tokens(&api_messages(messages));
     let summary = summarize_prefix(&messages[..boundary]);
     let mut compacted = vec![ApiMessage::System {
+        metadata: None,
+        subtype: Some("compact_summary".into()),
         uuid: uuid::Uuid::new_v4().to_string(),
         timestamp: format_rfc3339_micros(now_millis()),
         content: summary.clone(),
@@ -523,6 +541,7 @@ mod tests {
 
     fn user_msg(text: &str) -> MessageRecord {
         MessageRecord {
+            meta: None,
             id: uuid::Uuid::new_v4().to_string(),
             session_id: "s1".into(),
             role: MessageRole::User,
@@ -537,6 +556,7 @@ mod tests {
 
     fn assistant_msg(text: &str, stop: Option<&str>) -> MessageRecord {
         MessageRecord {
+            meta: None,
             id: uuid::Uuid::new_v4().to_string(),
             session_id: "s1".into(),
             role: MessageRole::Assistant,
@@ -554,6 +574,37 @@ mod tests {
     fn estimate_tokens_matches_legacy_formula() {
         let messages = vec![api_message(&user_msg("hello"))];
         assert_eq!(estimate_tokens(&messages), 6);
+    }
+
+    #[test]
+    fn rest_and_ws_hide_private_image_replay_state_but_preserve_display_metadata() {
+        let block = StoredBlock::ToolResult {
+            tool_use_id: "read-image".into(),
+            content: "Read image".into(),
+            is_error: false,
+            metadata: Some(serde_json::json!({
+                "__zkTrustedImageProducer":true,
+                "inlineImages":[{"data":"PRIVATE_BYTES","sourceDigest":"INTERNAL"}],
+                "structuredResult":{"schema":"image-preview/v1","label":"display"},
+                "warning":"preserve this"
+            })),
+        };
+        let rest = serde_json::to_value(api_blocks(std::slice::from_ref(&block))).unwrap();
+        let ws = serde_json::to_value(zk_db::convert::blocks_to_ws(vec![block])).unwrap();
+        for projected in [rest, ws] {
+            assert_eq!(projected[0]["metadata"]["warning"], "preserve this");
+            assert_eq!(
+                projected[0]["metadata"]["structuredResult"]["label"],
+                "display"
+            );
+            assert!(projected[0]["metadata"].get("inlineImages").is_none());
+            assert!(
+                projected[0]["metadata"]
+                    .get("__zkTrustedImageProducer")
+                    .is_none()
+            );
+            assert!(!projected.to_string().contains("PRIVATE_BYTES"));
+        }
     }
 
     /// 图片黄金值：`ceil(100·100 / 750) = 14` token → `ceil(14·3.5) = 49` 字符。
@@ -652,6 +703,7 @@ mod tests {
     #[test]
     fn detail_and_export_null_semantics() {
         let detail = SessionDetail {
+            purpose: zk_protocol::SessionPurpose::Chat,
             session_id: "s1".into(),
             model: "m".into(),
             working_dir: "/w".into(),
@@ -682,6 +734,7 @@ mod tests {
     #[test]
     fn markdown_export_skeleton() {
         let detail = SessionDetail {
+            purpose: zk_protocol::SessionPurpose::Chat,
             session_id: "s1".into(),
             model: "qwen3.8-max-0902".into(),
             working_dir: "/w".into(),

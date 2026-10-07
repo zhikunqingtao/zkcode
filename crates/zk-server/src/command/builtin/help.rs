@@ -125,6 +125,60 @@ mod tests {
     use crate::command::traits::CommandResult;
     use crate::state::AppState;
 
+    struct Unavailable;
+    impl crate::command::traits::Command for Unavailable {
+        fn name(&self) -> &'static str {
+            "unsupported-test"
+        }
+        fn aliases(&self) -> &'static [&'static str] {
+            &["unsupported-alias"]
+        }
+        fn description(&self) -> &'static str {
+            "unavailable"
+        }
+        fn command_type(&self) -> crate::command::traits::CommandType {
+            crate::command::traits::CommandType::Local
+        }
+        fn is_available(&self) -> bool {
+            false
+        }
+        fn execute<'a>(
+            &'a self,
+            _: &'a str,
+            _: &'a CommandContext,
+        ) -> futures::future::BoxFuture<'a, CommandResult> {
+            Box::pin(async { panic!("unavailable command must never execute") })
+        }
+    }
+
+    #[tokio::test]
+    async fn unavailable_commands_are_hidden_from_details_aliases_lists_and_suggestions() {
+        let ctx = ctx();
+        ctx.state
+            .commands
+            .register(std::sync::Arc::new(Unavailable));
+        let help = ctx.state.commands.find_command("help").unwrap();
+        for name in ["unsupported-test", "unsupported-alias"] {
+            assert!(
+                matches!(help.execute(name, &ctx).await, CommandResult::Error(message) if message.starts_with("Unknown command:"))
+            );
+            assert!(ctx.state.commands.find_command(name).is_none());
+        }
+        assert!(
+            !ctx.state
+                .commands
+                .visible_commands()
+                .iter()
+                .any(|c| c.name() == "unsupported-test")
+        );
+        assert!(
+            !ctx.state
+                .commands
+                .suggest_commands("unsupported")
+                .contains("unsupported-test")
+        );
+    }
+
     fn ctx() -> CommandContext {
         CommandContext::of("s-1", "/tmp", "kimi-k3", AppState::for_tests())
     }
@@ -143,8 +197,8 @@ mod tests {
             panic!("help without args must return jsx");
         };
         assert_eq!(data["action"], "helpCommandList");
-        // 32 个内建命令无一隐藏 → `total` 即全量。
-        assert_eq!(data["total"], 32);
+        // Hidden account/remote commands remain excluded from the visible catalog.
+        assert_eq!(data["total"], 44);
         let groups = data["groups"].as_array().expect("groups array");
         let titles: Vec<&str> = groups
             .iter()
@@ -171,6 +225,7 @@ mod tests {
                 "browser-snapshot",
                 "clear",
                 "compact",
+                "context",
                 "cost",
                 "diff",
                 "env-vars",
@@ -200,7 +255,7 @@ mod tests {
             .iter()
             .map(|item| item["name"].as_str().expect("name"))
             .collect();
-        assert_eq!(prompt, ["git-review", "init", "retry"]);
+        assert_eq!(prompt, ["code-search", "git-review", "init", "retry"]);
     }
 
     /// 有参命中 → 详情块逐字（别名行仅在非空时出现）。

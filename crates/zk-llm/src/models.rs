@@ -73,6 +73,18 @@ pub const MODEL_CAPABILITIES_FILE_NAME: &str = "model-capabilities.json";
 /// 两个字符串字段为 [`Cow`]：内置表项恒为 `Borrowed`（const 可构造、零分配），
 /// 配置来源的覆盖项为 `Owned`——由此让「静态表项」与「配置项」共用同一记录
 /// 类型，无需把配置字符串 leak 成 `&'static`（热重载重复装配即内存泄漏）。
+/// Image transport required by the provider's model endpoint.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ImageInputMode {
+    /// URL or inline inputs are accepted.
+    #[default]
+    Url,
+    /// Every URL must be resolved to validated, bounded inline bytes before send.
+    Base64Only,
+}
+
+/// Validated capabilities and transport requirements for one model.
 #[derive(Clone, Debug, PartialEq)]
 #[expect(
     clippy::struct_excessive_bools,
@@ -93,6 +105,8 @@ pub struct ModelCapabilities {
     pub supports_thinking: bool,
     /// 是否支持图片输入。
     pub supports_images: bool,
+    /// Required wire representation for image input.
+    pub image_input_mode: ImageInputMode,
     /// 单请求图片数量上限。
     pub max_images: u32,
     /// 是否支持工具调用。
@@ -136,6 +150,7 @@ impl ModelCapabilities {
             supports_streaming,
             supports_thinking,
             supports_images,
+            image_input_mode: ImageInputMode::Url,
             max_images,
             supports_tool_use,
             cost_per_1k_input,
@@ -155,6 +170,7 @@ pub const DEFAULT_CAPABILITIES: ModelCapabilities = ModelCapabilities {
     supports_streaming: true,
     supports_thinking: false,
     supports_images: false,
+    image_input_mode: ImageInputMode::Url,
     max_images: 0,
     supports_tool_use: false,
     cost_per_1k_input: 0.0,
@@ -165,6 +181,136 @@ pub const DEFAULT_CAPABILITIES: ModelCapabilities = ModelCapabilities {
 
 /// 内置模型表（条目顺序与数值逐条对照旧 `ModelRegistry.BUILTIN_MODELS`）。
 pub static BUILTIN_MODELS: &[ModelCapabilities] = &[
+    // September 2026 additions. Existing IDs and user capability overrides remain valid.
+    ModelCapabilities::caps(
+        "deepseek-flash",
+        "DeepSeek V4.1 Flash",
+        384_000,
+        1_000_000,
+        true,
+        true,
+        true,
+        600,
+        true,
+        0.0003,
+        0.0012,
+    ),
+    ModelCapabilities::caps(
+        "deepseek-v4.1-flash",
+        "DeepSeek V4.1 Flash（百炼）",
+        393_216,
+        1_000_000,
+        true,
+        true,
+        true,
+        4,
+        true,
+        0.002,
+        0.008,
+    ),
+    {
+        let mut caps = ModelCapabilities::caps(
+            "bailian/glm-5.3",
+            "GLM-5.3（百炼订阅）",
+            65_536,
+            1_000_000,
+            true,
+            true,
+            false,
+            0,
+            true,
+            0.0,
+            0.0,
+        );
+        caps.supports_cache = true;
+        caps
+    },
+    {
+        let mut caps = ModelCapabilities::caps(
+            "k3",
+            "Kimi K3（订阅）",
+            131_072,
+            1_048_576,
+            true,
+            true,
+            true,
+            8,
+            true,
+            0.0,
+            0.0,
+        );
+        caps.image_input_mode = ImageInputMode::Base64Only;
+        caps
+    },
+    {
+        let mut caps = ModelCapabilities::caps(
+            "kimi-for-coding",
+            "Kimi K2.8 Preview（订阅）",
+            131_072,
+            1_048_576,
+            true,
+            true,
+            true,
+            8,
+            true,
+            0.0,
+            0.0,
+        );
+        caps.image_input_mode = ImageInputMode::Base64Only;
+        caps
+    },
+    ModelCapabilities::caps(
+        "stealth/union-alpha",
+        "Union Alpha（OpenRouter）",
+        131_072,
+        262_144,
+        true,
+        false,
+        true,
+        4,
+        true,
+        0.0,
+        0.0,
+    ),
+    ModelCapabilities::caps(
+        "openrouter/openai/gpt-6-astra",
+        "GPT-6 Astra（OpenRouter）",
+        128_000,
+        1_050_000,
+        true,
+        true,
+        true,
+        4,
+        true,
+        0.010,
+        0.050,
+    ),
+    ModelCapabilities::caps(
+        "openrouter/anthropic/claude-fable-5.1",
+        "Claude Fable 5.1（OpenRouter）",
+        128_000,
+        1_000_000,
+        true,
+        true,
+        true,
+        4,
+        true,
+        0.010,
+        0.050,
+    ),
+    ModelCapabilities::caps(
+        "anthropic/claude-fable-5.1",
+        "Claude Fable 5.1（ZenMux）",
+        64_000,
+        1_000_000,
+        true,
+        false,
+        true,
+        5,
+        true,
+        0.010,
+        0.050,
+    ),
     // OpenAI
     ModelCapabilities::caps(
         "gpt-5.6-sol",
@@ -208,7 +354,7 @@ pub static BUILTIN_MODELS: &[ModelCapabilities] = &[
     ),
     ModelCapabilities::caps(
         "claude-opus-4-8",
-        "Claude Opus 4.8",
+        "Claude Opus 4.8（旧版）",
         16384,
         200_000,
         true,
@@ -235,7 +381,7 @@ pub static BUILTIN_MODELS: &[ModelCapabilities] = &[
     // Anthropic via ZenMux（anthropic/ 前缀 = zenmux 中转，保守设 64K 输出）
     ModelCapabilities::caps(
         "anthropic/claude-opus-4.8",
-        "Claude Opus 4.8",
+        "Claude Opus 4.8（旧版）",
         64000,
         1_000_000,
         true,
@@ -248,7 +394,7 @@ pub static BUILTIN_MODELS: &[ModelCapabilities] = &[
     ),
     ModelCapabilities::caps(
         "anthropic/claude-fable-5",
-        "Claude Fable 5",
+        "Claude Fable 5（旧版）",
         64000,
         1_000_000,
         true,
@@ -317,7 +463,7 @@ pub static BUILTIN_MODELS: &[ModelCapabilities] = &[
     // 国产大模型
     ModelCapabilities::caps(
         "deepseek-v4-pro",
-        "DeepSeek V4 Pro",
+        "DeepSeek V4 Pro（旧版）",
         384_000,
         1_000_000,
         true,
@@ -330,7 +476,7 @@ pub static BUILTIN_MODELS: &[ModelCapabilities] = &[
     ),
     ModelCapabilities::caps(
         "deepseek-v4-flash",
-        "DeepSeek V4 Flash",
+        "DeepSeek V4 Flash（旧版）",
         384_000,
         1_000_000,
         true,
@@ -343,7 +489,7 @@ pub static BUILTIN_MODELS: &[ModelCapabilities] = &[
     ),
     ModelCapabilities::caps(
         "deepseek-v4-flash-vision-exp",
-        "DeepSeek V4 Flash Vision Exp",
+        "DeepSeek V4 Flash Vision Exp（旧版）",
         384_000,
         1_000_000,
         true,
@@ -386,7 +532,7 @@ pub static BUILTIN_MODELS: &[ModelCapabilities] = &[
     ),
     ModelCapabilities::caps(
         "kimi-k2.7-code",
-        "Kimi K2.7 Code",
+        "Kimi K2.7 Code（旧版）",
         16384,
         256_000,
         true,
@@ -399,7 +545,7 @@ pub static BUILTIN_MODELS: &[ModelCapabilities] = &[
     ),
     ModelCapabilities::caps(
         "moonshot-v1-128k",
-        "Moonshot V1 128K",
+        "Moonshot V1 128K（旧版）",
         8192,
         128_000,
         true,
@@ -464,7 +610,7 @@ pub static BUILTIN_MODELS: &[ModelCapabilities] = &[
     ),
     ModelCapabilities::caps(
         "qwen3.7-plus",
-        "Qwen 3.7 Plus",
+        "Qwen 3.7 Plus（旧版）",
         8192,
         1_000_000,
         true,
@@ -542,6 +688,8 @@ pub struct CapabilityOverride {
     pub supports_tool_use: Option<bool>,
     /// 图片输入支持覆盖（旧键名 `supportsVision`，落到 `supports_images`）。
     pub supports_vision: Option<bool>,
+    /// Image wire format override (`URL` or `BASE64_ONLY`).
+    pub image_input_mode: Option<ImageInputMode>,
     /// 流式支持覆盖（缺省取 base）。
     pub supports_streaming: Option<bool>,
 }
@@ -749,6 +897,7 @@ fn merge_override(
         supports_streaming: over.supports_streaming.unwrap_or(base.supports_streaming),
         supports_thinking: base.supports_thinking,
         supports_images: over.supports_vision.unwrap_or(base.supports_images),
+        image_input_mode: over.image_input_mode.unwrap_or(base.image_input_mode),
         max_images: base.max_images,
         supports_tool_use: over.supports_tool_use.unwrap_or(base.supports_tool_use),
         cost_per_1k_input: base.cost_per_1k_input,
@@ -861,6 +1010,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn subscription_model_capabilities_retain_wire_and_cache_contracts() {
+        let registry = ModelRegistry::builtin_only();
+        assert!(registry.capabilities("bailian/glm-5.3").supports_cache);
+        for model in ["k3", "kimi-for-coding"] {
+            assert_eq!(
+                registry.capabilities(model).image_input_mode,
+                ImageInputMode::Base64Only
+            );
+        }
+    }
+
+    #[test]
+    fn configured_image_input_mode_is_explicit_and_validated() {
+        let registry=ModelRegistry::from_json_str(r#"{"capabilities":{"private-vision":{"tokenCharRatio":3.5,"supportsVision":true,"imageInputMode":"BASE64_ONLY"}}}"#).unwrap();
+        assert_eq!(
+            registry.capabilities("private-vision").image_input_mode,
+            super::ImageInputMode::Base64Only
+        );
+        assert!(registry.capabilities("private-vision").supports_images);
+        assert!(ModelRegistry::from_json_str(r#"{"capabilities":{"private-vision":{"tokenCharRatio":3.5,"imageInputMode":"invalid"}}}"#).is_err());
+    }
+
+    #[test]
     fn kimi_k3_matches_legacy_builtin_entry() {
         // 旧 BUILTIN_MODELS：kimi-k3 = 131072 输出 / 1000000 窗口 / 0.002 · 0.012。
         let caps = capabilities_for("kimi-k3");
@@ -913,7 +1085,7 @@ mod tests {
             );
         }
         // 当前内置能力表包含 ZenMux GPT-6 Astra。
-        assert_eq!(BUILTIN_MODELS.len(), 28);
+        assert_eq!(BUILTIN_MODELS.len(), 37);
         // 键唯一。
         let mut ids: Vec<&str> = BUILTIN_MODELS
             .iter()
@@ -985,7 +1157,7 @@ mod tests {
         // 旧 ModelRegistry.java 新增三条：vision-exp 开图片输入（5 张上限）；
         // 0813 / 0731 为百炼渠道别名，参数与 pro / flash 本体逐字段一致。
         let vision = capabilities_for("deepseek-v4-flash-vision-exp");
-        assert_eq!(vision.display_name, "DeepSeek V4 Flash Vision Exp");
+        assert_eq!(vision.display_name, "DeepSeek V4 Flash Vision Exp（旧版）");
         assert_eq!(vision.max_output_tokens, 384_000);
         assert_eq!(vision.context_window, 1_000_000);
         assert!(vision.supports_streaming);

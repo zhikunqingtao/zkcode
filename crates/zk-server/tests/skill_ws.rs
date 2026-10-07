@@ -210,17 +210,17 @@ async fn skill_command_substitutes_declared_arguments() {
     let (addr, session_id, engine) = spawn_bound().await;
     let mut ws = connect_bound(addr, &session_id).await;
 
-    // `publish-oss.md` 声明 `arguments: file_path`，正文含 `{{file_path}}`。
-    send_json(&mut ws, &slash_frame("skill", "publish-oss   dist/app.zip")).await;
+    // `debug.md` 声明 `arguments: error_description`。
+    send_json(&mut ws, &slash_frame("skill", "debug   missing-module")).await;
     assert_eq!(next_json(&mut ws).await["resultType"], "prompt");
 
     let seen = wait_for_engine(&engine, 1).await;
     let ClientMessage::UserMessage { text, .. } = &seen[0] else {
         panic!("expected user_message injection");
     };
-    assert!(text.contains("dist/app.zip"), "argument not substituted");
+    assert!(text.contains("missing-module"), "argument not substituted");
     assert!(
-        !text.contains("{{file_path}}"),
+        !text.contains("{{error_description}}"),
         "placeholder left unreplaced"
     );
 }
@@ -289,6 +289,73 @@ async fn registered_slash_command_executes_locally() {
     assert!(engine.snapshot().is_empty());
 }
 
+/// `/plan` changes only the bound session's panel, including when permissions
+/// already use PLAN. The command never starts an engine run or changes mode.
+#[tokio::test]
+async fn plan_panel_events_are_session_scoped_and_do_not_change_permissions() {
+    let (addr, session_id, engine, db) = spawn_bound_with_db().await;
+    let first = db.get_session(&session_id).await.unwrap().unwrap();
+    let other = db
+        .create_session(&first.model, &first.working_dir)
+        .await
+        .unwrap();
+    let mut ws = connect_bound(addr, &session_id).await;
+    let mut other_ws = connect_bound(addr, &other.id).await;
+    for (args, mode, open, name) in [
+        (
+            "on Release plan",
+            "ACCEPT_EDITS",
+            true,
+            Some("Release plan"),
+        ),
+        ("off", "PLAN", false, None),
+        ("", "PLAN", true, Some("New Plan")),
+        ("onboarding", "DEFAULT", true, Some("onboarding")),
+    ] {
+        db.set_session_permission_mode(session_id.clone(), mode.into())
+            .await
+            .unwrap();
+        send_json(&mut ws, &slash_frame("plan", args)).await;
+        let panel = next_json(&mut ws).await;
+        assert_eq!(panel["type"], "plan_update");
+        assert_eq!(panel["_sessionId"], session_id);
+        assert_eq!(panel["isPlanMode"], open);
+        assert_eq!(
+            panel.get("planName").and_then(serde_json::Value::as_str),
+            name
+        );
+        assert_eq!(
+            panel
+                .get("planOverview")
+                .and_then(serde_json::Value::as_str),
+            open.then_some("")
+        );
+        let result = next_json(&mut ws).await;
+        assert_eq!(result["type"], "command_result");
+        assert!(
+            result["output"]
+                .as_str()
+                .unwrap()
+                .contains("Session permissions are unchanged.")
+        );
+        assert_eq!(next_json(&mut ws).await["type"], "session_list_updated");
+        assert_eq!(
+            db.session_permission_mode(&session_id).unwrap().as_deref(),
+            Some(mode)
+        );
+    }
+    // Binding the second session must not receive the first session's panel.
+    while let Ok(Some(frame)) =
+        tokio::time::timeout(Duration::from_millis(50), other_ws.next()).await
+    {
+        if let Message::Text(text) = frame.unwrap() {
+            let event: serde_json::Value = serde_json::from_str(text.as_str()).unwrap();
+            assert_eq!(event["type"], "session_list_updated");
+        }
+    }
+    assert!(engine.snapshot().is_empty());
+}
+
 /// 未注册命令 → `COMMAND_NOT_FOUND`（含模糊建议），同样不转发引擎。
 #[tokio::test]
 async fn unregistered_slash_command_reports_not_found() {
@@ -322,6 +389,7 @@ async fn registered_prompt_command_pushes_notice_and_injects_prompt() {
     db.append_message(
         &session_id,
         zk_db::NewMessage {
+            meta: None,
             role: zk_db::MessageRole::User,
             content: vec![zk_db::StoredBlock::Text {
                 text: "再跑一次构建".to_owned(),
@@ -378,4 +446,98 @@ async fn failing_prompt_command_reports_command_error_without_injection() {
     assert_eq!(frame["message"], "当前会话无消息，无法重试");
     assert_eq!(frame["retryable"], false);
     assert!(engine.snapshot().is_empty());
+}
+
+/// Real WS aliases resolve only against the bound session, including the legacy
+/// fix alias and shared global-disable preference after a project hot reload.
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn project_aliases_do_not_cross_ws_sessions_and_global_disable_applies_to_both() {
+    let root = std::env::temp_dir().join(format!("zk-skill-ws-{}", uuid::Uuid::new_v4()));
+    for project in ["a", "b"] {
+        let skills = root.join(project).join(".zkcode/skills");
+        std::fs::create_dir_all(&skills).unwrap();
+        std::fs::write(skills.join("fix.md"), format!("{project} project fix")).unwrap();
+    }
+    std::fs::write(
+        root.join("a/.zkcode/skills/private.md"),
+        "---\nname: my-private-alias\n---\nA private skill",
+    )
+    .unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    let state = AppState::new_with_ws(
+        zk_db::Db::open_in_memory().unwrap(),
+        Config::test_config(),
+        WsConfig::fast_for_tests(),
+    );
+    let engine = Arc::new(RecordingEngine::default());
+    state.hub.set_engine(engine.clone());
+    let a = state
+        .db
+        .create_session("m", root.join("a").to_str().unwrap())
+        .await
+        .unwrap();
+    let b = state
+        .db
+        .create_session("m", root.join("b").to_str().unwrap())
+        .await
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let router = build_router(state.clone());
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    let mut wa = connect_bound(addr, &a.id).await;
+    let mut wb = connect_bound(addr, &b.id).await;
+    for (index, ws, session, expected) in [
+        (0, &mut wa, &a.id, "a project fix"),
+        (1, &mut wb, &b.id, "b project fix"),
+    ] {
+        send_json(ws, &slash_frame("fix", "")).await;
+        let frame = next_json(ws).await;
+        assert_eq!(frame["resultType"], "prompt");
+        assert_eq!(frame["_sessionId"], *session);
+        let seen = wait_for_engine(&engine, index + 1).await;
+        let ClientMessage::UserMessage { text, .. } = &seen[index] else {
+            panic!("skill prompt expected")
+        };
+        assert_eq!(text, expected);
+    }
+    send_json(&mut wb, &slash_frame("my-private-alias", "")).await;
+    assert_eq!(next_json(&mut wb).await["code"], "COMMAND_NOT_FOUND");
+    assert_eq!(engine.snapshot().len(), 2);
+    send_json(&mut wa, &slash_frame("my-private-alias", "")).await;
+    assert_eq!(next_json(&mut wa).await["resultType"], "prompt");
+    let seen = wait_for_engine(&engine, 3).await;
+    let ClientMessage::UserMessage { text, .. } = &seen[2] else {
+        panic!("skill prompt expected")
+    };
+    assert_eq!(text, "A private skill");
+    state
+        .skill_catalog
+        .view(Some(&a.id), None)
+        .await
+        .unwrap()
+        .set_enabled("fix", false)
+        .await
+        .unwrap();
+    for ws in [&mut wa, &mut wb] {
+        send_json(ws, &slash_frame("fix", "")).await;
+        assert_eq!(next_json(ws).await["code"], "COMMAND_ERROR");
+    }
+    assert_eq!(
+        engine.snapshot().len(),
+        3,
+        "disabled aliases never invoke the engine"
+    );
+    drop((wa, wb));
+    server.abort();
+    let _ = server.await;
+    std::fs::remove_dir_all(root).unwrap();
 }

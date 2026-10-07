@@ -236,6 +236,11 @@ impl Db {
                 [&binding.root_run_id],
             )?;
             for criterion in criteria {
+                let source_text = crate::content::store_run_text(
+                    &tx,
+                    &binding.root_run_id,
+                    &criterion.source_text,
+                )?;
                 tx.execute(
                     "INSERT INTO run_acceptance_criteria \
                      (criterion_id,root_run_id,ordinal,criterion_type,source_text,status, \
@@ -246,7 +251,7 @@ impl Db {
                         criterion.root_run_id,
                         criterion.ordinal,
                         criterion.criterion_type,
-                        criterion.source_text,
+                        source_text,
                         criterion.status,
                         criterion.evidence_bundle_id,
                         criterion.created_at,
@@ -335,6 +340,8 @@ impl Db {
                         "acceptance criterion root run mismatch".into(),
                     ));
                 }
+                let source_text =
+                    crate::content::store_run_text(&tx, &root_run_id, &criterion.source_text)?;
                 tx.execute(
                     "INSERT INTO run_acceptance_criteria \
                      (criterion_id,root_run_id,ordinal,criterion_type,source_text,status, \
@@ -345,7 +352,7 @@ impl Db {
                         criterion.root_run_id,
                         criterion.ordinal,
                         criterion.criterion_type,
-                        criterion.source_text,
+                        source_text,
                         criterion.status,
                         criterion.evidence_bundle_id,
                         criterion.created_at,
@@ -469,7 +476,8 @@ impl Db {
         let started_at = started_at.to_owned();
         let upper_bound = upper_bound.to_owned();
         self.with_reader(move |conn| {
-            conn.query_row(
+            let tx = conn.transaction()?;
+            let explicit = tx.query_row(
                 "WITH RECURSIVE run_tree(id) AS ( \
                    SELECT id FROM run_envelopes WHERE id=?1 \
                    UNION ALL \
@@ -481,16 +489,30 @@ impl Db {
                           WHERE root_run_id=?1 AND result_message_id IS NOT NULL) \
                    OR EXISTS(SELECT 1 FROM artifact_manifests manifest \
                              JOIN run_tree tree ON tree.id=manifest.run_id) \
-                   OR EXISTS(SELECT 1 FROM messages \
-                             WHERE session_id=?2 AND role='assistant' \
-                               AND created_at>=?3 AND created_at<=?4 \
-                               AND content_json LIKE '%\"type\":\"text\"%') \
                    THEN 1 ELSE 0 END",
-                rusqlite::params![root_run_id, session_id, started_at, upper_bound],
+                [&root_run_id],
                 |row| row.get::<_, i64>(0),
-            )
-            .map(|count| count > 0)
-            .map_err(Into::into)
+            )? > 0;
+            if explicit {
+                return Ok(true);
+            }
+            let mut stmt = tx.prepare(
+                "SELECT content_json FROM messages WHERE session_id=?1 AND role='assistant' \
+                 AND created_at>=?2 AND created_at<=?3 ORDER BY created_at,id",
+            )?;
+            let mut rows = stmt.query(params![session_id, started_at, upper_bound])?;
+            while let Some(row) = rows.next()? {
+                let body = crate::content::load_row_text(&tx, &session_id, row.get(0)?)?;
+                let blocks: Value = serde_json::from_str(&body)?;
+                if blocks.as_array().is_some_and(|blocks| {
+                    blocks
+                        .iter()
+                        .any(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+                }) {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
         })
         .await
     }
@@ -531,7 +553,7 @@ fn load_workbench(
                 root_run_id: row.get(1)?,
                 ordinal: row.get(2)?,
                 criterion_type: row.get(3)?,
-                source_text: row.get(4)?,
+                source_text: crate::content::load_run_text(conn, root_run_id, row.get(4)?)?,
                 status: row.get(5)?,
                 evidence_bundle_id: row.get(6)?,
                 created_at: row.get(7)?,
@@ -566,7 +588,7 @@ where
              WHERE session_id=?1 AND parent_run_id IS NULL
              ORDER BY started_at DESC,id DESC LIMIT 1",
             [session_id],
-            map_envelope_row,
+            |row| map_envelope_row(conn, row),
         )
         .optional()?;
     // The first SELECT above anchors the deferred transaction. Tests use this
@@ -662,7 +684,7 @@ fn load_run_tree(conn: &Connection, root_run_id: &str) -> Result<Vec<RunEnvelope
          ORDER BY tree.depth,run.started_at,run.id",
     )?;
     statement
-        .query_map([root_run_id], map_envelope_row)?
+        .query_map([root_run_id], |row| map_envelope_row(conn, row))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(Into::into)
 }
@@ -678,7 +700,7 @@ fn load_task_tree(
     );
     let mut statement = conn.prepare(&sql)?;
     statement
-        .query_map([root_task_id], map_runtime_task)?
+        .query_map([root_task_id], |row| map_runtime_task(conn, row))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(Into::into)
 }
@@ -817,7 +839,11 @@ fn load_active_tools(
                 row.get::<_, String>(3)?,
                 row.get::<_, String>(4)?,
                 row.get::<_, String>(5)?,
-                row.get::<_, Option<String>>(6)?,
+                crate::content::load_optional(
+                    conn,
+                    &crate::content::run_session(conn, &row.get::<_, String>(2)?)?,
+                    row.get(6)?,
+                )?,
                 row.get::<_, String>(7)?,
                 row.get::<_, String>(8)?,
                 row.get::<_, Option<String>>(9)?,
@@ -1048,7 +1074,9 @@ fn load_previous_delivery(
              ORDER BY started_at DESC,id DESC LIMIT 200",
         )?;
         statement
-            .query_map(params![session_id, current_root_run_id], map_envelope_row)?
+            .query_map(params![session_id, current_root_run_id], |row| {
+                map_envelope_row(conn, row)
+            })?
             .collect::<Result<Vec<_>, _>>()?
     };
     for candidate in candidates {
@@ -1149,6 +1177,7 @@ mod tests {
             .append_message(
                 &session.id,
                 crate::NewMessage {
+                    meta: None,
                     role: crate::MessageRole::User,
                     content: vec![crate::StoredBlock::Text {
                         text: "committed after snapshot".to_owned(),
@@ -1232,6 +1261,7 @@ mod tests {
             .append_message(
                 &session.id,
                 crate::NewMessage {
+                    meta: None,
                     role: crate::MessageRole::User,
                     content: vec![crate::StoredBlock::Text {
                         text: "ship".into(),
@@ -1283,6 +1313,7 @@ mod tests {
             .append_message(
                 &session.id,
                 crate::NewMessage {
+                    meta: None,
                     role: crate::MessageRole::Assistant,
                     content: vec![crate::StoredBlock::Text {
                         text: "shipped".into(),
@@ -1329,6 +1360,7 @@ mod tests {
                 .append_message(
                     &session.id,
                     crate::NewMessage {
+                        meta: None,
                         role: crate::MessageRole::User,
                         content: vec![crate::StoredBlock::Text {
                             text: "persist delivery".into(),

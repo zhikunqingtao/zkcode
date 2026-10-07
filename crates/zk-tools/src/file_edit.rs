@@ -20,10 +20,8 @@
 //!   `lastEditor = null`）→ `checkBeforeWrite(expectedHash)`」，等价于
 //!   「重读磁盘并与刚读到的内容比对」，故本实现自包含还原该语义；也因此
 //!   `"\nLast editor: …"` 尾行在旧实现中恒不出现，本实现不产出该行。
-//! - 旧 `countMatches` 在 `search` 为空串时 `idx += 0` 死循环（`old_string`
-//!   为空且文件已存在即触发）。本实现按「空串在每个字符边界匹配一次」计数
-//!   （非空文件 → 多匹配 → `FILE_EDIT_MATCH_AMBIGUOUS` 终止；空文件 → 单
-//!   匹配 → 在开头插入），错误码同族、无新增码，且不会挂死。
+//! - Existing-file empty matches are rejected before edits; creating an absent file
+//!   with an empty `old_string` remains supported. UI diff previews are bounded.
 //! - 容错匹配策略 2 的「归一化后反查原文子串」旧实现按 UTF-16 code unit
 //!   取下标，本实现按 Unicode 标量取下标（弯引号均为 BMP 字符，两者对 BMP
 //!   文本完全一致；仅当正文含星光平面字符时下标口径不同）。
@@ -34,11 +32,26 @@ use futures::future::BoxFuture;
 use serde_json::json;
 use similar::TextDiff;
 
-use crate::atomic::{ExpectedOldState, WriteOutcome, sha256_hex, write_checked_authorized};
+use crate::atomic::{
+    ExpectedOldState, WriteOutcome, sha256_hex, write_checked_authorized,
+    write_checked_bytes_authorized,
+};
 use crate::file_state::{self, session_key};
 use crate::input::{bool_or, failure, required_str, required_str_allow_empty, resolve_path};
 use crate::snapshot::{MAX_SNAPSHOT_BYTES, SnapshotRequest, SnapshotSink};
 use crate::tool::{FileArtifactReceipt, Tool, ToolContext, ToolOutput};
+
+/// Bound only the display preview; the applied edit and full metadata stay complete.
+fn diff_preview(diff: &str) -> (&str, bool) {
+    let mut end = 0;
+    for line in diff.split_inclusive('\n').take(500) {
+        if end + line.len() > 64 * 1024 {
+            break;
+        }
+        end += line.len();
+    }
+    (&diff[..end], end < diff.len())
+}
 
 /// 可编辑文件大小上限（旧 `MAX_EDIT_FILE_SIZE = 1024L * 1024 * 1024`）。
 pub const MAX_EDIT_FILE_BYTES: u64 = 1024 * 1024 * 1024;
@@ -187,6 +200,13 @@ impl EditFileTool {
             return failure("FILE_NOT_FOUND", format!("{file_path} is a directory"));
         }
 
+        if old_string.is_empty() {
+            return failure(
+                "FILE_EDIT_EMPTY_MATCH",
+                "old_string must not be empty for an existing file; use Write for an empty file.",
+            );
+        }
+
         // Every overwrite is authorized by the digest emitted by a complete
         // physical Read. The digest, not only mtime, survives same-tick races.
         let store = file_state::global();
@@ -221,52 +241,40 @@ impl EditFileTool {
             session,
             ctx,
         } = request;
-        let file_content = match read_edit_target(path, expected_hash).await {
-            Ok(content) => content,
+        let format = file_state::global().read_text_format(session, file_path);
+        let (file_content, original_bytes) =
+            match read_edit_target(path, expected_hash, format).await {
+                Ok(content) => content,
+                Err(output) => return output,
+            };
+
+        let (new_content, match_count) = match replacement_text(
+            file_path,
+            &file_content,
+            old_string,
+            new_string,
+            replace_all,
+        ) {
+            Ok(replacement) => replacement,
             Err(output) => return output,
         };
 
-        let Some(actual_old) = find_actual_string(&file_content, old_string) else {
-            return failure(
-                "FILE_EDIT_MATCH_NOT_FOUND",
-                format!(
-                    "No match found for the specified old_string in {file_path}.\n{MATCH_NOT_FOUND_HINT}"
-                ),
-            );
-        };
-        let match_count = count_matches(&file_content, &actual_old);
-        if match_count > 1 && !replace_all {
-            return failure(
-                "FILE_EDIT_MATCH_AMBIGUOUS",
-                format!(
-                    "Found {match_count} matches. \
-                     Set replace_all=true or provide more context to uniquely identify."
-                ),
-            );
-        }
-        let new_content = if replace_all {
-            file_content.replace(&actual_old, new_string)
-        } else {
-            file_content.replacen(actual_old.as_str(), new_string, 1)
-        };
-
-        // 写前 SHA-256 冲突检测（Conflict-Abort：重读磁盘与刚读到的内容比对）。
-        if let Some(current_hash) = current_disk_hash(path).await
-            && current_hash != expected_hash
-        {
-            return failure(
-                "FILE_CONFLICT",
-                format!(
-                    "文件自上次读取后已被修改，请重新读取文件后再编辑。\n\
-                     Expected hash: {expected_hash}\n\
-                     Current hash: {current_hash}"
-                ),
-            );
+        if let Err(output) = check_edit_version(path, expected_hash).await {
+            return output;
         }
 
-        let outcome = write_checked_authorized(
+        let new_bytes = match format.encode(&new_content) {
+            Ok(bytes) => bytes,
+            Err(code) => {
+                return failure(
+                    code,
+                    "New text cannot be represented in the file's observed encoding",
+                );
+            }
+        };
+        let outcome = write_checked_bytes_authorized(
             path,
-            &new_content,
+            &new_bytes,
             &ExpectedOldState::sha256(expected_hash),
             ctx.authorized_write_path(),
         )
@@ -275,25 +283,41 @@ impl EditFileTool {
             return write_failure(&outcome);
         }
 
-        let (history_recorded, history_error) = self.capture(ctx, file_path, &file_content).await;
+        let (history_recorded, history_error) = self
+            .capture(
+                ctx,
+                file_path,
+                &file_content,
+                (format != crate::text_encoding::TextFormat::default())
+                    .then_some(original_bytes.as_slice()),
+            )
+            .await;
         file_state::global().mark_modified(session, file_path);
         let diff = unified_diff(file_path, &file_content, &new_content);
         let artifact = FileArtifactReceipt::capture(
             path,
             "modified",
             outcome.new_hash.as_deref(),
-            new_content.len(),
+            new_bytes.len(),
         )
         .await;
         if artifact.is_none() {
-            tracing::error!(path = %file_path, "applied Edit could not produce an artifact receipt");
+            tracing::error!(
+                tool = "Edit",
+                code = "FILE_ARTIFACT_RECEIPT_UNAVAILABLE",
+                "applied file operation could not produce an artifact receipt"
+            );
         }
+        let (display_diff, truncated) = diff_preview(&diff);
         let mut output = ToolOutput::ok(format!("Edited: {file_path}"));
         output.metadata = Some(json!({
+            "diff": diff,
             "structuredResult": {
+                "schema": "edit-diff/v1",
                 "type": "update",
                 "filePath": file_path,
-                "diff": diff,
+                "diff": display_diff,
+                "truncated": truncated,
                 "sealedHash": outcome.new_hash,
                 "historyRecorded": history_recorded,
                 "historyErrorCode": history_error,
@@ -308,12 +332,25 @@ impl EditFileTool {
     /// post-commit 快照（旧 `trackAppliedEdit(filePath, fileContent, …, "edit")`
     /// 的错误码逐条对齐：无旧内容 / 超 10 MiB → `HISTORY_SNAPSHOT_NOT_APPLICABLE`，
     /// 落库异常 → `HISTORY_SNAPSHOT_PERSIST_FAILED`）。
-    async fn capture(&self, ctx: &ToolContext, path: &str, original: &str) -> (bool, &'static str) {
+    async fn capture(
+        &self,
+        ctx: &ToolContext,
+        path: &str,
+        original: &str,
+        original_bytes: Option<&[u8]>,
+    ) -> (bool, &'static str) {
         let (Some(sink), Some(session_id)) = (self.sink.as_ref(), ctx.session_id()) else {
             return (false, "HISTORY_SNAPSHOT_NOT_APPLICABLE");
         };
-        if original.len() > MAX_SNAPSHOT_BYTES {
-            tracing::warn!(path, bytes = original.len(), "snapshot skipped: too large");
+        if original.len() > MAX_SNAPSHOT_BYTES
+            || original_bytes.is_some_and(|bytes| bytes.len() > MAX_SNAPSHOT_BYTES)
+        {
+            tracing::warn!(
+                tool = "Edit",
+                code = "HISTORY_SNAPSHOT_TOO_LARGE",
+                bytes = original.len(),
+                "snapshot skipped"
+            );
             return (false, "HISTORY_SNAPSHOT_NOT_APPLICABLE");
         }
         let request = SnapshotRequest {
@@ -321,14 +358,18 @@ impl EditFileTool {
             message_id: ctx.tool_use_id().map(str::to_owned),
             file_path: path.to_owned(),
             content: original.to_owned(),
+            original_bytes: original_bytes.map(<[u8]>::to_vec),
             operation: SNAPSHOT_OPERATION.to_owned(),
         };
-        match sink.capture(request).await {
-            Ok(()) => (true, ""),
-            Err(error) => {
-                tracing::warn!(path, %error, "snapshot persist failed");
-                (false, "HISTORY_SNAPSHOT_PERSIST_FAILED")
-            }
+        if sink.capture(request).await.is_ok() {
+            (true, "")
+        } else {
+            tracing::warn!(
+                tool = "Edit",
+                code = "HISTORY_SNAPSHOT_PERSIST_FAILED",
+                "snapshot persist failed"
+            );
+            (false, "HISTORY_SNAPSHOT_PERSIST_FAILED")
         }
     }
 }
@@ -358,7 +399,8 @@ struct EditRequest<'a> {
 async fn read_edit_target(
     path: &std::path::Path,
     expected_hash: &str,
-) -> Result<String, ToolOutput> {
+    format: crate::text_encoding::TextFormat,
+) -> Result<(String, Vec<u8>), ToolOutput> {
     match tokio::fs::metadata(path).await {
         Ok(metadata) if metadata.len() > MAX_EDIT_FILE_BYTES => {
             return Err(failure(
@@ -381,9 +423,12 @@ async fn read_edit_target(
                 format!("Failed to edit file: {error}"),
             ))
         },
-        |bytes| Ok(String::from_utf8_lossy(&bytes).into_owned()),
+        Ok,
     )?;
-    let current_hash = sha256_hex(file_content.as_bytes());
+    if file_content.len() as u64 > MAX_EDIT_FILE_BYTES {
+        return Err(failure("FILE_TOO_LARGE", "File grew beyond the edit limit"));
+    }
+    let current_hash = sha256_hex(&file_content);
     if current_hash != expected_hash {
         return Err(failure(
             "FILE_VERSION_CONFLICT",
@@ -394,7 +439,15 @@ async fn read_edit_target(
             ),
         ));
     }
-    Ok(file_content)
+    let decoded = crate::text_encoding::decode(&file_content, Some(format.encoding.name()))
+        .map_err(|code| failure(code, "Existing file cannot be decoded without loss"))?;
+    if !decoded.reversible || decoded.format != format {
+        return Err(failure(
+            "FILE_ENCODING_NOT_REVERSIBLE",
+            "Re-read using the actual file encoding before editing",
+        ));
+    }
+    Ok((decoded.text, file_content))
 }
 
 /// 「文件不存在 + `old_string` 为空」→ 新建文件（旧 `ExpectedOldState.absent()`）。
@@ -424,7 +477,11 @@ async fn create_file(
     )
     .await;
     if artifact.is_none() {
-        tracing::error!(path = %file_path, "applied Edit could not produce an artifact receipt");
+        tracing::error!(
+            tool = "Edit",
+            code = "FILE_ARTIFACT_RECEIPT_UNAVAILABLE",
+            "applied file operation could not produce an artifact receipt"
+        );
     }
     let mut output = ToolOutput::ok(format!("Created: {file_path}"));
     output.metadata = Some(json!({
@@ -591,6 +648,52 @@ fn normalize_quotes(text: &str) -> String {
         .collect()
 }
 
+/// Recheck after matching, before the atomic writer performs its final CAS.
+async fn check_edit_version(path: &std::path::Path, expected_hash: &str) -> Result<(), ToolOutput> {
+    if let Some(current_hash) = current_disk_hash(path).await
+        && current_hash != expected_hash
+    {
+        return Err(failure(
+            "FILE_CONFLICT",
+            format!(
+                "文件自上次读取后已被修改，请重新读取文件后再编辑。\nExpected hash: {expected_hash}\nCurrent hash: {current_hash}"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn replacement_text(
+    file_path: &str,
+    content: &str,
+    old: &str,
+    new: &str,
+    replace_all: bool,
+) -> Result<(String, usize), ToolOutput> {
+    let actual = find_actual_string(content, old).ok_or_else(|| failure("FILE_EDIT_MATCH_NOT_FOUND", format!("No match found for the specified old_string in {file_path}.\n{MATCH_NOT_FOUND_HINT}")))?;
+    if actual.is_empty() {
+        return Err(failure(
+            "FILE_EDIT_EMPTY_MATCH",
+            "old_string resolved to an empty match after normalization; re-read the file.",
+        ));
+    }
+    let count = count_matches(content, &actual);
+    if count > 1 && !replace_all {
+        return Err(failure(
+            "FILE_EDIT_MATCH_AMBIGUOUS",
+            format!(
+                "Found {count} matches. Set replace_all=true or provide more context to uniquely identify."
+            ),
+        ));
+    }
+    let next = if replace_all {
+        content.replace(&actual, new)
+    } else {
+        content.replacen(actual.as_str(), new, 1)
+    };
+    Ok((next, count))
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
@@ -636,6 +739,30 @@ mod tests {
         let display = path.display().to_string();
         file_state::global().mark_read(session, &display, body, None, None, false);
         display
+    }
+
+    #[test]
+    fn display_diff_is_bounded_without_cutting_unicode_or_long_lines() {
+        let diff = "中文変更\n".repeat(600);
+        let (preview, truncated) = diff_preview(&diff);
+        assert!(truncated);
+        assert_eq!(preview.lines().count(), 500);
+        let huge = "字".repeat(30_000);
+        assert_eq!(diff_preview(&huge), ("", true));
+    }
+
+    #[tokio::test]
+    async fn existing_file_empty_match_never_inserts_even_with_replace_all() {
+        let session = "edit-empty-existing";
+        let path = seed("empty-existing", "empty.txt", "", session);
+        let output = EditFileTool::new()
+            .execute(
+                json!({"file_path":path,"old_string":"","new_string":"oops","replace_all":true}),
+                ctx(session),
+            )
+            .await;
+        assert!(output.content.starts_with("FILE_EDIT_EMPTY_MATCH"));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "");
     }
 
     #[tokio::test]

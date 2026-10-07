@@ -28,13 +28,15 @@ pub struct SnapshotRequest {
     pub file_path: String,
     /// **写前**内容（旧 `originalContent`）。
     pub content: String,
+    /// Original non-UTF-8/BOM bytes, for exact encoding-preserving rewind.
+    pub original_bytes: Option<Vec<u8>>,
     /// 操作名（旧 `FileWriteTool` 传 `"write"`）。
     pub operation: String,
 }
 
 /// 快照落库出口（组合根实现；实现方须自担错误处理，仅回报成败）。
 pub trait SnapshotSink: Send + Sync {
-    /// 落一条写前快照；`Err` 携带可记日志的原因（调用方仅告警不阻断）。
+    /// 落一条写前快照；`Err` 可能包含原始文件正文或路径，不得直接写入日志。
     fn capture(&self, request: SnapshotRequest) -> BoxFuture<'_, Result<(), String>>;
 }
 
@@ -70,6 +72,7 @@ mod tests {
             message_id: Some("call-1".to_owned()),
             file_path: "/tmp/a.txt".to_owned(),
             content: "old".to_owned(),
+            original_bytes: None,
             operation: "write".to_owned(),
         };
         sink.capture(request.clone()).await.expect("captured");

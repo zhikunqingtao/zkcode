@@ -49,3 +49,4 @@ mod uds;
 pub use client::{CapabilityStatus, Correlation, PythonClient};
 pub use sidecar::{ProcessState, PythonSidecar, SidecarConfig};
 pub use tools::{BrowserVerifyJourneyTool, CodeIntelTool, GitEnhancedTool, WebBrowserTool};
+pub(crate) use uds::TransportError;

@@ -32,6 +32,10 @@ pub struct FileSnapshotRecord {
     pub file_path: String,
     /// 写前内容（UTF-8 文本；旧系统同样以字符串存入 BLOB 列）。
     pub content: String,
+    /// Exact physical bytes for non-UTF-8/BOM files. Kept out of UI JSON;
+    /// authorized rewind uses these bytes rather than re-encoding a preview.
+    #[serde(skip)]
+    pub original_bytes: Option<Vec<u8>>,
     /// 操作名（`"write"` / `"edit"` / `"rewind"`）。
     pub operation: String,
     /// 落库时刻（RFC 3339，恒 6 位微秒，见 `time` 模块）。
@@ -40,20 +44,44 @@ pub struct FileSnapshotRecord {
 
 /// 快照行 SELECT（列清单与 [`map_snapshot_row`] 互锁）。
 const SNAPSHOT_SELECT: &str = "SELECT id, session_id, message_id, file_path, content, \
-                               operation, created_at FROM file_snapshots";
+                               original_bytes, operation, created_at FROM file_snapshots";
 
 /// 整行映射（`content` 列为 BLOB，UTF-8 解码失败时回落有损转换——
 /// 快照仅用于展示与回滚预览，不因个别坏字节整条失败）。
-fn map_snapshot_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileSnapshotRecord> {
+fn map_snapshot_row(
+    conn: &rusqlite::Connection,
+    memory: &crate::content::MemoryContentStore,
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<FileSnapshotRecord> {
     let content: Option<Vec<u8>> = row.get("content")?;
+    let session_id: String = row.get("session_id")?;
+    let content = content.map_or_else(String::new, |bytes| {
+        String::from_utf8_lossy(&bytes).into_owned()
+    });
+    let content = crate::content::load_row_text(conn, &session_id, content)?;
+    let original_bytes: Option<Vec<u8>> = row.get("original_bytes")?;
+    let original_bytes = original_bytes
+        .map(|bytes| -> Result<Vec<u8>, DbError> {
+            if crate::content::session_retention(conn, &session_id)?
+                == crate::content::ContentRetention::Ephemeral
+            {
+                let reference = serde_json::from_slice(&bytes)?;
+                Ok(memory.get(&session_id, &reference)?.to_vec())
+            } else {
+                Ok(bytes)
+            }
+        })
+        .transpose()
+        .map_err(|error| {
+            rusqlite::Error::UserFunctionError(Box::new(std::io::Error::other(error.to_string())))
+        })?;
     Ok(FileSnapshotRecord {
         id: row.get("id")?,
-        session_id: row.get("session_id")?,
+        session_id,
         message_id: row.get("message_id")?,
         file_path: row.get("file_path")?,
-        content: content.map_or_else(String::new, |bytes| {
-            String::from_utf8_lossy(&bytes).into_owned()
-        }),
+        content,
+        original_bytes,
         operation: row.get("operation")?,
         created_at: row.get("created_at")?,
     })
@@ -77,18 +105,45 @@ impl crate::Db {
         content: &str,
         operation: &str,
     ) -> Result<String, DbError> {
+        self.insert_file_snapshot_with_bytes(
+            session_id, message_id, file_path, content, operation, None,
+        )
+        .await
+    }
+
+    /// Preserve optional original bytes alongside the decoded preview for lossless undo.
+    ///
+    /// # Errors
+    /// Invalid sessions, expired RAM scope, capacity exhaustion and `SQLite` failures propagate.
+    pub async fn insert_file_snapshot_with_bytes(
+        &self,
+        session_id: &str,
+        message_id: Option<&str>,
+        file_path: &str,
+        content: &str,
+        operation: &str,
+        original_bytes: Option<&[u8]>,
+    ) -> Result<String, DbError> {
         let session_id = session_id.to_owned();
         let message_id = message_id.map(str::to_owned);
         let file_path = file_path.to_owned();
         let content = content.to_owned();
         let operation = operation.to_owned();
+        let original_bytes = original_bytes.map(<[u8]>::to_vec);
+        let memory = self.memory_content_store();
         self.with_writer(move |conn| {
             let id = uuid::Uuid::new_v4().to_string();
             let created_at = format_rfc3339_micros(now_millis());
+            let content = crate::content::store_text(conn, &session_id, &content)?;
+            let original_bytes = original_bytes.map(|bytes| -> Result<Vec<u8>, DbError> {
+                if crate::content::session_retention(conn, &session_id)? == crate::content::ContentRetention::Ephemeral {
+                    Ok(serde_json::to_vec(&memory.put(&session_id, &bytes)?)?)
+                } else {Ok(bytes)}
+            }).transpose()?;
             conn.execute(
                 "INSERT INTO file_snapshots
-                     (id, session_id, message_id, file_path, content, operation, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                     (id, session_id, message_id, file_path, content, operation, created_at, original_bytes)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     id,
                     session_id,
@@ -96,7 +151,8 @@ impl crate::Db {
                     file_path,
                     content.as_bytes(),
                     operation,
-                    created_at
+                    created_at,
+                    original_bytes
                 ],
             )
             .map_err(|err| map_fk_violation(&session_id, err))?;
@@ -119,10 +175,13 @@ impl crate::Db {
         session_id: &str,
     ) -> Result<Vec<FileSnapshotRecord>, DbError> {
         let session_id = session_id.to_owned();
+        let memory = self.memory_content_store();
         self.with_reader(move |conn| {
             let sql = format!("{SNAPSHOT_SELECT} WHERE session_id = ?1 ORDER BY created_at, rowid");
             let mut stmt = conn.prepare(&sql)?;
-            let rows = stmt.query_map(params![session_id], map_snapshot_row)?;
+            let rows = stmt.query_map(params![session_id], |row| {
+                map_snapshot_row(conn, &memory, row)
+            })?;
             let mut out = Vec::new();
             for row in rows {
                 out.push(row?);
@@ -157,13 +216,16 @@ impl crate::Db {
     ) -> Result<Vec<FileSnapshotRecord>, DbError> {
         let session_id = session_id.to_owned();
         let message_id = message_id.to_owned();
+        let memory = self.memory_content_store();
         self.with_reader(move |conn| {
             let sql = format!(
                 "{SNAPSHOT_SELECT} WHERE session_id = ?1 AND message_id = ?2 \
                  ORDER BY created_at, rowid"
             );
             let mut stmt = conn.prepare(&sql)?;
-            let rows = stmt.query_map(params![session_id, message_id], map_snapshot_row)?;
+            let rows = stmt.query_map(params![session_id, message_id], |row| {
+                map_snapshot_row(conn, &memory, row)
+            })?;
             let mut out = Vec::new();
             for row in rows {
                 out.push(row?);
@@ -185,13 +247,16 @@ impl crate::Db {
     ) -> Result<Option<FileSnapshotRecord>, DbError> {
         let session_id = session_id.to_owned();
         let file_path = file_path.to_owned();
+        let memory = self.memory_content_store();
         self.with_reader(move |conn| {
             let sql = format!(
                 "{SNAPSHOT_SELECT} WHERE session_id = ?1 AND file_path = ?2 \
                  ORDER BY created_at DESC, rowid DESC LIMIT 1"
             );
             Ok(conn
-                .query_row(&sql, params![session_id, file_path], map_snapshot_row)
+                .query_row(&sql, params![session_id, file_path], |row| {
+                    map_snapshot_row(conn, &memory, row)
+                })
                 .optional()?)
         })
         .await

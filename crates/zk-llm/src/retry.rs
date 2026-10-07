@@ -18,10 +18,8 @@
 //!
 //! # 与旧实现的差异（留痕）
 //!
-//! - 旧 529 分支还会调 `ModelTierService.triggerCooldown` 触发模型冷却——本
-//!   crate 无模型分层组件，该副作用无对应面（限额与源分类语义均已移植：
-//!   见 [`FOREGROUND_529_RETRY_SOURCES`] 与 [`RetryPolicy::should_retry_529`]，
-//!   注册表按前台源 [`FOREGROUND_QUERY_SOURCE`] 装配）；
+//! - 529 模型冷却由注册表按提供商和实际模型承接；保留当前前台有界重试，
+//!   后续逻辑请求仅在已配置候选之间避开过载模型，不新增后台探测费用。
 //! - 旧 `isRetryableError` 三条判定中，`isRetryable()` 标志与
 //!   `statusCode >= 500` 已如实移植（[`RetryPolicy::is_retryable_error`]）；
 //!   第三条 `errorType ∈ {overloaded_error, rate_limit_error, api_error}`
@@ -371,6 +369,13 @@ impl RetryState {
         };
         self.attempt = self.attempt.saturating_add(1);
 
+        if !error.is_retryable() {
+            return None;
+        }
+        if matches!(error, ProviderError::Connect { .. }) {
+            return (self.attempt < 3.min(self.policy.max_retries)).then_some(2000);
+        }
+
         if status == Some(CAPACITY_LIMIT_STATUS) {
             // 旧实现此处还触发模型冷却（ModelTierService）——本 crate 无对应
             // 组件，源分类 + 限额语义如实保留（见模块文档差异留痕）。
@@ -467,6 +472,29 @@ mod tests {
 
     fn http(status: u16) -> ProviderError {
         ProviderError::http(status, format!("HTTP {status}"), None)
+    }
+
+    #[test]
+    fn connect_failures_have_three_attempts_and_suppression_always_wins() {
+        let mut state = RetryState::new(RetryPolicy::default(), "qwen3.8-max-0902");
+        let error = ProviderError::Connect {
+            message: "connection refused".into(),
+        };
+        assert_eq!(state.on_error(&error), Some(2000));
+        assert_eq!(state.on_error(&error), Some(2000));
+        assert_eq!(state.on_error(&error), None);
+        for status in [503, 529] {
+            let mut state = RetryState::new(RetryPolicy::default(), "qwen3.8-max-0902");
+            assert_eq!(
+                state.on_error(&ProviderError::Http {
+                    status,
+                    message: "suppressed".into(),
+                    retry_after_ms: None,
+                    retryable: false
+                }),
+                None
+            );
+        }
     }
 
     #[test]

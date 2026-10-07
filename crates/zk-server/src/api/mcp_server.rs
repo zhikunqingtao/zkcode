@@ -1,5 +1,7 @@
 //! Reverse MCP JSON-RPC server. All tool calls share the production registry and admission.
 
+mod external;
+
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::sync::{Arc, LazyLock, Mutex};
@@ -19,8 +21,8 @@ use zk_db::{
     NewToolInvocation, TaskStatus, ToolInvocationRecord, ToolInvocationStatus,
 };
 use zk_engine::ObservabilityEvent;
+use zk_engine::PreHookDecision;
 use zk_engine::admission::{Admission, AdmissionRequest, ToolAdmission};
-use zk_engine::{HookContext, PreHookDecision};
 use zk_tools::{CallEnv, ExecutionResourceOwner, ToolCleanupStatus, ToolEvent, ToolOutput};
 
 use crate::authz::EngineAdmission;
@@ -41,6 +43,11 @@ pub(crate) async fn handle(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    if headers.contains_key("x-mcp-context-token")
+        && state.mcp_contexts.authorized(&headers).is_err()
+    {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     if body.len() > MAX_REQUEST_BYTES {
         return json_response(rpc_error(
             &Value::Null,
@@ -70,8 +77,15 @@ pub(crate) async fn handle(
         return notification(&headers, method, &params);
     }
     let id = id.unwrap_or(Value::Null);
-    let Ok(permit) = CONCURRENCY.try_acquire() else {
-        return json_response(rpc_error(&id, -32001, "MCP server is busy", None));
+    // Long permission waits must not consume the control-plane capacity used
+    // by heartbeat/list/cancel to maintain the owned context.
+    let permit = if matches!(method, "tools/call" | "resources/read") {
+        match CONCURRENCY.try_acquire() {
+            Ok(permit) => Some(permit),
+            Err(_) => return json_response(rpc_error(&id, -32001, "MCP server is busy", None)),
+        }
+    } else {
+        None
     };
     let (request_cancel, _request_guard) = if method == "tools/call" {
         match register_in_flight_request(&headers, &id) {
@@ -122,6 +136,12 @@ struct InFlightRequestGuard {
     key: String,
     generation: String,
     cancel: CancellationToken,
+}
+struct AbortWatcher(tokio::task::JoinHandle<()>);
+impl Drop for AbortWatcher {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 impl Drop for InFlightRequestGuard {
@@ -192,6 +212,54 @@ async fn dispatch(
     params: Value,
     request_cancel: CancellationToken,
 ) -> Result<Value, RpcFailure> {
+    let external = if headers.contains_key("x-mcp-context-token") {
+        Some(
+            state
+                .mcp_contexts
+                .authorized(headers)
+                .map_err(|_| RpcFailure::new(-32003, "MCP_CONTEXT_INVALID"))?,
+        )
+    } else {
+        None
+    };
+    if let Some(context) = external.as_ref() {
+        super::mcp_context::refresh_capabilities(state, context)
+            .await
+            .map_err(|_| RpcFailure::new(-32003, "MCP_CONTEXT_INVALID"))?;
+    }
+    let directory = if let Some(context) = external.as_ref() {
+        state
+            .run_tool_scopes
+            .directory(&context.run_id)
+            .ok_or_else(|| RpcFailure::new(-32003, "MCP_RUN_SCOPE_UNAVAILABLE"))?
+    } else if method == "tools/list" && headers.contains_key("x-run-id") {
+        let session = required_header(headers, "x-session-id")
+            .ok_or_else(|| RpcFailure::new(-32003, "MCP_TOOL_CONTEXT_REQUIRED: sessionId"))?;
+        let run = required_header(headers, "x-run-id")
+            .ok_or_else(|| RpcFailure::new(-32003, "MCP_TOOL_CONTEXT_REQUIRED: runId"))?;
+        let stored = state
+            .db
+            .find_run_by_id(&run)
+            .await
+            .map_err(|_| RpcFailure::new(-32003, "MCP_TOOL_CONTEXT_UNAVAILABLE"))?
+            .filter(|stored| stored.session_id == session)
+            .ok_or_else(|| RpcFailure::new(-32003, "MCP_TOOL_CONTEXT_INVALID"))?;
+        match state.run_tool_scopes.directory(&stored.id) {
+            Some(directory) => directory,
+            None if state
+                .db
+                .session_retention(&session)
+                .await
+                .map_err(|_| RpcFailure::new(-32003, "MCP_CONTENT_POLICY_UNAVAILABLE"))?
+                == zk_db::content::ContentRetention::Ephemeral =>
+            {
+                return Err(RpcFailure::new(-32003, "EPHEMERAL_RUN_SCOPE_REQUIRED"));
+            }
+            None => state.tools(),
+        }
+    } else {
+        state.tools()
+    };
     match method {
         "initialize" => Ok(json!({
             "protocolVersion": "2025-03-26",
@@ -201,12 +269,14 @@ async fn dispatch(
             },
             "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION}
         })),
-        "ping" => Ok(json!({})),
+        "ping" => Ok(
+            json!({"capabilityEpoch":external.as_ref().map_or(0, |context| context.ceiling_epoch())}),
+        ),
         "tools/list" => Ok(json!({
-            "tools": state
-                .tools()
-                .specs()
-                .into_iter()
+            "tools": directory.names().into_iter()
+                .filter_map(|name| directory.get(&name))
+                .filter(|tool| external.as_ref().map_or_else(|| !requires_engine_projection(tool.name(), Some(tool.as_ref())), |context| context.allows_tool(tool.name(), tool.as_ref())))
+                .map(|tool| tool.spec())
                 .map(|spec| json!({
                     "name": spec.name,
                     "description": spec.description,
@@ -215,6 +285,11 @@ async fn dispatch(
                 .collect::<Vec<_>>()
         })),
         "tools/call" => call_tool(state, headers, &params, request_cancel).await,
+        "resources/list" if external.is_some() => Ok(json!({"resources":[]})),
+        "resources/read" if external.is_some() => Err(RpcFailure::new(
+            -32003,
+            "Use Read with the authorized project workspace",
+        )),
         "resources/list" => list_resources(state).await,
         "resources/read" => read_resource(state, &params).await,
         _ => Err(RpcFailure::new(
@@ -222,6 +297,13 @@ async fn dispatch(
             format!("Method not found: {method}"),
         )),
     }
+}
+
+fn requires_engine_projection(name: &str, tool: Option<&dyn zk_tools::Tool>) -> bool {
+    matches!(
+        name,
+        "Write" | "Edit" | "NotebookEdit" | "WebSearch" | "WebFetch" | "VerifyJourney"
+    ) || tool.is_some_and(zk_tools::Tool::produces_machine_evidence)
 }
 
 #[allow(clippy::too_many_lines)] // validation, admission, execution and telemetry are one RPC boundary
@@ -245,10 +327,7 @@ async fn call_tool(
         .and_then(Value::as_str)
         .filter(|name| !name.is_empty())
         .ok_or_else(|| RpcFailure::new(-32602, "tool name is required"))?;
-    if matches!(
-        name,
-        "Write" | "Edit" | "NotebookEdit" | "WebSearch" | "WebFetch" | "VerifyJourney"
-    ) {
+    if !headers.contains_key("x-mcp-context-token") && requires_engine_projection(name, None) {
         return Err(RpcFailure::new(
             -32004,
             "MCP_TOOL_REQUIRES_ENGINE_PROJECTION: invoke this tool through the Agent runtime",
@@ -320,11 +399,42 @@ async fn call_tool(
         ));
     }
     let workspace_text = workspace.to_string_lossy().into_owned();
-    let tools = state.tools();
+    let external = if task.task_type == "mcp" {
+        let active = state
+            .mcp_contexts
+            .acquire(headers)
+            .await
+            .map_err(|_| RpcFailure::new(-32003, "MCP_CONTEXT_INVALID"))?;
+        Some(active)
+    } else if headers.contains_key("x-mcp-context-token") {
+        return Err(RpcFailure::new(-32003, "MCP_CONTEXT_INVALID"));
+    } else {
+        None
+    };
+    let ephemeral = state
+        .db
+        .session_retention(&session_id)
+        .await
+        .map_err(|_| RpcFailure::new(-32003, "MCP_CONTENT_POLICY_UNAVAILABLE"))?
+        == zk_db::content::ContentRetention::Ephemeral;
+    let tools = match state.run_tool_scopes.directory(&run_id) {
+        Some(tools) => tools,
+        None if ephemeral => return Err(RpcFailure::new(-32003, "EPHEMERAL_RUN_SCOPE_REQUIRED")),
+        None => state.tools(),
+    };
+    if let Some(active) = external {
+        return external::call(state, active, tools, name, input, metadata, cancel).await;
+    }
     let binding = tools
         .resolve(name)
         .ok_or_else(|| RpcFailure::new(-32601, format!("Tool not found: {name}")))?;
     let tool = binding.tool();
+    if requires_engine_projection(name, Some(tool.as_ref())) {
+        return Err(RpcFailure::new(
+            -32004,
+            "MCP_TOOL_REQUIRES_ENGINE_PROJECTION: invoke this tool through the Agent runtime",
+        ));
+    }
     let name = name.to_owned();
     let finalizer_state = state.clone();
     let finalizer_cancel = cancel.clone();
@@ -334,6 +444,7 @@ async fn call_tool(
         .spawn_owned_finalizer(
             cancel,
             Box::pin(async move {
+                // The active lease follows the owned finalizer, not the HTTP future.
                 let state = &finalizer_state;
                 let cancel = finalizer_cancel;
                 let name = name.as_str();
@@ -365,7 +476,12 @@ async fn call_tool(
                         .map_err(|error| {
                             storage_failure("persist reverse MCP invocation", &error)
                         })?;
-                    let hook_context = HookContext::new()
+                    let hook_context = state
+                        .execution_supervisor
+                        .hook_context(&task.id, &run_id, &session_id, &workspace, cancel.clone())
+                        .without_permission_interaction()
+                        .with_ephemeral_content(ephemeral)
+                        .with_cancellation(&cancel)
                         .with_tool(name)
                         .with_session(session_id.clone())
                         .with_working_dir(workspace_text.clone());
@@ -414,17 +530,24 @@ async fn call_tool(
                     let admission =
                         EngineAdmission::new_dont_ask(state.authz.clone(), Arc::clone(&tools));
                     let outcome = admission
-                        .admit(AdmissionRequest {
-                            session_id: &session_id,
-                            run_id: &run_id,
-                            tool_use_id: &tool_use_id,
-                            tool_name: name,
-                            input: &pre_input,
-                            working_directory: Some(&workspace_text),
-                        })
+                        .admit_bound(
+                            AdmissionRequest {
+                                session_id: &session_id,
+                                run_id: &run_id,
+                                tool_use_id: &tool_use_id,
+                                tool_name: name,
+                                input: &pre_input,
+                                working_directory: Some(&workspace_text),
+                            },
+                            tool.clone(),
+                        )
                         .await;
-                    let execution_input = match outcome {
-                        Admission::Allow { execution_input } => execution_input,
+                    let (execution_input, authorized_shell_cwd) = match outcome {
+                        Admission::Allow { execution_input } => (execution_input, None),
+                        Admission::AllowWithShellCwd {
+                            execution_input,
+                            authorized_shell_cwd,
+                        } => (execution_input, Some(authorized_shell_cwd)),
                         Admission::Denied { code, message }
                         | Admission::Failed { code, message } => {
                             commit_invocation_result(
@@ -519,11 +642,15 @@ async fn call_tool(
                         cancel.clone(),
                         watcher_stop.clone(),
                     );
-                    let env = CallEnv::new()
+                    let mut env = CallEnv::new()
+                        .with_ephemeral_content(ephemeral)
                         .with_working_dir(workspace)
                         .with_session_id(session_id.clone())
                         .with_run_id(run_id.clone())
                         .with_tool_catalog(tools.specs());
+                    if let Some(cwd) = authorized_shell_cwd {
+                        env = env.with_authorized_shell_cwd(cwd);
+                    }
                     let owner = ExecutionResourceOwner {
                         task_id: task.id.clone(),
                         run_id: run_id.clone(),
@@ -1018,7 +1145,24 @@ mod tests {
         .await
         .expect("tools/list");
         let tools = listed["tools"].as_array().expect("tools array");
-        assert_eq!(tools.len(), state.tools().specs().len());
+        let expected = state
+            .tools()
+            .names()
+            .into_iter()
+            .filter(|name| {
+                state
+                    .tools()
+                    .get(name)
+                    .is_some_and(|tool| !requires_engine_projection(name, Some(tool.as_ref())))
+            })
+            .count();
+        assert_eq!(tools.len(), expected);
+        for tool in tools {
+            assert!(!requires_engine_projection(
+                tool["name"].as_str().unwrap(),
+                None
+            ));
+        }
         assert!(tools.iter().any(|tool| tool["name"] == "ReadMcpResource"));
     }
 

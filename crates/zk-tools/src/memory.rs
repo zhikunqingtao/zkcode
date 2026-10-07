@@ -145,6 +145,12 @@ impl Tool for MemoryTool {
                 Ok(action) => action,
                 Err(rejected) => return rejected,
             };
+            if ctx.is_ephemeral() && matches!(action, "write" | "delete") {
+                return failure(
+                    "EPHEMERAL_OPERATION_UNSUPPORTED",
+                    "Temporary executions may read existing memory but cannot change persistent memory.",
+                );
+            }
             let target = match target_from_input(&input, ctx.working_dir()) {
                 Ok(target) => target,
                 Err(output) => return output,
@@ -316,5 +322,29 @@ mod tests {
             schema["properties"]["scope"]["enum"],
             json!(["project", "global"])
         );
+    }
+
+    #[tokio::test]
+    async fn temporary_execution_can_read_but_never_mutates_persistent_memory() {
+        let store = Arc::new(StubStore::default());
+        let tool = MemoryTool::with_store(store.clone());
+        for action in ["write", "delete"] {
+            let result = tool
+                .execute(
+                    json!({"action":action,"content":"private"}),
+                    ctx().with_ephemeral_content(true),
+                )
+                .await;
+            assert!(result.is_error);
+            assert!(result.content.contains("EPHEMERAL_OPERATION_UNSUPPORTED"));
+        }
+        assert!(store.calls.lock().unwrap().is_empty());
+        assert!(
+            !tool
+                .execute(json!({"action":"read"}), ctx().with_ephemeral_content(true))
+                .await
+                .is_error
+        );
+        assert_eq!(store.calls.lock().unwrap().len(), 1);
     }
 }

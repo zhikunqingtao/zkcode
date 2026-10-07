@@ -1,0 +1,287 @@
+{
+  "sourceBaseline": "3e536438ccc1d7b500416c90e92ee08783f5ee41",
+  "sourceTarget": "053adf9071dc1996aa1ebfa30c0a23d587ffad5c",
+  "rustBaseline": "08cbdc4",
+  "capabilities": [
+    {
+      "id": "edit-empty-match-and-visible-diff",
+      "status": "equivalent",
+      "sourceCommits": [
+        "2c52c4e3",
+        "7d14cfc5"
+      ],
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/tool/impl/FileEditTool.java"
+      ],
+      "implementationPaths": [
+        "crates/zk-tools/src/file_edit.rs"
+      ],
+      "validation": [
+        {
+          "command": "cargo test -q -p zk-tools --lib",
+          "result": "349 passed; includes empty existing file and complete-line Unicode diff bounds",
+          "scope": "local automated"
+        },
+        {
+          "command": "ZK_RUN_GIT_TESTS=true CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --workspace --all-features --locked --no-fail-fast",
+          "result": "Successful full workspace regression includes this native module and existing compatibility tests; ignored external integrations are not claimed executed.",
+          "evidence": {
+            "path": "/tmp/zk-workspace-tests-resume7.txt",
+            "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7"
+          }
+        }
+      ],
+      "preserved": [
+        "Read-before-edit digest checks, CAS writes, snapshot metadata and file artifact receipt",
+        "new files can still be created with empty old_string",
+        "structuredResult.schema=edit-diff/v1 preview64KiB/500lines; full diff stays in metadata.diff"
+      ]
+    },
+    {
+      "id": "grep-paging-and-protected-descendants",
+      "status": "equivalent",
+      "sourceCommits": [
+        "f86edff1",
+        "61500268",
+        "6f97166e",
+        "7d14cfc5"
+      ],
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/tool/impl/GrepTool.java"
+      ],
+      "implementationPaths": [
+        "crates/zk-tools/src/grep.rs",
+        "crates/zk-core/src/protected_paths.rs",
+        "crates/zk-authz/src/path_security.rs"
+      ],
+      "validation": [
+        {
+          "command": "cargo test -q -p zk-tools --lib",
+          "result": "349 passed; includes strict numeric validation, paging-off offset, explicit protected root and nested exclusions",
+          "scope": "local automated"
+        },
+        {
+          "command": "cargo test -q -p zk-authz",
+          "result": "all unit/integration tests passed; existing policy contents unchanged",
+          "scope": "local automated"
+        },
+        {
+          "command": "ZK_RUN_GIT_TESTS=true CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --workspace --all-features --locked --no-fail-fast",
+          "result": "Successful full workspace regression includes this native module and existing compatibility tests; ignored external integrations are not claimed executed.",
+          "evidence": {
+            "path": "/tmp/zk-workspace-tests-resume7.txt",
+            "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7"
+          }
+        }
+      ],
+      "preserved": [
+        "in-process regex/multiline/types and relative directory-result formatting",
+        "explicit root follows existing authorization; only descendants excluded",
+        "all protected file/directory names are shared with authz; .env* case-insensitive",
+        "head_limit<=0 ignores offset; checked32bit numeric input and sum; existing10kline/20kchar caps"
+      ]
+    },
+    {
+      "id": "todo-normalization-and-anonymous-merge",
+      "status": "equivalent",
+      "sourceCommits": [
+        "6f97166e",
+        "7d14cfc5"
+      ],
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/tool/interaction/TodoWriteTool.java"
+      ],
+      "implementationPaths": [
+        "crates/zk-tools/src/todo_write.rs"
+      ],
+      "validation": [
+        {
+          "command": "cargo test -q -p zk-tools --lib",
+          "result": "349 passed; includes state aliases and anonymous merge preserving all entries",
+          "scope": "local automated"
+        },
+        {
+          "command": "ZK_RUN_GIT_TESTS=true CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --workspace --all-features --locked --no-fail-fast",
+          "result": "Successful full workspace regression includes this native module and existing compatibility tests; ignored external integrations are not claimed executed.",
+          "evidence": {
+            "path": "/tmp/zk-workspace-tests-resume7.txt",
+            "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7"
+          }
+        }
+      ],
+      "preserved": [
+        "session isolation and .zk/todos.md mirror",
+        "COMPLETE/CANCELLED terminal auto-clear",
+        "completed and case aliases normalized; invalid status rejected before mutation",
+        "missing/null status stays missing/null; anonymous/empty-ID entries do not overwrite"
+      ]
+    },
+    {
+      "id": "mcp-truthful-failure-no-success-cache-fallback",
+      "status": "equivalent",
+      "sourceCommits": [
+        "ac2a6cb5"
+      ],
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/mcp/McpToolAdapter.java"
+      ],
+      "implementationPaths": [
+        "crates/zk-mcp/src/tool_adapter.rs"
+      ],
+      "validation": [
+        {
+          "command": "cargo test -q -p zk-mcp --lib",
+          "result": "192 passed",
+          "scope": "unit and local transport fixtures; no external credentialed services"
+        },
+        {
+          "command": "ZK_RUN_GIT_TESTS=true CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --workspace --all-features --locked --no-fail-fast",
+          "result": "Successful full workspace regression includes this native module and existing compatibility tests; ignored external integrations are not claimed executed.",
+          "evidence": {
+            "path": "/tmp/zk-workspace-tests-resume7.txt",
+            "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7"
+          }
+        }
+      ],
+      "preserved": [
+        "connection generation checks",
+        "progress and V4 durable request-resource ownership",
+        "legacy ResultCache utility/injection API remains source-compatible but tool invocations neither read nor populate it",
+        "tool isError identity prefixed before truncation with MCP_TOOL_REPORTED_ERROR",
+        "network/timeout/tool failures retain is_error, NEVER retryability and UNKNOWN effects"
+      ]
+    },
+    {
+      "id": "repl-session-parameter-and-language-compatibility",
+      "status": "equivalent",
+      "sourceCommits": [
+        "6f97166e"
+      ],
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/tool/repl/REPLTool.java"
+      ],
+      "implementationPaths": [
+        "crates/zk-tools/src/repl/tool.rs"
+      ],
+      "validation": [
+        {
+          "command": "cargo test -q -p zk-tools --lib repl::tool::tests",
+          "result": "6 passed in30.43s; real Python state persists from session_id call into sessionId call, conflicting aliases reject before interpreter spawn",
+          "scope": "native interpreter and unit"
+        },
+        {
+          "command": "ZK_RUN_GIT_TESTS=true CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --workspace --all-features --locked --no-fail-fast",
+          "result": "Successful full workspace regression includes this native module and existing compatibility tests; ignored external integrations are not claimed executed.",
+          "evidence": {
+            "path": "/tmp/zk-workspace-tests-resume7.txt",
+            "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7"
+          }
+        }
+      ],
+      "preserved": [
+        "Python, Node and Ruby are implemented in Rust and remain available; upstream Java Python-only declaration is not a Rust capability reduction",
+        "Both session parameter names are advertised; duplicate conflicting values fail explicitly",
+        "Existing timeout, concurrency and idle cleanup behavior remains"
+      ]
+    },
+    {
+      "id": "powershell-prompt-tool-names",
+      "status": "equivalent",
+      "sourceCommits": [
+        "24b602b6"
+      ],
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/tool/powershell/PowerShellTool.java"
+      ],
+      "implementationPaths": [
+        "crates/zk-tools/src/bash.rs"
+      ],
+      "validation": [
+        {
+          "command": "git diff source baseline..target -- PowerShellTool.java",
+          "result": "Change only corrects display references to Glob/Grep/Read/Edit/Write; no new execution capability",
+          "scope": "source audit"
+        },
+        {
+          "command": "ZK_RUN_GIT_TESTS=true CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --workspace --all-features --locked --no-fail-fast",
+          "result": "Successful full workspace regression includes this native module and existing compatibility tests; ignored external integrations are not claimed executed.",
+          "evidence": {
+            "path": "/tmp/zk-workspace-tests-resume7.txt",
+            "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7"
+          }
+        }
+      ],
+      "preserved": [
+        "Native macOS Bash and dedicated tool names remain; no Windows PowerShell dependency introduced"
+      ]
+    },
+    {
+      "id": "brief-truthful-context-description",
+      "status": "equivalent",
+      "sourceCommits": [
+        "6f97166e"
+      ],
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/tool/interaction/BriefTool.java"
+      ],
+      "implementationPaths": [
+        "crates/zk-tools/src/brief.rs"
+      ],
+      "validation": [
+        {
+          "command": "cargo test -q -p zk-tools --lib brief::",
+          "result": "6 passed",
+          "scope": "local unit"
+        },
+        {
+          "command": "ZK_RUN_GIT_TESTS=true CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --workspace --all-features --locked --no-fail-fast",
+          "result": "Successful full workspace regression includes this native module and existing compatibility tests; ignored external integrations are not claimed executed.",
+          "evidence": {
+            "path": "/tmp/zk-workspace-tests-resume7.txt",
+            "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7"
+          }
+        }
+      ],
+      "preserved": [
+        "Scope output clearly says context-only: no Git/session collection or generated topic analysis",
+        "Existing Rust content head/tail/smart condensation remains fully functional"
+      ]
+    },
+    {
+      "id": "native-read-image-prerequisite-and-provenance",
+      "status": "implemented_verified_local",
+      "sourceCommits": [
+        "e28c7b66",
+        "c720e9bb",
+        "2484322f"
+      ],
+      "sourcePaths": [
+        "backend/src/main/java/com/aicodeassistant/tool/impl/FileReadTool.java",
+        "backend/src/main/java/com/aicodeassistant/tool/impl/ImageResultExternalizer.java"
+      ],
+      "sourcePrerequisite": "Both production producer files are unchanged in fixed range but present at9/9 baseline and required by the changed ImageRefInjector/identity tests; user approved filling necessary baseline prerequisites.",
+      "implementationPaths": [
+        "crates/zk-tools/src/image_read.rs",
+        "crates/zk-tools/src/file_read.rs",
+        "crates/zk-tools/src/tool.rs",
+        "crates/zk-engine/src/engine.rs",
+        "crates/zk-db/src/session_merge_snapshot.rs",
+        "crates/zk-db/tests/merge_tool_images.rs",
+        "crates/zk-llm/src/payload_guard.rs"
+      ],
+      "notes": "Native Read keeps text and1-basedoffset; images≤10MiB/40Mpixels are read from per-componentO_NOFOLLOWanchored authorized canonical path. Source pixels decode under160MiB allocation limit; originalPNG/JPEG/GIF/WebPbytes preserved; BMP encodesPNG through bounded10MiBwriter. sourceDigest and payloadDigest are separate. Image observation never permits text overwrite. Trait capability defaultfalse; nativeRead/Handoff true; engine seals only actual builtin producer output and rejects remote name/metadata forgery. No OSS/public upload. Merge snapshots only seal images joined to successful native tool-invocation receipts from the same session/run/task, with recomputed payload SHA and original source SHA preserved as provenance. MCP or user-authored metadata cannot create a trusted archive asset. Original file paths remain references unless separately owned artifact/scratchpad rules allow copying; no historical permission is inherited. Nullable user-image MIME remains compatible. SVG retains native text Read behavior rather than introducing an SVG renderer or unsupported provider image MIME.",
+      "validation": [
+        {
+          "command": "ZK_RUN_GIT_TESTS=true CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --workspace --all-features --locked --no-fail-fast",
+          "result": "Full workspace exit0. Read4, merge_tool_images2 and actual Read→Engine→provider image_roundtrip1 all pass. BMP sources with equal PNG payload retain separate identities; successful delivery suppresses later duplicate injections without erasing durable history; forged user/MCP metadata never creates owned archive assets.",
+          "evidence": {
+            "path": "/tmp/zk-workspace-tests-resume7.txt",
+            "sha256": "d339e788279719257047dd77ce8c3ce8e130c53620de7e6b9190ae7ecf6a9cb7"
+          }
+        }
+      ]
+    }
+  ],
+  "externalApiValidation": "MCP live external API not run; local transport fixtures only.",
+  "pendingValidation": []
+}

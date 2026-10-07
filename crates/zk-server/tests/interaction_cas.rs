@@ -807,3 +807,363 @@ async fn decision_rolls_back_when_run_cannot_resume() {
     );
     assert_eq!(run_status(&fixture.db, &fixture.run_id).await, "cancelling");
 }
+
+#[tokio::test]
+async fn staged_deadlines_start_at_ten_minutes_and_obey_root_deadline() {
+    let f = fixture().await;
+    let now = time::now_millis();
+    let request = f
+        .interactions
+        .create(elicitation(
+            &f.run_id,
+            "staged",
+            json!({"multiSelect":true}),
+            &["answer", "cancel"],
+            &[],
+        ))
+        .await
+        .unwrap();
+    let first = time::parse_rfc3339_millis(&request.delivery_window_ends_at).unwrap();
+    assert!(first >= now + 599_000 && first <= time::now_millis() + 601_000);
+    let root_deadline = time::now_millis() + 12_000;
+    update(&f.db,"UPDATE tasks SET deadline_at_ms=?1 WHERE id=(SELECT task_id FROM run_envelopes WHERE id=?2)",vec![root_deadline.to_string(),f.run_id.clone()]).await;
+    assert!(
+        f.interactions
+            .mark_dispatched(&request.interaction_id, "client")
+            .await
+            .unwrap()
+    );
+    let sent = find(&f.interactions, &request.interaction_id).await;
+    assert_eq!(
+        time::parse_rfc3339_millis(&sent.delivery_window_ends_at),
+        Some(root_deadline)
+    );
+    assert!(
+        f.interactions
+            .acknowledge_received(
+                &request.interaction_id,
+                Some("client"),
+                sent.delivery_generation
+            )
+            .await
+            .unwrap()
+    );
+    let ack = find(&f.interactions, &request.interaction_id).await;
+    assert_eq!(
+        ack.decision_deadline_at
+            .as_deref()
+            .and_then(time::parse_rfc3339_millis),
+        Some(root_deadline)
+    );
+    for invalid in [
+        json!("single"),
+        json!([]),
+        json!(["same", "same"]),
+        json!([""]),
+    ] {
+        assert!(
+            f.interactions
+                .decide(
+                    &request.interaction_id,
+                    ack.version,
+                    InteractionStatus::Answered,
+                    Some(invalid),
+                    Some("user_rest")
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            find(&f.interactions, &request.interaction_id).await.status,
+            InteractionStatus::Pending
+        );
+    }
+    let accepted = f
+        .interactions
+        .decide(
+            &request.interaction_id,
+            ack.version,
+            InteractionStatus::Answered,
+            Some(json!(["one", "two"])),
+            Some("user_rest"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(accepted, InteractionStatus::Answered);
+    assert_eq!(
+        find(&f.interactions, &request.interaction_id)
+            .await
+            .response_json
+            .as_deref(),
+        Some("[\"one\",\"two\"]")
+    );
+}
+
+#[tokio::test]
+async fn expired_decision_cannot_win_before_background_sweeper() {
+    let f = fixture().await;
+    let request = f
+        .interactions
+        .create(elicitation(
+            &f.run_id,
+            "late",
+            json!({"multiSelect":false}),
+            &["answer", "cancel"],
+            &[],
+        ))
+        .await
+        .unwrap();
+    update(
+        &f.db,
+        "UPDATE interaction_requests SET delivery_window_ends_at=?1 WHERE interaction_id=?2",
+        vec![
+            time::format_rfc3339_micros(time::now_millis() - 1000),
+            request.interaction_id.clone(),
+        ],
+    )
+    .await;
+    assert!(
+        f.interactions
+            .decide(
+                &request.interaction_id,
+                request.version,
+                InteractionStatus::Answered,
+                Some(json!("late answer")),
+                Some("user_rest")
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        find(&f.interactions, &request.interaction_id).await.status,
+        InteractionStatus::Pending
+    );
+}
+
+/// Source regression: a transport failure must not claim the user ignored a question.
+#[tokio::test]
+async fn question_delivery_failures_remain_distinct_from_user_answer_expiry() {
+    use tokio_util::sync::CancellationToken;
+    use zk_server::interaction::DurableElicitationSink;
+    use zk_tools::{AskUserQuestionTool, Tool, ToolContext};
+
+    for stage in 0..3 {
+        let fixture = fixture().await;
+        let tool = AskUserQuestionTool::with_elicitation_sink(Arc::new(
+            DurableElicitationSink::new(fixture.interactions.clone()),
+        ));
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let context = ToolContext::new(CancellationToken::new(), tx)
+            .with_session_id("s1")
+            .with_run_id(fixture.run_id.clone());
+        let running = tokio::spawn(async move {
+            tool.execute(
+                json!({"questions":[{"question":"Continue?","multiSelect":true,
+                "options":[{"label":"Yes"},{"label":"No"}]}]}),
+                context,
+            )
+            .await
+        });
+        let record = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(record) = fixture.interactions.pending("s1").await.unwrap().pop() {
+                    break record;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&record.prompt_json).unwrap()["multiSelect"],
+            true
+        );
+        if stage > 0 {
+            fixture
+                .interactions
+                .mark_dispatched(&record.interaction_id, "transport")
+                .await
+                .unwrap();
+        }
+        if stage == 2 {
+            assert!(
+                fixture
+                    .interactions
+                    .acknowledge_received(&record.interaction_id, Some("transport"), 1)
+                    .await
+                    .unwrap()
+            );
+        }
+        let id = record.interaction_id.clone();
+        fixture.db.with_writer(move |conn| {
+            let column = if stage == 2 { "decision_deadline_at" } else { "delivery_window_ends_at" };
+            conn.execute(&format!("UPDATE interaction_requests SET {column}='1970-01-01T00:00:00.000000Z' WHERE interaction_id=?1"), [id])?;
+            Ok(())
+        }).await.unwrap();
+        fixture.interactions.expire_deadlines().await.unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(5), running)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(result.is_error);
+        let (code, detail, reason) = match stage {
+            0 => (
+                "ELICITATION_UNDELIVERABLE",
+                "could not be dispatched",
+                "delivery_not_dispatched",
+            ),
+            1 => (
+                "ELICITATION_UNDELIVERABLE",
+                "did not acknowledge",
+                "delivery_not_acknowledged",
+            ),
+            _ => (
+                "ELICITATION_EXPIRED",
+                "no answer was received",
+                "decision_deadline_exceeded",
+            ),
+        };
+        assert!(result.content.contains(code), "{result:?}");
+        assert!(result.content.contains(detail), "{result:?}");
+        assert!(!result.content.contains("User did not respond"));
+        let persisted = fixture
+            .interactions
+            .find_by_id(&record.interaction_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted.terminal_reason.as_deref(), Some(reason));
+        assert!(persisted.status.is_terminal());
+        let recovered = fixture
+            .interactions
+            .prepare_recovery_delivery(&record.interaction_id, "late")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered.status, persisted.status);
+        assert_eq!(recovered.delivery_generation, persisted.delivery_generation);
+    }
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "One live lease, WAL privacy proof and expired-lease cancellation form a single interaction lifecycle"
+)]
+async fn ephemeral_interaction_deduplicates_without_storing_prompt_or_operation_hash() {
+    let root =
+        std::env::temp_dir().join(format!("zk-private-interaction-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&root).unwrap();
+    let db = Db::open(root.join("interaction.sqlite")).unwrap();
+    let (session, lease) = db
+        .create_ephemeral_session("fixture", root.to_str().unwrap(), "DEFAULT")
+        .await
+        .unwrap();
+    let run = uuid::Uuid::new_v4().to_string();
+    let sid = session.clone();
+    let rid = run.clone();
+    db.with_writer(move |conn| {
+        runs::start_in_current_write(conn, &rid, &sid, None, Some("main"), "fixture")
+    })
+    .await
+    .unwrap();
+    let service = Arc::new(DurableInteractionService::new(
+        db.clone(),
+        Arc::new(NoopInteractionPublisher),
+        Arc::new(RecordingTermination::default()),
+    ));
+    let secret = format!("private-operation-and-hash-{}", uuid::Uuid::new_v4());
+    let mut spec = elicitation(
+        &run,
+        &secret,
+        json!({"question":secret,"multiSelect":false}),
+        &["answer"],
+        &[],
+    );
+    spec.session_id = session.clone();
+    let (one, two) = tokio::join!(service.create(spec.clone()), service.create(spec));
+    let one = one.unwrap();
+    let two = two.unwrap();
+    assert_eq!(one.interaction_id, two.interaction_id);
+    assert!(one.prompt_json.contains(&secret));
+    assert_eq!(
+        service
+            .find_by_correlation_key(&run, &secret)
+            .await
+            .unwrap()
+            .unwrap()
+            .interaction_id,
+        one.interaction_id
+    );
+    db.with_writer(|conn| {
+        assert!(
+            conn.execute("UPDATE interaction_requests SET prompt_json='raw'", [])
+                .is_err()
+        );
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let answered = service
+        .decide_request(
+            &one.interaction_id,
+            one.version,
+            InteractionStatus::Answered,
+            Some(Value::String(secret.clone())),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        answered.response_json.as_deref(),
+        Some(serde_json::to_string(&secret).unwrap().as_str())
+    );
+    for file in std::fs::read_dir(&root).unwrap() {
+        let file = file.unwrap().path();
+        if file.is_file() {
+            let bytes = std::fs::read(file).unwrap();
+            assert!(
+                !bytes
+                    .windows(secret.len())
+                    .any(|part| part == secret.as_bytes())
+            );
+        }
+    }
+    let mut pending = elicitation(
+        &run,
+        "pending-cleanup",
+        json!({"question":secret}),
+        &["answer"],
+        &[],
+    );
+    pending.session_id = session.clone();
+    let pending = service.create(pending).await.unwrap();
+    // Terminal metadata remains available for cleanup, while old answers disappear.
+    drop(lease);
+    db.request_runtime_shutdown().await.unwrap();
+    let cancelled = service
+        .complete_runtime_cancellation(&run, "private cancellation reason")
+        .await
+        .unwrap();
+    assert_eq!(cancelled.interactions_cancelled, 1);
+    assert_eq!(
+        service
+            .find_by_id(&pending.interaction_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        InteractionStatus::Cancelled
+    );
+    let expired = service
+        .find_by_id(&one.interaction_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(expired.status, InteractionStatus::Answered);
+    assert_eq!(expired.prompt_json, r#"{"contentUnavailable":true}"#);
+    assert_eq!(expired.response_json.as_deref(), Some("null"));
+    drop(service);
+    drop(db);
+    std::fs::remove_dir_all(root).unwrap();
+}

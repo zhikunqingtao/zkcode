@@ -21,8 +21,11 @@ pub mod connection;
 pub mod error;
 pub mod jsonrpc;
 pub mod manager;
+pub mod oauth;
 pub mod prompt_adapter;
 pub mod protocol;
+pub mod run_scope;
+pub mod schema;
 pub mod security;
 pub mod sse;
 pub mod stdio;
@@ -38,7 +41,7 @@ pub use error::{JsonRpcError, McpProtocolError};
 pub use jsonrpc::{JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, RequestId};
 pub use manager::{
     ApprovalPort, ManagerError, McpClientManager, McpClientManagerBuilder, McpHealthObserver,
-    McpToolSink,
+    McpServicePreferenceStore, McpServiceView, McpToolSink,
 };
 pub use prompt_adapter::McpPromptAdapter;
 pub use protocol::{

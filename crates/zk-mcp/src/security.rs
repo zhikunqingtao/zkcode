@@ -259,7 +259,7 @@ fn is_local_hostname(host: &str) -> bool {
             .is_some_and(|label| matches!(label, "localhost" | "local" | "internal" | "home"))
 }
 
-fn is_forbidden_ip(ip: IpAddr) -> bool {
+pub(crate) fn is_forbidden_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ip) => is_forbidden_v4(ip),
         IpAddr::V6(ip) => is_forbidden_v6(ip),

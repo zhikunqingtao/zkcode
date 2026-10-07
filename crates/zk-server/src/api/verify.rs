@@ -79,8 +79,14 @@ pub(crate) async fn run_checks(
     });
     let parsed = parse_verify_request(&normalized, &workspace)
         .map_err(|error| ApiError::validation_with_code(&error.code, &error.message))?;
-    let executed =
-        run_admitted_checks(&state, &asserted, &run.task_id, &request.run_id, parsed).await?;
+    let executed = run_admitted_checks(
+        &state,
+        &run.session_id,
+        &run.task_id,
+        &request.run_id,
+        parsed,
+    )
+    .await?;
     let evidence = evidence_for_report(
         &state,
         &session.session_id,
@@ -110,7 +116,18 @@ async fn run_admitted_checks(
     telemetry.run_id = Some(run_id.to_owned());
     state.observability.record(telemetry);
     let project = ProjectKind::detect(&request.working_dir);
-    let registry = state.tools();
+    let ephemeral = state.db.session_retention(session_id).await?
+        == zk_db::content::ContentRetention::Ephemeral;
+    let registry = match state.run_tool_scopes.directory(run_id) {
+        Some(registry) => registry,
+        None if ephemeral => {
+            return Err(ApiError::validation_with_code(
+                "EPHEMERAL_RUN_SCOPE_REQUIRED",
+                "Verification requires the live temporary execution scope",
+            ));
+        }
+        None => state.tools(),
+    };
     // The REST call is itself an explicit request to execute these checks. Use an isolated
     // authorization stack so AUTO_APPROVE cannot leak into a concurrent conversation in the
     // same session; command analysis, absolute-deny rules and gateway rechecks still all run.
@@ -122,8 +139,7 @@ async fn run_admitted_checks(
     ));
     verify_authz
         .modes
-        .set_mode(session_id, PermissionMode::AutoApprove)
-        .await;
+        .set_ephemeral_mode(session_id, PermissionMode::AutoApprove);
     let admission = EngineAdmission::new(verify_authz, Arc::clone(&registry));
     let mut results = Vec::with_capacity(request.plans.len());
     let mut invocation_ids = Vec::with_capacity(request.plans.len());
@@ -203,8 +219,18 @@ async fn run_admitted_checks(
                 working_directory: request.working_dir.to_str(),
             })
             .await;
+        let authorized_shell_cwd = match &admitted {
+            Admission::AllowWithShellCwd {
+                authorized_shell_cwd,
+                ..
+            } => Some(authorized_shell_cwd.clone()),
+            _ => None,
+        };
         let result = match admitted {
-            Admission::Allow { execution_input } => {
+            Admission::Allow { execution_input }
+            | Admission::AllowWithShellCwd {
+                execution_input, ..
+            } => {
                 if !registry.is_binding_current(&binding) {
                     transition_invocation(
                         state,
@@ -282,11 +308,15 @@ async fn run_admitted_checks(
                     continue;
                 }
                 let cancel = CancellationToken::new();
-                let env = CallEnv::new()
+                let mut env = CallEnv::new()
+                    .with_ephemeral_content(ephemeral)
                     .with_session_id(session_id)
                     .with_run_id(run_id)
                     .with_working_dir(&request.working_dir)
                     .with_tool_catalog(registry.specs());
+                if let Some(cwd) = authorized_shell_cwd {
+                    env = env.with_authorized_shell_cwd(cwd);
+                }
                 let owner = ExecutionResourceOwner {
                     task_id: task_id.to_owned(),
                     run_id: run_id.to_owned(),
@@ -385,6 +415,8 @@ async fn run_admitted_checks(
                     None
                 } else {
                     match super::evidence::store_blob(
+                        &state.db,
+                        session_id,
                         request.working_dir.clone(),
                         safe_output.as_bytes().to_vec(),
                     )
@@ -609,6 +641,8 @@ async fn evidence_for_report(
             None if safe_output.is_empty() => None,
             None => Some(
                 super::evidence::store_blob(
+                    &state.db,
+                    session_id,
                     workspace.to_path_buf(),
                     safe_output.as_bytes().to_vec(),
                 )

@@ -19,34 +19,29 @@
 //! | `BUNDLED` | 编译期嵌入 | `ClassPathResource` |
 //! | `MCP` | 无目录，运行时经 `SkillRegistry::register` 注入 | 仅枚举值 |
 //!
-//! 上表 `<legacy>` 指旧布局目录名，其字面量在全仓只有一处定义——
-//! `zk_core::paths::LEGACY_CONFIG_DIR_NAME`（#65）。目录名从旧布局迁到
-//! `.zkcode`：与本仓库既有用户态路径约定一致（`~/.zkcode/python.sock`）。
-//! `MANAGED` / `PLUGIN` 的目录约定为本次补齐（旧仓库只有枚举值），`MCP`
-//! 保留编程注册入口不做目录扫描。
-//!
-//! 待办（#65 报备，另立任务）：本仓库当前三套目录约定并存——`.zk/`
-//!（zk-core 基座 + `data.db` + scratchpad）、`.zkcode/`（技能与侧车 socket）、
-//! 旧布局（仅迁移源与保护面）。技能目录向 `.zk/skills` 的收敛需连带改
-//! `registry` 断言与侧车 UDS 路径，不在 #65 范围内。
+//! 用户与项目来源同时兼容 `LEGACY_CONFIG_DIR_NAME/skills`、
+//! `CONFIG_DIR_NAME/skills` 和既有 `.zkcode/skills`；同来源后者优先，
+//! 来源间优先级保持不变。加载不移动或删除用户文件。
 //!
 //! # 热重载：轮询而非 `inotify`
 //!
 //! 旧实现用 `WatchService` + 500 ms 防抖。Rust 侧**不引入 `notify` crate**：
 //! 其全版本许可证为 `CC0-1.0`，不在本仓库 `deny.toml` 的
 //! `[licenses].allow` 白名单内（CI `cargo-deny` 会红）。改为 500 ms 周期
-//! 轮询「路径 → (mtime, 大小)」指纹并 diff：
+//! 轮询「词法路径 → (mtime, ctime, 大小, device, inode)」指纹并 diff：
 //! - 新增/内容变化 → 重新解析并注册（等价 `ENTRY_CREATE` / `ENTRY_MODIFY`）；
 //! - 路径消失 → 按路径反注册（等价 `ENTRY_DELETE`）；
 //! - 轮询周期天然吸收半写状态，等价旧实现的 500 ms 防抖窗口。
 //!
-//! 差异留痕：文件在一个周期内「改回原样且大小与 mtime 不变」不会触发重载；
-//! 反之旧 `WatchService` 会各触发一次事件（对技能表终态无影响）。
+//! 扫描和读取使用已授权目录描述符；内容身份或来源在两阶段间变化时保留
+//! 最近有效快照并报告错误。来源授权失效的快照不会进入发现、详情或执行。
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
+
+use super::filesystem::{self, BoundSkillFile, FileStamp, SourceRoot};
 
 use super::registry::{SkillDefinition, SkillRegistry, SkillSource};
 
@@ -72,6 +67,8 @@ pub struct SkillDir {
     pub path: PathBuf,
     /// 该目录下技能的来源标签。
     pub source: SkillSource,
+    /// Physical authority is distinct from the lexical reload/cache identity.
+    pub(super) authority: SourceRoot,
 }
 
 /// 目录扫描统计（启动加载日志用）。
@@ -102,28 +99,28 @@ impl ReloadStats {
     }
 }
 
-/// 文件指纹（mtime + 字节数；`mtime` 不可用的文件系统上退化为按大小判定）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct FileStamp {
-    /// 最后修改时刻。
-    modified: Option<SystemTime>,
-    /// 字节数。
-    len: u64,
-}
-
 /// 轮询基线快照（路径 → 指纹）。
 #[derive(Debug, Clone, Default)]
-pub struct SkillSnapshot(HashMap<PathBuf, FileStamp>);
+pub struct SkillSnapshot(HashMap<PathBuf, FileStamp>, bool);
 
 impl SkillSnapshot {
     /// 立即采集一份基线（启动加载后调用，避免首轮把已加载技能当新增）。
     #[must_use]
     pub fn capture(dirs: &[SkillDir]) -> Self {
-        let mut snapshot = HashMap::new();
-        for (path, (stamp, _)) in collect_files(dirs) {
-            snapshot.insert(path, stamp);
-        }
-        Self(snapshot)
+        let Ok(files) = collect_files(dirs) else {
+            tracing::warn!(
+                code = "SKILL_SCAN_FAILED",
+                "skill baseline unavailable; next poll will retry"
+            );
+            return Self::default();
+        };
+        Self(
+            files
+                .into_iter()
+                .flat_map(|(_, files)| files.into_iter().map(|file| (file.path, file.stamp)))
+                .collect(),
+            true,
+        )
     }
 
     /// 已跟踪的文件数。
@@ -153,26 +150,33 @@ pub fn skill_dirs_with(
     managed: Option<PathBuf>,
     home: Option<PathBuf>,
 ) -> Vec<SkillDir> {
-    let mut dirs = Vec::new();
-    // PLUGIN（最低）→ PROJECT → USER → MANAGED（最高）。
-    for path in plugin_skill_dirs(working_dir) {
-        dirs.push(SkillDir {
-            path,
-            source: SkillSource::Plugin,
-        });
-    }
-    dirs.push(SkillDir {
-        path: working_dir.join(PROJECT_SKILLS_DIR),
-        source: SkillSource::Project,
+    let authority = SourceRoot::new(working_dir);
+    let mut dirs = project_skill_dirs(working_dir, &authority).unwrap_or_else(|error| {
+        tracing::warn!(
+            code = error,
+            "project Skill sources could not be authorized"
+        );
+        compatible_skill_dirs(working_dir)
+            .into_iter()
+            .map(|path| SkillDir {
+                path,
+                source: SkillSource::Project,
+                authority: authority.clone(),
+            })
+            .collect()
     });
     if let Some(home) = home {
-        dirs.push(SkillDir {
-            path: home.join(USER_SKILLS_DIR),
-            source: SkillSource::User,
-        });
+        for path in compatible_skill_dirs(&home) {
+            dirs.push(SkillDir {
+                authority: SourceRoot::new(&path),
+                path,
+                source: SkillSource::User,
+            });
+        }
     }
     if let Some(managed) = managed {
         dirs.push(SkillDir {
+            authority: SourceRoot::new(&managed),
             path: managed,
             source: SkillSource::Managed,
         });
@@ -180,11 +184,47 @@ pub fn skill_dirs_with(
     dirs
 }
 
+/// Project/plugin discovery must use the same pinned root as existing leases.
+pub(super) fn project_skill_dirs(
+    working_dir: &Path,
+    authority: &SourceRoot,
+) -> Result<Vec<SkillDir>, &'static str> {
+    let mut dirs = plugin_skill_dirs(working_dir, authority)
+        .map_err(|error| filesystem::diagnostic(&error))?
+        .into_iter()
+        .map(|path| SkillDir {
+            path,
+            source: SkillSource::Plugin,
+            authority: authority.clone(),
+        })
+        .collect::<Vec<_>>();
+    dirs.extend(
+        compatible_skill_dirs(working_dir)
+            .into_iter()
+            .map(|path| SkillDir {
+                path,
+                source: SkillSource::Project,
+                authority: authority.clone(),
+            }),
+    );
+    Ok(dirs)
+}
+
+/// Compatibility order within one source; existing `.zkcode` preferences win.
+fn compatible_skill_dirs(root: &Path) -> [PathBuf; 3] {
+    [
+        root.join(zk_core::paths::LEGACY_CONFIG_DIR_NAME)
+            .join("skills"),
+        root.join(zk_core::paths::CONFIG_DIR_NAME).join("skills"),
+        root.join(PROJECT_SKILLS_DIR),
+    ]
+}
+
 /// 加载并注册全部目录来源（旧 `loadAndRegister` 的 6 级扩展版）。
 pub fn load_and_register(registry: &SkillRegistry, dirs: &[SkillDir]) -> LoadStats {
     let mut stats = LoadStats::default();
     for dir in dirs {
-        let skills = load_skills_from_dir(&dir.path, dir.source);
+        let skills = load_skills_from_dir(dir);
         let scanned = skills.len();
         let registered = skills
             .into_iter()
@@ -213,17 +253,28 @@ pub fn load_and_register(registry: &SkillRegistry, dirs: &[SkillDir]) -> LoadSta
 
 /// 扫描单个目录（旧 `loadSkillsFromDir`：递归 + `.md` + 跳隐藏 + 读失败告警）。
 #[must_use]
-pub fn load_skills_from_dir(dir: &Path, source: SkillSource) -> Vec<SkillDefinition> {
+pub fn load_skills_from_dir(dir: &SkillDir) -> Vec<SkillDefinition> {
+    let files = match scan_dir(dir) {
+        Ok(files) => files,
+        Err(error) => {
+            tracing::warn!(
+                code = filesystem::diagnostic(&error),
+                "Skill source could not be scanned"
+            );
+            return Vec::new();
+        }
+    };
     let mut result = Vec::new();
-    for path in walk_markdown(dir, 0) {
-        match std::fs::read_to_string(&path) {
+    for file in files {
+        match file.read() {
             Ok(raw) => {
-                if let Some(skill) = definition_from_file(&path, &raw, source) {
+                if let Some(mut skill) = definition_from_file(&file.path, &raw, dir.source) {
+                    skill.read_authority = Some(file.authority);
                     result.push(skill);
                 }
             }
-            Err(err) => {
-                tracing::warn!(path = %path.display(), error = %err, "failed to read skill file");
+            Err(error) => {
+                tracing::warn!(path = %file.path.display(), %error, "failed to read Skill file");
             }
         }
     }
@@ -235,11 +286,16 @@ pub fn load_skills_from_dir(dir: &Path, source: SkillSource) -> Vec<SkillDefinit
 #[must_use]
 pub fn resolve_working_directory() -> Option<PathBuf> {
     let current = std::env::current_dir().ok()?;
-    if current.join(PROJECT_SKILLS_DIR).is_dir() {
+    if compatible_skill_dirs(&current)
+        .iter()
+        .any(|path| path.is_dir())
+    {
         return Some(current);
     }
     if let Some(parent) = current.parent()
-        && parent.join(PROJECT_SKILLS_DIR).is_dir()
+        && compatible_skill_dirs(parent)
+            .iter()
+            .any(|path| path.is_dir())
     {
         return Some(parent.to_path_buf());
     }
@@ -256,15 +312,22 @@ pub fn spawn_watcher(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let baseline_dirs = dirs.clone();
-        let mut snapshot =
-            match tokio::task::spawn_blocking(move || SkillSnapshot::capture(&baseline_dirs)).await
-            {
-                Ok(snapshot) => snapshot,
-                Err(err) => {
-                    tracing::warn!(error = %err, "skill watcher baseline failed");
-                    return;
-                }
-            };
+        let baseline_registry = Arc::clone(&registry);
+        let mut snapshot = match tokio::task::spawn_blocking(move || {
+            // A forced first reconciliation closes the load → watcher race,
+            // including a winner deleted before baseline collection.
+            let mut baseline = SkillSnapshot::default();
+            poll_once(&baseline_registry, &baseline_dirs, &mut baseline);
+            baseline
+        })
+        .await
+        {
+            Ok(snapshot) => snapshot,
+            Err(err) => {
+                tracing::warn!(error = %err, "skill watcher baseline failed");
+                return;
+            }
+        };
         tracing::info!(
             dirs = dirs.len(),
             files = snapshot.len(),
@@ -310,49 +373,80 @@ pub fn poll_once(
     dirs: &[SkillDir],
     snapshot: &mut SkillSnapshot,
 ) -> ReloadStats {
-    let mut stats = ReloadStats::default();
-    let current = collect_files(dirs);
-    let mut next: HashMap<PathBuf, FileStamp> = HashMap::new();
+    poll_checked(registry, dirs, snapshot).unwrap_or_default()
+}
 
-    for (path, (stamp, source)) in &current {
-        let previous = snapshot.0.get(path);
-        if previous == Some(stamp) {
-            next.insert(path.clone(), *stamp);
-            continue;
-        }
-        match std::fs::read_to_string(path) {
-            Ok(raw) => {
-                if let Some(skill) = definition_from_file(path, &raw, *source)
-                    && registry.register(skill)
-                {
-                    if previous.is_some() {
-                        stats.reloaded += 1;
-                    } else {
-                        stats.registered += 1;
-                    }
-                }
-                next.insert(path.clone(), *stamp);
-            }
-            Err(err) => {
-                // 读失败（半写 / 权限）不记指纹，下一周期重试。
-                tracing::warn!(path = %path.display(), error = %err, "skill reload read failed");
-            }
-        }
+/// Refresh with a stable diagnostic while preserving the last complete view.
+pub(super) fn poll_checked(
+    registry: &SkillRegistry,
+    dirs: &[SkillDir],
+    snapshot: &mut SkillSnapshot,
+) -> Result<ReloadStats, &'static str> {
+    let result = reconcile(registry, dirs, snapshot);
+    registry.set_source_error(result.as_ref().err().copied());
+    result
+}
+
+fn reconcile(
+    registry: &SkillRegistry,
+    dirs: &[SkillDir],
+    snapshot: &mut SkillSnapshot,
+) -> Result<ReloadStats, &'static str> {
+    let current = collect_files(dirs).map_err(|error| filesystem::diagnostic(&error))?;
+    let next: HashMap<PathBuf, FileStamp> = current
+        .iter()
+        .flat_map(|(_, files)| files.iter().map(|file| (file.path.clone(), file.stamp)))
+        .collect();
+    if snapshot.1 && snapshot.0 == next {
+        return Ok(ReloadStats::default());
     }
-    for path in snapshot.0.keys() {
-        if current.contains_key(path) {
-            continue;
+    // Complete descriptor-bound scan and read before publishing any candidates.
+    let mut candidates = Vec::new();
+    for (source, files) in current {
+        let mut directory_candidates = Vec::new();
+        for file in files {
+            let raw = file.read().map_err(|error| {
+                if filesystem::diagnostic(&error) == "SKILL_SOURCE_UNAUTHORIZED" {
+                    "SKILL_SOURCE_UNAUTHORIZED"
+                } else {
+                    "SKILL_READ_FAILED"
+                }
+            })?;
+            if let Some(mut skill) = definition_from_file(&file.path, &raw, source) {
+                skill.read_authority = Some(file.authority);
+                directory_candidates.push(skill);
+            }
         }
-        if registry
-            .unregister_by_path(&absolute_string(path))
-            .is_some()
+        directory_candidates.sort_by(|left, right| left.name.cmp(&right.name));
+        candidates.extend(directory_candidates);
+    }
+    let roots = dirs
+        .iter()
+        .map(|dir| (dir.source, PathBuf::from(absolute_string(&dir.path))))
+        .collect::<Vec<_>>();
+    let changed = registry.replace_directory_skills(candidates, &roots);
+    let mut stats = ReloadStats::default();
+    for (previous, replacement) in changed {
+        if previous
+            .as_ref()
+            .and_then(|skill| skill.file_path.as_deref())
+            .is_some_and(|path| !next.contains_key(Path::new(path)))
         {
             stats.unregistered += 1;
-            tracing::info!(path = %path.display(), "skill unregistered (file removed)");
+        } else if let Some(path) = replacement
+            .as_ref()
+            .and_then(|skill| skill.file_path.as_deref())
+        {
+            if snapshot.0.contains_key(Path::new(path)) {
+                stats.reloaded += 1;
+            } else {
+                stats.registered += 1;
+            }
         }
     }
     snapshot.0 = next;
-    stats
+    snapshot.1 = true;
+    Ok(stats)
 }
 
 /// 由文件路径 + 内容构建技能定义（文件名非法（无 `file_name`）时跳过）。
@@ -376,75 +470,34 @@ fn absolute_string(path: &Path) -> String {
         .into_owned()
 }
 
-/// 采集全部目录的文件指纹（路径 → (指纹, 来源)）。
-fn collect_files(dirs: &[SkillDir]) -> HashMap<PathBuf, (FileStamp, SkillSource)> {
-    let mut files = HashMap::new();
-    for dir in dirs {
-        for path in walk_markdown(&dir.path, 0) {
-            let Ok(meta) = std::fs::metadata(&path) else {
-                continue;
-            };
-            let stamp = FileStamp {
-                modified: meta.modified().ok(),
-                len: meta.len(),
-            };
-            // 同一路径被多个来源覆盖时以后者（更高优先级）为准。
-            files.insert(path, (stamp, dir.source));
-        }
-    }
-    files
+/// Scan metadata through pinned directory descriptors; keep source ordering.
+fn collect_files(dirs: &[SkillDir]) -> std::io::Result<Vec<(SkillSource, Vec<BoundSkillFile>)>> {
+    dirs.iter()
+        .map(|dir| Ok((dir.source, scan_dir(dir)?)))
+        .collect()
 }
 
-/// 递归收集 `.md` 文件（跳隐藏项、不跟随符号链接、深度设界）。
-fn walk_markdown(dir: &Path, depth: usize) -> Vec<PathBuf> {
-    let mut result = Vec::new();
-    if depth > MAX_WALK_DEPTH || !dir.is_dir() {
-        return result;
+fn scan_dir(dir: &SkillDir) -> std::io::Result<Vec<BoundSkillFile>> {
+    match dir.authority.source(&dir.path) {
+        Ok(source) => source.scan(MAX_WALK_DEPTH),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(error),
     }
-    let entries = match std::fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(err) => {
-            tracing::warn!(dir = %dir.display(), error = %err, "failed to scan skills directory");
-            return result;
-        }
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with('.') {
-            continue;
-        }
-        let Ok(file_type) = entry.file_type() else {
-            continue;
-        };
-        let path = entry.path();
-        if file_type.is_dir() {
-            result.extend(walk_markdown(&path, depth + 1));
-        } else if file_type.is_file() && path.extension().is_some_and(|ext| ext == "md") {
-            result.push(path);
-        }
-    }
-    result.sort();
-    result
 }
 
-/// 插件技能目录枚举（`<workspace>/.zkcode/plugins/*/skills`）。
-///
-/// 目录清单在装配时定格：进程运行期新装插件需重启才纳入监听（旧仓库无插件
-/// 技能加载器，此为补齐实现的已知边界）。
-fn plugin_skill_dirs(working_dir: &Path) -> Vec<PathBuf> {
+/// Dynamic plugin discovery uses the project anchor, including ancestor aliases.
+fn plugin_skill_dirs(working_dir: &Path, authority: &SourceRoot) -> std::io::Result<Vec<PathBuf>> {
     let root = working_dir.join(PLUGIN_ROOT_DIR);
-    let Ok(entries) = std::fs::read_dir(&root) else {
-        return Vec::new();
+    let source = match authority.source(&root) {
+        Ok(source) => source,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
     };
-    let mut dirs: Vec<PathBuf> = entries
-        .flatten()
-        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
-        .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
-        .map(|entry| entry.path().join(PLUGIN_SKILLS_SUBDIR))
-        .filter(|path| path.is_dir())
-        .collect();
-    dirs.sort();
-    dirs
+    Ok(source
+        .child_directories()?
+        .into_iter()
+        .map(|path| path.join(PLUGIN_SKILLS_SUBDIR))
+        .collect())
 }
 
 /// `ZK_MANAGED_SKILLS_DIR` 读取（空值视作未配置）。
@@ -494,7 +547,11 @@ mod tests {
         write_skill(&skills, ".hidden.md", "隐藏");
         write_skill(&skills, "notes.txt", "非技能");
 
-        let loaded = load_skills_from_dir(&skills, SkillSource::Project);
+        let loaded = load_skills_from_dir(&SkillDir {
+            path: skills.clone(),
+            source: SkillSource::Project,
+            authority: SourceRoot::new(&root),
+        });
         let names: Vec<&str> = loaded.iter().map(|skill| skill.name.as_str()).collect();
         assert_eq!(names, vec!["audit", "deploy"]);
         for skill in &loaded {
@@ -513,7 +570,11 @@ mod tests {
     #[test]
     fn load_skills_from_missing_dir_is_empty() {
         let root = temp_root("missing");
-        let loaded = load_skills_from_dir(&root.join("nope"), SkillSource::User);
+        let loaded = load_skills_from_dir(&SkillDir {
+            path: root.join("nope"),
+            source: SkillSource::User,
+            authority: SourceRoot::new(&root),
+        });
         assert!(loaded.is_empty());
         std::fs::remove_dir_all(&root).ok();
     }
@@ -534,19 +595,37 @@ mod tests {
             vec![
                 SkillSource::Plugin,
                 SkillSource::Project,
+                SkillSource::Project,
+                SkillSource::Project,
+                SkillSource::User,
+                SkillSource::User,
                 SkillSource::User,
                 SkillSource::Managed
             ]
         );
         assert_eq!(dirs[0].path, root.join(".zkcode/plugins/git-pack/skills"));
-        assert_eq!(dirs[1].path, root.join(PROJECT_SKILLS_DIR));
-        assert_eq!(dirs[2].path, home.join(USER_SKILLS_DIR));
-        assert_eq!(dirs[3].path, managed);
+        assert_eq!(
+            dirs[1].path,
+            root.join(zk_core::paths::LEGACY_CONFIG_DIR_NAME)
+                .join("skills")
+        );
+        assert_eq!(
+            dirs[2].path,
+            root.join(zk_core::paths::CONFIG_DIR_NAME).join("skills")
+        );
+        assert_eq!(dirs[3].path, root.join(PROJECT_SKILLS_DIR));
+        assert_eq!(dirs[6].path, home.join(USER_SKILLS_DIR));
+        assert_eq!(dirs[7].path, managed);
         // 无 HOME / 无 managed 时对应来源整体缺席。
         let minimal = skill_dirs_with(&root, None, None);
         assert_eq!(
             minimal.iter().map(|dir| dir.source).collect::<Vec<_>>(),
-            vec![SkillSource::Plugin, SkillSource::Project]
+            vec![
+                SkillSource::Plugin,
+                SkillSource::Project,
+                SkillSource::Project,
+                SkillSource::Project
+            ]
         );
         for dir in [root, home, managed] {
             std::fs::remove_dir_all(dir).ok();
@@ -579,7 +658,7 @@ mod tests {
         let stats = load_and_register(&registry, &dirs);
         assert_eq!(stats.scanned, 3);
         assert_eq!(stats.registered, 3);
-        assert_eq!(registry.len(), 15, "14 内置 + deploy，commit 被同名覆盖");
+        assert_eq!(registry.len(), 14, "13 内置 + deploy，commit 被同名覆盖");
         let commit = registry.resolve("commit").expect("commit skill");
         assert_eq!(commit.source, SkillSource::User);
         assert_eq!(commit.effective_description(), "用户提交");
@@ -667,7 +746,7 @@ mod tests {
             registry.resolve("commit").expect("commit skill").source,
             SkillSource::Bundled
         );
-        assert_eq!(registry.len(), 14);
+        assert_eq!(registry.len(), 13);
         assert!(snapshot.is_empty());
         std::fs::remove_dir_all(&root).ok();
     }
@@ -684,5 +763,151 @@ mod tests {
         assert_eq!(WATCH_INTERVAL, Duration::from_millis(500));
         assert_eq!(PROJECT_SKILLS_DIR, ".zkcode/skills");
         assert_eq!(USER_SKILLS_DIR, ".zkcode/skills");
+    }
+    #[tokio::test]
+    async fn compatible_paths_reload_deterministically_and_keep_global_disable() {
+        let project = temp_root("compat-project");
+        let home = temp_root("compat-home");
+        let paths = [
+            (
+                project
+                    .join(zk_core::paths::LEGACY_CONFIG_DIR_NAME)
+                    .join("skills"),
+                "legacy project",
+            ),
+            (
+                project.join(zk_core::paths::CONFIG_DIR_NAME).join("skills"),
+                "core project",
+            ),
+            (project.join(PROJECT_SKILLS_DIR), "current project"),
+            (
+                home.join(zk_core::paths::LEGACY_CONFIG_DIR_NAME)
+                    .join("skills"),
+                "legacy user",
+            ),
+            (
+                home.join(zk_core::paths::CONFIG_DIR_NAME).join("skills"),
+                "core user",
+            ),
+            (home.join(USER_SKILLS_DIR), "current user"),
+        ];
+        let files = paths
+            .iter()
+            .map(|(dir, body)| write_skill(dir, "commit.md", body))
+            .collect::<Vec<_>>();
+        let db = zk_db::Db::open_in_memory().unwrap();
+        let registry = SkillRegistry::with_persisted_state(db.clone());
+        let dirs = skill_dirs_with(&project, None, Some(home.clone()));
+        load_and_register(&registry, &dirs);
+        let mut snapshot = SkillSnapshot::capture(&dirs);
+        assert_eq!(registry.resolve("commit").unwrap().content, "current user");
+        registry.set_enabled("commit", false).await.unwrap();
+        // Editing every lower-ranked duplicate cannot replace the current winner.
+        for path in &files[..5] {
+            std::fs::write(path, "changed lower candidate").unwrap();
+        }
+        assert_eq!(
+            poll_once(&registry, &dirs, &mut snapshot),
+            ReloadStats::default()
+        );
+        assert_eq!(
+            registry
+                .resolve_including_disabled("commit")
+                .unwrap()
+                .content,
+            "current user"
+        );
+        for index in (0..files.len()).rev() {
+            std::fs::remove_file(&files[index]).unwrap();
+            assert!(poll_once(&registry, &dirs, &mut snapshot).changed());
+            assert!(
+                registry.resolve("commit").is_none(),
+                "candidate fallback cannot reenable a global switch"
+            );
+            let winner = registry.resolve_including_disabled("commit").unwrap();
+            if index > 0 {
+                assert_eq!(
+                    winner.file_path.as_deref(),
+                    Some(absolute_string(&files[index - 1]).as_str())
+                );
+            } else {
+                assert_eq!(winner.source, SkillSource::Bundled);
+            }
+        }
+        assert!(!SkillRegistry::with_persisted_state(db).is_enabled("commit"));
+        std::fs::remove_dir_all(project).unwrap();
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn failed_candidate_read_retains_last_valid_registry_and_retries() {
+        let root = temp_root("reload-unreadable");
+        let legacy = root
+            .join(zk_core::paths::LEGACY_CONFIG_DIR_NAME)
+            .join("skills");
+        let current = root.join(PROJECT_SKILLS_DIR);
+        write_skill(&legacy, "deploy.md", "legacy valid");
+        let winner = write_skill(&current, "deploy.md", "current valid");
+        let registry = SkillRegistry::with_builtin_skills();
+        let dirs = skill_dirs_with(&root, None, None);
+        load_and_register(&registry, &dirs);
+        let mut snapshot = SkillSnapshot::capture(&dirs);
+        std::fs::write(&winner, [0xff, 0xfe, 0xfd]).unwrap();
+        assert_eq!(
+            poll_once(&registry, &dirs, &mut snapshot),
+            ReloadStats::default()
+        );
+        assert_eq!(registry.resolve("deploy").unwrap().content, "current valid");
+        std::fs::write(&winner, "restored current valid").unwrap();
+        assert_eq!(poll_once(&registry, &dirs, &mut snapshot).reloaded, 1);
+        assert_eq!(
+            registry.resolve("deploy").unwrap().content,
+            "restored current valid"
+        );
+        std::fs::remove_file(&winner).unwrap();
+        assert_eq!(poll_once(&registry, &dirs, &mut snapshot).unregistered, 1);
+        assert_eq!(registry.resolve("deploy").unwrap().content, "legacy valid");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn duplicate_files_in_one_directory_keep_stable_path_order_after_reload() {
+        let root = temp_root("reload-order");
+        let current = root.join(PROJECT_SKILLS_DIR);
+        let first = write_skill(&current.join("a"), "deploy.md", "a candidate");
+        let last = write_skill(&current.join("z"), "deploy.md", "z candidate");
+        let registry = SkillRegistry::with_builtin_skills();
+        let dirs = skill_dirs_with(&root, None, None);
+        load_and_register(&registry, &dirs);
+        let mut snapshot = SkillSnapshot::capture(&dirs);
+        for iteration in 0..8 {
+            std::fs::write(&first, format!("lower candidate {iteration}")).unwrap();
+            poll_once(&registry, &dirs, &mut snapshot);
+            assert_eq!(registry.resolve("deploy").unwrap().content, "z candidate");
+        }
+        std::fs::remove_file(last).unwrap();
+        poll_once(&registry, &dirs, &mut snapshot);
+        assert_eq!(
+            registry.resolve("deploy").unwrap().content,
+            "lower candidate 7"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn first_reconciliation_removes_a_file_deleted_after_startup_load() {
+        let root = temp_root("watcher-baseline");
+        let file = write_skill(
+            &root.join(PROJECT_SKILLS_DIR),
+            "deploy.md",
+            "loaded before watcher",
+        );
+        let registry = SkillRegistry::with_builtin_skills();
+        let dirs = skill_dirs_with(&root, None, None);
+        load_and_register(&registry, &dirs);
+        std::fs::remove_file(file).unwrap();
+        let mut snapshot = SkillSnapshot::default();
+        assert_eq!(poll_once(&registry, &dirs, &mut snapshot).unregistered, 1);
+        assert!(registry.resolve("deploy").is_none());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

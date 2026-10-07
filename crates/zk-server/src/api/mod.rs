@@ -33,21 +33,28 @@
 
 pub(crate) mod config;
 pub(crate) mod doctor;
+pub(crate) mod editor_preferences;
+pub(crate) mod hook_config;
 // ── Task 4 Step 5：LLM 密钥管理端点（GET/PUT /api/llm-keys）──
 pub(crate) mod dto;
 pub(crate) mod evidence;
+pub(crate) mod execution_preferences;
 pub(crate) mod grant;
 pub(crate) mod interaction;
 pub(crate) mod llm_keys;
 pub(crate) mod mapping;
 pub(crate) mod mcp;
 pub(crate) mod mcp_capability;
+pub(crate) mod mcp_context;
 pub(crate) mod mcp_server;
 pub(crate) mod models;
 pub(crate) mod openapi;
 pub(crate) mod project;
 pub(crate) mod query;
+pub(crate) mod repl;
 pub(crate) mod session;
+mod session_hooks;
+pub(crate) mod session_merge;
 pub(crate) mod session_snapshot;
 pub(crate) mod skill;
 pub(crate) mod speech;
@@ -74,7 +81,12 @@ pub(crate) mod swarm;
 pub(crate) mod admin;
 pub(crate) mod dialog;
 // ── Batch 8G：Plugin / BrowserReplay / CodeAnalysis 端点（Step 3-5）──
+pub(crate) mod analysis_openapi;
 pub(crate) mod browser_replay;
 pub(crate) mod code_analysis;
+pub(crate) mod code_complexity;
 pub(crate) mod command;
+pub(crate) mod git_read;
 pub(crate) mod plugin;
+
+pub(crate) mod handoff_asset;

@@ -2,7 +2,7 @@
 //!
 //! 语义来源（旧仓库只读，`581d407b`）：
 //! `backend/src/main/java/com/aicodeassistant/skill/SkillRegistry.java`
-//! （`ConcurrentHashMap` 双表 + 14 内置技能清单 + `resolve` 大小写不敏感
+//! （`ConcurrentHashMap` 双表 + 旧内置技能清单 + `resolve` 大小写不敏感
 //! 三级匹配 + `registerBuiltin` / `register` 双入口）、`SkillDefinition.java`
 //! （record 六字段 + `effectiveName` / `effectiveDescription` / `parseArgs`
 //! / `renderTemplate` / `fromMarkdown`）。
@@ -29,8 +29,8 @@ use serde::Serialize;
 
 use super::parser::{self, FrontmatterData};
 
-/// 内置技能清单（旧 `BUILTIN_SKILL_NAMES`，14 件，顺序一致）。
-pub const BUILTIN_SKILL_NAMES: [&str; 14] = [
+/// 内置技能清单（适用的 `BUILTIN_SKILL_NAMES`，13 件，不包含发布能力）。
+pub const BUILTIN_SKILL_NAMES: [&str; 13] = [
     "commit",
     "review",
     "fix",
@@ -44,11 +44,10 @@ pub const BUILTIN_SKILL_NAMES: [&str; 14] = [
     "csv-data-summarizer",
     "prompt-engineering",
     "test-driven-development",
-    "publish-oss",
 ];
 
 /// 内置技能正文（编译期嵌入，与 [`BUILTIN_SKILL_NAMES`] 一一对应）。
-const BUILTIN_SKILL_SOURCES: [&str; 14] = [
+const BUILTIN_SKILL_SOURCES: [&str; 13] = [
     include_str!("../../resources/skills/bundled/commit.md"),
     include_str!("../../resources/skills/bundled/review.md"),
     include_str!("../../resources/skills/bundled/fix.md"),
@@ -62,7 +61,6 @@ const BUILTIN_SKILL_SOURCES: [&str; 14] = [
     include_str!("../../resources/skills/bundled/csv-data-summarizer.md"),
     include_str!("../../resources/skills/bundled/prompt-engineering.md"),
     include_str!("../../resources/skills/bundled/test-driven-development.md"),
-    include_str!("../../resources/skills/bundled/publish-oss.md"),
 ];
 
 /// 技能加载来源（旧 `SkillDefinition.SkillSource` 六值，序列化形状与旧
@@ -127,6 +125,8 @@ pub struct SkillDefinition {
     pub source: SkillSource,
     /// 文件绝对路径（`None` = 内置技能）。
     pub file_path: Option<String>,
+    /// Validated filesystem provenance; never accepted from model/tool input.
+    pub(super) read_authority: Option<super::filesystem::ReadAuthority>,
 }
 
 impl SkillDefinition {
@@ -150,7 +150,14 @@ impl SkillDefinition {
             content: parsed.content,
             source,
             file_path,
+            read_authority: None,
         }
+    }
+
+    fn source_authorized(&self) -> bool {
+        self.read_authority
+            .as_ref()
+            .is_none_or(super::filesystem::ReadAuthority::permits_snapshot)
     }
 
     /// 有效名称（旧 `effectiveName`：frontmatter.name 优先，回落文件名）。
@@ -177,7 +184,11 @@ impl SkillDefinition {
     /// 解析调用参数（旧 `parseArgs`，委托模板参数替换器）。
     #[must_use]
     pub fn parse_args(&self, args: &str) -> std::collections::BTreeMap<String, String> {
-        parser::parse_args(args, &self.frontmatter.arguments)
+        let mut params = parser::parse_args(args, &self.frontmatter.arguments);
+        if self.source == SkillSource::Bundled && self.name == "review" {
+            params.insert("review_scope".into(), args.into());
+        }
+        params
     }
 
     /// 渲染模板（旧 `renderTemplate`：替换 `{{param}}`）。
@@ -191,22 +202,181 @@ impl SkillDefinition {
 ///
 /// 读多写少：`RwLock` + 锁内克隆出参，锁作用域恒为常数级；poison 一律
 /// `into_inner` 恢复（技能表是可重建的派生状态，无需以 panic 传播）。
-#[derive(Debug, Default)]
 pub struct SkillRegistry {
     /// 全部在册技能（name → definition，按来源优先级覆盖）。
     skills: RwLock<HashMap<String, SkillDefinition>>,
     /// 内置技能独立缓存（旧 `builtinSkills`，供自定义技能删除后回填）。
     builtin: RwLock<HashMap<String, SkillDefinition>>,
+    switches: RwLock<HashMap<String, bool>>,
+    state_error: RwLock<Option<String>>,
+    source_error: RwLock<Option<&'static str>>,
+    state_loaded: std::sync::atomic::AtomicBool,
+    store: Option<zk_db::Db>,
+    update_lock: tokio::sync::Mutex<()>,
+}
+
+impl Default for SkillRegistry {
+    fn default() -> Self {
+        Self {
+            skills: RwLock::new(HashMap::new()),
+            builtin: RwLock::new(HashMap::new()),
+            switches: RwLock::new(HashMap::new()),
+            state_error: RwLock::new(None),
+            source_error: RwLock::new(None),
+            state_loaded: std::sync::atomic::AtomicBool::new(true),
+            store: None,
+            update_lock: tokio::sync::Mutex::new(()),
+        }
+    }
+}
+
+impl std::fmt::Debug for SkillRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SkillRegistry")
+            .field("count", &self.len())
+            .field("state_error", &self.state_error())
+            .finish_non_exhaustive()
+    }
 }
 
 impl SkillRegistry {
     /// 空注册表。
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            state_loaded: std::sync::atomic::AtomicBool::new(true),
+            ..Self::default()
+        }
     }
 
-    /// 载入 14 件内置技能后的注册表（旧 `@PostConstruct
+    /// Attach authoritative global switches before loading any skills.
+    pub fn with_persisted_state(db: zk_db::Db) -> Self {
+        let stored = db.skill_states_at_startup();
+        let registry = Self {
+            store: Some(db),
+            ..Self::new()
+        };
+        match stored {
+            Ok(states) => {
+                *registry
+                    .switches
+                    .write()
+                    .unwrap_or_else(PoisonError::into_inner) = states.into_iter().fold(
+                    HashMap::new(),
+                    |mut normalized: HashMap<String, bool>, (name, enabled)| {
+                        normalized
+                            .entry(name.to_lowercase())
+                            .and_modify(|previous| *previous &= enabled)
+                            .or_insert(enabled);
+                        normalized
+                    },
+                );
+            }
+            Err(error) => {
+                tracing::error!(%error, "skill state unavailable; invocation disabled");
+                registry
+                    .state_loaded
+                    .store(false, std::sync::atomic::Ordering::Release);
+                *registry
+                    .state_error
+                    .write()
+                    .unwrap_or_else(PoisonError::into_inner) =
+                    Some("Skill state could not be loaded".into());
+            }
+        }
+        registry.register_builtin_skills();
+        registry
+    }
+
+    /// Whether authoritative preferences loaded successfully; save failures keep this true.
+    #[must_use]
+    pub fn state_available(&self) -> bool {
+        self.state_loaded.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Last persistence failure, displayed by every management entry point.
+    pub fn state_error(&self) -> Option<String> {
+        self.state_error
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+            .or_else(|| {
+                self.source_error
+                    .read()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .map(str::to_owned)
+            })
+            .or_else(|| {
+                self.skills
+                    .read()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .values()
+                    .any(|skill| !skill.source_authorized())
+                    .then(|| "SKILL_SOURCE_UNAUTHORIZED".to_owned())
+            })
+    }
+
+    pub(super) fn set_source_error(&self, error: Option<&'static str>) {
+        *self
+            .source_error
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = error;
+    }
+
+    /// Switches use the canonical file name, so aliases cannot bypass them.
+    pub fn is_enabled(&self, name: &str) -> bool {
+        self.state_loaded.load(std::sync::atomic::Ordering::Acquire)
+            && self
+                .switches
+                .read()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(&name.to_lowercase())
+                .copied()
+                .unwrap_or(true)
+    }
+
+    /// Serialize DB/cache publication so concurrent toggles cannot reorder.
+    /// # Errors
+    /// Rejects unknown skills and failed transactions while retaining the last valid state.
+    pub async fn set_enabled(&self, name: &str, enabled: bool) -> Result<(), zk_db::DbError> {
+        let skill = self
+            .resolve_including_disabled(name)
+            .ok_or_else(|| zk_db::DbError::Validation("unknown skill".into()))?;
+        self.set_known_enabled(&skill.name, enabled).await
+    }
+
+    /// Persist an identity already resolved inside an authorized Skill view.
+    pub(super) async fn set_known_enabled(
+        &self,
+        name: &str,
+        enabled: bool,
+    ) -> Result<(), zk_db::DbError> {
+        let _guard = self.update_lock.lock().await;
+        if !self.state_loaded.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(zk_db::DbError::Invalid("skill state is unavailable".into()));
+        }
+        if let Some(db) = &self.store
+            && let Err(error) = db.set_skill_enabled(name.to_lowercase(), enabled).await
+        {
+            *self
+                .state_error
+                .write()
+                .unwrap_or_else(PoisonError::into_inner) =
+                Some("Skill state could not be saved; last valid state retained".into());
+            return Err(error);
+        }
+        self.switches
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(name.to_lowercase(), enabled);
+        *self
+            .state_error
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = None;
+        Ok(())
+    }
+
+    /// 载入 13 件内置技能后的注册表（旧 `@PostConstruct
     /// registerBuiltinSkills` 的等价装配入口）。
     #[must_use]
     pub fn with_builtin_skills() -> Self {
@@ -215,7 +385,7 @@ impl SkillRegistry {
         registry
     }
 
-    /// 注册内置技能（旧 `registerBuiltinSkills`：14 件逐个解析入双表）。
+    /// 注册内置技能（旧 `registerBuiltinSkills`：13 件逐个解析入双表）。
     pub fn register_builtin_skills(&self) {
         for (name, raw) in BUILTIN_SKILL_NAMES.iter().zip(BUILTIN_SKILL_SOURCES) {
             let skill = SkillDefinition::from_markdown(
@@ -234,23 +404,27 @@ impl SkillRegistry {
 
     /// 注册内置技能（旧 `registerBuiltin`：同时进 `builtin` 与总表）。
     pub fn register_builtin(&self, skill: SkillDefinition) {
-        let name = skill.name.clone();
+        if skill.name.trim().is_empty() {
+            return;
+        }
+        let name = skill.name.to_lowercase();
         self.builtin
             .write()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(name.clone(), skill.clone());
-        self.skills
-            .write()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(name, skill);
+        self.register(skill);
     }
 
     /// 注册任意来源技能（旧 `register`，附加来源优先级守卫）。
     ///
     /// 返回 `true` = 已写入；`false` = 被更高优先级来源的同名技能挡下。
     pub fn register(&self, skill: SkillDefinition) -> bool {
+        if skill.name.trim().is_empty() {
+            return false;
+        }
+        let key = skill.name.to_lowercase();
         let mut skills = self.skills.write().unwrap_or_else(PoisonError::into_inner);
-        if let Some(existing) = skills.get(&skill.name)
+        if let Some(existing) = skills.get(&key)
             && existing.source.priority() > skill.source.priority()
         {
             tracing::debug!(
@@ -262,21 +436,81 @@ impl SkillRegistry {
             return false;
         }
         tracing::debug!(skill = %skill.name, source = skill.source.as_str(), "skill registered");
-        skills.insert(skill.name.clone(), skill);
+        skills.insert(key, skill);
         true
+    }
+
+    /// Replace only filesystem-owned definitions in one publication. The loader
+    /// supplies candidates in stable source/path priority order; other runtime
+    /// sources and the independent global switches remain untouched.
+    pub(super) fn replace_directory_skills(
+        &self,
+        candidates: Vec<SkillDefinition>,
+        roots: &[(SkillSource, std::path::PathBuf)],
+    ) -> Vec<(Option<SkillDefinition>, Option<SkillDefinition>)> {
+        let builtins = self
+            .builtin
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let mut skills = self.skills.write().unwrap_or_else(PoisonError::into_inner);
+        let previous = skills.clone();
+        skills.retain(|_, skill| {
+            !skill.file_path.as_deref().is_some_and(|path| {
+                roots.iter().any(|(source, root)| {
+                    *source == skill.source && std::path::Path::new(path).starts_with(root)
+                })
+            })
+        });
+        for (name, skill) in builtins {
+            skills.entry(name).or_insert(skill);
+        }
+        for skill in candidates {
+            if skill.name.trim().is_empty() {
+                continue;
+            }
+            let name = skill.name.to_lowercase();
+            if skills
+                .get(&name)
+                .is_none_or(|current| current.source.priority() <= skill.source.priority())
+            {
+                skills.insert(name, skill);
+            }
+        }
+        let names = previous
+            .keys()
+            .chain(skills.keys())
+            .collect::<std::collections::BTreeSet<_>>();
+        names
+            .into_iter()
+            .filter_map(|name| {
+                let (old, new) = (previous.get(name), skills.get(name));
+                (old != new).then(|| (old.cloned(), new.cloned()))
+            })
+            .collect()
     }
 
     /// 按名称解析（旧 `resolve`：去 `/` 前缀 + 小写精确命中 → 遍历大小写
     /// 不敏感匹配 `name` / `effectiveName`）。
     #[must_use]
     pub fn resolve(&self, name: &str) -> Option<SkillDefinition> {
+        self.resolve_including_disabled(name)
+            .filter(|skill| self.is_enabled(&skill.name))
+    }
+
+    /// Management-only lookup; execution must always use `resolve`.
+    pub fn resolve_including_disabled(&self, name: &str) -> Option<SkillDefinition> {
         let normalized = name.strip_prefix('/').unwrap_or(name).to_lowercase();
         let skills = self.skills.read().unwrap_or_else(PoisonError::into_inner);
-        if let Some(skill) = skills.get(&normalized) {
+        if let Some(skill) = skills
+            .get(&normalized)
+            .filter(|skill| skill.source_authorized())
+        {
             return Some(skill.clone());
         }
         skills
             .values()
+            .filter(|skill| skill.source_authorized())
             .find(|skill| {
                 skill.name.eq_ignore_ascii_case(&normalized)
                     || skill.effective_name().eq_ignore_ascii_case(&normalized)
@@ -290,11 +524,20 @@ impl SkillRegistry {
     /// `ConcurrentHashMap.values()`（顺序不定），REST 列表需要确定序。
     #[must_use]
     pub fn all_skills(&self) -> Vec<SkillDefinition> {
+        self.manage_skills()
+            .into_iter()
+            .filter(|skill| self.is_enabled(&skill.name))
+            .collect()
+    }
+
+    /// Management list including disabled definitions.
+    pub fn manage_skills(&self) -> Vec<SkillDefinition> {
         let mut all: Vec<SkillDefinition> = self
             .skills
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .values()
+            .filter(|skill| skill.source_authorized())
             .cloned()
             .collect();
         all.sort_by(|left, right| left.effective_name().cmp(right.effective_name()));
@@ -309,6 +552,7 @@ impl SkillRegistry {
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .values()
+            .filter(|skill| self.is_enabled(&skill.name))
             .cloned()
             .collect();
         all.sort_by(|left, right| left.effective_name().cmp(right.effective_name()));
@@ -335,15 +579,16 @@ impl SkillRegistry {
     /// 返回被移除的技能。移除后若同名内置技能仍在缓存中，则回填内置版本
     /// （自定义覆盖被删 → 退回内置行为；旧实现无此回填，见模块文档）。
     pub fn unregister(&self, name: &str) -> Option<SkillDefinition> {
+        let name = name.to_lowercase();
         let mut skills = self.skills.write().unwrap_or_else(PoisonError::into_inner);
-        let removed = skills.remove(name)?;
+        let removed = skills.remove(&name)?;
         if let Some(builtin) = self
             .builtin
             .read()
             .unwrap_or_else(PoisonError::into_inner)
-            .get(name)
+            .get(&name)
         {
-            skills.insert(name.to_owned(), builtin.clone());
+            skills.insert(name.clone(), builtin.clone());
         }
         Some(removed)
     }
@@ -378,11 +623,95 @@ impl SkillRegistry {
 mod tests {
     use super::*;
 
-    /// 14 件内置技能全部载入，名称与旧 `BUILTIN_SKILL_NAMES` 逐一对齐。
+    #[tokio::test]
+    async fn global_switches_survive_reload_and_failed_save_keeps_last_state() {
+        let db = zk_db::Db::open_in_memory().unwrap();
+        let registry = SkillRegistry::with_persisted_state(db.clone());
+        registry.set_enabled("/FIX", false).await.unwrap();
+        assert!(registry.resolve("fix").is_none());
+        assert!(!registry.all_skills().iter().any(|s| s.name == "fix"));
+        assert!(!registry.builtin_skills().iter().any(|s| s.name == "fix"));
+        registry.register(SkillDefinition::from_markdown(
+            "fix.md",
+            "---\nname: custom-fix\n---\ncustom",
+            SkillSource::Project,
+            None,
+        ));
+        assert!(
+            registry.resolve("custom-fix").is_none(),
+            "display aliases cannot bypass canonical switch"
+        );
+        let restarted = SkillRegistry::with_persisted_state(db.clone());
+        assert!(restarted.resolve("fix").is_none());
+        db.with_conn_blocking(|conn| {
+            conn.execute_batch("DROP TABLE skill_states")?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(registry.set_enabled("fix", true).await.is_err());
+        assert!(registry.resolve("custom-fix").is_none());
+        assert!(registry.state_error().is_some());
+        let unavailable = SkillRegistry::with_persisted_state(db);
+        assert!(unavailable.all_skills().is_empty());
+        assert!(unavailable.state_error().is_some());
+    }
+
+    #[tokio::test]
+    async fn case_changed_reload_preserves_global_switch_and_invalid_names_are_skipped() {
+        let db = zk_db::Db::open_in_memory().unwrap();
+        let registry = SkillRegistry::with_persisted_state(db.clone());
+        let before = registry.len();
+        let definition = |name: &str, alias: &str, source| {
+            SkillDefinition::from_markdown(
+                &format!("{name}.md"),
+                &format!("---\nname: {alias}\n---\nbody"),
+                source,
+                None,
+            )
+        };
+        assert!(!registry.register(definition(" ", "invalid", SkillSource::User)));
+        registry.register_builtin(definition("", "invalid", SkillSource::Bundled));
+        assert_eq!(registry.len(), before);
+        registry.register(definition("Example", "old-alias", SkillSource::Bundled));
+        registry.set_enabled("EXAMPLE", false).await.unwrap();
+        registry.register(definition("example", "new-alias", SkillSource::Project));
+        assert_eq!(registry.len(), before + 1);
+        assert!(registry.resolve("new-alias").is_none());
+        assert!(registry.resolve("/EXAMPLE").is_none());
+        let restarted = SkillRegistry::with_persisted_state(db);
+        restarted.register(definition("Example", "new-alias", SkillSource::Project));
+        assert!(restarted.resolve("new-alias").is_none());
+        restarted.set_enabled("example", true).await.unwrap();
+        assert!(restarted.resolve("new-alias").is_some());
+    }
+
     #[test]
-    fn builtin_skills_cover_fourteen_names() {
+    fn migrated_project_skills_parse_with_real_tool_names_and_project_priority() {
+        let directory =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.zkcode/skills");
+        for name in ["batch", "deep-research", "deploy", "refactor", "skillify"] {
+            let file = directory.join(format!("{name}.md"));
+            let content = std::fs::read_to_string(&file).unwrap();
+            let skill = SkillDefinition::from_markdown(
+                &format!("{name}.md"),
+                &content,
+                SkillSource::Project,
+                Some(file.to_string_lossy().into_owned()),
+            );
+            assert_eq!(skill.effective_name(), name);
+            assert!(!skill.frontmatter.allowed_tools.is_empty());
+            assert!(!skill.content.contains(".zhikun/"));
+            assert!(skill.frontmatter.user_invocable);
+            assert_eq!(skill.frontmatter.context, "inline");
+        }
+    }
+
+    /// 13 件内置技能全部载入，名称与旧 `BUILTIN_SKILL_NAMES` 逐一对齐。
+    #[test]
+    fn builtin_skills_cover_applicable_names() {
         let registry = SkillRegistry::with_builtin_skills();
-        assert_eq!(registry.len(), 14);
+        assert_eq!(registry.len(), 13);
+        assert!(registry.resolve("publish-oss").is_none());
         for name in BUILTIN_SKILL_NAMES {
             let skill = registry
                 .resolve(name)
@@ -398,6 +727,22 @@ mod tests {
         }
     }
 
+    #[test]
+    fn removing_bundled_publishing_does_not_block_user_owned_skills() {
+        let registry = SkillRegistry::with_builtin_skills();
+        let skill = SkillDefinition::from_markdown(
+            "publish-oss.md",
+            "User-managed workflow",
+            SkillSource::User,
+            Some("/user/skills/publish-oss.md".into()),
+        );
+        assert!(registry.register(skill));
+        assert_eq!(
+            registry.resolve("publish-oss").unwrap().source,
+            SkillSource::User
+        );
+    }
+
     /// 内置技能 description 来源二分：带 frontmatter 者取 YAML，
     /// 无 frontmatter 者取正文首段落兜底。
     #[test]
@@ -406,7 +751,7 @@ mod tests {
         let debug = registry.resolve("debug").expect("debug skill");
         assert_eq!(
             debug.frontmatter.description.as_deref(),
-            Some("系统化调试流程，从错误复现到根因定位到修复验证的完整闭环")
+            Some("基于复现证据定位根因，按用户授权进行最小修复；无进展时回顾假设并选择下一步")
         );
         assert_eq!(debug.effective_name(), "debug");
         // commit.md 无 frontmatter → 首段落兜底（跳过 `#` 标题行）。
@@ -448,7 +793,7 @@ mod tests {
             registry.resolve("commit").expect("commit skill").source,
             SkillSource::Project
         );
-        assert_eq!(registry.len(), 14, "同名覆盖不增加计数");
+        assert_eq!(registry.len(), 13, "同名覆盖不增加计数");
     }
 
     /// 反注册按路径定位，且同名内置技能回填。
@@ -466,7 +811,7 @@ mod tests {
         assert_eq!(removed.source, SkillSource::Project);
         let restored = registry.resolve("commit").expect("builtin restored");
         assert_eq!(restored.source, SkillSource::Bundled);
-        assert_eq!(registry.len(), 14);
+        assert_eq!(registry.len(), 13);
     }
 
     /// 自定义技能（无同名内置）反注册后彻底消失。
@@ -498,7 +843,7 @@ mod tests {
         let mut sorted = names.clone();
         sorted.sort();
         assert_eq!(names, sorted);
-        assert_eq!(registry.builtin_skills().len(), 14);
+        assert_eq!(registry.builtin_skills().len(), 13);
     }
 
     /// 来源字符串与优先级链（序列化形状即旧 `enum.name()`）。

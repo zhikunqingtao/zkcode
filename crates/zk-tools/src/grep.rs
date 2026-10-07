@@ -22,8 +22,7 @@ use futures::future::BoxFuture;
 use serde_json::json;
 
 use crate::input::{
-    RESULTS_TRUNCATED, bool_or, failure, optional_str, optional_usize, required_str, resolve_path,
-    truncate_chars,
+    RESULTS_TRUNCATED, bool_or, failure, optional_str, required_str, resolve_path, truncate_chars,
 };
 use crate::tool::{Tool, ToolContext, ToolOutput};
 
@@ -121,8 +120,8 @@ impl Tool for GrepTool {
                 "-B": { "type": "integer", "description": "Lines of leading context (content mode)." },
                 "-C": { "type": "integer", "description": "Lines of context on both sides (content mode)." },
                 "multiline": { "type": "boolean", "description": "Let the pattern span line boundaries." },
-                "head_limit": { "type": "integer", "description": "Maximum output lines (default 250)." },
-                "offset": { "type": "integer", "description": "Skip this many output lines." }
+                "head_limit": { "type": "integer", "description": "32-bit integer maximum result lines (default 250); <=0 disables paging and ignores offset, total output caps still apply." },
+                "offset": { "type": "integer", "description": "Non-negative 32-bit integer lines to skip; offset + head_limit + 1 must fit in 2147483647." }
             },
             "required": ["pattern"]
         })
@@ -155,10 +154,10 @@ async fn run(input: serde_json::Value, ctx: ToolContext) -> ToolOutput {
             format!("Path does not exist: {display}"),
         );
     }
-    let head_limit = optional_usize(&input, "head_limit")
-        .unwrap_or(DEFAULT_GREP_HEAD_LIMIT)
-        .clamp(1, MAX_GREP_OUTPUT_LINES);
-    let offset = optional_usize(&input, "offset").unwrap_or(0);
+    let (head_limit, offset) = match paging(&input) {
+        Ok(paging) => paging,
+        Err(output) => return output,
+    };
     let target = root.clone();
     let Ok(found) = tokio::task::spawn_blocking(move || search(&target, &options)).await else {
         return failure(
@@ -190,19 +189,106 @@ fn parse(input: &serde_json::Value) -> Result<Options, ToolOutput> {
             ));
         }
     };
-    let context = optional_usize(input, "-C").unwrap_or(0);
+    let context = if mode == Mode::Content {
+        context_lines(input, "-C", 0)?
+    } else {
+        0
+    };
+    let before = if mode == Mode::Content {
+        context_lines(input, "-B", context)?
+    } else {
+        0
+    };
+    let after = if mode == Mode::Content {
+        context_lines(input, "-A", context)?
+    } else {
+        0
+    };
     Ok(Options {
         regex,
         multiline,
         mode,
-        before: optional_usize(input, "-B").unwrap_or(context),
-        after: optional_usize(input, "-A").unwrap_or(context),
+        before,
+        after,
         include: compile_glob(
             optional_str(input, "glob").or_else(|| optional_str(input, "include")),
         )?,
         exclude: compile_glob(optional_str(input, "exclude"))?,
         extensions: optional_str(input, "type").map(extensions_for),
     })
+}
+
+fn exact_i32(input: &serde_json::Value, key: &str, default: i32) -> Result<i32, ToolOutput> {
+    let Some(raw) = input.get(key).filter(|value| !value.is_null()) else {
+        return Ok(default);
+    };
+    let parsed = raw
+        .as_i64()
+        .and_then(|value| i32::try_from(value).ok())
+        .or_else(|| raw.as_str().and_then(|value| value.parse::<i32>().ok()))
+        .or_else(|| {
+            raw.as_f64()
+                .filter(|value| value.fract() == 0.0)
+                .and_then(|value| value.to_string().parse::<i32>().ok())
+        });
+    parsed.ok_or_else(|| {
+        failure(
+            "GREP_ARGUMENT_INVALID",
+            format!("{key} must be a 32-bit integer"),
+        )
+    })
+}
+
+fn context_lines(
+    input: &serde_json::Value,
+    key: &str,
+    default: usize,
+) -> Result<usize, ToolOutput> {
+    let value = exact_i32(input, key, i32::try_from(default).unwrap_or(i32::MAX))?;
+    usize::try_from(value).map_err(|_| {
+        failure(
+            "GREP_ARGUMENT_INVALID",
+            format!("{key} must be non-negative in content mode"),
+        )
+    })
+}
+
+fn paging(input: &serde_json::Value) -> Result<(usize, usize), ToolOutput> {
+    let head = exact_i32(
+        input,
+        "head_limit",
+        i32::try_from(DEFAULT_GREP_HEAD_LIMIT).unwrap_or(250),
+    )?;
+    if head <= 0 {
+        return Ok((MAX_GREP_OUTPUT_LINES, 0));
+    }
+    let offset = exact_i32(input, "offset", 0)?;
+    if offset < 0 || i64::from(offset) + i64::from(head) + 1 > i64::from(i32::MAX) {
+        return Err(failure(
+            "GREP_ARGUMENT_INVALID",
+            "offset must be non-negative and offset + head_limit + 1 must not exceed 2147483647",
+        ));
+    }
+    Ok((
+        usize::try_from(head)
+            .unwrap_or(MAX_GREP_OUTPUT_LINES)
+            .min(MAX_GREP_OUTPUT_LINES),
+        usize::try_from(offset).unwrap_or(0),
+    ))
+}
+
+fn protected_descendant(name: &str, directory: bool) -> bool {
+    use zk_core::protected_paths::{DANGEROUS_DIRECTORIES, DANGEROUS_FILES};
+    if directory {
+        DANGEROUS_DIRECTORIES
+            .iter()
+            .any(|entry| name.eq_ignore_ascii_case(entry))
+    } else {
+        name.to_ascii_lowercase().starts_with(".env")
+            || DANGEROUS_FILES
+                .iter()
+                .any(|entry| name.eq_ignore_ascii_case(entry))
+    }
 }
 
 /// 编译可选 glob（失败 → `GREP_GLOB_INVALID`）。
@@ -244,7 +330,7 @@ fn finish(found: Found, offset: usize, head_limit: usize) -> ToolOutput {
         .collect();
     let line_truncated = offset + window.len() < total;
     let (body, char_truncated) = truncate_chars(window.join("\n"), MAX_GREP_RESULT_CHARS);
-    let truncated = line_truncated || char_truncated;
+    let truncated = found.truncated || line_truncated || char_truncated;
     let mut content = body;
     if truncated {
         content.push_str(RESULTS_TRUNCATED);
@@ -254,6 +340,7 @@ fn finish(found: Found, offset: usize, head_limit: usize) -> ToolOutput {
         "structuredResult": {
             "numLines": window.len(),
             "numFiles": found.files,
+            "keyFileReferences": found.key_files,
             "truncated": truncated,
         }
     }));
@@ -266,6 +353,10 @@ struct Found {
     lines: Vec<String>,
     /// 命中文件数。
     files: usize,
+    /// Bounded successful file matches for authorized context reload selection.
+    key_files: Vec<String>,
+    /// The global line cap stopped discovery before the search was exhausted.
+    truncated: bool,
 }
 
 /// 遍历候选文件并逐文件搜索（目录 → 递归遍历；单文件 → 直接搜）。
@@ -273,23 +364,33 @@ fn search(root: &Path, options: &Options) -> Found {
     let mut found = Found {
         lines: Vec::new(),
         files: 0,
+        key_files: Vec::new(),
+        truncated: false,
     };
     if root.is_file() {
         scan_file(root, root, options, &mut found);
+        apply_global_line_cap(&mut found);
         return found;
     }
     let mut builder = ignore::WalkBuilder::new(root);
     builder
         .hidden(false)
         .follow_links(false)
+        .sort_by_file_path(std::cmp::Ord::cmp)
         .filter_entry(|entry| {
-            entry
-                .file_name()
-                .to_str()
-                .is_none_or(|name| !VCS_EXCLUDE.contains(&name))
+            // The explicit root has already passed the authorization gateway.
+            // Exclusions apply only below it, including nested names matching it.
+            entry.depth() == 0
+                || entry.file_name().to_str().is_none_or(|name| {
+                    !VCS_EXCLUDE.contains(&name)
+                        && !protected_descendant(
+                            name,
+                            entry.file_type().is_some_and(|kind| kind.is_dir()),
+                        )
+                })
         });
     for entry in builder.build().flatten() {
-        if found.lines.len() >= MAX_GREP_OUTPUT_LINES {
+        if found.lines.len() > MAX_GREP_OUTPUT_LINES {
             break;
         }
         if !entry.file_type().is_some_and(|kind| kind.is_file()) {
@@ -299,7 +400,15 @@ fn search(root: &Path, options: &Options) -> Found {
             scan_file(root, entry.path(), options, &mut found);
         }
     }
+    apply_global_line_cap(&mut found);
     found
+}
+
+fn apply_global_line_cap(found: &mut Found) {
+    if found.lines.len() > MAX_GREP_OUTPUT_LINES {
+        found.lines.truncate(MAX_GREP_OUTPUT_LINES);
+        found.truncated = true;
+    }
 }
 
 /// 路径过滤（glob 包含 / 排除 / 扩展名白名单）。
@@ -341,16 +450,22 @@ fn scan_file(root: &Path, path: &Path, options: &Options, found: &mut Found) {
         return;
     }
     let text = String::from_utf8_lossy(&bytes);
-    let label = path
-        .strip_prefix(root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .into_owned();
+    let relative = path.strip_prefix(root).unwrap_or(path);
+    let label = if relative.as_os_str().is_empty() {
+        path
+    } else {
+        relative
+    }
+    .to_string_lossy()
+    .into_owned();
     let hits = hit_lines(&text, options);
     if hits.is_empty() {
         return;
     }
     found.files += 1;
+    if found.key_files.len() < 20 {
+        found.key_files.push(path.to_string_lossy().into_owned());
+    }
     match options.mode {
         Mode::FilesWithMatches => found.lines.push(label),
         Mode::Count => found.lines.push(format!("{label}:{}", hits.len())),
@@ -388,7 +503,7 @@ fn render_content(
     let mut emitted: Vec<usize> = Vec::new();
     for hit in hits {
         let from = hit.saturating_sub(options.before).max(1);
-        let to = (hit + options.after).min(lines.len());
+        let to = hit.saturating_add(options.after).min(lines.len());
         for number in from..=to {
             if emitted.contains(&number) {
                 continue;
@@ -397,7 +512,7 @@ fn render_content(
             let separator = if hits.contains(&number) { ':' } else { '-' };
             let body = lines.get(number - 1).copied().unwrap_or_default();
             out.push(format!("{label}{separator}{number}{separator}{body}"));
-            if out.len() >= MAX_GREP_OUTPUT_LINES {
+            if out.len() > MAX_GREP_OUTPUT_LINES {
                 return;
             }
         }
@@ -431,6 +546,66 @@ mod tests {
         std::fs::write(root.join("b.txt"), "prefix\nfn gamma() {}\nsuffix\n").expect("w");
         std::fs::write(root.join("c.rs"), "no hits here\n").expect("w");
         root
+    }
+
+    #[test]
+    fn exact_paging_context_validation_and_disabled_offset() {
+        assert_eq!(
+            paging(&json!({"head_limit":0,"offset":"ignored"})).unwrap(),
+            (MAX_GREP_OUTPUT_LINES, 0)
+        );
+        assert_eq!(
+            paging(&json!({"head_limit":-1,"offset":-9})).unwrap(),
+            (MAX_GREP_OUTPUT_LINES, 0)
+        );
+        assert_eq!(
+            paging(&json!({"head_limit":"2","offset":1})).unwrap(),
+            (2, 1)
+        );
+        for value in [
+            json!({"head_limit":1.5}),
+            json!({"offset":-1}),
+            json!({"head_limit":2_147_483_647_i64}),
+            json!({"offset":2_147_483_647_i64}),
+        ] {
+            assert!(
+                paging(&value)
+                    .unwrap_err()
+                    .content
+                    .starts_with("GREP_ARGUMENT_INVALID")
+            );
+        }
+        assert!(parse(&json!({"pattern":"x", "output_mode":"content", "-A":-1})).is_err());
+        assert!(parse(&json!({"pattern":"x", "output_mode":"count", "-A":-1})).is_ok());
+    }
+
+    #[tokio::test]
+    async fn broad_search_excludes_protected_descendants_but_explicit_root_is_searchable() {
+        let root = fixture("protected");
+        let explicit = root.join("node_modules");
+        std::fs::create_dir_all(explicit.join("node_modules")).unwrap();
+        std::fs::write(explicit.join("visible.js"), "fn package").unwrap();
+        std::fs::write(explicit.join("node_modules/hidden.js"), "fn nested").unwrap();
+        std::fs::write(root.join(".ENV.production"), "fn secret").unwrap();
+        let broad = GrepTool
+            .execute(json!({"pattern":"fn", "glob":"**/*"}), ctx(&root))
+            .await;
+        assert!(
+            !broad.content.contains("visible")
+                && !broad.content.contains("hidden")
+                && !broad.content.contains("ENV")
+        );
+        let narrow = GrepTool
+            .execute(json!({"pattern":"fn", "path":explicit}), ctx(&root))
+            .await;
+        assert_eq!(narrow.content, "visible.js");
+        let single = GrepTool
+            .execute(
+                json!({"pattern":"fn", "path":root.join("a.rs")}),
+                ctx(&root),
+            )
+            .await;
+        assert!(single.content.ends_with("a.rs"));
     }
 
     #[tokio::test]

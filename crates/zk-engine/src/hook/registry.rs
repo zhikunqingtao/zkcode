@@ -1,16 +1,9 @@
-//! Hook 注册表：按事件类型索引 hook 声明（Batch 8B Step 2）。
+//! Bounded, descriptor-anchored loading of `.zk/hooks.toml`.
 //!
-//! 对照旧 `hook/HookRegistry.java`（178L）。语义偏离留痕：
+//! Complete valid replacements are loaded atomically by `HookService`. Malformed
+//! replacements cannot silently erase security rules. Event role constraints,
+//! regex matchers and priorities are validated before any external execution.
 //!
-//! - **H-03 索引简化**：旧注册表值为 `HookRegistration`（含 role / matcher 正则 /
-//!   priority / source），且对 `PRE_TOOL_USE` 禁 `PRESENTATION`、`POST_TOOL_USE`
-//!   必须 `PRESENTATION`，并按 priority 升序返回——那是**进程内函数 hook** 参与
-//!   准入与展示裁决的必要元数据（见 [`crate::hook::event`] H-01）。本端 hook 是
-//!   外部副作用通知，无准入/展示语义，故索引值直接是 [`HookConfig`]，注册即入表、
-//!   保持声明顺序（`.zk/hooks.toml` 内自上而下），无 priority / matcher。
-//! - **配置源**：旧 hook 由代码注册（`register`）；本端由 `.zk/hooks.toml` 声明式
-//!   加载（[`HookRegistry::load_from_dir`]），`register` 仍保留供编程式注入 / 测试。
-
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -45,67 +38,110 @@ impl HookRegistry {
 
     /// 从工作根目录加载 `.zk/hooks.toml`（不存在 → 空注册表）。
     ///
-    /// 解析失败或单条 hook 无效（既无 `command` 又无 `url`）时 `warn!` 并跳过，
-    /// **不** fail-fast——hook 是外部通知，配置错误不应拖垮服务启动。
+    /// Invalid configuration keeps the security gate closed. `HookService` hot
+    /// reload retains the last fully valid replacement instead of resetting rules.
     #[must_use]
     pub fn load_from_dir(root: &Path) -> Self {
+        if let Ok(registry) = Self::try_load_from_dir(root) {
+            registry
+        } else {
+            tracing::error!(
+                error_code = "HOOK_CONFIG_INVALID",
+                "hooks configuration unavailable; security gate remains closed"
+            );
+            Self {
+                invalid_security_config: true,
+                ..Self::new()
+            }
+        }
+    }
+
+    /// Read a complete bounded configuration. Malformed replacements are not
+    /// interpreted as an empty configuration by hot-reload callers.
+    ///
+    /// # Errors
+    /// Unreadable, oversized, invalid or unsafe configurations return a diagnostic.
+    pub fn try_load_from_dir(root: &Path) -> Result<Self, String> {
+        use std::io::Read;
+        let root = match root.canonicalize() {
+            Ok(root) => root,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Self::new()),
+            Err(error) => return Err(format!("HOOK_ROOT_UNAVAILABLE: {error}")),
+        };
         let path = root.join(HOOKS_FILE_REL);
-        let metadata = match std::fs::symlink_metadata(&path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Self::new(),
-            Err(error) => {
-                tracing::warn!(path = %path.display(), %error, "hooks config metadata unavailable; skipping");
-                return Self::new();
-            }
-        };
-        if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
-            tracing::warn!(path = %path.display(), "hooks config must be a regular non-symlink file; skipping");
-            return Self::new();
-        }
-        if metadata.len() > 256 * 1024 {
-            tracing::warn!(path = %path.display(), "hooks config exceeds 256KiB; skipping");
-            return Self::new();
-        }
-        let raw = match std::fs::read_to_string(&path) {
-            Ok(raw) => raw,
-            Err(error) => {
-                tracing::warn!(path = %path.display(), %error, "hooks config unreadable; skipping");
-                return Self::new();
-            }
-        };
-        let file: HooksFile = match toml::from_str(&raw) {
+        let file = match zk_tools::safe_file::open_bound_regular(&path) {
             Ok(file) => file,
-            Err(error) => {
-                tracing::warn!(path = %path.display(), %error, "hooks config parse failed; skipping");
-                return Self::new();
-            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Self::new()),
+            Err(error) => return Err(format!("HOOK_CONFIG_READ_FAILED: {error}")),
         };
+        let mut bytes = Vec::new();
+        file.take(256 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|error| error.to_string())?;
+        if bytes.len() > 256 * 1024 {
+            return Err("HOOK_CONFIG_TOO_LARGE".into());
+        }
+        let text = std::str::from_utf8(&bytes).map_err(|_| "HOOK_CONFIG_INVALID_UTF8")?;
+        Self::try_parse(text)
+    }
+
+    /// Validate a bounded replacement before saving or executing any hook.
+    ///
+    /// # Errors
+    /// Invalid roles, matchers, declarations or oversized text are rejected.
+    pub fn try_parse(text: &str) -> Result<Self, String> {
+        if text.len() > 256 * 1024 {
+            return Err("HOOK_CONFIG_TOO_LARGE".into());
+        }
+        let file: HooksFile =
+            toml::from_str(text).map_err(|error| format!("HOOK_CONFIG_INVALID: {error}"))?;
+        if file.hook.len() > 128 {
+            return Err("HOOK_CONFIG_TOO_MANY".into());
+        }
         let mut registry = Self::new();
+        let expected = file.hook.len();
         for config in file.hook {
             registry.register(config);
         }
-        tracing::info!(
-            path = %path.display(),
-            count = registry.len(),
-            "hooks loaded"
-        );
-        registry
+        if registry.invalid_security_config || registry.len() != expected {
+            return Err("HOOK_CONFIG_INVALID_ROLE_OR_COMMAND".into());
+        }
+        Ok(registry)
     }
 
-    /// 注册一条 hook（既无 `command` 又无 `url` 的无效声明被 `warn!` 丢弃）。
+    /// Register a validated declaration. Invalid entries mark the configuration
+    /// unusable for security decisions instead of silently disappearing.
     pub fn register(&mut self, config: HookConfig) {
+        let invalid_role = (config.event == HookEvent::PreToolExecution
+            && config.role == HookRole::Presentation)
+            || (config.event == HookEvent::PostToolExecution
+                && matches!(config.role, HookRole::Security | HookRole::Transform))
+            || (config.async_mode
+                && matches!(
+                    config.role,
+                    HookRole::Security | HookRole::Transform | HookRole::Presentation
+                ));
+        if invalid_role
+            || config.timeout_secs == 0
+            || config.timeout_secs > 300
+            || config.name.trim().is_empty()
+        {
+            self.invalid_security_config = true;
+            tracing::error!(name=%config.name, "invalid hook role, timeout or name");
+            return;
+        }
         if !config.is_http() && !config.is_command() {
-            tracing::warn!(
-                name = %config.name,
-                event = %config.event,
-                "hook has neither command nor url; skipping"
-            );
+            self.invalid_security_config = true;
+            tracing::error!(name=%config.name, event=%config.event, "hook has neither command nor url");
             return;
         }
         if let Some(matcher) = config.matcher.as_deref()
-            && let Err(error) = regex::Regex::new(matcher)
+            && regex::Regex::new(matcher).is_err()
         {
-            tracing::warn!(name = %config.name, %error, "hook matcher is invalid; skipping");
+            tracing::warn!(
+                code = "HOOK_MATCHER_INVALID",
+                "hook matcher is invalid; skipping"
+            );
             if config.role == HookRole::Security {
                 self.invalid_security_config = true;
             }
@@ -127,7 +163,7 @@ impl HookRegistry {
         removed
     }
 
-    /// 某事件下的 hook 列表（声明顺序；无则空切片）。
+    /// Matching event declarations ordered by priority, with stable declaration ties.
     #[must_use]
     pub fn hooks_for(&self, event: HookEvent) -> &[HookConfig] {
         self.by_event.get(&event).map_or(&[], Vec::as_slice)

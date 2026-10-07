@@ -3,7 +3,7 @@ import { useConfigStore } from '@/store/configStore';
 import { useProjectStore, type Project } from '@/store/projectStore';
 import { useSessionStore } from '@/store/sessionStore';
 import { useModelStore } from '@/store/modelStore';
-import { requestAuthorizedSession } from './authorizedSession';
+import { requestAuthorizedSession, setNewSessionModelSelection } from './authorizedSession';
 
 const project: Project = {
     id: 'project-1',
@@ -19,6 +19,7 @@ const originalFetchModels = useModelStore.getState().fetchModels;
 
 describe('requestAuthorizedSession', () => {
     beforeEach(() => {
+        setNewSessionModelSelection(null);
         useConfigStore.setState({ defaultModel: 'model-default' });
         useProjectStore.setState({
             requestSelection: originalRequestSelection,
@@ -67,6 +68,22 @@ describe('requestAuthorizedSession', () => {
             project.id,
             'model-default',
         );
+    });
+
+    it('uses a home model choice only for the next session, preserving the default after cancellation', async () => {
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200 }));
+        const requestSelection = vi.fn().mockResolvedValueOnce(null).mockResolvedValue(project);
+        const createSession = vi.fn().mockResolvedValue('created');
+        useProjectStore.setState({ requestSelection });
+        useSessionStore.setState({ createSession });
+        useModelStore.setState({ models: [model('model-default'), model('home-choice')] });
+        setNewSessionModelSelection('home-choice');
+        await expect(requestAuthorizedSession()).resolves.toBeNull();
+        await expect(requestAuthorizedSession()).resolves.toBe('created');
+        expect(createSession).toHaveBeenLastCalledWith(project.id, 'home-choice');
+        expect(useConfigStore.getState().defaultModel).toBe('model-default');
+        await requestAuthorizedSession();
+        expect(createSession).toHaveBeenLastCalledWith(project.id, 'model-default');
     });
 
     it('replaces stale local choices with the backend catalog default', async () => {

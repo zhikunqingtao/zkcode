@@ -110,12 +110,16 @@ async fn run(input: Value, ctx: ToolContext) -> ToolOutput {
             "Required parameter 'todos' is missing or not an array",
         );
     };
+    let new_todos = match normalize_todos(new_todos) {
+        Ok(todos) => todos,
+        Err(output) => return output,
+    };
     let merge = bool_or(&input, "merge", false);
     let scope = session_key(ctx.session_id());
 
     let old_todos = lock().get(scope).cloned().unwrap_or_default();
     let mut result_todos = if merge {
-        merge_by_id(&old_todos, new_todos)
+        merge_by_id(&old_todos, &new_todos)
     } else {
         new_todos.clone()
     };
@@ -166,14 +170,47 @@ async fn run(input: Value, ctx: ToolContext) -> ToolOutput {
     output
 }
 
-/// 按 `id` 合并：旧条目保序在前，同 `id` 原位覆盖，新 `id` 追加
-/// （旧 `LinkedHashMap` 先 put 旧、后 put 新的等价语义；`id` 缺失的条目
-/// 与旧实现的 null 键一致地共用同一槽位）。
+fn normalize_todos(todos: &[Value]) -> Result<Vec<Value>, ToolOutput> {
+    todos
+        .iter()
+        .map(|todo| {
+            let Some(mut item) = todo.as_object().cloned() else {
+                return Err(failure("TODO_ITEM_INVALID", "Each todo must be an object"));
+            };
+            if let Some(status) = item.get("status").filter(|value| !value.is_null()) {
+                let canonical = match status.as_str().map(str::to_ascii_uppercase).as_deref() {
+                    Some("PENDING") => "PENDING",
+                    Some("IN_PROGRESS") => "IN_PROGRESS",
+                    Some("COMPLETE" | "COMPLETED") => "COMPLETE",
+                    Some("CANCELLED") => "CANCELLED",
+                    _ => {
+                        return Err(failure(
+                            "TODO_STATUS_INVALID",
+                            "Allowed states: PENDING, IN_PROGRESS, COMPLETE, CANCELLED",
+                        ));
+                    }
+                };
+                item.insert("status".into(), json!(canonical));
+            }
+            Ok(Value::Object(item))
+        })
+        .collect()
+}
+
+/// Merge identified entries in place; anonymous entries never overwrite one another.
 fn merge_by_id(old_todos: &[Value], new_todos: &[Value]) -> Vec<Value> {
-    let mut keys: Vec<Option<&str>> = Vec::new();
+    let mut keys: Vec<&str> = Vec::new();
     let mut merged: Vec<Value> = Vec::new();
+    let mut anonymous: Vec<Value> = Vec::new();
     for todo in old_todos.iter().chain(new_todos) {
-        let key = todo.get("id").and_then(Value::as_str);
+        let Some(key) = todo
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+        else {
+            anonymous.push(todo.clone());
+            continue;
+        };
         if let Some(position) = keys.iter().position(|existing| *existing == key) {
             merged[position] = todo.clone();
         } else {
@@ -181,6 +218,7 @@ fn merge_by_id(old_todos: &[Value], new_todos: &[Value]) -> Vec<Value> {
             merged.push(todo.clone());
         }
     }
+    merged.extend(anonymous);
     merged
 }
 
@@ -280,6 +318,24 @@ mod tests {
 
     fn parse(output: &ToolOutput) -> Value {
         serde_json::from_str(&output.content).expect("json result")
+    }
+
+    #[test]
+    fn status_aliases_and_anonymous_merge_are_lossless() {
+        let input = vec![
+            json!({"status":"completed"}),
+            json!({"status":"in_progress"}),
+            json!({"status":null}),
+            json!({}),
+        ];
+        let normalized = normalize_todos(&input).unwrap();
+        assert_eq!(normalized[0]["status"], "COMPLETE");
+        assert_eq!(normalized[1]["status"], "IN_PROGRESS");
+        assert!(normalized[2]["status"].is_null());
+        assert!(normalized[3].get("status").is_none());
+        assert_eq!(merge_by_id(&normalized[..2], &normalized[2..]).len(), 4);
+        assert!(normalize_todos(&[json!({"status":"unknown"})]).is_err());
+        assert!(normalize_todos(&[json!({"status":4})]).is_err());
     }
 
     #[tokio::test]

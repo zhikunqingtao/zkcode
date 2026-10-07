@@ -468,7 +468,9 @@ async fn config_and_synthetic_output_round_trip_through_the_executor() {
     .await;
     assert!(!listed.is_error, "content: {}", listed.content);
     assert!(
-        listed.content.starts_with("Available settings:\n"),
+        listed.content.starts_with(
+            "Stored values (runtime store only; not applied to application settings):\n"
+        ),
         "content: {}",
         listed.content
     );

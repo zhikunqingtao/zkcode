@@ -54,6 +54,13 @@ pub enum Admission {
         /// 最终执行入参。
         execution_input: Value,
     },
+    /// A Bash decision also binds the exact canonical cwd used in its authorization facts.
+    AllowWithShellCwd {
+        /// Frozen final tool input.
+        execution_input: Value,
+        /// Trusted physical directory; never accepted from model JSON.
+        authorized_shell_cwd: std::path::PathBuf,
+    },
     /// 授权拒绝（旧 `catch (AuthorizationException denied)`，L335-343）：先推
     /// `tool_permission_denied` 下行，再以 `ToolResult.permissionDenied(code,
     /// message)` 回喂模型。
@@ -80,7 +87,7 @@ impl Admission {
     #[must_use]
     pub fn code(&self) -> Option<&str> {
         match self {
-            Self::Allow { .. } => None,
+            Self::Allow { .. } | Self::AllowWithShellCwd { .. } => None,
             Self::Denied { code, .. } | Self::Failed { code, .. } => Some(code),
         }
     }
@@ -90,6 +97,16 @@ impl Admission {
 pub trait ToolAdmission: Send + Sync {
     /// 在工具真正执行之前裁决。
     fn admit<'a>(&'a self, request: AdmissionRequest<'a>) -> BoxFuture<'a, Admission>;
+
+    /// Authorize the exact instance frozen by a registry binding. The engine
+    /// revalidates its binding after awaiting this decision and before execution.
+    fn admit_bound<'a>(
+        &'a self,
+        request: AdmissionRequest<'a>,
+        _tool: Arc<dyn zk_tools::Tool>,
+    ) -> BoxFuture<'a, Admission> {
+        self.admit(request)
+    }
 }
 
 /// 直通准入（无权限管线装配时的等价行为；2.3/2.4 的既有语义）。

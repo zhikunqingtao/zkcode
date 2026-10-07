@@ -1,0 +1,704 @@
+{
+  "sourceRange": "3e536438..053adf90",
+  "targetBaseline": "08cbdc45",
+  "scope": "20 remaining provider configuration, model routing, key selection and opt-in live test source paths",
+  "method": "Read every net changed hunk and the full intermediate deleted summary test. Compare native implementation and preserved baseline decisions. Exact test names identify assertions; existence is not execution. New local HTTP regressions await root unified gates and no remote paid test is claimed run.",
+  "paths": {
+    "backend/src/test/java/com/aicodeassistant/llm/AliyunConfigVerificationTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/llm/AliyunConfigVerificationTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "190e9efd64c44d441696fa5650135a81bf74ee83f56e03b76fad747b866fc0a5",
+      "changedMethods": [
+        "testDeepSeekV41FlashCapabilities"
+      ],
+      "sourceAssertions": [
+        "Qwen defaults advance upstream; DeepSeek Flash V4.1 capabilities require 1M context, 384K output, native images with maxImages=600 and tools."
+      ],
+      "nativeImplementation": [
+        "crates/zk-llm/src/config.rs",
+        "crates/zk-llm/src/models.rs",
+        "crates/zk-server/src/api/models.rs"
+      ],
+      "actualNativeAssertions": [
+        "catalog_matches_plan_matrix",
+        "declared_models_match_twenty_one_model_baseline",
+        "effective_image_limits_match_registered_capabilities"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "User decision 10 retains old IDs and marks their labels as legacy instead of deleting them. Native provider model metadata remains in one shared capability registry rather than reproducing the Java provider-level exception/fallback hierarchy. New model values inspected directly."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "pending_root_unified_gates"
+    },
+    "backend/src/test/java/com/aicodeassistant/llm/AliyunIntegrationTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/llm/AliyunIntegrationTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "34ec146c5de4c5b241ea081442c5b7a616ebdf93101abc4c5fcee8b3025d0040",
+      "changedMethods": [],
+      "sourceAssertions": [
+        "Configuration/model capability assertions select qwen3.8-max-0902; opt-in real text and tool API tests use that model."
+      ],
+      "nativeImplementation": [
+        "crates/zk-llm/src/config.rs",
+        "crates/zk-llm/src/openai_compat.rs",
+        "crates/zk-llm/tests/real_connectivity.rs"
+      ],
+      "actualNativeAssertions": [
+        "dashscope_preset_matches_application_yml",
+        "dashscope_live"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Native DashScope default already matches. dashscope_live is ignored/credentialed and has NOT been executed for this migration; local SSE fixtures do not prove remote availability."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "pending_root_unified_gates",
+      "remoteVerificationStatus": "not_run_no_claim"
+    },
+    "backend/src/test/java/com/aicodeassistant/llm/BailianDeepSeekConfigurationTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/llm/BailianDeepSeekConfigurationTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "f507ba19ac40105776a02de868bd6f5989e4e2c67f9e1f7736e2949954c5b565",
+      "changedMethods": [
+        "actualYamlDefaultsRouteBailianAndDirectDeepSeekIndependently"
+      ],
+      "sourceAssertions": [
+        "Direct DeepSeek and Token Plan routes use separate endpoint/key/model identity; expose DeepSeek V4.1 capabilities; configured fast model takes priority over provider registration order.",
+        "Upstream switches all defaults/fallbacks to Bailian and removes old model IDs."
+      ],
+      "nativeImplementation": [
+        "crates/zk-llm/src/config.rs",
+        "crates/zk-llm/src/models.rs",
+        "crates/zk-server/src/engine_bridge.rs",
+        "crates/zk-llm/src/vision_router.rs"
+      ],
+      "actualNativeAssertions": [
+        "catalog_matches_plan_matrix",
+        "env_scan_registers_only_keyed_providers",
+        "optional_fast_route_preserves_explicit_auxiliary_and_unconfigured_defaults"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "User decisions 9/10 require retaining native auxiliary/default selection and configured old models. ZK_FAST_MODEL/LLM_FAST_MODEL is opt-in; explicit ZK_LIGHTWEIGHT_MODEL still wins. Native explicit vision/fallback settings retain existing defaults. DeepSeek V4.1 Bailian 0.002/0.008 reference rates match the fixed upstream ModelRegistry; they are not replaced with unrelated GLM subscription zero rates."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "pending_root_unified_gates"
+    },
+    "backend/src/test/java/com/aicodeassistant/llm/BailianDeepSeekLiveTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/llm/BailianDeepSeekLiveTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "028a6f448c3893526406c47a8cf0f50baab1564ef970685d7cb32e873dedb988",
+      "changedMethods": [
+        "setUp",
+        "textAndThinkingStream",
+        "fourImagesThroughInternalImageConversion",
+        "toolRoundTripKeepsReasoningAndToolResults",
+        "syncSummaryUsesCompactBudgetAndTimeout",
+        "compactionWithConfiguredModel",
+        "fastModelSideQueriesWithProductionBudgets"
+      ],
+      "sourceAssertions": [
+        "Opt-in live text/reasoning, four-image recognition, tool call/result reasoning replay, sync compaction and title/commit/structured auxiliary requests."
+      ],
+      "nativeImplementation": [
+        "crates/zk-llm/src/config.rs",
+        "crates/zk-llm/src/openai_compat.rs",
+        "crates/zk-llm/src/models.rs",
+        "crates/zk-llm/tests/image_wire.rs",
+        "crates/zk-engine/src/llm_summarizer.rs",
+        "crates/zk-llm/src/summary_transport.rs",
+        "crates/zk-llm/src/registry.rs",
+        "crates/zk-llm/tests/summary_wire.rs"
+      ],
+      "actualNativeAssertions": [
+        "openai_request_serializes_validated_user_images_as_content_parts",
+        "summary_http_is_nonstreaming_retries_once_with_same_key_and_keeps_partial_usage_unknown",
+        "scoped_summary_persists_attribution_and_authoritative_usage"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "No credentialed remote calls executed. Local image/summary/protocol tests verify transport shape and accounting only. Native standalone compact defaults to direct DeepSeek per final decision; slash GitCommit uses explicit native operation, not a fabricated successful AI commit. No claim that model semantic recognition or remote compact quality has been proven."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "pending_root_unified_gates",
+      "remoteVerificationStatus": "not_run_no_claim"
+    },
+    "backend/src/test/java/com/aicodeassistant/llm/BailianGlmIntegrationTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/llm/BailianGlmIntegrationTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "79b28bfe2a5cc7e425455ae32741a44c7057c16335000ec81be2eeb057652fa8",
+      "changedMethods": [
+        "actualConfigExposesIndependentRoutesAndFullContextInEitherRegistrationOrder",
+        "rawSubscriptionIdIsNormalizedAndDeduplicatedWithoutChangingZhipu",
+        "missingSubscriptionKeyLeavesOnlyDirectGlm",
+        "liveDiagnosticsNormalizeBeforeModelSelectionAndDispatch",
+        "streamingUsesSubscriptionWireIdAndMaxWhilePreservingToolReasoning",
+        "syncUsesSameWireIdAndMaxWithoutAffectingDirectRequestShape",
+        "assertSubscriptionBody",
+        "configuredProviders",
+        "onEvent",
+        "onComplete",
+        "onError"
+      ],
+      "sourceAssertions": [
+        "Bailian GLM local ID must remain independent of direct Zhipu in either registration order; normalization deduplicates IDs; empty keys are unavailable.",
+        "Subscription wire model is glm-5.3 with enable_thinking=true, reasoning_effort=max, clear_thinking=false, max_tokens; no direct thinking/tool_stream fields. Tools preserve reasoning and results; metadata includes 1M context/65536 output/cache."
+      ],
+      "nativeImplementation": [
+        "crates/zk-llm/src/config.rs",
+        "crates/zk-llm/src/models.rs",
+        "crates/zk-llm/src/openai_compat.rs",
+        "crates/zk-llm/tests/provider_routing_wire.rs"
+      ],
+      "actualNativeAssertions": [
+        "normalization_deduplicates_provider_model_aliases_in_configured_order",
+        "provider_qualified_models_do_not_steal_direct_routes",
+        "bailian_glm_uses_local_route_identity_and_its_distinct_wire_parameters"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Audit fixed missing normalized-model deduplication and cache capability metadata through runtime owner. New actual local HTTP test is pending unified Cargo gates. Native summary transport has its own selected endpoint token-limit semantics, not a new public Java chatSync API."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "pending_root_unified_gates"
+    },
+    "backend/src/test/java/com/aicodeassistant/llm/ChatSyncTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/llm/ChatSyncTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "0b86c17c87fbd760529650b18491e2f4f2c38a4a1b974654da0dc9e8b850bd20",
+      "changedMethods": [
+        "bailianSummaryUsesExplicitThinkingWithoutChangingDirectSyncRequests"
+      ],
+      "sourceAssertions": [
+        "Bailian ordinary sync uses forced max thinking; ordinary direct DeepSeek sync must not unexpectedly gain those fields."
+      ],
+      "nativeImplementation": [
+        "crates/zk-llm/src/openai_compat.rs",
+        "crates/zk-engine/src/llm_summarizer.rs",
+        "crates/zk-llm/src/summary_transport.rs",
+        "crates/zk-llm/src/registry.rs",
+        "crates/zk-llm/tests/summary_wire.rs"
+      ],
+      "actualNativeAssertions": [
+        "summary_modes_match_supported_model_matrix",
+        "summary_wire_preserves_usage_and_uses_endpoint_output_limit",
+        "summary_http_is_nonstreaming_retries_once_with_same_key_and_keeps_partial_usage_unknown"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Rust has a dedicated summary request flag and selected max/low/off thinking modes. Final user plan explicitly requires independent direct DeepSeek summary thinking=max by default; Java ordinary chatSync null-mode expectation is not that contract. No unrelated synchronous API or unscoped unbilled LLM call is introduced."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "pending_root_unified_gates"
+    },
+    "backend/src/test/java/com/aicodeassistant/llm/DeepSeekSummaryLiveTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/llm/DeepSeekSummaryLiveTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "6e35f11830f0951011ba8cf29e086f2e16a587fd824445ffb9898eedfb06ba2d",
+      "changedMethods": [
+        "setUp",
+        "summarizesWithMaxThinking",
+        "summarizesWithLowThinking",
+        "summarizesWithThinkingOff",
+        "summarize"
+      ],
+      "sourceAssertions": [
+        "Opt-in real official DeepSeek summarize requests must support max/low/off, bounded output and deadline, preserve actual usage/model/finish and nonblank content."
+      ],
+      "nativeImplementation": [
+        "crates/zk-engine/src/llm_summarizer.rs",
+        "crates/zk-llm/src/summary_transport.rs",
+        "crates/zk-llm/src/registry.rs",
+        "crates/zk-llm/tests/summary_wire.rs"
+      ],
+      "actualNativeAssertions": [
+        "summary_modes_match_supported_model_matrix",
+        "summary_http_is_nonstreaming_retries_once_with_same_key_and_keeps_partial_usage_unknown"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Remote max/low/off calls NOT executed. Native local summary transport checks do not establish remote model availability. Final configured default uses 8192 output/4096 summary/90s, not the source live fixture 150s."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "pending_root_unified_gates",
+      "remoteVerificationStatus": "not_run_no_claim"
+    },
+    "backend/src/test/java/com/aicodeassistant/llm/KimiCodeIntegrationTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/llm/KimiCodeIntegrationTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "d1e9b2254c7609983cc7cf8859e0cde0394d45fdeb50fbdd970db81c8594e7eb",
+      "changedMethods": [
+        "actualConfigurationKeepsSubscriptionAndMoonshotRoutesIndependent",
+        "missingSubscriptionKeyDoesNotExposeSubscriptionModels",
+        "streamingAlwaysUsesMaxAndPreservesReasoningWithToolResults",
+        "synchronousRequestsAlsoUseMax",
+        "moonshotKeepsItsExistingRequestProtocol",
+        "assertMaxRequest",
+        "providers",
+        "onEvent",
+        "onComplete",
+        "onError"
+      ],
+      "sourceAssertions": [
+        "Subscription endpoint k3/kimi-for-coding independent from Moonshot kimi-k3; absent key suppresses subscription routes; metadata includes 1Mi context, 128Ki output, eight base64-only images and zero subscription token rate.",
+        "Subscription chat uses max_tokens and forced max thinking while Moonshot keeps max_completion_tokens; reasoning/tool history survives conversion."
+      ],
+      "nativeImplementation": [
+        "crates/zk-llm/src/config.rs",
+        "crates/zk-llm/src/models.rs",
+        "crates/zk-llm/src/openai_compat.rs",
+        "crates/zk-llm/src/user_images.rs",
+        "crates/zk-llm/tests/provider_routing_wire.rs",
+        "crates/zk-llm/tests/image_wire.rs"
+      ],
+      "actualNativeAssertions": [
+        "catalog_matches_plan_matrix",
+        "configured_image_input_mode_is_explicit_and_validated",
+        "kimi_subscription_wire_keeps_tools_and_forced_reasoning_without_changing_moonshot"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Audit fixed missing Base64Only capability metadata, in addition to existing concrete-provider URL-to-inline conversion. Actual local HTTP tests cover both subscription IDs and direct protocol separation; new tests await unified Cargo gates. No remote subscription invocation claimed."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "pending_root_unified_gates"
+    },
+    "backend/src/test/java/com/aicodeassistant/llm/LlmProviderRegistryModelContractTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/llm/LlmProviderRegistryModelContractTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "55a8fe0925dc84598e53b3c6b61eb4df86eaa613f31b39c91cbf464da0fe4cd6",
+      "changedMethods": [
+        "duplicateModelIdsFailExplicitlyInsteadOfDependingOnRegistrationOrder"
+      ],
+      "sourceAssertions": [
+        "Upstream now rejects duplicate model IDs owned by different providers instead of accepting registration-order routing."
+      ],
+      "nativeImplementation": [
+        "crates/zk-llm/src/registry.rs",
+        "crates/zk-llm/src/config.rs"
+      ],
+      "actualNativeAssertions": [
+        "register_keeps_provider_and_model_order_with_first_owner_wins",
+        "normalization_deduplicates_provider_model_aliases_in_configured_order"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Deliberate native adaptation: the Rust baseline explicitly guarantees first registered owner for duplicate custom IDs, and user requires preserving working configuration. Root chose to retain that existing contract rather than silently invalidating configured providers. New built-in OpenRouter and Bailian local namespaces avoid collisions; same-provider alias dedup is migrated. The Java ambiguity-error assertion is explicitly NOT claimed implemented."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "pending_root_unified_gates"
+    },
+    "backend/src/test/java/com/aicodeassistant/llm/LlmProvidersPropertiesBindingTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/llm/LlmProvidersPropertiesBindingTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "7c0028c80690954c379044abf78dd2be087d77806befef4ac3d4c2ccc29ea8e5",
+      "changedMethods": [
+        "strategyDefaultsToRoundRobinAndBindsExplicitPriorityFailover"
+      ],
+      "sourceAssertions": [
+        "Key selection defaults to round robin; explicit PRIORITY_FAILOVER binds correctly."
+      ],
+      "nativeImplementation": [
+        "crates/zk-llm/src/config.rs",
+        "crates/zk-llm/src/secret.rs"
+      ],
+      "actualNativeAssertions": [
+        "ring_round_robins_across_keys",
+        "subscription_does_not_silently_fail_over_to_paid_key",
+        "repeated_credentials_share_one_cooldown_and_preserve_priority"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Native environment configuration replaces Spring property binding. Existing non-ZenMux round-robin preserved. ZenMux priority policy and paid-failover opt-in are explicit migration decisions; user permission and monetary budget remain separate."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "pending_root_unified_gates"
+    },
+    "backend/src/test/java/com/aicodeassistant/llm/McpModelCompatibilityLiveTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/llm/McpModelCompatibilityLiveTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "1cf7e95793b9ef92efd2a890041aa9a4ccb046510fd8f71fb8bbbccf4f4b77a2",
+      "changedMethods": [
+        "normalizeModelIds",
+        "csv"
+      ],
+      "sourceAssertions": [
+        "Diagnostic provider construction splits multi-keys; test model catalog includes new Bailian GLM/DeepSeek and Kimi subscription IDs and normalizes subscription IDs before selection.",
+        "Real MCP tool round trips are opt-in."
+      ],
+      "nativeImplementation": [
+        "crates/zk-llm/src/config.rs",
+        "crates/zk-llm/src/secret.rs",
+        "crates/zk-llm/tests/real_connectivity.rs",
+        "crates/zk-llm/tests/provider_routing_wire.rs"
+      ],
+      "actualNativeAssertions": [
+        "normalization_deduplicates_provider_model_aliases_in_configured_order",
+        "repeated_credentials_share_one_cooldown_and_preserve_priority"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Live MCP/model compatibility matrix NOT executed. Native provider construction uses the same config/credential ring as production; local synthetic tools are not equivalent to an externally connected MCP server. Source removal of legacy IDs is excluded per user decision 10."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "pending_root_unified_gates",
+      "remoteVerificationStatus": "not_run_no_claim"
+    },
+    "backend/src/test/java/com/aicodeassistant/llm/ModelDegradationChainTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/llm/ModelDegradationChainTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "9c65cc9cbf1aed1b4ad9fe983e6b5986684230c4348549420063d6f439fd5401",
+      "changedMethods": [
+        "otherModelsFallBackToBailianWithoutSelfFallback",
+        "cooldownSkipsBailianWhenItIsTheFailingModel"
+      ],
+      "sourceAssertions": [
+        "No self-fallback, bounded fallback depth, failing/cooling model skipped when alternative exists; upstream changes default model chain to Bailian then direct DeepSeek."
+      ],
+      "nativeImplementation": [
+        "crates/zk-llm/src/registry.rs",
+        "crates/zk-llm/src/breaker.rs",
+        "crates/zk-llm/src/config.rs"
+      ],
+      "actualNativeAssertions": [
+        "candidate_models_follow_chain_suffix_and_depth_cap",
+        "degraded_provider_is_skipped_when_alternative_exists",
+        "retryable_error_before_content_degrades_to_next_chain_model",
+        "fallback_rechecks_capabilities_before_starting_physical_provider"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Native existing ZK_MODEL_FALLBACK_CHAIN remains explicit and no unconfigured paid provider is added by default. Per-provider breaker/physical attempt accounting replaces Java cooldown map; aliases and native retry limits remain."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "pending_root_unified_gates"
+    },
+    "backend/src/test/java/com/aicodeassistant/llm/ModelRegistryThinkingModeTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/llm/ModelRegistryThinkingModeTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "d56bed85c03cd90a576b20802ee52e4437c970e76242081bfec52e8eec09b95d",
+      "changedMethods": [
+        "tc004_bailianDeepSeek_contextWindow1M",
+        "tc005_bailianDeepSeek_maxOutputTokens393216",
+        "tc006_bailianDeepSeek_supportsThinkingTrue",
+        "tc008_deepseekV41Flash_supportsThinkingTrue",
+        "tc012_deepseekV41FlashCapabilities"
+      ],
+      "sourceAssertions": [
+        "New Bailian/direct DeepSeek model output/context/image/thinking/tool limits replace removed legacy assertions."
+      ],
+      "nativeImplementation": [
+        "crates/zk-llm/src/models.rs"
+      ],
+      "actualNativeAssertions": [
+        "builtin_table_holds_legacy_invariants",
+        "max_output_tokens_accessor_matches_capabilities",
+        "glm_53_family_matches_migrated_registry_entries",
+        "config_overrides_win_over_builtin_table"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "New entries inspected against fixed source 393216/1M/4 Bailian and 384000/1M/600 direct limits. Old entries remain valid with legacy labels by user decision. Native override invariants remain authoritative."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "pending_root_unified_gates"
+    },
+    "backend/src/test/java/com/aicodeassistant/llm/MultiApiKeySplitTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/llm/MultiApiKeySplitTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "4a35079dc1980d8bb3502a3bb75c12d5d47d48c39757104ab55c978de8f4130e",
+      "changedMethods": [
+        "nullOrBlankReturnsEmptyList",
+        "singleKeyReturnsSingletonList",
+        "multipleKeysSplitInOrder",
+        "trimsWhitespaceAroundKeys",
+        "trailingCommaAndEmptySegmentsAreDropped",
+        "duplicateKeysAreDeduplicatedKeepingFirstOccurrence",
+        "singleKeyRotationKeepsOriginalSemantics",
+        "multiKeyRotationKeepsRoundRobinOrder",
+        "priorityFailoverKeepsUsingFirstHealthyKey"
+      ],
+      "sourceAssertions": [
+        "Null/blank/comma-empty values disappear; split keys trim and preserve order; duplicate values share one slot; round-robin and priority fallback/cooldown recover correctly."
+      ],
+      "nativeImplementation": [
+        "crates/zk-llm/src/secret.rs",
+        "crates/zk-llm/src/config.rs"
+      ],
+      "actualNativeAssertions": [
+        "ring_filters_blank_and_handles_single_key",
+        "ring_round_robins_across_keys",
+        "repeated_credentials_share_one_cooldown_and_preserve_priority",
+        "ring_skips_rate_limited_key_until_cooldown_expires"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Audit found duplicate secrets created multiple cooldown slots. Runtime now trims and deduplicates in common constructor, including explicit rings and environment input. New regression awaits unified Cargo gates."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "pending_root_unified_gates"
+    },
+    "backend/src/test/java/com/aicodeassistant/llm/OpenAiCompatibleProviderThinkingTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/llm/OpenAiCompatibleProviderThinkingTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "ee2b873fc3e384f31c2d3da953b56fdcc3db576478490d1c0bd799901ed22d12",
+      "changedMethods": [
+        "tc002_qwen38Flash_supportsThinkingTrue",
+        "tc005_deepseekV41Flash_supportsThinkingTrue",
+        "tc012_deepseekV41FlashCapabilities",
+        "tc019_legacyDirectDeepSeekModelsRemoved"
+      ],
+      "sourceAssertions": [
+        "New direct DeepSeek Flash and Bailian dated IDs emit correct reasoning; Qwen family supports opt-in thinking; old DeepSeek removal expectations added upstream."
+      ],
+      "nativeImplementation": [
+        "crates/zk-llm/src/openai_compat.rs",
+        "crates/zk-llm/src/models.rs"
+      ],
+      "actualNativeAssertions": [
+        "thinking_params_helper_mirrors_request_body",
+        "summary_modes_match_supported_model_matrix",
+        "deepseek_vision_unconfigured_falls_back_to_global"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Old direct DeepSeek and vision IDs deliberately retained for valid user configuration; old vision nonthinking request policy preserved. New deepseek-flash/v4.1-flash force max in normal chat; dedicated summary modes override separately. Java reflection/private-method assertions replaced with serialized request assertions."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "pending_root_unified_gates"
+    },
+    "backend/src/test/java/com/aicodeassistant/llm/OpenRouterIntegrationTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/llm/OpenRouterIntegrationTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "3b82db96b8648ba3498e8b64742b2b0ffc71d76ace0116377521ce7e94c4c58c",
+      "changedMethods": [
+        "configuredProviderRoutesUnionAndPublishesCapabilitiesToFrontend",
+        "emptyKeyDoesNotExposeOpenRouterModel",
+        "providers",
+        "namespacedRoutesDoNotStealZenMuxModelsRegardlessOfRegistrationOrder",
+        "rawOpenRouterConfigurationIsNormalizedBeforeRegistration"
+      ],
+      "sourceAssertions": [
+        "Configured OpenRouter exposes Union Alpha metadata and endpoint only with key; namespaced Astra/Fable do not steal ZenMux IDs regardless of order; raw configuration normalizes/deduplicates."
+      ],
+      "nativeImplementation": [
+        "crates/zk-llm/src/config.rs",
+        "crates/zk-llm/src/models.rs",
+        "crates/zk-llm/src/registry.rs",
+        "crates/zk-llm/src/openai_compat.rs",
+        "crates/zk-llm/tests/provider_routing_wire.rs"
+      ],
+      "actualNativeAssertions": [
+        "catalog_matches_plan_matrix",
+        "env_scan_registers_only_keyed_providers",
+        "normalization_deduplicates_provider_model_aliases_in_configured_order",
+        "openrouter_replays_opaque_state_only_to_the_original_provider_and_model"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Native no-provider static metadata catalog remains baseline behavior; callable model registration still requires configured credentials. Actual local HTTP verifies namespace removal at wire and origin-bound reasoning. New tests await unified Cargo gates."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "pending_root_unified_gates"
+    },
+    "backend/src/test/java/com/aicodeassistant/llm/OpenRouterReasoningLiveTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/llm/OpenRouterReasoningLiveTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "2cbf57769b1d838e0e1d50be7d0413aab88fe2bfc5b8ee0751fa5e92c1f7a2f5",
+      "changedMethods": [
+        "maxReasoningAndToolContinuation"
+      ],
+      "sourceAssertions": [
+        "Opt-in paid Astra/Fable max-reasoning tool call and continuation must return supplied synthetic value using opaque state."
+      ],
+      "nativeImplementation": [
+        "crates/zk-llm/src/openai_compat.rs",
+        "crates/zk-llm/tests/provider_routing_wire.rs",
+        "crates/zk-llm/src/responses.rs"
+      ],
+      "actualNativeAssertions": [
+        "openrouter_streamed_reasoning_reassembles_only_same_identity",
+        "openrouter_replays_opaque_state_only_to_the_original_provider_and_model"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Paid remote tests NOT executed. New local HTTP test proves origin/model binding and outgoing encrypted state only; it does not claim generated tool semantics or remote response correctness."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "pending_root_unified_gates",
+      "remoteVerificationStatus": "not_run_no_claim"
+    },
+    "backend/src/test/java/com/aicodeassistant/llm/VisionModelRouterTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/llm/VisionModelRouterTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "ec0c799321473ef9a8fdcff2e7537d2013edf31a113cab4f07f007839fcb8bcd",
+      "changedMethods": [
+        "configuredBailianFallbackTakesPriorityOverDirectDeepSeekAndSameProvider",
+        "configuredFallbackAlsoHandlesOtherTextOnlyModelFamilies",
+        "bailianCurrentModelAlreadySupportsImages",
+        "findsAvailableGlobalModelInsteadOfReturningAnUnconfiguredFallback",
+        "returnsNoTargetWhenNoVisionProviderIsConfigured",
+        "configureDeepSeekVisionAvailable"
+      ],
+      "sourceAssertions": [
+        "Configured valid image model takes priority, already image-capable current model stays, fallback finds a configured global vision model or returns none."
+      ],
+      "nativeImplementation": [
+        "crates/zk-llm/src/vision_router.rs",
+        "crates/zk-llm/src/models.rs"
+      ],
+      "actualNativeAssertions": [
+        "image_capable_model_needs_no_route",
+        "same_provider_vision_model_preferred_over_global_fallback",
+        "deepseek_vision_unconfigured_falls_back_to_global",
+        "no_available_vision_model_returns_none"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Native ZK_VISION_FALLBACK_MODEL adds explicit first preference and global available-model scan, retaining existing family/same-provider/default ordering when unset per user decision 9. Source deletion of old DeepSeek and forced Bailian default are not copied. Exact explicit-override/global-scan permutations are inspected, not claimed as new execution."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "pending_root_unified_gates"
+    },
+    "backend/src/test/java/com/aicodeassistant/llm/ZenMuxSubscriptionKeyFailoverTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/llm/ZenMuxSubscriptionKeyFailoverTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "113187dc604921e89ea4cae59889806def8f404c9f417066aad89b81a56b6db2",
+      "changedMethods": [
+        "setUp",
+        "tearDown",
+        "quoteExceededCoolsSubscriptionKeyAndNextRequestsUsePaygKey",
+        "modelNotAvailableCoolsSubscriptionKeyAndNextRequestsUsePaygKey",
+        "otherQuotaErrorsDoNotCoolDownKeyAndRoundRobinContinues",
+        "singleKeyConfigKeepsUsingSameKeyAfterSubscriptionError",
+        "rateLimitCoolsUsedKeyAndNextRequestUsesPaygKey",
+        "chatSyncSubscriptionErrorCoolsKeyAndNextCallUsesPaygKey",
+        "chatSyncRateLimitCoolsKeyAndNextCallUsesPaygKey",
+        "authorizationOfRequest",
+        "enqueueCompleted"
+      ],
+      "sourceAssertions": [
+        "402 subscription quota and 404 unavailable-model cool the actual used credential; subsequent requests select healthy credential; nonmatching failures do not receive long cooldown; single-key remains usable; 429 targets actual credential.",
+        "Source chatSync retries 429 once with same key then changes next logical call; automatic paid fallback source behavior exists."
+      ],
+      "nativeImplementation": [
+        "crates/zk-llm/src/openai_compat.rs",
+        "crates/zk-llm/src/secret.rs",
+        "crates/zk-llm/src/config.rs",
+        "crates/zk-llm/src/responses.rs",
+        "crates/zk-llm/tests/provider_routing_wire.rs",
+        "crates/zk-engine/src/llm_summarizer.rs",
+        "crates/zk-llm/src/summary_transport.rs",
+        "crates/zk-llm/src/registry.rs",
+        "crates/zk-llm/tests/summary_wire.rs"
+      ],
+      "actualNativeAssertions": [
+        "subscription_does_not_silently_fail_over_to_paid_key",
+        "repeated_credentials_share_one_cooldown_and_preserve_priority",
+        "zenmux_quota_failure_cools_the_used_credential_for_later_requests",
+        "summary_http_is_nonstreaming_retries_once_with_same_key_and_keeps_partial_usage_unknown"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "User requires paid key failover explicit opt-in; native env filters unapproved PAYG keys and physical ledger remains charged. New actual local HTTP checks 402/404 credential cooldown. Independent compact pins one summary credential and never silently rotates/falls back; source generic chatSync automatic-PAYG behavior is not applied to this separate summary contract. HTTP-date/Retry-After duration and nonquota errors are not all independently replayed here."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "pending_root_unified_gates"
+    },
+    "backend/src/test/java/com/aicodeassistant/llm/impl/BailianSummaryClientTest.java": {
+      "sourcePath": "backend/src/test/java/com/aicodeassistant/llm/impl/BailianSummaryClientTest.java",
+      "sourceCommit": "053adf90",
+      "sourceRange": "3e536438..053adf90",
+      "reviewStatus": "reviewed_changed_assertions",
+      "sourceDiffSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "changedMethods": [],
+      "sourceAssertions": [
+        "Intermediate implementation tested explicit summary profiles/nonstream wire, exact output parameter, absent usage/finish preserved, unsupported no request, one 429 retry, deadline/cancel and history marker/tool identity.",
+        "File added in 156cde14 and removed in 8ed651a1; final source replaced it with direct DeepSeek summary implementation/tests."
+      ],
+      "nativeImplementation": [
+        "crates/zk-engine/src/llm_summarizer.rs",
+        "crates/zk-llm/src/summary_transport.rs",
+        "crates/zk-llm/src/registry.rs",
+        "crates/zk-llm/tests/summary_wire.rs",
+        "crates/zk-engine/src/context/compact.rs"
+      ],
+      "actualNativeAssertions": [
+        "summary_modes_match_supported_model_matrix",
+        "summary_wire_preserves_usage_and_uses_endpoint_output_limit",
+        "summary_http_is_nonstreaming_retries_once_with_same_key_and_keeps_partial_usage_unknown",
+        "independent_summary_retries_only_one_429_and_accounts_every_attempt"
+      ],
+      "disposition": "reviewed_native_adaptation",
+      "verificationNotes": [
+        "Read intermediate full test despite zero net diff. Final fixed target and user contract use direct DeepSeek summary by default, while Token Plan endpoint-specific max_completion_tokens remains configurable. User excludes Java historical import; legacy assistant UUID repair is not required. Final native no fabricated finish/usage and cancellation/ledger checks remain separate actual regressions."
+      ],
+      "javaTestsExecuted": false,
+      "allSourceAssertionsClaimedCovered": false,
+      "newRegressionStatus": "pending_root_unified_gates",
+      "intermediateSourceSha256": "0345ee22eccbc077b6666a766c9ad82de10392e7abc3839fc1897322e3290064",
+      "sourceHistory": [
+        "156cde14 added",
+        "8ed651a1 deleted; final summary replacement audited by runtime owner"
+      ]
+    }
+  }
+}

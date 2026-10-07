@@ -324,7 +324,9 @@ impl AuthorizationService {
                 .await;
         }
         // 步 4：授权记录命中（同 operationHash / 同工具 / 同能力约束的免弹路径）。
-        if let Some(matched) = self.grants.find_match(&subject, &operation).await? {
+        if mode != PermissionMode::Plan
+            && let Some(matched) = self.grants.find_match(&subject, &operation).await?
+        {
             return Ok(allow(
                 DiagnosticSource::Grant,
                 "GRANT_MATCH",
@@ -684,6 +686,32 @@ impl AuthorizationService {
         let denied = |message: &str| {
             AuthzError::new("AUTHORIZATION_FINAL_RECHECK_DENIED", message.to_owned())
         };
+        if authorized.descriptor.analyzer_id == "hook-v1" {
+            let mode = self
+                .modes
+                .mode_in_current_write(conn, &authorized.subject.root_session_id);
+            if mode == PermissionMode::Plan
+                || (authorized.reason_code == "AUTO_APPROVE" && mode != PermissionMode::AutoApprove)
+            {
+                return Err(denied("Hook permission mode changed before execution"));
+            }
+        }
+        // 和取消状态变更使用同一个 writer，避免批准后、执行前的取消竞态。
+        // waitingDependencies 仍可能有同批次并行工具需要完成。
+        let accepts_tools: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM run_envelopes WHERE id=?1 \
+             AND status IN ('running','waitingInteraction','waitingDependencies'))",
+                rusqlite::params![authorized.subject.current_run_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| denied(&format!("Run admission recheck failed: {error}")))?;
+        if !accepts_tools {
+            return Err(AuthzError::new(
+                "RUN_TOOL_ADMISSION_CLOSED",
+                "The run no longer accepts tool execution",
+            ));
+        }
         if let Some(grant_id) = authorized.grant_id.as_deref() {
             let current = grants::find_match_in_tx(
                 conn,
@@ -883,6 +911,32 @@ impl AuthorizationService {
                 "HIGH risk operations cannot be remembered",
             ));
         }
+        let latest_mode = self.modes.mode(&subject.root_session_id);
+        let denied_code = if latest_mode == PermissionMode::Plan {
+            Some("PLAN_MODE_EFFECT_DENIED")
+        } else if latest_mode == PermissionMode::DontAsk
+            && (operation.risk == RiskClass::High
+                || self.grants.find_match(subject, operation).await?.is_none())
+        {
+            Some("PERMISSION_INTERACTION_REQUIRED")
+        } else {
+            None
+        };
+        if let Some(code) = denied_code {
+            self.record_denial(
+                context,
+                subject,
+                operation,
+                execution_attempt_id,
+                DiagnosticSource::Policy,
+                EvaluationStage::Interaction,
+                code,
+            );
+            return Err(AuthzError::new(
+                code,
+                "Permission mode changed while awaiting approval",
+            ));
+        }
         if remembered_requested {
             // 授权记录由 `DurableInteractionService` 在写入决策的同一事务内创建；
             // 此处只确认它确实已提交，未提交即拒绝（不退化成一次性放行）。
@@ -956,6 +1010,7 @@ impl AuthorizationService {
     /// 旧源 `rememberScopeDescription`（L449-459）：仅远程分析器有可记住范围文案。
     fn remember_scope_description(operation: &OperationDescriptor) -> Option<String> {
         match operation.analyzer_id.as_str() {
+            "hook-v1" => Some("Saved permission applies only to this exact Hook declaration, configuration source, physical working root and execution environment. Editing execution semantics requires approval again. This does not sandbox commands or their dependencies.".to_owned()),
             "network-v1" => Some(format!(
                 "Saved permission applies to {} only; URL and input values may change. \
                  Other network tools remain separate. Run/session limits follow the selected \

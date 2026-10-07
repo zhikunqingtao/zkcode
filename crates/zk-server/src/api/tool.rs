@@ -123,6 +123,20 @@ fn tool_not_found(tool_name: &str) -> ApiError {
     ApiError::not_found("TOOL_NOT_FOUND", &format!("Tool not found: {tool_name}"))
 }
 
+// Tool preferences historically accept pre-session IDs. Keep that behavior,
+// but such IDs can only see the global Skill view, never a project directory.
+async fn contextual_catalog(
+    state: &AppState,
+    session: Option<&str>,
+) -> Result<std::sync::Arc<zk_tools::ToolRegistry>, ApiError> {
+    let view = match state.skill_catalog.view(session, None).await {
+        Ok(view) => view,
+        Err(zk_db::DbError::SessionNotFound(_)) => state.skill_catalog.global_view(),
+        Err(error) => return Err(error.into()),
+    };
+    Ok(view.filter_tools(state.tools()))
+}
+
 /// `GET /api/tools`——全部已注册工具（含会话级启用位覆盖）。
 ///
 /// `toolName` 参数只做存在性校验、**不筛选**返回列表（旧 L34-39 语义，见
@@ -144,14 +158,14 @@ pub(crate) async fn list_tools(
     State(state): State<AppState>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Result<Json<ToolListResponse>, ApiError> {
-    let registry = state.tools();
+    let session_id = non_blank(query.get("sessionId").map(String::as_str));
+    let registry = contextual_catalog(&state, session_id).await?;
     // 旧 L34-39：单个工具查询时先验证存在性（校验完毕仍返回全量列表）。
     if let Some(tool_name) = non_blank(query.get("toolName").map(String::as_str))
         && registry.get(tool_name).is_none()
     {
         return Err(tool_not_found(tool_name));
     }
-    let session_id = non_blank(query.get("sessionId").map(String::as_str));
     let tools = registry
         .specs()
         .into_iter()
@@ -190,9 +204,14 @@ pub(crate) async fn list_tools(
 pub(crate) async fn get_tool_detail(
     State(state): State<AppState>,
     AxumPath(tool_name): AxumPath<String>,
+    Query(query): Query<HashMap<String, String>>,
 ) -> Result<Json<ToolDetail>, ApiError> {
-    let tool = state
-        .tools()
+    let registry = contextual_catalog(
+        &state,
+        non_blank(query.get("sessionId").map(String::as_str)),
+    )
+    .await?;
+    let tool = registry
         .get(&tool_name)
         .ok_or_else(|| ApiError::validation(format!("Unknown tool: {tool_name}")))?;
     let spec = tool.spec();
@@ -233,7 +252,8 @@ pub(crate) async fn toggle_tool(
     let request = serde_json::from_slice::<ToggleToolRequest>(&body)
         .map_err(|_| ApiError::invalid_request_body())?;
     // 旧 L76-79：先验证工具存在性（先于状态写入）。
-    if state.tools().get(&tool_name).is_none() {
+    let registry = contextual_catalog(&state, non_blank(request.session_id.as_deref())).await?;
+    if registry.get(&tool_name).is_none() {
         return Err(tool_not_found(&tool_name));
     }
     // 旧 L80-84：仅在 sessionId 非空白时持久化会话级状态。

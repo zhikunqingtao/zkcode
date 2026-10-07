@@ -1,17 +1,9 @@
-//! `/diff [staged]`——显示 Git 差异（Batch 7）。
-//!
-//! 语义来源（旧仓库只读）：`DiffCommand.java`（70L）。
-//!
-//! 用法：
-//! - `/diff` — 显示工作区差异；
-//! - `/diff staged` — 显示暂存区差异。
-//!
-//! # 有意差异
-//!
-//! - Java 侧经 `GitService.execGitPublic` 执行 Git 命令；
-//!   Rust 侧直接 `tokio::process::Command` 调用 `git`。
+//! `/diff [unstaged|staged|--staged]`: explicit scoped Git diff preview.
+//! Failed reads are errors; only successful empty reads mean no changes.
 
 use futures::future::BoxFuture;
+
+use super::git_review::{require_repository_root, run_git, truncate};
 
 use crate::command::context::CommandContext;
 use crate::command::traits::{Command, CommandResult, CommandType};
@@ -25,6 +17,10 @@ pub(super) struct DiffCommand;
 impl Command for DiffCommand {
     fn name(&self) -> &'static str {
         "diff"
+    }
+
+    fn aliases(&self) -> &'static [&'static str] {
+        &["changes"]
     }
 
     fn description(&self) -> &'static str {
@@ -41,16 +37,15 @@ impl Command for DiffCommand {
         ctx: &'a CommandContext,
     ) -> BoxFuture<'a, CommandResult> {
         Box::pin(async move {
-            if ctx.working_dir.trim().is_empty() {
-                return CommandResult::error("工作目录未设置");
+            if let Some(denied) = require_repository_root(ctx).await {
+                return denied;
             }
             let work_dir = &ctx.working_dir;
-            // 系统目录保护（对照旧 `workDirStr` 检查）。
-            if work_dir == "/" || work_dir.starts_with("/etc") || work_dir.starts_with("/usr") {
-                return CommandResult::error("不允许在系统目录中执行 Git 操作");
-            }
-
-            let staged = args.contains("staged");
+            let staged = match args.trim().to_ascii_lowercase().as_str() {
+                "" | "unstaged" => false,
+                "staged" | "--staged" => true,
+                _ => return CommandResult::error("用法：/diff [unstaged|staged|--staged]"),
+            };
 
             let stat_args: Vec<&str> = if staged {
                 vec!["diff", "--cached", "--stat"]
@@ -66,19 +61,15 @@ impl Command for DiffCommand {
             let stat = run_git(work_dir, &stat_args).await;
             let diff = run_git(work_dir, &diff_args).await;
 
-            let stat = stat.unwrap_or_default();
-            let diff = diff.unwrap_or_default();
+            let (Some(stat), Some(diff)) = (stat, diff) else {
+                return CommandResult::error(
+                    "读取 Git 差异失败，无法确认是否存在差异；请检查仓库后重试。",
+                );
+            };
 
             if stat.trim().is_empty() && diff.trim().is_empty() {
                 return CommandResult::text("无差异");
             }
-
-            let truncated_diff = if diff.chars().count() > MAX_DIFF_LENGTH {
-                let truncated: String = diff.chars().take(MAX_DIFF_LENGTH).collect();
-                format!("{truncated}\n...(已截断)")
-            } else {
-                diff.clone()
-            };
 
             let file_count = if stat.trim().is_empty() {
                 0
@@ -89,22 +80,12 @@ impl Command for DiffCommand {
             CommandResult::jsx(serde_json::json!({
                 "action": "gitDiffView",
                 "staged": staged,
-                "stat": stat,
-                "diff": truncated_diff,
+                "stat": truncate(&stat, MAX_DIFF_LENGTH),
+                "diff": truncate(&diff, MAX_DIFF_LENGTH),
                 "fileCount": file_count
             }))
         })
     }
-}
-
-async fn run_git(working_dir: &str, args: &[&str]) -> Option<String> {
-    tokio::process::Command::new("git")
-        .args(args)
-        .current_dir(working_dir)
-        .output()
-        .await
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
 }
 
 #[cfg(test)]

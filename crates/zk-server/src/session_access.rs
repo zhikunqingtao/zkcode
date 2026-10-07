@@ -33,7 +33,12 @@ pub(crate) async fn can_access_session(
     requested_session_id: &str,
     asserted_session_id: &str,
 ) -> Result<bool, DbError> {
-    if requested_session_id != asserted_session_id {
+    if requested_session_id != asserted_session_id
+        || state
+            .db
+            .is_merge_billing_session(requested_session_id)
+            .await?
+    {
         return Ok(false);
     }
     Ok(state.db.get_session(requested_session_id).await?.is_some())

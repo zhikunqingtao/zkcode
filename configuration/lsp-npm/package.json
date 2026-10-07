@@ -1,0 +1,10 @@
+{
+  "name": "zkcode-private-language-servers",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "typescript": "6.0.3",
+    "typescript-language-server": "6.0.1",
+    "pyright": "1.1.414"
+  }
+}

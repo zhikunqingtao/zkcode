@@ -156,6 +156,11 @@ pub trait Command: Send + Sync + 'static {
         false
     }
 
+    /// Whether this command has an executable implementation in the current registry.
+    fn is_available(&self) -> bool {
+        true
+    }
+
     /// 旧 `isImmediate()`：前端可在补全时立即执行（缺省 false）。
     fn is_immediate(&self) -> bool {
         false

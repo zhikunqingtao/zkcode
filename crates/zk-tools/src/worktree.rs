@@ -27,7 +27,7 @@ use futures::future::BoxFuture;
 use serde_json::json;
 
 use crate::input::{failure, optional_str, required_str, resolve_path, truncate_chars};
-use crate::process::{ProcessOutcome, run_program};
+use crate::process::{ProcessOutcome, run_git_program};
 use crate::tool::{Tool, ToolContext, ToolOutput};
 
 /// worktree 命令超时（旧 `WorktreeTool.getMaxExecutionTimeMs() = 300_000`）。
@@ -239,7 +239,7 @@ async fn invoke(plan: Plan, input: &serde_json::Value, ctx: ToolContext) -> Tool
             format!("Not a directory: {}", repo.display()),
         );
     }
-    match run_program("git", &plan.argv, &repo, WORKTREE_TIMEOUT, &ctx).await {
+    match run_git_program(&plan.argv, &repo, WORKTREE_TIMEOUT, &ctx).await {
         Ok(outcome) => finish(&plan, &repo, outcome),
         Err(error) => failure("WORKTREE_SPAWN_FAILED", format!("git: {error}")),
     }
@@ -289,6 +289,47 @@ fn finish(plan: &Plan, repo: &Path, outcome: ProcessOutcome) -> ToolOutput {
         }
     }));
     output
+}
+
+/// Production implementation owns the durable worktree inventory and delivery gates.
+pub trait WorktreeBackend: Send + Sync {
+    /// Execute one explicitly requested worktree operation.
+    fn execute(&self, input: serde_json::Value, ctx: ToolContext) -> BoxFuture<'_, ToolOutput>;
+}
+/// Worktree tool backed by the process-shared durable manager.
+pub struct ManagedWorktreeTool(pub std::sync::Arc<dyn WorktreeBackend>);
+impl Tool for ManagedWorktreeTool {
+    fn name(&self) -> &'static str {
+        "Worktree"
+    }
+    fn description(&self) -> &'static str {
+        "Create and inspect isolated Git snapshots. Changes are retained after agents finish. commit and merge are separate explicit operations; remove refuses uncommitted, undelivered, active, or uncertain work."
+    }
+    fn parameters(&self) -> serde_json::Value {
+        let mut schema = WorktreeTool.parameters();
+        schema["properties"]["subcommand"]["enum"] =
+            json!(["add", "list", "inspect", "commit", "merge", "remove"]);
+        schema["properties"]["subcommand"]["description"] =
+            json!("Explicit operation; completion never automatically commits or merges.");
+        schema["properties"]["commit_message"] =
+            json!({"type":"string","description":"Required for explicit commit."});
+        schema
+    }
+    fn timeout(&self) -> Duration {
+        WORKTREE_TIMEOUT
+    }
+    fn is_read_only(&self, input: &serde_json::Value) -> bool {
+        matches!(optional_str(input, "subcommand"), Some("list" | "inspect"))
+    }
+    fn is_destructive(&self, input: &serde_json::Value) -> bool {
+        !self.is_read_only(input)
+    }
+    fn path_of(&self, input: &serde_json::Value) -> Option<String> {
+        WorktreeTool.path_of(input)
+    }
+    fn execute(&self, input: serde_json::Value, ctx: ToolContext) -> BoxFuture<'_, ToolOutput> {
+        self.0.execute(input, ctx)
+    }
 }
 
 #[cfg(test)]

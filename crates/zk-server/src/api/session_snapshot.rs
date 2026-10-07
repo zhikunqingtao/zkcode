@@ -4,13 +4,31 @@ use axum::Json;
 use axum::extract::{Path, State};
 use serde_json::{Value, json};
 use zk_db::SnapshotRestoreOutcome;
-use zk_engine::{SessionSnapshot, SessionSnapshotSummary};
+use zk_engine::{SessionSnapshot, SessionSnapshotError, SessionSnapshotSummary};
 
 use crate::error::ApiError;
 use crate::state::AppState;
 
 fn invalid_snapshot_id() -> ApiError {
     ApiError::validation_with_code("SNAPSHOT_ID_INVALID", "Snapshot session id is invalid")
+}
+
+fn snapshot_error(error: SessionSnapshotError) -> ApiError {
+    match error {
+        SessionSnapshotError::InvalidId(_) => invalid_snapshot_id(),
+        SessionSnapshotError::Content(error) => error.into(),
+    }
+}
+
+async fn require_durable_snapshot(state: &AppState, session_id: &str) -> Result<(), ApiError> {
+    if state.db.session_retention(session_id).await? == zk_db::content::ContentRetention::Ephemeral
+    {
+        return Err(ApiError::validation_with_code(
+            "EPHEMERAL_OPERATION_UNSUPPORTED",
+            "Temporary conversations cannot save or resume durable snapshots",
+        ));
+    }
+    Ok(())
 }
 
 fn snapshot_not_found(session_id: &str) -> ApiError {
@@ -30,6 +48,7 @@ pub(crate) async fn save(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
 ) -> Result<Json<SessionSnapshotSummary>, ApiError> {
+    require_durable_snapshot(&state, &session_id).await?;
     let detail = state
         .db
         .get_session(&session_id)
@@ -40,12 +59,12 @@ pub(crate) async fn save(
         .session_snapshots
         .save_snapshot(&session_id, &snapshot)
         .await
-        .map_err(|_| invalid_snapshot_id())?;
+        .map_err(snapshot_error)?;
     let persisted = state
         .session_snapshots
         .load_snapshot(&session_id)
         .await
-        .map_err(|_| invalid_snapshot_id())?
+        .map_err(snapshot_error)?
         .ok_or_else(|| {
             ApiError::validation_with_code(
                 "SNAPSHOT_WRITE_FAILED",
@@ -60,11 +79,12 @@ pub(crate) async fn resume(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
 ) -> Result<Json<SessionSnapshotSummary>, ApiError> {
+    require_durable_snapshot(&state, &session_id).await?;
     let snapshot = state
         .session_snapshots
         .load_snapshot(&session_id)
         .await
-        .map_err(|_| invalid_snapshot_id())?
+        .map_err(snapshot_error)?
         .ok_or_else(|| snapshot_not_found(&session_id))?;
     if snapshot.session_id.as_deref() != Some(session_id.as_str()) {
         return Err(ApiError::validation_with_code(
@@ -147,7 +167,7 @@ pub(crate) async fn delete(
         .session_snapshots
         .delete_snapshot(&session_id)
         .await
-        .map_err(|_| invalid_snapshot_id())?;
+        .map_err(snapshot_error)?;
     if !deleted {
         return Err(snapshot_not_found(&session_id));
     }

@@ -34,6 +34,10 @@ use tokio_util::sync::CancellationToken;
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskSnapshot {
+    /// Durable execution kind.
+    pub task_type: String,
+    /// Whether the task follows parent lifetime or runs independently.
+    pub lifecycle: String,
     /// 任务 ID。
     pub task_id: String,
     /// 会话 ID。
@@ -50,6 +54,9 @@ pub struct TaskSnapshot {
     pub description: Option<String>,
     /// 输出。
     pub output: Option<String>,
+    /// Mutable advisory display note, separate from immutable result output.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_output: Option<String>,
     /// 错误。
     pub error: Option<String>,
     /// Latest immutable result version.
@@ -71,7 +78,7 @@ pub struct TaskSnapshot {
 }
 
 impl TaskSnapshot {
-    fn structured_result(&self) -> Value {
+    pub(crate) fn structured_result(&self) -> Value {
         serde_json::to_value(self).unwrap_or_else(|_| {
             json!({
                 "taskId": self.task_id,
@@ -81,7 +88,7 @@ impl TaskSnapshot {
         })
     }
 
-    fn render(&self) -> String {
+    pub(crate) fn render(&self) -> String {
         serde_json::to_string_pretty(&self.structured_result())
             .unwrap_or_else(|_| format!("Task {}: {}", self.task_id, self.status))
     }
@@ -131,6 +138,14 @@ pub struct TaskInvocation {
     pub prompt: String,
     /// Requested task/agent specialization.
     pub task_type: String,
+    /// Explicit lifecycle, attached unless selected by the caller.
+    pub lifecycle: String,
+    /// Exact shell command, present only for shell tasks.
+    pub command: Option<String>,
+    /// Optional smaller shell deadline; `TaskRuntime` still bounds it by the parent budget.
+    pub timeout_ms: Option<u64>,
+    /// Trusted cwd from the original Bash admission, never a JSON input field.
+    pub authorized_shell_cwd: Option<PathBuf>,
     /// Parent run used for authorization ancestry.
     pub parent_run_id: String,
     /// Canonical workspace inherited from the session.
@@ -263,7 +278,26 @@ pub trait TaskCoordinatorPort: Send + Sync {
         description: Option<String>,
         plan: Option<String>,
         reported_progress: Option<f64>,
+        output: Option<String>,
     ) -> BoxFuture<'_, Result<TaskSnapshot, TaskPortError>>;
+
+    /// Narrow child self-report: authoritative Run/session identity decides the
+    /// target; an optional caller-supplied task id must identify that same task.
+    fn update_own_output(
+        &self,
+        _task_id: Option<String>,
+        _session_id: String,
+        _run_id: String,
+        _output: String,
+    ) -> BoxFuture<'_, Result<TaskSnapshot, TaskPortError>> {
+        Box::pin(async {
+            Err(TaskPortError::new(
+                "TASK_SELF_OUTPUT_UNAVAILABLE",
+                "child display output is unavailable",
+                false,
+            ))
+        })
+    }
 
     /// Read or wait for one immutable result page.
     fn read_output(
@@ -409,7 +443,7 @@ impl Tool for TaskCreateTool {
     }
 
     fn description(&self) -> &'static str {
-        "Submit one attached child task to the durable TaskRuntime. The returned taskId is \
+        "Submit a durable agent or shell task; lifecycle defaults to attached and detached is explicit. The returned taskId is \
          immediately queryable and all terminal outcomes have a durable result."
     }
 
@@ -439,10 +473,6 @@ impl Tool for TaskCreateTool {
                 Ok(d) => d.to_owned(),
                 Err(e) => return e,
             };
-            let prompt = match required_v4_string(&input, "prompt") {
-                Ok(p) => p.to_owned(),
-                Err(e) => return e,
-            };
             let task_type = match required_v4_string(&input, "taskType") {
                 Ok(task_type) => task_type.to_owned(),
                 Err(error) => return error,
@@ -453,6 +483,37 @@ impl Tool for TaskCreateTool {
                     format!("taskType '{task_type}' is not available in TaskRuntime v4"),
                 );
             }
+            let lifecycle = match input.get("lifecycle") {
+                None => "attached".to_owned(),
+                Some(Value::String(value)) if matches!(value.as_str(), "attached" | "detached") => {
+                    value.clone()
+                }
+                _ => {
+                    return v4_failure(
+                        "TASK_LIFECYCLE_INVALID",
+                        "lifecycle must be attached or detached",
+                    );
+                }
+            };
+            let (prompt, command) = if task_type == "shell" {
+                let command = match required_v4_string(&input, "command") {
+                    Ok(value) => value.to_owned(),
+                    Err(error) => return error,
+                };
+                (command.clone(), Some(command))
+            } else {
+                if input.get("command").is_some() {
+                    return v4_failure(
+                        "TASK_COMMAND_INVALID",
+                        "command is only valid for shell tasks",
+                    );
+                }
+                let prompt = match required_v4_string(&input, "prompt") {
+                    Ok(value) => value.to_owned(),
+                    Err(error) => return error,
+                };
+                (prompt, None)
+            };
             let Some(session_id) = ctx.session_id().map(str::to_owned) else {
                 return v4_failure("TASK_CONTEXT_INCOMPLETE", "Task requires session id");
             };
@@ -468,6 +529,10 @@ impl Tool for TaskCreateTool {
                     description: description.clone(),
                     prompt,
                     task_type,
+                    lifecycle,
+                    command,
+                    timeout_ms: None,
+                    authorized_shell_cwd: None,
                     parent_run_id,
                     working_directory: ctx.working_dir().to_path_buf(),
                     tool_use_id,
@@ -491,13 +556,58 @@ impl Tool for TaskCreateTool {
 /// 更新任务状态 / 输出（对照旧 `TaskUpdateTool`）。
 pub struct TaskUpdateTool {
     port: std::sync::Arc<dyn TaskCoordinatorPort>,
+    self_only: bool,
 }
 
 impl TaskUpdateTool {
     /// 构造工具。
     #[must_use]
     pub fn new(port: std::sync::Arc<dyn TaskCoordinatorPort>) -> Self {
-        Self { port }
+        Self {
+            port,
+            self_only: false,
+        }
+    }
+    fn execute_own(&self, input: Value, ctx: ToolContext) -> BoxFuture<'_, ToolOutput> {
+        let port = std::sync::Arc::clone(&self.port);
+        Box::pin(async move {
+            if let Err(error) =
+                validate_v4_fields(&input, &["taskId", "output"], TASK_UPDATE_LEGACY_FIELDS)
+            {
+                return error;
+            }
+            let task_id = if input.get("taskId").is_some() {
+                match required_v4_task_id(&input) {
+                    Ok(id) => Some(id),
+                    Err(error) => return error,
+                }
+            } else {
+                None
+            };
+            let output = match optional_v4_string(&input, "output") {
+                Ok(Some(output)) => output.to_owned(),
+                Ok(None) => {
+                    return v4_failure(
+                        "INVALID_REQUEST",
+                        "output is required for a child self-report",
+                    );
+                }
+                Err(error) => return error,
+            };
+            let (Some(session), Some(run)) = (ctx.session_id(), ctx.run_id()) else {
+                return v4_failure(
+                    "TASK_CONTEXT_INCOMPLETE",
+                    "child self-report requires authoritative session and Run identity",
+                );
+            };
+            match port
+                .update_own_output(task_id, session.to_owned(), run.to_owned(), output)
+                .await
+            {
+                Ok(snapshot) => snapshot_output(&snapshot),
+                Err(error) => error.into_output(),
+            }
+        })
     }
 }
 
@@ -507,12 +617,38 @@ impl Tool for TaskUpdateTool {
     }
 
     fn description(&self) -> &'static str {
-        "Update advisory task description, plan, or reported progress. Execution terminal \
-         state is owned exclusively by TaskRuntime."
+        if self.self_only {
+            return "Replace only your current task's advisory display output. Supply output; taskId is optional and must identify your own current task. Empty output clears the note. Cannot change parent/sibling tasks, execution status, errors, result pages, usage, description, plan, or progress.";
+        }
+        "Update advisory task description, plan, reported progress, or display output. Display output \
+         may be replaced after execution ends; empty output clears it. Execution terminal state, \
+         errors, immutable result pages, and usage remain owned exclusively by TaskRuntime."
     }
 
     fn parameters(&self) -> Value {
-        task_update_input_schema()
+        let mut schema = task_update_input_schema();
+        if self.self_only {
+            if let Some(properties) = schema["properties"].as_object_mut() {
+                properties.retain(|key, _| matches!(key.as_str(), "taskId" | "output"));
+            }
+            schema["required"] = json!(["output"]);
+        }
+        schema
+    }
+
+    fn child_access(&self) -> crate::ChildToolAccess {
+        if self.self_only {
+            crate::ChildToolAccess::SelfTaskDisplay
+        } else {
+            crate::ChildToolAccess::Denied
+        }
+    }
+
+    fn child_view(&self) -> Option<std::sync::Arc<dyn Tool>> {
+        Some(std::sync::Arc::new(Self {
+            port: std::sync::Arc::clone(&self.port),
+            self_only: true,
+        }))
     }
 
     fn uses_execution_slot(&self) -> bool {
@@ -521,6 +657,9 @@ impl Tool for TaskUpdateTool {
 
     fn execute(&self, input: Value, ctx: ToolContext) -> BoxFuture<'_, ToolOutput> {
         let port = std::sync::Arc::clone(&self.port);
+        if self.self_only {
+            return self.execute_own(input, ctx);
+        }
         Box::pin(async move {
             if let Err(error) = validate_v4_fields(
                 &input,
@@ -541,6 +680,10 @@ impl Tool for TaskUpdateTool {
                 Err(error) => return error,
             };
             let plan = match optional_v4_string(&input, "plan") {
+                Ok(value) => value.map(String::from),
+                Err(error) => return error,
+            };
+            let output = match optional_v4_string(&input, "output") {
                 Ok(value) => value.map(String::from),
                 Err(error) => return error,
             };
@@ -567,7 +710,14 @@ impl Tool for TaskUpdateTool {
             }
 
             match port
-                .update_task(task_id, session_id, description, plan, reported_progress)
+                .update_task(
+                    task_id,
+                    session_id,
+                    description,
+                    plan,
+                    reported_progress,
+                    output,
+                )
                 .await
             {
                 Ok(snapshot) => snapshot_output(&snapshot),
@@ -914,6 +1064,8 @@ mod tests {
 
     fn snapshot(status: &str) -> TaskSnapshot {
         TaskSnapshot {
+            task_type: "agent".into(),
+            lifecycle: "attached".into(),
             task_id: TEST_TASK_ID.into(),
             session_id: "s1".into(),
             parent_task_id: Some("root-task".into()),
@@ -922,6 +1074,7 @@ mod tests {
             reason: None,
             description: Some("test task".into()),
             output: None,
+            display_output: None,
             error: None,
             result_version: None,
             partial: false,
@@ -936,6 +1089,21 @@ mod tests {
 
     struct StubPort;
     impl TaskCoordinatorPort for StubPort {
+        fn update_own_output(
+            &self,
+            _task_id: Option<String>,
+            session_id: String,
+            run_id: String,
+            output: String,
+        ) -> BoxFuture<'_, Result<TaskSnapshot, TaskPortError>> {
+            Box::pin(async move {
+                assert_eq!(session_id, "s1");
+                assert_eq!(run_id, "child-run");
+                let mut task = snapshot("running");
+                task.display_output = Some(output);
+                Ok(task)
+            })
+        }
         fn submit_task(
             &self,
             _invocation: TaskInvocation,
@@ -976,8 +1144,13 @@ mod tests {
             _description: Option<String>,
             _plan: Option<String>,
             _reported_progress: Option<f64>,
+            output: Option<String>,
         ) -> BoxFuture<'_, Result<TaskSnapshot, TaskPortError>> {
-            Box::pin(async { Ok(snapshot("running")) })
+            Box::pin(async move {
+                let mut task = snapshot("running");
+                task.display_output = output;
+                Ok(task)
+            })
         }
         fn read_output(
             &self,
@@ -1039,6 +1212,87 @@ mod tests {
             )
             .await;
         assert!(!output.is_error);
+    }
+
+    #[tokio::test]
+    async fn task_update_display_output_is_separate_and_rejects_terminal_field_mutation() {
+        let tool = TaskUpdateTool::new(std::sync::Arc::new(StubPort));
+        let output = tool
+            .execute(
+                json!({"taskId": TEST_TASK_ID, "output": "display note"}),
+                ctx(),
+            )
+            .await;
+        assert!(!output.is_error);
+        let value = &output.metadata.as_ref().unwrap()["structuredResult"];
+        assert_eq!(value["displayOutput"], "display note");
+        assert!(value["output"].is_null());
+        assert_eq!(value["status"], "running");
+        for field in ["status", "error"] {
+            let mut input = json!({"taskId": TEST_TASK_ID, "output": "not applied"});
+            input[field] = Value::Null;
+            assert!(tool.execute(input, ctx()).await.is_error);
+        }
+        assert!(
+            tool.execute(json!({"taskId": TEST_TASK_ID, "output": null}), ctx())
+                .await
+                .is_error
+        );
+    }
+
+    #[tokio::test]
+    async fn child_task_update_catalog_and_execution_allow_only_self_output() {
+        let parent = TaskUpdateTool::new(std::sync::Arc::new(StubPort));
+        let child = parent.child_view().unwrap();
+        assert!(
+            parent.parameters()["properties"]
+                .get("description")
+                .is_some()
+        );
+        assert_eq!(
+            child.parameters()["properties"].as_object().unwrap().len(),
+            2
+        );
+        assert_eq!(child.parameters()["required"], json!(["output"]));
+        assert_eq!(
+            child.child_access(),
+            crate::ChildToolAccess::SelfTaskDisplay
+        );
+        let result = child
+            .execute(
+                json!({"output":"self report"}),
+                ctx().with_run_id("child-run"),
+            )
+            .await;
+        assert!(!result.is_error);
+        assert_eq!(
+            result.metadata.unwrap()["structuredResult"]["displayOutput"],
+            "self report"
+        );
+        for field in ["description", "plan", "reportedProgress", "status", "error"] {
+            let mut input = json!({"output":"must not apply"});
+            input[field] = Value::Null;
+            assert!(
+                child
+                    .execute(input, ctx().with_run_id("child-run"))
+                    .await
+                    .is_error
+            );
+        }
+        let (progress, _receiver) = mpsc::unbounded_channel();
+        let no_run = ToolContext::new(CancellationToken::new(), progress).with_session_id("s1");
+        assert!(
+            child
+                .execute(json!({"output":"no Run"}), no_run)
+                .await
+                .is_error
+        );
+        assert!(
+            child
+                .execute(json!({}), ctx().with_run_id("child-run"))
+                .await
+                .is_error
+        );
     }
 
     #[tokio::test]
@@ -1204,6 +1458,7 @@ mod tests {
                 _: Option<String>,
                 _: Option<String>,
                 _: Option<f64>,
+                _: Option<String>,
             ) -> BoxFuture<'_, Result<TaskSnapshot, TaskPortError>> {
                 Box::pin(async { Ok(snapshot("running")) })
             }

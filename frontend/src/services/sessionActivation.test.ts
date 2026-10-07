@@ -12,10 +12,14 @@ import {
 import { useMessageStore } from '@/store/messageStore';
 import { useSessionStore } from '@/store/sessionStore';
 import { useCostStore } from '@/store/costStore';
+import { useNotificationStore } from '@/store/notificationStore';
+import { usePromptDraftStore, capturePromptDraftTarget } from '@/store/promptDraftStore';
 import type { Message } from '@/types';
 import { runtimeEnvelope } from '@/test/runtimeEnvelope';
 import {
     activateSessionCandidate,
+    captureSessionSelectionGuard,
+    clearSessionSelection,
     getPendingSessionActivation,
 } from './sessionActivation';
 
@@ -65,6 +69,8 @@ describe('Session activation transaction', () => {
         vi.mocked(waitForWsConnection).mockResolvedValue();
         resetBoundSession();
         window.sessionStorage.clear();
+        usePromptDraftStore.setState({ drafts: {} });
+        useNotificationStore.getState().clearAll();
         useMessageStore.getState().clearMessages();
         useCostStore.getState().resetSessionCost();
         useSessionStore.setState({
@@ -291,4 +297,130 @@ describe('Session activation transaction', () => {
         expect(isSessionBound('session-restored')).toBe(true);
         expect(useCostStore.getState().sessionCost).toBe(7);
     });
+    it('commits a captured new-session draft before authoritative session publication', async () => {
+        usePromptDraftStore.getState().setInput('__none__', 'home with pending assets');
+        usePromptDraftStore.getState().setLocalFiles('__none__', [{ path: '/project/a.txt', name: 'a.txt', size: 1 }]);
+        const id = usePromptDraftStore.getState().drafts.__none__.id;
+        const resolveAttachmentTarget = capturePromptDraftTarget('__none__');
+        const publishedDrafts: Array<string | undefined> = [];
+        const unsubscribe = useSessionStore.subscribe(state => {
+            if (state.sessionId === 'created') publishedDrafts.push(usePromptDraftStore.getState().drafts.created?.id);
+        });
+        let bind!: BindPayload;
+        vi.mocked(sendToServer).mockImplementation((_dest, body) => { bind = body as BindPayload; return true; });
+        const pending = activateSessionCandidate('created', { newSessionDraftId: id });
+        await Promise.resolve();
+        expect(usePromptDraftStore.getState().drafts.created).toBeUndefined();
+        expect(bind).not.toHaveProperty('newSessionDraftId');
+        restore({ ...bind, bindingEpoch: bind.bindingEpoch + 1 });
+        expect(usePromptDraftStore.getState().drafts.__none__.id).toBe(id);
+        restore(bind);
+        await expect(pending).resolves.toMatchObject({ status: 'activated' });
+        expect(publishedDrafts.length).toBeGreaterThan(0);
+        expect(publishedDrafts.every(value => value === id)).toBe(true);
+        expect(resolveAttachmentTarget()).toBe('created');
+        expect(usePromptDraftStore.getState().drafts.created.localFiles[0].path).toBe('/project/a.txt');
+        // An async attachment completion still follows its own draft after another selection.
+        useSessionStore.setState({ sessionId: 'other' });
+        const attachment = { id: 'late', name: 'late.png', size: 1, type: 'image/png', file: new File(['x'], 'late.png') };
+        usePromptDraftStore.getState().setAttachments(resolveAttachmentTarget()!, [attachment]);
+        expect(usePromptDraftStore.getState().drafts.created.attachments[0].id).toBe('late');
+        expect(usePromptDraftStore.getState().drafts.other).toBeUndefined();
+        unsubscribe();
+    });
+
+    it('ordinary restore preserves independent home and existing-session drafts', async () => {
+        usePromptDraftStore.getState().setInput('__none__', 'home');
+        usePromptDraftStore.getState().setInput('existing', 'existing');
+        const drafts = usePromptDraftStore.getState().drafts;
+        vi.mocked(sendToServer).mockImplementation((_dest, body) => { restore(body as BindPayload); return true; });
+        await expect(activateSessionCandidate('existing')).resolves.toMatchObject({ status: 'activated' });
+        expect(usePromptDraftStore.getState().drafts).toEqual(drafts);
+    });
+
+    it('failed and superseded new binds cannot transfer the captured home draft', async () => {
+        usePromptDraftStore.getState().setInput('__none__', 'keep home');
+        const id = usePromptDraftStore.getState().drafts.__none__.id;
+        const binds: BindPayload[] = [];
+        vi.mocked(sendToServer).mockImplementation((_dest, body) => { binds.push(body as BindPayload); return true; });
+        const first = activateSessionCandidate('created-first', { newSessionDraftId: id, bindTimeoutMs: 20 });
+        await Promise.resolve();
+        const second = activateSessionCandidate('existing-second', { bindTimeoutMs: 20 });
+        await Promise.resolve();
+        restore(binds[0]);
+        expect(usePromptDraftStore.getState().drafts.__none__.id).toBe(id);
+        await vi.advanceTimersByTimeAsync(25);
+        await expect(first).resolves.toMatchObject({ status: 'superseded' });
+        await expect(second).resolves.toMatchObject({ status: 'failed' });
+        expect(Object.keys(usePromptDraftStore.getState().drafts)).toEqual(['__none__']);
+    });
+
+    it.each(['replacement-home', 'occupied-target'])('confirmed creation preserves independent drafts on %s', async (conflict) => {
+        usePromptDraftStore.getState().setInput('__none__', 'original home');
+        const id = usePromptDraftStore.getState().drafts.__none__.id;
+        let bind!: BindPayload;
+        vi.mocked(sendToServer).mockImplementation((_destination, body) => { bind = body as BindPayload; return true; });
+        const pending = activateSessionCandidate('created', { newSessionDraftId: id });
+        await Promise.resolve();
+        if (conflict === 'replacement-home') {
+            usePromptDraftStore.getState().clear('__none__');
+            usePromptDraftStore.getState().setInput('__none__', 'replacement home');
+        } else {
+            usePromptDraftStore.getState().setInput('created', 'independent target');
+        }
+        const drafts = usePromptDraftStore.getState().drafts;
+        restore(bind);
+        await expect(pending).resolves.toMatchObject({ status: 'activated' });
+        expect(usePromptDraftStore.getState().drafts).toEqual(drafts);
+        expect(useNotificationStore.getState().notifications).toEqual([
+            expect.objectContaining({
+                key: `prompt-draft-transfer:${id}:created`,
+                level: 'warning',
+                message: expect.stringContaining('草稿未自动转移'),
+            }),
+        ]);
+    });
+
+    it.each([false, true])('reconfirming a transferred draft identity does not report a conflict (new home: %s)', async replacement => {
+        usePromptDraftStore.getState().setInput('__none__', 'original home');
+        const id = usePromptDraftStore.getState().drafts.__none__.id;
+        vi.mocked(sendToServer).mockImplementation((_destination, body) => { restore(body as BindPayload); return true; });
+        await expect(activateSessionCandidate('created', { newSessionDraftId: id })).resolves.toMatchObject({ status: 'activated' });
+        if (replacement) usePromptDraftStore.getState().setInput('__none__', 'new independent home');
+        const drafts = usePromptDraftStore.getState().drafts;
+        resetBoundSession();
+        await expect(activateSessionCandidate('created', { newSessionDraftId: id })).resolves.toMatchObject({ status: 'activated' });
+        expect(usePromptDraftStore.getState().drafts).toEqual(drafts);
+        expect(useNotificationStore.getState().notifications).toEqual([]);
+    });
+
+    it('expires a creation guard as soon as a newer history selection starts', async () => {
+        const creationStillCurrent = captureSessionSelectionGuard();
+        expect(creationStillCurrent()).toBe(true);
+        vi.mocked(sendToServer).mockImplementation((_destination, body) => {
+            restore(body as BindPayload);
+            return true;
+        });
+        const history = activateSessionCandidate('selected-history');
+        expect(creationStillCurrent()).toBe(false);
+        await expect(history).resolves.toMatchObject({ status: 'activated' });
+        expect(useSessionStore.getState().sessionId).toBe('selected-history');
+        expect(creationStillCurrent()).toBe(false);
+    });
+
+    it('discarded new-session activation cannot commit a late restore after returning home', async () => {
+        usePromptDraftStore.getState().setInput('__none__', 'keep home');
+        const id = usePromptDraftStore.getState().drafts.__none__.id;
+        let bind!: BindPayload;
+        vi.mocked(sendToServer).mockImplementation((_destination, body) => { bind = body as BindPayload; return true; });
+        const activation = activateSessionCandidate('abandoned-new-session', { newSessionDraftId: id });
+        await Promise.resolve();
+        clearSessionSelection();
+        restore(bind);
+        expect(useSessionStore.getState().sessionId).toBe('');
+        expect(usePromptDraftStore.getState().drafts.__none__.id).toBe(id);
+        expect(usePromptDraftStore.getState().drafts['abandoned-new-session']).toBeUndefined();
+        await expect(activation).resolves.toMatchObject({ status: 'superseded' });
+    });
+
 });

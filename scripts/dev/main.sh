@@ -8,6 +8,8 @@ ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 . "$ROOT_DIR/scripts/dev/fingerprint.sh"
 . "$ROOT_DIR/scripts/dev/lifecycle.sh"
 . "$ROOT_DIR/scripts/dev/sync.sh"
+. "$ROOT_DIR/scripts/dev/documents.sh"
+. "$ROOT_DIR/scripts/dev/lsp.sh"
 . "$ROOT_DIR/scripts/dev/doctor.sh"
 
 export HOMEBREW_NO_AUTO_UPDATE=${HOMEBREW_NO_AUTO_UPDATE:-1}
@@ -33,7 +35,7 @@ Commands:
   doctor [--deep] [--json]          diagnose environment and capabilities
   repair <component>                repair frontend/python/browser/rust/build
   logs [backend|frontend|python]    follow a service log
-  test [quick|full|browser|real]    run a validation tier
+  test [quick|full|browser|office|real]    run a validation tier
 
 Source, lock files, .env, and user data are never reset, checked out, or
 committed by this command.
@@ -243,6 +245,9 @@ dev_test_command() {
         full)
             PLAYWRIGHT_BROWSERS_PATH="$ROOT_DIR/.runtime/playwright" \
                 "$ROOT_DIR/scripts/parity/run-local-gates.sh"
+            ;;
+        office)
+            "$ROOT_DIR/tools/office-regression/run.sh"
             ;;
         browser)
             PLAYWRIGHT_BROWSERS_PATH="$ROOT_DIR/.runtime/playwright" \

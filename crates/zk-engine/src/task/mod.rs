@@ -2,8 +2,9 @@
 
 pub mod runtime;
 pub use runtime::{
-    CLEANUP_GRACE, CancelReceipt, ChildTaskSubmission, DEFAULT_TASK_TIMEOUT, GLOBAL_AGENT_LIMIT,
-    ROOT_AGENT_LIMIT, TaskExecutionContext, TaskExecutionLease, TaskExecutionResult,
-    TaskOutputRequest, TaskOutputResponse, TaskRuntime, TaskRuntimeError, TaskRuntimeShutdownPhase,
+    CLEANUP_GRACE, CancelReceipt, ChildTaskSubmission, DEFAULT_TASK_TIMEOUT,
+    ExternalRootSubmission, GLOBAL_AGENT_LIMIT, ROOT_AGENT_LIMIT, RunTerminalObserver,
+    TaskExecutionContext, TaskExecutionLease, TaskExecutionResult, TaskOutputRequest,
+    TaskOutputResponse, TaskRuntime, TaskRuntimeError, TaskRuntimeShutdownPhase,
     TaskRuntimeShutdownReport, TaskSubmissionReceipt,
 };

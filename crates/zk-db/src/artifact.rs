@@ -88,7 +88,66 @@ pub struct ProducedFileArtifactRecord {
     pub file_size: i64,
 }
 
+/// A native Bash receipt. The engine accepts these only from a trusted bound tool;
+/// the database additionally checks the exact pre-execution invocation input.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProducedShellArtifactRecord {
+    /// Original declaration path; matched against the persisted invocation.
+    pub requested_path: String,
+    /// Descriptor-verified output path inside the owning workspace.
+    pub canonical_path: String,
+    /// Canonical created, modified, or deleted effect.
+    pub operation: String,
+    /// Original bytes identity for modifications and deletions.
+    pub previous_hash: Option<String>,
+    /// Actual final bytes identity; absent for a verified deletion.
+    pub sealed_hash: Option<String>,
+    /// Actual final byte count; absent for deletion.
+    pub file_size: Option<u64>,
+    /// Declared validator requirement, never a successful validator result.
+    pub required_validator_id: Option<String>,
+}
+
 impl Db {
+    /// Atomically publish only the explicitly declared, physically observed Bash effects.
+    /// No command is executed or retried here. Failed persistence leaves a durable
+    /// postprocessing obligation in the tool ledger, never an assumed success.
+    ///
+    /// # Errors
+    /// Rejects ownership, declaration, byte-integrity or budget mismatches and propagates storage failures.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub async fn record_declared_shell_artifacts(
+        &self,
+        run_id: &str,
+        session_id: &str,
+        workspace_root: &str,
+        tool_use_id: &str,
+        invocation_id: &str,
+        receipts: Vec<ProducedShellArtifactRecord>,
+    ) -> Result<(), DbError> {
+        let (run_id, session_id, workspace_root, tool_use_id, invocation_id) = (
+            run_id.to_owned(),
+            session_id.to_owned(),
+            workspace_root.to_owned(),
+            tool_use_id.to_owned(),
+            invocation_id.to_owned(),
+        );
+
+        self.with_writer(move |conn| {
+            record_declared_shell_artifacts_in_write(
+                conn,
+                &run_id,
+                &session_id,
+                &workspace_root,
+                &tool_use_id,
+                &invocation_id,
+                receipts,
+            )
+        })
+        .await
+    }
+
     /// Register a successful built-in file write in the run's `SQLite` manifest.
     ///
     /// The physical invocation must already be durably `succeeded`; a failed,
@@ -148,7 +207,7 @@ impl Db {
                      JOIN artifact_entries entry ON entry.manifest_id=manifest.manifest_id \
                      WHERE manifest.run_id=?1 AND entry.canonical_path=?2 \
                        AND entry.producer_invocation_id=?3 AND entry.tool_use_id=?4 \
-                       AND entry.operation=?5 AND entry.sealed_hash=?6 AND entry.file_size=?7",
+                       AND entry.operation=?5 AND (CASE WHEN (SELECT content_retention FROM sessions WHERE id=manifest.session_id)='ephemeral' THEN CASE WHEN zk_ephemeral_ref_valid(manifest.session_id,entry.sealed_hash) THEN zk_ephemeral_get(manifest.session_id,entry.sealed_hash) ELSE NULL END ELSE entry.sealed_hash END)=?6 AND entry.file_size=?7",
                     rusqlite::params![
                         &produced.run_id,
                         &produced.canonical_path,
@@ -178,7 +237,7 @@ impl Db {
                      JOIN artifact_entries entry ON entry.manifest_id=manifest.manifest_id \
                      WHERE entry.canonical_path=?1 \
                        AND (manifest.state='verified' OR entry.state IN ('integrity_verified','content_verified')) \
-                       AND (entry.sealed_hash IS NOT ?2 OR entry.file_size IS NOT ?3)",
+                       AND ((CASE WHEN (SELECT content_retention FROM sessions WHERE id=manifest.session_id)='ephemeral' THEN CASE WHEN zk_ephemeral_ref_valid(manifest.session_id,entry.sealed_hash) THEN zk_ephemeral_get(manifest.session_id,entry.sealed_hash) ELSE NULL END ELSE entry.sealed_hash END) IS NOT ?2 OR entry.file_size IS NOT ?3)",
                 )?;
                 statement
                     .query_map(
@@ -200,7 +259,10 @@ impl Db {
                     rusqlite::params![&now, &manifest_id],
                 )?;
                 tx.execute(
-                    "UPDATE artifact_entries SET state='unverified',actual_hash=?1, \
+                    "UPDATE artifact_entries SET state='unverified',actual_hash=CASE WHEN \
+                       (SELECT content_retention FROM sessions WHERE id=?5)='ephemeral' \
+                       OR (SELECT s.content_retention FROM artifact_manifests m JOIN sessions s ON s.id=m.session_id WHERE m.manifest_id=?3)='ephemeral' \
+                       THEN NULL ELSE ?1 END, \
                      failure_code='ARTIFACT_CHANGED_AFTER_VERIFICATION',updated_at=?2 \
                      WHERE manifest_id=?3 AND canonical_path=?4",
                     rusqlite::params![
@@ -208,6 +270,7 @@ impl Db {
                         &now,
                         &manifest_id,
                         &produced.canonical_path,
+                        &produced.session_id,
                     ],
                 )?;
             }
@@ -264,7 +327,7 @@ impl Db {
                     &produced.producer_invocation_id,
                     &produced.canonical_path,
                     &produced.operation,
-                    &produced.sealed_hash,
+                    crate::content::store_text(&tx,&produced.session_id,&produced.sealed_hash)?,
                     produced.file_size,
                     &now,
                 ],
@@ -430,6 +493,229 @@ impl Db {
 
 use rusqlite::OptionalExtension;
 
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn record_declared_shell_artifacts_in_write(
+    conn: &mut rusqlite::Connection,
+    run_id: &str,
+    session_id: &str,
+    workspace_root: &str,
+    tool_use_id: &str,
+    invocation_id: &str,
+    receipts: Vec<ProducedShellArtifactRecord>,
+) -> Result<(), DbError> {
+    let tx = conn.transaction()?;
+
+    let input:Option<String>=tx.query_row("SELECT invocation.input_json FROM tool_invocations invocation JOIN run_envelopes run ON run.id=invocation.run_id WHERE invocation.invocation_id=?1 AND invocation.run_id=?2 AND run.session_id=?3 AND invocation.tool_use_id=?4 AND invocation.tool_name='Bash' AND invocation.status='succeeded' AND invocation.side_effect_class='write'",rusqlite::params![invocation_id,run_id,session_id,tool_use_id],|row|row.get(0)).optional()?.flatten();
+
+    let input = input.ok_or_else(|| DbError::Invalid("BASH_ARTIFACT_PRODUCER_MISMATCH".into()))?;
+
+    let input = crate::content::load_text(&tx, session_id, &input)?;
+
+    let input: Value = serde_json::from_str(&input)
+        .map_err(|_| DbError::Invalid("BASH_ARTIFACT_INPUT_INVALID".into()))?;
+
+    let declarations = input
+        .get("declared_outputs")
+        .and_then(Value::as_array)
+        .ok_or_else(|| DbError::Invalid("BASH_ARTIFACT_NOT_DECLARED".into()))?;
+
+    if receipts.is_empty()
+        || receipts.len() > 32
+        || declarations.len() != receipts.len()
+        || input.get("is_background").and_then(Value::as_bool) == Some(true)
+    {
+        return Err(DbError::Invalid(
+            "BASH_ARTIFACT_DECLARATION_MISMATCH".into(),
+        ));
+    }
+
+    let mut unique = std::collections::BTreeSet::new();
+    let mut requested = std::collections::BTreeSet::new();
+    let mut total_bytes = 0u64;
+
+    for receipt in &receipts {
+        total_bytes = total_bytes
+            .checked_add(receipt.file_size.unwrap_or_default())
+            .ok_or_else(|| DbError::Invalid("BASH_ARTIFACT_SIZE_INVALID".into()))?;
+        if total_bytes > 100 * 1024 * 1024 {
+            return Err(DbError::Invalid("BASH_ARTIFACT_SIZE_INVALID".into()));
+        }
+        let path = Path::new(&receipt.canonical_path);
+
+        if !Path::new(&workspace_root).is_absolute()
+            || !path.is_absolute()
+            || !path.starts_with(workspace_root)
+            || path == Path::new(&workspace_root)
+            || path.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir | std::path::Component::CurDir
+                )
+            })
+            || !unique.insert(receipt.canonical_path.clone())
+            || !requested.insert(receipt.requested_path.clone())
+        {
+            return Err(DbError::Invalid("BASH_ARTIFACT_PATH_INVALID".into()));
+        }
+
+        let declaration = declarations
+            .iter()
+            .find(|declaration| {
+                declaration.get("path").and_then(Value::as_str)
+                    == Some(receipt.requested_path.as_str())
+            })
+            .ok_or_else(|| DbError::Invalid("BASH_ARTIFACT_NOT_DECLARED".into()))?;
+
+        let operation = match declaration
+            .get("operation")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "create" | "created" => "created",
+            "update" | "modified" => "modified",
+            "delete" | "deleted" => "deleted",
+            _ => return Err(DbError::Invalid("BASH_ARTIFACT_OPERATION_INVALID".into())),
+        };
+
+        let hash_valid =
+            |hash: &str| hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit());
+
+        if operation != receipt.operation
+            || declaration
+                .get("requiredValidatorId")
+                .and_then(Value::as_str)
+                != receipt.required_validator_id.as_deref()
+            || receipt
+                .previous_hash
+                .as_deref()
+                .is_some_and(|hash| !hash_valid(hash))
+            || (operation == "created") != receipt.previous_hash.is_none()
+            || (operation == "deleted"
+                && (receipt.sealed_hash.is_some() || receipt.file_size.is_some()))
+            || (operation != "deleted"
+                && (!receipt.sealed_hash.as_deref().is_some_and(hash_valid)
+                    || receipt.file_size.is_none_or(|size| size > 50 * 1024 * 1024)))
+            || (operation == "modified" && receipt.previous_hash == receipt.sealed_hash)
+        {
+            return Err(DbError::Invalid("BASH_ARTIFACT_RECEIPT_INVALID".into()));
+        }
+    }
+
+    let existing_id: Option<String> = tx
+        .query_row(
+            "SELECT manifest_id FROM artifact_manifests WHERE run_id=?1",
+            [run_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+
+    let now = crate::time::format_rfc3339_micros(crate::time::now_millis());
+
+    let mut manifest = match existing_id {
+        Some(id) => load_manifest(&tx, &id)?
+            .ok_or_else(|| DbError::Invalid("ARTIFACT_MANIFEST_DISAPPEARED".into()))?,
+        None => ArtifactManifestRecord {
+            manifest_id: uuid::Uuid::new_v4().to_string(),
+            run_id: run_id.to_owned(),
+            session_id: session_id.to_owned(),
+            workspace_root: workspace_root.to_owned(),
+            state: "sealed".into(),
+            created_at: now.clone(),
+            updated_at: now.clone(),
+            entries: Vec::new(),
+        },
+    };
+
+    if manifest.session_id != session_id || manifest.workspace_root != workspace_root {
+        return Err(DbError::Invalid("ARTIFACT_MANIFEST_OWNER_MISMATCH".into()));
+    }
+
+    if receipts.iter().all(|receipt| {
+        manifest.entries.iter().any(|entry| {
+            entry.canonical_path == receipt.canonical_path
+                && entry.producer_invocation_id.as_deref() == Some(invocation_id)
+                && entry.operation == receipt.operation
+                && entry.sealed_hash == receipt.sealed_hash
+                && entry.file_size == receipt.file_size.and_then(|size| i64::try_from(size).ok())
+                && entry.required_validator_id == receipt.required_validator_id
+        })
+    }) {
+        tx.commit()?;
+        return Ok(());
+    }
+
+    for receipt in receipts {
+        let affected = {
+            let mut statement=tx.prepare("SELECT DISTINCT manifest.manifest_id,manifest.run_id FROM artifact_manifests manifest JOIN artifact_entries entry ON entry.manifest_id=manifest.manifest_id WHERE entry.canonical_path=?1 AND (manifest.state='verified' OR entry.state IN ('integrity_verified','content_verified'))")?;
+            statement
+                .query_map([&receipt.canonical_path], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+
+        for (manifest_id, affected_run) in affected {
+            invalidate_verification_in_current_write(&tx, &manifest_id, &affected_run)?;
+            tx.execute("UPDATE artifact_manifests SET state='unverified',updated_at=?2 WHERE manifest_id=?1",rusqlite::params![manifest_id,now])?;
+            tx.execute("UPDATE artifact_entries SET state='unverified',actual_hash=NULL,failure_code='ARTIFACT_CHANGED_AFTER_VERIFICATION',updated_at=?2 WHERE manifest_id=?1 AND canonical_path=?3",rusqlite::params![manifest_id,now,receipt.canonical_path])?;
+        }
+
+        let old = manifest
+            .entries
+            .iter()
+            .position(|entry| entry.canonical_path == receipt.canonical_path);
+
+        let entry = ArtifactEntryRecord {
+            artifact_id: old.map_or_else(
+                || uuid::Uuid::new_v4().to_string(),
+                |index| manifest.entries[index].artifact_id.clone(),
+            ),
+            tool_use_id: tool_use_id.to_owned(),
+            producer_invocation_id: Some(invocation_id.to_owned()),
+            canonical_path: receipt.canonical_path,
+            operation: receipt.operation,
+            state: "sealed".into(),
+            sealed_hash: receipt.sealed_hash,
+            actual_hash: None,
+            file_size: receipt.file_size.and_then(|size| i64::try_from(size).ok()),
+            required_validator_id: receipt.required_validator_id,
+            validator_result: None,
+            failure_code: None,
+            created_at: old.map_or_else(
+                || now.clone(),
+                |index| manifest.entries[index].created_at.clone(),
+            ),
+            updated_at: now.clone(),
+        };
+
+        if let Some(index) = old {
+            manifest.entries[index] = entry;
+        } else {
+            manifest.entries.push(entry);
+        }
+    }
+
+    manifest.state = "sealed".into();
+    manifest.updated_at = now;
+
+    save_manifest_in_current_write(&tx, &manifest)?;
+
+    crate::run::append_event_in_current_write(
+        &tx,
+        run_id,
+        "artifact_recorded",
+        Some(tool_use_id),
+        &serde_json::json!({
+        "manifestId":manifest.manifest_id,"producerInvocationId":invocation_id,"declaredOutputCount":declarations.len()}
+        ),
+    )?;
+
+    tx.commit()?;
+    Ok(())
+}
+
 fn validate_produced_file_artifact(produced: &ProducedFileArtifactRecord) -> Result<(), DbError> {
     if !matches!(produced.operation.as_str(), "created" | "modified") {
         return Err(DbError::Invalid("ARTIFACT_OPERATION_INVALID".to_owned()));
@@ -452,7 +738,7 @@ fn validate_produced_file_artifact(produced: &ProducedFileArtifactRecord) -> Res
     Ok(())
 }
 
-fn save_manifest_in_current_write(
+pub(crate) fn save_manifest_in_current_write(
     conn: &rusqlite::Connection,
     manifest: &ArtifactManifestRecord,
 ) -> Result<(), DbError> {
@@ -496,12 +782,12 @@ fn save_manifest_in_current_write(
                 &entry.canonical_path,
                 &entry.operation,
                 &entry.state,
-                &entry.sealed_hash,
-                &entry.actual_hash,
+                crate::content::store_optional(conn,&manifest.session_id,entry.sealed_hash.as_deref())?,
+                crate::content::store_optional(conn,&manifest.session_id,entry.actual_hash.as_deref())?,
                 entry.file_size,
-                &entry.required_validator_id,
-                validator_result_json,
-                &entry.failure_code,
+                crate::content::store_optional(conn,&manifest.session_id,entry.required_validator_id.as_deref())?,
+                crate::content::store_optional(conn,&manifest.session_id,validator_result_json.as_deref())?,
+                crate::content::store_diagnostic(conn,&manifest.session_id,entry.failure_code.as_deref())?,
                 &entry.created_at,
                 &entry.updated_at,
             ],
@@ -514,7 +800,7 @@ fn save_manifest_in_current_write(
     clippy::too_many_lines,
     reason = "one SQLite transaction invalidates the artifact and every ancestor projection"
 )]
-fn invalidate_verification_in_current_write(
+pub(crate) fn invalidate_verification_in_current_write(
     conn: &rusqlite::Connection,
     manifest_id: &str,
     source_run_id: &str,
@@ -704,15 +990,27 @@ pub(crate) fn load_manifest(
             canonical_path,
             operation,
             state,
-            sealed_hash,
-            actual_hash,
+            sealed_hash: crate::content::load_optional(conn, &manifest.session_id, sealed_hash)?,
+            actual_hash: crate::content::load_optional(conn, &manifest.session_id, actual_hash)?,
             file_size,
-            required_validator_id,
-            validator_result: validator_result_json
-                .as_deref()
-                .map(serde_json::from_str)
-                .transpose()?,
-            failure_code,
+            required_validator_id: crate::content::load_optional(
+                conn,
+                &manifest.session_id,
+                required_validator_id,
+            )?,
+            validator_result: crate::content::load_optional(
+                conn,
+                &manifest.session_id,
+                validator_result_json,
+            )?
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()?,
+            failure_code: crate::content::load_diagnostic(
+                conn,
+                &manifest.session_id,
+                failure_code,
+            )?,
             created_at,
             updated_at,
         });
