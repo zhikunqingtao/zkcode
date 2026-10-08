@@ -95,7 +95,12 @@ export interface CompactStartPayload { type: 'compact_start'; sessionId: string 
 export interface CompactCompletePayload { type: 'compact_complete'; sessionId: string; removedCount: number; summary: string }
 export interface RateLimitPayload { type: 'rate_limit'; retryAfterMs: number; limitType: string }
 export interface PermissionRequestPayload { type: 'permission_request'; interactionId?: string; toolUseId: string; toolName: string; input: Record<string, unknown>; riskLevel: 'low' | 'medium' | 'high'; reason: string; source?: 'subagent' | string; childSessionId?: string; decisionDeadlineAt?: number; scopeOptions?: PermissionRememberScope[] }
-export interface CostUpdatePayload { type: 'cost_update'; sessionCost: number; totalCost: number; usage: Usage }
+/** Whether actual model calls can be priced, independently of authoritative token usage. */
+export type PricingStatus = 'known' | 'unknown' | 'unavailable';
+export interface CostUpdatePayload {
+    type: 'cost_update'; sessionCost: number; totalCost: number; usage?: Usage;
+    usageComplete?: boolean; sessionPricingStatus?: PricingStatus; totalPricingStatus?: PricingStatus;
+}
 export interface TaskUpdatePayload { type: 'task_update'; taskId: string; status: string; progress?: unknown; result?: unknown }
 export interface AgentSpawnPayload { type: 'agent_spawn'; taskId: string; agentName: string; agentType: string }
 export interface AgentUpdatePayload { type: 'agent_update'; taskId: string; progress: unknown }
@@ -168,7 +173,7 @@ export interface SessionRestoredPayload {
     }>;
     runSnapshot?: RuntimeRunSnapshot | null;
     taskTree?: RuntimeTaskSnapshot[];
-    costSummary?: { sessionCost?: number; totalCost?: number; usage?: Usage; usageComplete?: boolean };
+    costSummary?: { sessionCost?: number; totalCost?: number; usage?: Usage; usageComplete?: boolean; sessionPricingStatus?: PricingStatus; totalPricingStatus?: PricingStatus };
 }
 export interface ProtocolErrorPayload { type: 'protocol_error'; code: string; supportedVersion: number; bindRequestId?: string; bindingEpoch?: number }
 export interface MessageCompletePayload {

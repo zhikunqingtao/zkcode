@@ -239,7 +239,7 @@ impl McpClientManager {
                     .await
                     .map_err(|_| ManagerError::ServiceStorageUnavailable)?;
             }
-            let _directory = lock(&self.services.directory);
+            let directory = lock(&self.services.directory);
             *lock(&self.services.preferences) = next;
             if enabled {
                 let mut tokens = lock(&self.services.cancellations);
@@ -258,16 +258,35 @@ impl McpClientManager {
                     .entry(name.to_owned())
                     .or_default()
                     .cancel();
-                self.next_generation(name);
-                self.clear_tool_directory(name);
+                let generation = self.next_generation(name);
+                self.clear_tool_directory_locked(&directory, name);
                 self.cancel_reconnect_work(name);
                 lock(&self.registry_owned_servers).remove(name);
-                lock(&self.connections).remove(name)
+                self.get_connection(name).map(|connection| {
+                    // A concurrent enable must start a new generation instead
+                    // of mistaking this pending close for a live connection.
+                    connection.set_status(McpConnectionStatus::Disabled);
+                    (generation, connection)
+                })
             }
         };
         if !enabled {
-            if let Some(connection) = removed {
-                connection.close().await;
+            if let Some((generation, connection)) = removed {
+                if !connection
+                    .close_if(|| self.owns_connection_cleanup(name, generation, &connection))
+                    .await
+                {
+                    return Err(ManagerError::LifecycleChanged);
+                }
+                let _directory = lock(&self.services.directory);
+                if self.generation_of(name) != generation {
+                    return Err(ManagerError::LifecycleChanged);
+                }
+                if connection.cleanup_confirmed() {
+                    super::remove_if_same(&self.connections, name, &connection);
+                } else {
+                    return Err(ManagerError::CleanupPending(name.to_owned()));
+                }
             }
             if !self.is_service_enabled(name) {
                 self.broadcast_health_status(name, McpConnectionStatus::Disabled);
@@ -304,10 +323,10 @@ impl McpClientManager {
 
     /// Rebuild a live service directory after a capability preference changes.
     pub fn refresh_service_tools(self: &Arc<Self>, name: &str) {
-        let _directory = lock(&self.services.directory);
-        self.clear_tool_directory(name);
+        let directory = lock(&self.services.directory);
+        self.clear_tool_directory_locked(&directory, name);
         if let Some(connection) = self.get_connection(name) {
-            self.register_tools_locked(&connection);
+            self.register_tools_locked(&directory, &connection);
         }
     }
 }

@@ -13,7 +13,7 @@
 //! |---|---|---|---|
 //! | `listServers` L32-35 | `GET /api/mcp/servers` | 200 `{"servers":[连接视图]}` | 无 |
 //! | `addServer` L38-44 | `POST /api/mcp/servers` | **201** `{"name","status":"connecting"}` | 体缺失/非法 → 400 `INVALID_REQUEST_BODY`；管理器未运行 → 500 |
-//! | `deleteServer` L47-51 | `DELETE /api/mcp/servers/{name}` | 200 `{"success":true}` | 无（不存在同样回 `true`） |
+//! | `deleteServer` L47-51 | `DELETE /api/mcp/servers/{name}` | 200 `{"success":true}` | 不存在同样成功；清理未确认/并发替换返回错误 |
 //! | `restartServer` L54-58 | `POST /api/mcp/servers/{name}/restart` | 200 `{"status":"connecting"}` | 不存在 → 400 `INVALID_REQUEST` `MCP server not found: …` |
 //! | `getServerLogs` L61-66 | `GET /api/mcp/servers/{name}/logs?lines=100` | 200 `{"logs":[…]}` | `lines` 非法 → 500（`parse_spring_int` 语义） |
 //! | `listResources` L78-124 | `GET /api/mcp/resources[?server=]` | 200 `{"resources":{server:[…]},"totalCount":n}` | — |
@@ -26,8 +26,8 @@
 //!
 //! 1. 旧 `McpController` 的自持 `try/catch` 会返回多种裸 map；功能对齐契约明确
 //!    覆盖该怪癖，所有非 2xx REST 响应统一走 [`ApiError`]。
-//! 2. **`deleteServer` 恒回 `{"success": true}`**：旧实现丢弃
-//!    `removeServer` 的 `boolean` 返回值，删不存在的服务器也报成功。
+//! 2. **`deleteServer` 对不存在的服务器保持幂等成功**；运行时配置及命名空间
+//!    仅在清理确认后释放，清理未确认或并发替换时通过 [`ApiError`] 报错。
 //! 3. **`getServerLogs` 的 `lines` 参数被无条件忽略**：旧
 //!    `McpClientManager.getServerLogs(name, lines)` 返回固定 4 行状态快照，
 //!    `lines` 不参与裁剪；服务器不存在时返回单元素列表
@@ -185,6 +185,14 @@ pub(crate) fn manager_error(error: &ManagerError) -> ApiError {
             status: StatusCode::SERVICE_UNAVAILABLE,
             code: "MCP_SERVICE_STORAGE_UNAVAILABLE".into(),
             message: "MCP service preferences could not be loaded or saved".into(),
+        },
+        ManagerError::ToolNamespaceCollision(_) => {
+            ApiError::validation_with_code("MCP_TOOL_NAMESPACE_COLLISION", &error.to_string())
+        }
+        ManagerError::CleanupPending(_) => ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "MCP_CLEANUP_PENDING".into(),
+            message: error.to_string(),
         },
         ManagerError::ServerNotFound(_) | ManagerError::UnsafeCapabilityEndpoint(_) => {
             ApiError::validation(error.to_string())
@@ -405,8 +413,8 @@ pub(crate) async fn add_server(
     ))
 }
 
-/// `DELETE /api/mcp/servers/{name}`——摘除服务器（旧 `deleteServer` L47-51；
-/// 返回值被丢弃，见怪癖 2）。
+/// `DELETE /api/mcp/servers/{name}`——确认清理后删除运行时配置及其命名空间。
+/// 服务器不存在时保持幂等成功；文件和注册表配置仍由原配置源持有。
 #[utoipa::path(
     delete,
     path = "/api/mcp/servers/{name}",
@@ -417,9 +425,13 @@ pub(crate) async fn add_server(
 pub(crate) async fn delete_server(
     State(state): State<AppState>,
     AxumPath(name): AxumPath<String>,
-) -> Json<Value> {
-    let _removed = state.mcp().remove_server(&name).await;
-    Json(json!({ "success": true }))
+) -> Result<Json<Value>, ApiError> {
+    state
+        .mcp()
+        .delete_server(&name)
+        .await
+        .map_err(|error| manager_error(&error))?;
+    Ok(Json(json!({ "success": true })))
 }
 
 /// `POST /api/mcp/servers/{name}/restart`——重启服务器（旧 `restartServer`

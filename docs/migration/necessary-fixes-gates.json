@@ -1,0 +1,3488 @@
+{
+  "schemaVersion": 3,
+  "publicationNotes": {
+    "kind": "portable_historical_validation_record",
+    "scope": "Historical commands, results and source identities only; this record does not certify the current working tree.",
+    "pathNormalization": {
+      "{repo}": "Repository root used by the original validation. Substitute your checkout path when reproducing commands.",
+      "{userHome}": "User home used by the original validation, if referenced."
+    },
+    "originalRecordSha256": "9e11b971da7461fad0e89652f0088fdb405853ea473055ed05eeabeaddb15bb2",
+    "originalEvidence": "The unmodified machine record and raw logs are retained outside the repository. Log and artifact paths below are historical references, not bundled files.",
+    "integrity": "Only personal path prefixes are normalized in the historical record. Test results, timestamps, commands and previously recorded content hashes retain their original meaning; a log hash refers to the original external artifact."
+  },
+  "recordedAt": "2026-10-08T06:08:14.813076+00:00",
+  "assessment": {
+    "status": "evidence_session_deletion_verified_on_new_baseline",
+    "submissionReadyForAuthorizedScope": true,
+    "repositoryDefectFreeClaim": false,
+    "reason": "Previously confirmed successful-evidence Session deletion blocker fixed without mutating evidence; applicable Rust, native browser and private backend E2E validation passed. Existing databases and running services deliberately unchanged.",
+    "committed": false,
+    "pushed": false,
+    "prCreated": false,
+    "activeServicesRestarted": false
+  },
+  "baseline": {
+    "head": "298d2b30b3d310420c12d953bb4382ec8064d1bb",
+    "branch": "main",
+    "databaseSchemaChanged": true,
+    "userDatabaseRebuilt": false,
+    "dependencyLockfilesChanged": false,
+    "userConfirmedNewDatabaseBaseline": true,
+    "zhikuncodeFilesOrDatabaseTouched": false
+  },
+  "source": {
+    "capturedAt": "2026-10-08T01:41:27.727998+00:00",
+    "sourceSha256": "a2dfb106e543859039acc26ede9cfb97935ab916ade92ab68b1130272e319bc2",
+    "fileCount": 1372,
+    "algorithm": "sorted tracked and non-ignored untracked files excluding docs/: SHA256(relative UTF-8 path + NUL + raw SHA256(file bytes))",
+    "unchangedAfterGates": true,
+    "changedSincePriorFreeze": [
+      {
+        "path": "crates/zk-db/migrations/V2__init_session_message.sql",
+        "before": "f57c194b15fd97cf0f6bc31d93d2a6ef35dccd33e40c2e6fd747cf499c079c05",
+        "after": "14f750ddfd9cc2d6b67b8b08dbdbf0c9d038a9a94a53049a5107463d8f9e6111"
+      },
+      {
+        "path": "crates/zk-db/src/browser_recordings.rs",
+        "before": "13c6ae3c4e3e700159b452ae1a5c29a85e596b0992b69db76e1c3fbdf9b89ae0",
+        "after": "b2e0111de926d41161b1423c993bae44126d33d3c401e8da77436340acaba27a"
+      },
+      {
+        "path": "crates/zk-db/src/evidence.rs",
+        "before": "2c0089951686c230d3e82823275713a938e2941b359b519a27eb8a982af17f86",
+        "after": "9d068b1d7d99296dff09523e349807ce90a3853e4a4a8f3d6e4372513f76aac5"
+      },
+      {
+        "path": "crates/zk-server/tests/evidence_api.rs",
+        "before": "099f828ffe94c219e65034effcd47d31e25502bbd6424e6095b00fa0575949e2",
+        "after": "f1c00e0f40ec72a2ea8aef08d96b04e586a92dd539d72aba61f1a32556829007"
+      }
+    ]
+  },
+  "build": {
+    "path": "target/evidence-delete-build/release/zk-server",
+    "sha256": "9be53c8f103586deeb81fb69743b4ccb5ae7bbe3247004370e2587e97fa04d18",
+    "bytes": 38672000,
+    "sourceSha256": "a2dfb106e543859039acc26ede9cfb97935ab916ade92ab68b1130272e319bc2"
+  },
+  "gates": [
+    {
+      "name": "evidence-api",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "zk-server",
+        "--test",
+        "evidence_api",
+        "--locked"
+      ],
+      "cwd": ".",
+      "environment": {
+        "CARGO_TARGET_DIR": "{repo}/target/evidence-delete-build",
+        "CARGO_INCREMENTAL": "0",
+        "CARGO_PROFILE_DEV_DEBUG": "0",
+        "CARGO_PROFILE_TEST_DEBUG": "0"
+      },
+      "exitCode": 0,
+      "log": "target/evidence-delete-fix/api-green.log",
+      "logSha256": "6f3f2704dfff86a02e4fe100649f3b10f1521847fdb74dde6b067669f4844ee2",
+      "passed": 7,
+      "newTests": 2
+    },
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "cwd": ".",
+      "environment": {
+        "CARGO_TARGET_DIR": "{repo}/target/evidence-delete-build",
+        "CARGO_INCREMENTAL": "0",
+        "CARGO_PROFILE_DEV_DEBUG": "0",
+        "CARGO_PROFILE_TEST_DEBUG": "0",
+        "PLAYWRIGHT_BROWSERS_PATH": "{repo}/.runtime/playwright",
+        "ZK_LSP_MANIFEST": "{repo}/target/necessary-fixes/lsp-native/current.json"
+      },
+      "startedAt": "2026-10-08T05:52:24.545548+00:00",
+      "seconds": 3.02,
+      "exitCode": 0,
+      "log": "target/evidence-delete-fix/fmt.log",
+      "logSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--all-features",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "cwd": ".",
+      "environment": {
+        "CARGO_TARGET_DIR": "{repo}/target/evidence-delete-build",
+        "CARGO_INCREMENTAL": "0",
+        "CARGO_PROFILE_DEV_DEBUG": "0",
+        "CARGO_PROFILE_TEST_DEBUG": "0",
+        "PLAYWRIGHT_BROWSERS_PATH": "{repo}/.runtime/playwright",
+        "ZK_LSP_MANIFEST": "{repo}/target/necessary-fixes/lsp-native/current.json"
+      },
+      "startedAt": "2026-10-08T05:52:27.566151+00:00",
+      "seconds": 1.3,
+      "exitCode": 0,
+      "log": "target/evidence-delete-fix/clippy.log",
+      "logSha256": "a40998bd4922a003af94a5f93c995410514e00756d5c203a1566242a6332e57c"
+    },
+    {
+      "name": "workspace",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--locked"
+      ],
+      "cwd": ".",
+      "environment": {
+        "CARGO_TARGET_DIR": "{repo}/target/evidence-delete-build",
+        "CARGO_INCREMENTAL": "0",
+        "CARGO_PROFILE_DEV_DEBUG": "0",
+        "CARGO_PROFILE_TEST_DEBUG": "0",
+        "PLAYWRIGHT_BROWSERS_PATH": "{repo}/.runtime/playwright",
+        "ZK_LSP_MANIFEST": "{repo}/target/necessary-fixes/lsp-native/current.json",
+        "ZK_RUN_GIT_TESTS": "true"
+      },
+      "startedAt": "2026-10-08T05:52:28.870639+00:00",
+      "seconds": 365.5,
+      "exitCode": 0,
+      "log": "target/evidence-delete-fix/workspace.log",
+      "logSha256": "c0fd46e0b2c3b585f49f57ba25572dc09079a87c2ef1ad6b86d3c367e9df2a55"
+    },
+    {
+      "name": "journey-native",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "zk-server",
+        "--test",
+        "verify_journey_native",
+        "--locked",
+        "--",
+        "--ignored"
+      ],
+      "cwd": ".",
+      "environment": {
+        "CARGO_TARGET_DIR": "{repo}/target/evidence-delete-build",
+        "CARGO_INCREMENTAL": "0",
+        "CARGO_PROFILE_DEV_DEBUG": "0",
+        "CARGO_PROFILE_TEST_DEBUG": "0",
+        "PLAYWRIGHT_BROWSERS_PATH": "{repo}/.runtime/playwright",
+        "ZK_LSP_MANIFEST": "{repo}/target/necessary-fixes/lsp-native/current.json"
+      },
+      "startedAt": "2026-10-08T05:58:34.376527+00:00",
+      "seconds": 32.01,
+      "exitCode": 0,
+      "log": "target/evidence-delete-fix/journey-native.log",
+      "logSha256": "9e8118ab6581f294df68a4deb74ba1c25570df14f89dac0204a0fe81ea8cec37"
+    },
+    {
+      "name": "release",
+      "command": [
+        "cargo",
+        "build",
+        "--workspace",
+        "--release",
+        "--locked"
+      ],
+      "cwd": ".",
+      "environment": {
+        "CARGO_TARGET_DIR": "{repo}/target/evidence-delete-build",
+        "CARGO_INCREMENTAL": "0",
+        "CARGO_PROFILE_DEV_DEBUG": "0",
+        "CARGO_PROFILE_TEST_DEBUG": "0",
+        "PLAYWRIGHT_BROWSERS_PATH": "{repo}/.runtime/playwright",
+        "ZK_LSP_MANIFEST": "{repo}/target/necessary-fixes/lsp-native/current.json"
+      },
+      "startedAt": "2026-10-08T05:59:06.388202+00:00",
+      "seconds": 378.35,
+      "exitCode": 0,
+      "log": "target/evidence-delete-fix/release.log",
+      "logSha256": "d89e23d18d3a311603440b7d29e1989c4527b4a7dadafa3f0f5cd98fa00b4cd8"
+    },
+    {
+      "name": "e2e-production",
+      "command": [
+        "npm",
+        "run",
+        "test:e2e:production"
+      ],
+      "cwd": "frontend",
+      "environment": {
+        "CARGO_TARGET_DIR": "{repo}/target/evidence-delete-build",
+        "CARGO_INCREMENTAL": "0",
+        "CARGO_PROFILE_DEV_DEBUG": "0",
+        "CARGO_PROFILE_TEST_DEBUG": "0",
+        "PLAYWRIGHT_BROWSERS_PATH": "{repo}/.runtime/playwright",
+        "ZK_LSP_MANIFEST": "{repo}/target/necessary-fixes/lsp-native/current.json",
+        "ZK_E2E_SERVER_BINARY": "{repo}/target/evidence-delete-build/release/zk-server"
+      },
+      "startedAt": "2026-10-08T06:06:25.086011+00:00",
+      "seconds": 55.94,
+      "exitCode": 0,
+      "log": "target/evidence-delete-fix/e2e-production.log",
+      "logSha256": "ce43526ffcc208511c22f66e6767819582731932ba5eae6677d3c8abda0a9743"
+    },
+    {
+      "name": "e2e-analysis",
+      "command": [
+        "npm",
+        "run",
+        "test:e2e:analysis"
+      ],
+      "cwd": "frontend",
+      "environment": {
+        "CARGO_TARGET_DIR": "{repo}/target/evidence-delete-build",
+        "CARGO_INCREMENTAL": "0",
+        "CARGO_PROFILE_DEV_DEBUG": "0",
+        "CARGO_PROFILE_TEST_DEBUG": "0",
+        "PLAYWRIGHT_BROWSERS_PATH": "{repo}/.runtime/playwright",
+        "ZK_LSP_MANIFEST": "{repo}/target/necessary-fixes/lsp-native/current.json",
+        "ZK_E2E_SERVER_BINARY": "{repo}/target/evidence-delete-build/release/zk-server"
+      },
+      "startedAt": "2026-10-08T06:07:21.030022+00:00",
+      "seconds": 18.99,
+      "exitCode": 0,
+      "log": "target/evidence-delete-fix/e2e-analysis.log",
+      "logSha256": "f4613d94770851fbc2b893cd4954213c615046077dbc9991a9e807ab6eb33309"
+    }
+  ],
+  "counts": {
+    "rustWorkspacePassed": 3299,
+    "rustWorkspaceIgnored": 10,
+    "nativeBrowserScenarios": 3,
+    "evidenceApiPassed": 7,
+    "newDbTests": 6,
+    "newApiTests": 2,
+    "productionE2E": 10,
+    "analysisE2E": 3,
+    "countsAreNotAdditive": true
+  },
+  "failedGateAttempts": {
+    "workspace": {
+      "name": "workspace",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--locked"
+      ],
+      "cwd": ".",
+      "environment": {
+        "CARGO_TARGET_DIR": "{repo}/target/evidence-delete-build",
+        "CARGO_INCREMENTAL": "0",
+        "CARGO_PROFILE_DEV_DEBUG": "0",
+        "CARGO_PROFILE_TEST_DEBUG": "0",
+        "PLAYWRIGHT_BROWSERS_PATH": "{repo}/.runtime/playwright",
+        "ZK_LSP_MANIFEST": "{repo}/target/necessary-fixes/lsp-native/current.json",
+        "ZK_RUN_GIT_TESTS": "true"
+      },
+      "startedAt": "2026-10-08T01:44:40.719628+00:00",
+      "seconds": 385.89,
+      "exitCode": 101,
+      "log": "target/evidence-delete-fix/workspace-first-attempt.log",
+      "logSha256": "d7db5f88741c12323db9b45438e950c4fd8562836304f577544a7d27177be2f8",
+      "reason": "Existing late Git post-commit hook test timed out; unchanged isolated rerun and unchanged complete workspace rerun both passed. No assertion or timeout changes."
+    },
+    "isolatedGitRerun": {
+      "log": "target/evidence-delete-fix/git-hook-rerun.log",
+      "exitCode": 0
+    },
+    "initialRegressionLogs": [
+      "target/evidence-delete-fix/db-red-corrected.log",
+      "target/evidence-delete-fix/db-red-final.log",
+      "target/evidence-delete-fix/db-red.log",
+      "target/evidence-delete-fix/db-child-red.log"
+    ],
+    "fixtureCorrectionLogs": [
+      "target/evidence-delete-fix/db-green.log",
+      "target/evidence-delete-fix/db-evidence-final.log"
+    ],
+    "note": "Initial fixtures corrected to use valid task finalization, UUID/budget and merge-capture lifecycle. The security assertions and production admission rules were not relaxed."
+  },
+  "isolation": {
+    "protectedRuntimeHashes": {
+      "target/debug/zk-server": "4d4846ca31f7c4a271bd841fc46476590258209f07cfbfb30f809105de8675a4",
+      ".runtime/lsp/current.json": "e789c506977fdb30ffec3c14d467b60940c65b3af704923ea11103ab21f12cfd",
+      ".runtime/dev/dev-state.json": "a550cf248c911346ceb1ace1bd26b3119cfbc22ad1c6659a42755407332756bd"
+    },
+    "protectedRuntimeUnchanged": true,
+    "existingServicesRestarted": false,
+    "userDatabaseTouched": false,
+    "paidProviderCalls": false,
+    "greenfieldOnly": true,
+    "existingDatabaseUpgradeImplemented": false
+  },
+  "knownLimits": [
+    "New zkcode baseline only. Existing zkcode DB checksum is intentionally incompatible; activation requires a separate backup/new DB and restart deployment step. zhikuncode history is unrelated and untouched.",
+    "Seven default-ignored tests were not rerun in this follow-up: five external provider/search cases and two unrelated native LSP/Keychain cases. Three browser-native ignored scenarios ran explicitly.",
+    "Frontend/Python unit, Office, LSP, Keychain, dependency audit and doctor results remain prior-stage evidence for unchanged components; they were not counted as new executions.",
+    "Initial existing Git hook timing failure is retained in the record despite the unchanged successful reruns.",
+    "Cancellation warning recovery is in-page memory only; no new-page diagnostic replay protocol was added.",
+    "safe_dom_v1 is not a complete frame/shadow accessibility tree; recording batch count is not a disk peak limit; single large BLOB lock behavior is unchanged.",
+    "No actual power-loss/disk-exhaustion campaign, remote OAuth end-to-end, or long-duration native Node/Ruby REPL campaign was performed."
+  ],
+  "scopeDecisions": [
+    {
+      "id": "R1",
+      "status": "implemented_verified",
+      "scope": "Descendant deletion protection and browser owner close"
+    },
+    {
+      "id": "R2",
+      "status": "implemented_verified",
+      "scope": "Terminal recording finalization, strict source proof and idempotent ACK; no action replay"
+    },
+    {
+      "id": "R3",
+      "status": "implemented_verified",
+      "scope": "Unconfirmed lease recovery and managed strict action identity"
+    },
+    {
+      "id": "R4",
+      "status": "implemented_verified",
+      "scope": "Retained cancellation coordination and no same-key restart"
+    },
+    {
+      "id": "R5",
+      "status": "implemented_verified",
+      "scope": "Runtime deletion namespace, startup and cleanup generation ownership"
+    },
+    {
+      "id": "R6",
+      "status": "implemented_verified",
+      "scope": "Default E2E exclusion and pre-request fixture guard"
+    },
+    {
+      "id": "R7",
+      "status": "implemented_verified",
+      "scope": "In-page session/run notice recovery and late-frame retirement"
+    },
+    {
+      "id": "4.1",
+      "status": "implemented_verified",
+      "scope": "Three-second notice covers cancelled root cleanup lifecycle"
+    },
+    {
+      "id": "4.2",
+      "status": "not_a_separate_confirmed_defect",
+      "scope": "Bounded per-entry finalization remains; no global fairness guarantee claimed"
+    },
+    {
+      "id": "4.3",
+      "status": "excluded",
+      "scope": "Historical sealed merge compatibility is outside greenfield scope"
+    },
+    {
+      "id": "successful-evidence-session-deletion",
+      "status": "implemented_verified",
+      "scope": "Three logical immutable source references, insert-time source validation, missing-owner 404, six DB and two API regressions; browser recording code changed only in a stale comment."
+    }
+  ],
+  "historicalValidationBeforeEvidenceDeletion": {
+    "schemaVersion": 2,
+    "recordedAt": "2026-10-08T01:04:28.402718+00:00",
+    "assessment": {
+      "status": "authorized_review_followup_verified",
+      "submissionReadyForAuthorizedScope": true,
+      "repositoryDefectFreeClaim": false,
+      "reason": "R1-R7 and cancellation cleanup diagnostic gap implemented and verified; known baseline evidence-deletion policy limitation remains separate. Passing gates are bounded evidence, not a guarantee of universal optimality.",
+      "committed": false,
+      "pushed": false,
+      "prCreated": false,
+      "activeServicesRestarted": false
+    },
+    "baseline": {
+      "head": "298d2b30b3d310420c12d953bb4382ec8064d1bb",
+      "branch": "main",
+      "databaseSchemaChanged": false,
+      "userDatabaseRebuilt": false,
+      "dependencyLockfilesChanged": false
+    },
+    "source": {
+      "capturedAt": "2026-10-08T00:34:16.237436+00:00",
+      "sourceSha256": "c4294842c825b694d84f6c77e0f4062757940205e084cd06febe5401be5ad4b9",
+      "fileCount": 1372,
+      "algorithm": "sorted tracked and non-ignored untracked files excluding docs/: SHA256(relative UTF-8 path + NUL + raw SHA256(file bytes))",
+      "unchangedAfterGates": true,
+      "changedSincePriorFreeze": [
+        {
+          "path": "crates/zk-db/src/browser_recordings.rs",
+          "before": "89cfd4af6fbe90886fcba4c72a274db84890265202e35e0a72fe8485777ccefd",
+          "after": "13c6ae3c4e3e700159b452ae1a5c29a85e596b0992b69db76e1c3fbdf9b89ae0"
+        },
+        {
+          "path": "crates/zk-db/src/session_merge.rs",
+          "before": "01bbc90d87a7ffb0fa2596137177f48363e6c917a5ad697a1627dd7dc23ee0ba",
+          "after": "99f749b78567e073c9c242cf9f3916bfdef71fd5db0c1453384ac5cfb7f3fc55"
+        },
+        {
+          "path": "crates/zk-db/tests/migration_integrity.rs",
+          "before": "8de5a5dafbe882f3dcbb5446acb56a0fd74a15322302ac1a2e8f51b596de1a8d",
+          "after": "0527833ed6b65b09acd9e8aa1f19494740f759172509bd2e67b3a98ac2ad5dda"
+        },
+        {
+          "path": "crates/zk-engine/src/engine.rs",
+          "before": "fa9201e34ce22e0fbf7865621cfd43d28246acfadc79ed6effd3089202862d90",
+          "after": "c40761bfe9fe1204db1ec8efb22a850967184c35c19122e79b1b2203d518f13c"
+        },
+        {
+          "path": "crates/zk-engine/tests/runtime_migration.rs",
+          "before": "44e8af6305ac50229625d8b75d18922d21fcfc221533708288cf3ccee9aff515",
+          "after": "a0f77490028f9c9342a33944da9cb5d2db8b892bfd5a62879169e27fbcf9a1fc"
+        },
+        {
+          "path": "crates/zk-mcp/src/connection.rs",
+          "before": "0919b929d77a0880596d0f8135d6704f2c5a4a95aa01df88fe9b1ef68159ec7f",
+          "after": "7ca88ac1086ae0fdf1f9fc39d0e4014d02eb40671b8badb9439d55d2063384c5"
+        },
+        {
+          "path": "crates/zk-mcp/src/manager.rs",
+          "before": "74b96e012d5a41a95ecd3703cacfa12b8303bc274cf7454233a89a3e83feed0f",
+          "after": "f95cefebb46c9a6c90627732ed3960a675d0de22d47fbb9c8929ef534dd76fc0"
+        },
+        {
+          "path": "crates/zk-mcp/src/manager/services.rs",
+          "before": "9d00fb77ac9226fc7c38d1af553c12c5312efe24957d693fcb4d68f121e41604",
+          "after": "0812133e08c99fad0fc81b9fa20926be7395788d82227767ea71096c2967922b"
+        },
+        {
+          "path": "crates/zk-server/src/api/mcp.rs",
+          "before": "94191a46b8debeda1558dcd741ce482c858627561cb6709a6bcc52ec9192d8a2",
+          "after": "5614a16294c45e136a0d39b75df96b7e715e884c90b3493ccd51ab20501ba929"
+        },
+        {
+          "path": "crates/zk-server/src/api/session_merge.rs",
+          "before": "4765ab4cfc0f658419198bbccf636541b321217ba67d25382ad632599829cef3",
+          "after": "bd1852c33be5b8ddd5403534a8b32582c52bd9df7ddebbd8e4798b3d9d442029"
+        },
+        {
+          "path": "crates/zk-server/src/python/tools/browser_recordings.rs",
+          "before": "28d5e578dfe8ff2aa66de9f57525e7291864ae1d0ae88a5331c8fe8e9b4e5462",
+          "after": "58023acc45a7a3f07da61e12ada75ce1267b2cbecdd78cccba9c45e739a74bf6"
+        },
+        {
+          "path": "crates/zk-server/src/python/tools/browser_session_scope.rs",
+          "before": "a2eb0e9ba093d73f69d6bc5f5de783358d1fc11af226930c6c383c1e71fff006",
+          "after": "c81acd8dad95538d9ddea2d2131bb7434574c98b4e193dd15015fb885e6510db"
+        },
+        {
+          "path": "crates/zk-server/src/python/tools/journey_resources.rs",
+          "before": "847d9c361db0df8e85f5d1999e854e580c1eee97c2769d91d72af9dd5f65d3ab",
+          "after": "2c844438ee4f33faaf7fa63b68818bd995de725d0a92dfa996767f7a3a2fb994"
+        },
+        {
+          "path": "crates/zk-server/tests/verify_journey_native.rs",
+          "before": "6f4f97fdf1ea7272e68ebfb2c6668ab987682c25fdc584f482278366de546a6f",
+          "after": "d8933d1fe28c6841acf0c78bc7578f2d0b7e8cec8a107c336692a2e8586ea3f3"
+        },
+        {
+          "path": "frontend/e2e/mobile-prompt-bar.spec.ts",
+          "before": "37b68c733b994cf77f0bb65797c14bc9acc498c217623d620fee4f1e1e7914b1",
+          "after": "d88012cde12fe6a42d01fad824652f0d5791dfa47c3409cb71087dbc9e647327"
+        },
+        {
+          "path": "frontend/e2e/production-backend.spec.ts",
+          "before": "44a4deee80f1149720886e1cd9dae10a333930d75061fb2b7cbb1c759b717f17",
+          "after": "a30ab08fe838e219922761f81c46e754d404c1ba2139282e78026d66ea88e81e"
+        },
+        {
+          "path": "frontend/e2e/support/production-fixture-guard.ts",
+          "before": null,
+          "after": "d35ea84b6713de5daddd8f8a5cf0c03fb826da3f5d9ebbf22d6ac55280486d69"
+        },
+        {
+          "path": "frontend/e2e/support/production-test.ts",
+          "before": null,
+          "after": "7715bb0f58a0b9eb0298a75ecb6c9a64a797f3a9448170376c2659f1a576046a"
+        },
+        {
+          "path": "frontend/playwright.config.ts",
+          "before": "59b9763e4ae422749f14a11ee49053003f6e6e42e9a63adb3d664015a0f9976a",
+          "after": "1391cedcd501d80390f823059ac9065a28eddc9397133ae912f1af78aa9be7b0"
+        },
+        {
+          "path": "frontend/playwright.production.config.ts",
+          "before": "e57ad3c7fd02bc54cb8a59fc6f72d4d6fd81965e390871a70b43b4af6bb3420a",
+          "after": "094d5fe5196f6ee344ce89160ee59e171ffc1b9d297948b91067a6d0cc375c84"
+        },
+        {
+          "path": "frontend/src/__tests__/api/dispatchCancellationRecovery.test.ts",
+          "before": null,
+          "after": "1c6f46b7395e1271101e2a3f20b851a0800706cd676f75c35291d29b94fd0d6f"
+        },
+        {
+          "path": "frontend/src/api/dispatch.ts",
+          "before": "db9edb3134645b1a8e6a2508caf08c7d8f68475836db2e369076a33bad05620c",
+          "after": "f5572d5970db9337c61136710d18db2a409b096be6c0bd079b56ad745d671fd0"
+        },
+        {
+          "path": "frontend/src/components/session/SessionMergePanel.test.tsx",
+          "before": "1c89c146382de501f967cc35d149f84770d934804065cebab4d66ae75714a979",
+          "after": "d1bdc3af9763dfcbfd785c6783260e2292308006564a45234f48870e6e46252c"
+        },
+        {
+          "path": "frontend/src/components/session/SessionMergePanel.tsx",
+          "before": "078462a38ffa581111f012786ef3b809f88422d61ee4b3c61ac645dd70a86631",
+          "after": "22f5acf4d4a3eafd4facb3071c86ec04939b77549c57173caa2a3a75ed8fe800"
+        },
+        {
+          "path": "frontend/src/store/notificationStore.ts",
+          "before": "6da739082ab320ffa1526224684b2a338da6ec1a455d15338fab795a9aa10eb6",
+          "after": "cd12dec44abeebd66ea71210ca605525e99cacb506dd35bf46c434b198646cdb"
+        },
+        {
+          "path": "frontend/tests/productionE2eIsolation.test.ts",
+          "before": null,
+          "after": "a6870c9c718c8bc6428e493b404ffe28479aa52539f22c50ce0a63964fc4a158"
+        },
+        {
+          "path": "python-service/src/routers/browser.py",
+          "before": "19a63ec241a5a7ec477a1286d95c2d65e78b98b7297df8e1c5ca54caf504c610",
+          "after": "3f9fa4a720fc9b71ab068ca8ba14221f789bdb49768b8c31ec96919aeddff9b9"
+        },
+        {
+          "path": "python-service/src/services/browser_models.py",
+          "before": "1cf5d1780ea4aa61d7695321740f9a08d6865f5f4d5bf0b992b1a11e0ad95180",
+          "after": "efd3e4dd8e936089bd64e19d9a0b1a0e682bd90df0e175668381da904c383a9e"
+        },
+        {
+          "path": "python-service/src/services/browser_service.py",
+          "before": "43e53ceddc247f58120fa3ddd2f2e6051a42efe9c2c1d484c3232e1588700fbe",
+          "after": "e139dd416428a2d8ae9b93fe48993a27875ea9da1fd331cc254b9696179079c4"
+        },
+        {
+          "path": "python-service/tests/test_browser_interaction_truth.py",
+          "before": "3fb0c74e2f9877138f36b8231c4cc63c1f56ba91a8e970adae6cca58e9f8135b",
+          "after": "535c2bc0cea36e23ac8c4beb0ad4d9cefc81b274cef6fb0813db51c52c8ee20a"
+        },
+        {
+          "path": "python-service/tests/test_browser_managed_actions.py",
+          "before": null,
+          "after": "5f5dcde55d136a30b81a8d393a74ad63cbdf04fed9c75fea0fa4c6027d5b8080"
+        },
+        {
+          "path": "python-service/tests/test_browser_service_lifecycle.py",
+          "before": "819a6b27984132fff249c002bc1092aee1e8abf4e2dbf7deb496279d69bf853e",
+          "after": "cc621429a20ffe1e7cf1f88eb65e86535592865d84ce6b797738b969f2f190e2"
+        },
+        {
+          "path": "python-service/tests/test_ephemeral_browser_evidence.py",
+          "before": "4b560bf117ccc5260534d657616a8b2cee39a95675be075d99729cc826436970",
+          "after": "41a7ac691676aadf5dcc1bd92f246a4d508867a4a2b06a7e3e58f4809943e2e8"
+        }
+      ]
+    },
+    "build": {
+      "path": "target/release/zk-server",
+      "sha256": "2efadf68c55d7e93f022f2d6fdd3580889a356892eb335295ed44a3527e031cd",
+      "bytes": 38672000,
+      "sourceSha256": "c4294842c825b694d84f6c77e0f4062757940205e084cd06febe5401be5ad4b9"
+    },
+    "gates": [
+      {
+        "name": "fmt",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "cwd": ".",
+        "environment": {
+          "CARGO_INCREMENTAL": "0",
+          "PLAYWRIGHT_BROWSERS_PATH": "{repo}/.runtime/playwright",
+          "ZK_LSP_MANIFEST": "{repo}/target/necessary-fixes/lsp-native/current.json"
+        },
+        "startedAt": "2026-10-08T00:34:16.281726+00:00",
+        "seconds": 2.39,
+        "exitCode": 0,
+        "status": "passed",
+        "evidence": {
+          "path": "target/review-followup/final/fmt.log",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        }
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--all-features",
+          "--locked",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "cwd": ".",
+        "environment": {
+          "CARGO_INCREMENTAL": "0",
+          "PLAYWRIGHT_BROWSERS_PATH": "{repo}/.runtime/playwright",
+          "ZK_LSP_MANIFEST": "{repo}/target/necessary-fixes/lsp-native/current.json"
+        },
+        "startedAt": "2026-10-08T00:34:18.674673+00:00",
+        "seconds": 6.06,
+        "exitCode": 0,
+        "status": "passed",
+        "evidence": {
+          "path": "target/review-followup/final/clippy.log",
+          "sha256": "40d719c9a4d6f0ad3576620c4cabeebcb09ade741dc66497b8b79c61db888c3c",
+          "bytes": 163
+        }
+      },
+      {
+        "name": "workspace",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--locked"
+        ],
+        "cwd": ".",
+        "environment": {
+          "CARGO_INCREMENTAL": "0",
+          "PLAYWRIGHT_BROWSERS_PATH": "{repo}/.runtime/playwright",
+          "ZK_LSP_MANIFEST": "{repo}/target/necessary-fixes/lsp-native/current.json",
+          "ZK_RUN_GIT_TESTS": "true"
+        },
+        "startedAt": "2026-10-08T00:34:24.737703+00:00",
+        "seconds": 676.09,
+        "exitCode": 0,
+        "status": "passed",
+        "evidence": {
+          "path": "target/review-followup/final/workspace.log",
+          "sha256": "2363590ef6bc5b8e40f63cbe316eb01a6dead0d390970e71e6b74399d99b3b5f",
+          "bytes": 279801
+        }
+      },
+      {
+        "name": "engine-no-default",
+        "command": [
+          "cargo",
+          "test",
+          "-p",
+          "zk-engine",
+          "--no-default-features",
+          "--locked"
+        ],
+        "cwd": ".",
+        "environment": {
+          "CARGO_INCREMENTAL": "0",
+          "PLAYWRIGHT_BROWSERS_PATH": "{repo}/.runtime/playwright",
+          "ZK_LSP_MANIFEST": "{repo}/target/necessary-fixes/lsp-native/current.json",
+          "ZK_RUN_GIT_TESTS": "true"
+        },
+        "startedAt": "2026-10-08T00:45:40.770195+00:00",
+        "seconds": 115.73,
+        "exitCode": 0,
+        "status": "passed",
+        "evidence": {
+          "path": "target/review-followup/final/engine-no-default.log",
+          "sha256": "49f980c980601a6fb9a39c1a3070a21afc98d7cda90354cad028e42c4087bf93",
+          "bytes": 63535
+        }
+      },
+      {
+        "name": "lsp-native",
+        "command": [
+          "cargo",
+          "test",
+          "-p",
+          "zk-tools",
+          "--test",
+          "lsp_native",
+          "--locked",
+          "--",
+          "--ignored"
+        ],
+        "cwd": ".",
+        "environment": {
+          "CARGO_INCREMENTAL": "0",
+          "PLAYWRIGHT_BROWSERS_PATH": "{repo}/.runtime/playwright",
+          "ZK_LSP_MANIFEST": "{repo}/target/necessary-fixes/lsp-native/current.json"
+        },
+        "startedAt": "2026-10-08T00:47:36.504857+00:00",
+        "seconds": 25.72,
+        "exitCode": 0,
+        "status": "passed",
+        "evidence": {
+          "path": "target/review-followup/final/lsp-native.log",
+          "sha256": "d5cfca7e400250f85fac8df6f1cd6cd8be8c41c9ecedb52ad3a3f78cc3b182cb",
+          "bytes": 346
+        }
+      },
+      {
+        "name": "journey-native",
+        "command": [
+          "cargo",
+          "test",
+          "-p",
+          "zk-server",
+          "--test",
+          "verify_journey_native",
+          "--locked",
+          "--",
+          "--ignored"
+        ],
+        "cwd": ".",
+        "environment": {
+          "CARGO_INCREMENTAL": "0",
+          "PLAYWRIGHT_BROWSERS_PATH": "{repo}/.runtime/playwright",
+          "ZK_LSP_MANIFEST": "{repo}/target/necessary-fixes/lsp-native/current.json"
+        },
+        "startedAt": "2026-10-08T00:48:02.226232+00:00",
+        "seconds": 108.51,
+        "exitCode": 0,
+        "status": "passed",
+        "evidence": {
+          "path": "target/review-followup/final/journey-native.log",
+          "sha256": "a9a27996ccf920d3f0063bc66f4104a8336e9267a4a50e0b02a9b41a315bdef7",
+          "bytes": 1342
+        }
+      },
+      {
+        "name": "keychain",
+        "command": [
+          "cargo",
+          "test",
+          "-p",
+          "zk-mcp",
+          "--lib",
+          "oauth::tests::native_keychain_round_trip",
+          "--locked",
+          "--",
+          "--ignored",
+          "--exact",
+          "--nocapture"
+        ],
+        "cwd": ".",
+        "environment": {
+          "CARGO_INCREMENTAL": "0",
+          "PLAYWRIGHT_BROWSERS_PATH": "{repo}/.runtime/playwright",
+          "ZK_LSP_MANIFEST": "{repo}/target/necessary-fixes/lsp-native/current.json"
+        },
+        "startedAt": "2026-10-08T00:49:50.739977+00:00",
+        "seconds": 19.02,
+        "exitCode": 0,
+        "status": "passed",
+        "evidence": {
+          "path": "target/review-followup/final/keychain.log",
+          "sha256": "941e1fa0e947e60823bcb15670da1ef79eca2b908c27e2109b0c9d7f693ef404",
+          "bytes": 404
+        }
+      },
+      {
+        "name": "cargo-deny",
+        "command": [
+          "cargo",
+          "deny",
+          "check"
+        ],
+        "cwd": ".",
+        "environment": {
+          "CARGO_INCREMENTAL": "0",
+          "PLAYWRIGHT_BROWSERS_PATH": "{repo}/.runtime/playwright",
+          "ZK_LSP_MANIFEST": "{repo}/target/necessary-fixes/lsp-native/current.json"
+        },
+        "startedAt": "2026-10-08T00:50:09.764461+00:00",
+        "seconds": 2.82,
+        "exitCode": 0,
+        "status": "passed",
+        "evidence": {
+          "path": "target/review-followup/final/cargo-deny.log",
+          "sha256": "065e43f402ae34ce8cd56214071005290ea89c6810f4e3f4c7d8117a1a408bc9",
+          "bytes": 62851
+        }
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "--workspace",
+          "--release",
+          "--locked"
+        ],
+        "cwd": ".",
+        "environment": {
+          "CARGO_INCREMENTAL": "0",
+          "PLAYWRIGHT_BROWSERS_PATH": "{repo}/.runtime/playwright",
+          "ZK_LSP_MANIFEST": "{repo}/target/necessary-fixes/lsp-native/current.json"
+        },
+        "startedAt": "2026-10-08T00:50:12.591210+00:00",
+        "seconds": 404.04,
+        "exitCode": 0,
+        "status": "passed",
+        "evidence": {
+          "path": "target/review-followup/final/release-build.log",
+          "sha256": "df06df6be73c4f52d109b935908cf25cb4023c5ab0c32668ebf21ab2712a3f92",
+          "bytes": 502
+        }
+      },
+      {
+        "name": "frontend-lint",
+        "command": [
+          "npm",
+          "run",
+          "lint"
+        ],
+        "cwd": "frontend",
+        "environment": {
+          "CARGO_INCREMENTAL": "0",
+          "PLAYWRIGHT_BROWSERS_PATH": "{repo}/.runtime/playwright",
+          "ZK_LSP_MANIFEST": "{repo}/target/necessary-fixes/lsp-native/current.json"
+        },
+        "startedAt": "2026-10-08T00:23:53.062832+00:00",
+        "seconds": 6.97,
+        "exitCode": 0,
+        "status": "passed",
+        "evidence": {
+          "path": "target/review-followup/final/frontend-lint.log",
+          "sha256": "b60802a2486a38abed82876ac6a1e311e4fc7c1c79b586671b867ae4dab4a448",
+          "bytes": 59
+        }
+      },
+      {
+        "name": "frontend-test",
+        "command": [
+          "npm",
+          "run",
+          "test:run"
+        ],
+        "cwd": "frontend",
+        "environment": {
+          "CARGO_INCREMENTAL": "0",
+          "PLAYWRIGHT_BROWSERS_PATH": "{repo}/.runtime/playwright",
+          "ZK_LSP_MANIFEST": "{repo}/target/necessary-fixes/lsp-native/current.json"
+        },
+        "startedAt": "2026-10-08T00:29:40+00:00",
+        "seconds": 142.91,
+        "exitCode": 0,
+        "rerunReason": "Initial unrelated Git panel test exceeded 5s during concurrent native work; exact unchanged test and full suite passed on rerun.",
+        "status": "passed",
+        "evidence": {
+          "path": "target/review-followup/final/frontend-test-final.log",
+          "sha256": "9e549ce50f2560db2b4dd06995ddce3e998ca3ed394d563f967a13c510b6bd73",
+          "bytes": 302
+        }
+      },
+      {
+        "name": "frontend-build",
+        "command": [
+          "npm",
+          "run",
+          "build"
+        ],
+        "cwd": "frontend",
+        "environment": {
+          "CARGO_INCREMENTAL": "0",
+          "PLAYWRIGHT_BROWSERS_PATH": "{repo}/.runtime/playwright",
+          "ZK_LSP_MANIFEST": "{repo}/target/necessary-fixes/lsp-native/current.json"
+        },
+        "startedAt": "2026-10-08T00:27:46.085703+00:00",
+        "seconds": 30.84,
+        "exitCode": 0,
+        "status": "passed",
+        "evidence": {
+          "path": "target/review-followup/final/frontend-build.log",
+          "sha256": "25649481c12598e8439f3ed25f3a6e28f5d0149166f94f4606babf3c3eb601e5",
+          "bytes": 10521
+        }
+      },
+      {
+        "name": "frontend-theme",
+        "command": [
+          "npm",
+          "run",
+          "test:theme-regression"
+        ],
+        "cwd": "frontend",
+        "environment": {
+          "CARGO_INCREMENTAL": "0",
+          "PLAYWRIGHT_BROWSERS_PATH": "{repo}/.runtime/playwright",
+          "ZK_LSP_MANIFEST": "{repo}/target/necessary-fixes/lsp-native/current.json"
+        },
+        "startedAt": "2026-10-08T00:28:16.924584+00:00",
+        "seconds": 49.9,
+        "exitCode": 0,
+        "status": "passed",
+        "evidence": {
+          "path": "target/review-followup/final/frontend-theme.log",
+          "sha256": "b1ffcb6e6700b837a9c9c5a7b452b628df7c51d7cfabb325a95f9ebe4c52411c",
+          "bytes": 1423
+        }
+      },
+      {
+        "name": "frontend-jelly",
+        "command": [
+          "npm",
+          "run",
+          "test:jelly-regression"
+        ],
+        "cwd": "frontend",
+        "environment": {
+          "CARGO_INCREMENTAL": "0",
+          "PLAYWRIGHT_BROWSERS_PATH": "{repo}/.runtime/playwright",
+          "ZK_LSP_MANIFEST": "{repo}/target/necessary-fixes/lsp-native/current.json"
+        },
+        "startedAt": "2026-10-08T00:29:06.825411+00:00",
+        "seconds": 50.04,
+        "exitCode": 0,
+        "status": "passed",
+        "evidence": {
+          "path": "target/review-followup/final/frontend-jelly.log",
+          "sha256": "0f3f5e13033729148a98c05e331562f7811337abdc593f9d59c43e47caf43ca2",
+          "bytes": 287
+        }
+      },
+      {
+        "name": "install-boundaries",
+        "command": [
+          "{repo}/python-service/.venv/bin/python",
+          "-m",
+          "pytest",
+          "scripts/dev/tests/test_install_boundaries.py",
+          "scripts/dev/tests/test_lsp_toolchains.py"
+        ],
+        "cwd": ".",
+        "environment": {
+          "CARGO_INCREMENTAL": "0",
+          "PLAYWRIGHT_BROWSERS_PATH": "{repo}/.runtime/playwright",
+          "ZK_LSP_MANIFEST": "{repo}/target/necessary-fixes/lsp-native/current.json"
+        },
+        "startedAt": "2026-10-08T00:23:54.141663+00:00",
+        "seconds": 6.16,
+        "exitCode": 0,
+        "status": "passed",
+        "evidence": {
+          "path": "target/review-followup/final/install-boundaries.log",
+          "sha256": "d29b94acf8e15e5ade1539ab0ce267eb7de1a409da0c1f739fd034dd01ff4ae7",
+          "bytes": 1248
+        }
+      },
+      {
+        "name": "office",
+        "command": [
+          "{repo}/dev",
+          "test",
+          "office"
+        ],
+        "cwd": ".",
+        "environment": {
+          "CARGO_INCREMENTAL": "0",
+          "PLAYWRIGHT_BROWSERS_PATH": "{repo}/.runtime/playwright",
+          "ZK_LSP_MANIFEST": "{repo}/target/necessary-fixes/lsp-native/current.json"
+        },
+        "startedAt": "2026-10-08T00:24:00.299077+00:00",
+        "seconds": 37.44,
+        "exitCode": 0,
+        "status": "passed",
+        "evidence": {
+          "path": "target/review-followup/final/office.log",
+          "sha256": "fe65baabe7589fba414939911bb3417e964e0d75c285e09e17de7352d0ed488c",
+          "bytes": 866
+        }
+      },
+      {
+        "name": "e2e-production",
+        "command": [
+          "npm",
+          "run",
+          "test:e2e:production"
+        ],
+        "cwd": "frontend",
+        "environment": {
+          "CARGO_INCREMENTAL": "0",
+          "PLAYWRIGHT_BROWSERS_PATH": "{repo}/.runtime/playwright",
+          "ZK_LSP_MANIFEST": "{repo}/target/necessary-fixes/lsp-native/current.json",
+          "ZK_E2E_SERVER_BINARY": "{repo}/target/release/zk-server"
+        },
+        "startedAt": "2026-10-08T01:02:11.700723+00:00",
+        "seconds": 36.18,
+        "exitCode": 0,
+        "status": "passed",
+        "evidence": {
+          "path": "target/review-followup/final/e2e-production.log",
+          "sha256": "855e5a361f273876a2ead7caa204f8c16cf9bca27ec3f0710d70b2cd7e7e75a3",
+          "bytes": 3919
+        }
+      },
+      {
+        "name": "e2e-analysis",
+        "command": [
+          "npm",
+          "run",
+          "test:e2e:analysis"
+        ],
+        "cwd": "frontend",
+        "environment": {
+          "CARGO_INCREMENTAL": "0",
+          "PLAYWRIGHT_BROWSERS_PATH": "{repo}/.runtime/playwright",
+          "ZK_LSP_MANIFEST": "{repo}/target/necessary-fixes/lsp-native/current.json",
+          "ZK_E2E_SERVER_BINARY": "{repo}/target/release/zk-server"
+        },
+        "startedAt": "2026-10-08T01:02:47.877853+00:00",
+        "seconds": 21.93,
+        "exitCode": 0,
+        "status": "passed",
+        "evidence": {
+          "path": "target/review-followup/final/e2e-analysis.log",
+          "sha256": "20de37674783093928b37efd77554626fa7af2a62df089c11ccffdf561e11f65",
+          "bytes": 2618
+        }
+      },
+      {
+        "name": "doctor",
+        "command": [
+          "{repo}/python-service/.venv/bin/python",
+          "{repo}/scripts/dev/inspect.py",
+          "doctor",
+          "--root",
+          "{repo}/target/necessary-fixes/doctor-workspace",
+          "--port",
+          "63416",
+          "--deep",
+          "--json"
+        ],
+        "cwd": "target/necessary-fixes/doctor-workspace",
+        "environment": {
+          "CARGO_INCREMENTAL": "0",
+          "PLAYWRIGHT_BROWSERS_PATH": "{repo}/.runtime/playwright",
+          "ZK_LSP_MANIFEST": "{repo}/target/necessary-fixes/lsp-native/current.json"
+        },
+        "startedAt": "2026-10-08T01:02:13.449226+00:00",
+        "seconds": 41.31,
+        "exitCode": 0,
+        "status": "passed",
+        "evidence": {
+          "path": "target/review-followup/final/doctor.log",
+          "sha256": "ebca33ad1ed7630ffd1e99dacb3bb3b9a13f30136b9c927b617164785585c00a",
+          "bytes": 5938
+        }
+      },
+      {
+        "name": "python",
+        "command": [
+          ".venv/bin/python",
+          "-m",
+          "pytest",
+          "--cov=src",
+          "--cov-fail-under=70"
+        ],
+        "cwd": "python-service",
+        "exitCode": 0,
+        "status": "passed",
+        "evidence": {
+          "path": "target/review-followup/final/python-final.log",
+          "sha256": "e6ff5ceb834755363d04ae4c562bd2aaa65bb42308de881ac013fa49b08db6f0",
+          "bytes": 11922
+        }
+      },
+      {
+        "name": "contracts",
+        "command": [
+          "scripts/parity/check-contracts.sh"
+        ],
+        "cwd": ".",
+        "exitCode": 0,
+        "status": "passed",
+        "evidence": {
+          "path": "target/review-followup/final/contracts-final.log",
+          "sha256": "dd7dca9f28ae775b866302044d05a2c4700f78b16d8efd9ce8ec2ee7f9173de5",
+          "bytes": 92
+        }
+      },
+      {
+        "name": "secrets",
+        "command": [
+          "scripts/parity/scan-release-secrets.sh"
+        ],
+        "cwd": ".",
+        "exitCode": 0,
+        "status": "passed",
+        "evidence": {
+          "path": "target/review-followup/final/secrets-final.log",
+          "sha256": "dcc20e4e15ecf21382e4260ac053f408303c7315d6dc2befe8f2acadf135db17",
+          "bytes": 146
+        }
+      },
+      {
+        "name": "npm-audit",
+        "command": [
+          "scripts/parity/npm-audit.sh"
+        ],
+        "cwd": ".",
+        "exitCode": 0,
+        "status": "passed",
+        "evidence": {
+          "path": "target/review-followup/final/npm-audit.log",
+          "sha256": "6d8c5c8f3d7684adb070417bd608d01ae90aa3dc26a65af03ffda4955f38d9a3",
+          "bytes": 24
+        }
+      },
+      {
+        "name": "default-e2e-collection",
+        "command": [
+          "npx",
+          "playwright",
+          "test",
+          "--list",
+          "--project=chromium"
+        ],
+        "cwd": "frontend",
+        "exitCode": 0,
+        "status": "passed",
+        "evidence": {
+          "path": "target/review-followup/final/default-e2e-collection.log",
+          "sha256": "a6a7e6a8c5413d36b7ac8abf58eccf2d70e3c1846714af896180d94dbfb52137",
+          "bytes": 35032
+        }
+      }
+    ],
+    "rustCounts": {
+      "workspace": {
+        "passed": 3291,
+        "failed": 0,
+        "ignored": 10
+      },
+      "engine-no-default": {
+        "passed": 725,
+        "failed": 0,
+        "ignored": 0
+      },
+      "lsp-native": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      "journey-native": {
+        "passed": 3,
+        "failed": 0,
+        "ignored": 0
+      },
+      "keychain": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      }
+    },
+    "counts": {
+      "frontend": {
+        "files": 151,
+        "passed": 1334
+      },
+      "python": {
+        "passed": 373,
+        "coveragePercent": 76.77
+      },
+      "office": {
+        "passed": 41
+      },
+      "installBoundaries": {
+        "passed": 11
+      },
+      "e2e": {
+        "production": 10,
+        "analysis": 3,
+        "skipped": 0
+      },
+      "doctor": {
+        "passed": 37,
+        "total": 37
+      }
+    },
+    "regressionEvidence": [
+      {
+        "path": "target/review-followup/browser-lease/ephemeral-identity-red.log",
+        "sha256": "753c53ca3f8fb409802b7ffb4d8031aa31040d81646abce1a3f8950e5d913b67",
+        "bytes": 2388
+      },
+      {
+        "path": "target/review-followup/browser-lease/interaction-fixture-green.log",
+        "sha256": "f2de4f1ef65646d23cbe15a0f27b0e4706e1016139c1729cd2871163755e98c5",
+        "bytes": 537
+      },
+      {
+        "path": "target/review-followup/browser-lease/interaction-fixture-red.log",
+        "sha256": "00a024263dafdfa6f95a5a4eb9b0d4ccf1fe349e020686539eb322373b357a27",
+        "bytes": 7361
+      },
+      {
+        "path": "target/review-followup/browser-lease/python-green.log",
+        "sha256": "7dd2c70d42f436000813d4b246653bccac0980b29b349595487466ef22df1af5",
+        "bytes": 99
+      },
+      {
+        "path": "target/review-followup/browser-lease/python-red.log",
+        "sha256": "90133a9944f83aa18f4f2f28f9b7b9f79b320584e0f909fd9f3cd2b15e8d7abc",
+        "bytes": 12109
+      },
+      {
+        "path": "target/review-followup/browser-lease/python-regressions-green.log",
+        "sha256": "65ad5ea6559736b9d12520c55c1a1257d404082b69ee8d1edd068a720f07f9ed",
+        "bytes": 180
+      },
+      {
+        "path": "target/review-followup/browser-lease/python-regressions.log",
+        "sha256": "f37ebf593dc776fcd0f1e7e3547afddf533fa53856beb7ba056d15951a596f53",
+        "bytes": 1569
+      },
+      {
+        "path": "target/review-followup/browser-lease/rust-green.log",
+        "sha256": "6397295260f09a2d887fac786902b55733dee09ced77313e8670e039da5ae141",
+        "bytes": 1179
+      },
+      {
+        "path": "target/review-followup/browser-lease/rust-red.log",
+        "sha256": "19aab57272e89594cc6f87e52e55f10e465f2e3ccd5ad58a7053fec2898e2d81",
+        "bytes": 3018
+      },
+      {
+        "path": "target/review-followup/cancel/cleanup-green.log",
+        "sha256": "5616103a7caffdc3cd73f42dccb9cf06f61e726a991828db82f5e7d7e4fd66d7",
+        "bytes": 744
+      },
+      {
+        "path": "target/review-followup/cancel/cleanup-red.log",
+        "sha256": "b1d1ad29c06ef92ab369f993ba4b5f7b68574c3632247273c081545712eea6c0",
+        "bytes": 1067
+      },
+      {
+        "path": "target/review-followup/cancel/merge-epoch-green.log",
+        "sha256": "bca2dc7754379347a12a40b84e1b9c4652d917680f873fa6a8ccc246067650dd",
+        "bytes": 485
+      },
+      {
+        "path": "target/review-followup/cancel/query-green.log",
+        "sha256": "d8bbe3d9d017ebeb88161762fe87610cfa4d6453a087ae3579d5c77585dc603a",
+        "bytes": 631
+      },
+      {
+        "path": "target/review-followup/cancel/r4-green-final.log",
+        "sha256": "336b54318e044261e002884b1ff861b4274cdd06f66626de6c8d64883fe0acac",
+        "bytes": 1209
+      },
+      {
+        "path": "target/review-followup/cancel/r4-green.log",
+        "sha256": "738f41ca3a34c376423bd9e843d3d7918a1a274be425661fec9e6aff618a84fc",
+        "bytes": 792
+      },
+      {
+        "path": "target/review-followup/cancel/r4-red.log",
+        "sha256": "4cb5892ec71c161094814d3a91340e751b1db42e1feffecf3a4081b873b032a7",
+        "bytes": 1412
+      },
+      {
+        "path": "target/review-followup/mcp-frontend/cancellation-dismiss-red.log",
+        "sha256": "c8689614d8374c199b586a8ab879f70d44caf46b702ec09fe3305c4d0d9b30d0",
+        "bytes": 1272
+      },
+      {
+        "path": "target/review-followup/mcp-frontend/cancellation-final.log",
+        "sha256": "a5db20eebb0f755f0185a57ac462cf15e466c0132a68cd3dd36d0e0425367be3",
+        "bytes": 345
+      },
+      {
+        "path": "target/review-followup/mcp-frontend/e2e-guard-green.log",
+        "sha256": "22fdd0e03f7e3aad8a51154c4fd3870e0705894a55d6384e1a11c74f4812b9b0",
+        "bytes": 321
+      },
+      {
+        "path": "target/review-followup/mcp-frontend/e2e-typecheck.log",
+        "sha256": "a58e5cfc7392699f9a8d50c4de08d98cfa747d3e8f2237ccf283c1e7a2a718b9",
+        "bytes": 298
+      },
+      {
+        "path": "target/review-followup/mcp-frontend/frontend-final-green.log",
+        "sha256": "507ff25382d847853b2d42020a1bf958bfb4191c5979e14960f1c0d7d5d485d5",
+        "bytes": 517
+      },
+      {
+        "path": "target/review-followup/mcp-frontend/frontend-green.log",
+        "sha256": "9d3380bab9caec77040f9c26430abb0227955a1b0c3baa9bbb036e52b644e158",
+        "bytes": 467
+      },
+      {
+        "path": "target/review-followup/mcp-frontend/frontend-red.log",
+        "sha256": "726dced6e064fd559610e2066767e4b373ce502c7d043dc21fb56b0044ba456f",
+        "bytes": 7104
+      },
+      {
+        "path": "target/review-followup/mcp-frontend/frontend-typecheck.log",
+        "sha256": "6fd18c2b161b62e43b9dc1220cb98eafcb3366fccb75f4c75f2a31fb4dd99004",
+        "bytes": 56
+      },
+      {
+        "path": "target/review-followup/mcp-frontend/mcp-disable-race-red.log",
+        "sha256": "e2ff35970bbfd625573d70b508cebb3914fbfd88ae75b050e6932bdc76d00b04",
+        "bytes": 1170
+      },
+      {
+        "path": "target/review-followup/mcp-frontend/mcp-final-green.log",
+        "sha256": "d8497e1862696b0d62e00b0361ca884b2ace930b2a0b68b2ba887633bd06d772",
+        "bytes": 18622
+      },
+      {
+        "path": "target/review-followup/mcp-frontend/mcp-green.log",
+        "sha256": "dc6321e87a034a764c35030757aeed748a68bd58ceb4ef9186c246dc8daefb48",
+        "bytes": 4626
+      },
+      {
+        "path": "target/review-followup/mcp-frontend/mcp-handshake-red.log",
+        "sha256": "1d58a7226238974e8a52ccbefe049b24f05c8c084a475a01043ea5bb0ec13917",
+        "bytes": 1347
+      },
+      {
+        "path": "target/review-followup/mcp-frontend/mcp-lifecycle-green.log",
+        "sha256": "ced02ae6f24a32f5327dc8983a6eb3746c56c21d075d62a7cde6827f68b4be3c",
+        "bytes": 18586
+      },
+      {
+        "path": "target/review-followup/mcp-frontend/mcp-red.log",
+        "sha256": "a156273b3ae7a85552f454ca75e58406d8fde59ea68fe4b7a0d80b0c44d40227",
+        "bytes": 1239
+      },
+      {
+        "path": "target/review-followup/mcp-frontend/merge-warning-red.log",
+        "sha256": "165df44867a9281dd6f9555b819a1ce315357ecd57b02bc0e2252feda36abfdf",
+        "bytes": 7084
+      },
+      {
+        "path": "target/review-followup/recordings/db-final-green.log",
+        "sha256": "0a9527b459b42b0a9cb314b55aa2ef06fa4dd1cc7ac107b5fd7b1bae47d9571d",
+        "bytes": 1296
+      },
+      {
+        "path": "target/review-followup/recordings/db-final.log",
+        "sha256": "f2b82d7cc29b4752251f9418a8e198ad00c565441ed2f33309e842f249c53f0c",
+        "bytes": 1843
+      },
+      {
+        "path": "target/review-followup/recordings/db-green-expanded.log",
+        "sha256": "ac4ac2605d64badfa175ed3ec7c1883a0fef4f5d664259d4d19e56f097808f53",
+        "bytes": 1140
+      },
+      {
+        "path": "target/review-followup/recordings/db-green-initial.log",
+        "sha256": "debd735fd8f032bd987bb010dda4b5fdf44ab635cf212cb9dff70fe1201c08fe",
+        "bytes": 773
+      },
+      {
+        "path": "target/review-followup/recordings/db-red.log",
+        "sha256": "579548b424906dcdebb6afe2b611273f595f7bebaeed4301c9ed9a69a2ab9dfb",
+        "bytes": 1920
+      },
+      {
+        "path": "target/review-followup/recordings/db-validated.log",
+        "sha256": "04ae46394f2343f5fac04420938d834ffc54cd8b1dd5cbe4d1d8b4b44b37665d",
+        "bytes": 1140
+      },
+      {
+        "path": "target/review-followup/recordings/native-cancel-deadline-final.log",
+        "sha256": "f3f085e8270d1b284defc2a94fd7132235d4397609aa7a65cfe236713c73be4d",
+        "bytes": 811
+      },
+      {
+        "path": "target/review-followup/recordings/native-cancel-deadline-green.log",
+        "sha256": "ca1c6151387c71ea9f28028a30e8f3bf6542ea948d2816d5f221935a05413d84",
+        "bytes": 2029
+      },
+      {
+        "path": "target/review-followup/recordings/native-cancel-deadline.log",
+        "sha256": "351f3cf472fb80817fe47ce3e5580394b8402fe1b3ca74191678c644beb44a6e",
+        "bytes": 1965
+      },
+      {
+        "path": "target/review-followup/recordings/native-normal-final.log",
+        "sha256": "30dad60e5d921331c7e1e2dee804ac712494cc85413f4ec7f8968b999abf51e3",
+        "bytes": 807
+      },
+      {
+        "path": "target/review-followup/recordings/normal-failed-receipt.log",
+        "sha256": "4ec153e1289aec6608eb0b644a4edada54e22334de76aaa867a3c298352a4ddc",
+        "bytes": 604
+      },
+      {
+        "path": "target/review-followup/recordings/preexisting-evidence-delete-boundary.log",
+        "sha256": "34db824652c5287fb996d63f4555655b93d3cdc9b301e13b4ab2d3f20e2438a1",
+        "bytes": 154
+      },
+      {
+        "path": "target/review-followup/recordings/rustfmt-after-helper.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      },
+      {
+        "path": "target/review-followup/recordings/rustfmt-check.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      },
+      {
+        "path": "target/review-followup/recordings/server-after-phase-helper.log",
+        "sha256": "46d7c8680dd4bf6b052531f279ae784a119ad815036a242abc5dd9914345c4bb",
+        "bytes": 845
+      },
+      {
+        "path": "target/review-followup/recordings/server-compile-initial.log",
+        "sha256": "5b0d28e64fcc56ab7552349121ae9c3c2641f07f1e3ede8650d5afa506f57d8f",
+        "bytes": 839
+      },
+      {
+        "path": "target/review-followup/recordings/server-final.log",
+        "sha256": "41b4c728040e3c3b0a3224b38abe176b1d9004ae79052d8e7001406a1c546cd2",
+        "bytes": 984
+      },
+      {
+        "path": "target/review-followup/recordings/server-recovery.log",
+        "sha256": "04a202f8f3a26acd4beb89e9157f70f862c8ce65fe42613dc6cd75a303bae6f2",
+        "bytes": 1026
+      }
+    ],
+    "failedGateAttempts": [
+      {
+        "evidence": {
+          "path": "target/review-followup/final/python.log",
+          "sha256": "9a09f448b5f58483189565621768da9e11b0436fd7d9719b320b9d936dac0f76",
+          "bytes": 55354
+        },
+        "reason": "Seven old interaction test doubles omitted the new action admission port; corrected the fixture without weakening production validation.",
+        "resolvedBy": "python-final.log"
+      },
+      {
+        "evidence": {
+          "path": "target/review-followup/final/python-green.log",
+          "sha256": "29fff2cd7aa46f7372a8c6cf6be747633588d2d4c73dca17cd62590267b6e593",
+          "bytes": 16120
+        },
+        "reason": "A 50ms fixture cleanup budget expired under concurrent native compilation. This ownership test now has 2s; production cleanup timeout and separate timeout tests are unchanged.",
+        "resolvedBy": "python-final.log"
+      },
+      {
+        "evidence": {
+          "path": "target/review-followup/final/frontend-test.log",
+          "sha256": "a11b8af48af2323fdabca8fb3f9e7841f3afd3aee5c58412b68496fb111c42a5",
+          "bytes": 1279
+        },
+        "reason": "One unchanged Git panel test exceeded 5s; exact rerun and final full suite passed without source/timeout changes.",
+        "resolvedBy": "frontend-test-final.log"
+      },
+      {
+        "evidence": {
+          "path": "target/review-followup/final/initial-clippy.log",
+          "sha256": "8a756a7bccd2417532881eb13d45cb1e8cea373b7b09ad7c5249b88bc79ef35e",
+          "bytes": 4561
+        },
+        "reason": "Split production phases, simplified test reply helpers, documented the single complete Router test scenario.",
+        "resolvedBy": "clippy.log"
+      },
+      {
+        "evidence": {
+          "path": "target/review-followup/final/round2-clippy.log",
+          "sha256": "c1d7d91ac6c96beb07e1bb9a69880958d84d88015aa39a4b8e8db278b00e6ff2",
+          "bytes": 3970
+        },
+        "reason": "Moved native test imports before statements; no new suppression.",
+        "resolvedBy": "clippy.log"
+      },
+      {
+        "evidence": {
+          "path": "target/review-followup/final/fmt-before-final-format.log",
+          "sha256": "1e53acbe1d3a222cb4c6678827054ae2963948784673b8b8ab83fb46488c6dda",
+          "bytes": 568
+        },
+        "reason": "Applied rustfmt to the final MCP race test assertion.",
+        "resolvedBy": "fmt.log"
+      }
+    ],
+    "evidencePolicy": "Commands use repo-relative cwd and arguments unless an isolated local fixture path is required. target/ logs are generated local artifacts, not committed CI uploads. Rerun the listed commands in a checkout with installed private dependencies to regenerate them.",
+    "isolation": {
+      "fixtureDatabaseOnly": true,
+      "paidProviderCalls": false,
+      "privateLspManifest": "target/necessary-fixes/lsp-native/current.json",
+      "privateDoctorRoot": "target/necessary-fixes/doctor-workspace",
+      "doctorFrontendHealthIsCandidateProof": false,
+      "candidateRuntimeProof": "e2e-production/e2e-analysis use fresh release binary with isolated database, UDS and loopback ports",
+      "protectedRuntimeFiles": [
+        {
+          "path": ".runtime/lsp/current.json",
+          "sha256": "e789c506977fdb30ffec3c14d467b60940c65b3af704923ea11103ab21f12cfd",
+          "bytes": 3076
+        },
+        {
+          "path": ".runtime/dev/dev-state.json",
+          "sha256": "a550cf248c911346ceb1ace1bd26b3119cfbc22ad1c6659a42755407332756bd",
+          "bytes": 1075
+        }
+      ]
+    },
+    "authorizedDebugCleanup": {
+      "recordedAt": "2026-10-08T01:01:50.977770+00:00",
+      "authorizedByUser": true,
+      "removedRebuildableArtifacts": [
+        "target/debug/deps",
+        "target/debug/build",
+        "target/debug/.fingerprint",
+        "target/debug/incremental",
+        "target/debug/examples",
+        "target/debug/libzk_server.rlib",
+        "target/debug/zk-server.d",
+        "target/debug/libzk_server.d"
+      ],
+      "preserved": [
+        "target/debug/zk-server",
+        "target/release",
+        "target/necessary-fixes",
+        "target/review-followup"
+      ],
+      "freeBytesBefore": 10721341440,
+      "freeBytesAfter": 64719347712,
+      "reclaimedAvailableBytes": 53998006272,
+      "preservedExecutableSha256": "4d4846ca31f7c4a271bd841fc46476590258209f07cfbfb30f809105de8675a4",
+      "cargoActiveBeforeCleanup": false,
+      "note": "No active service was stopped; debug caches will be rebuilt only when a later debug build needs them."
+    },
+    "scopeDecisions": [
+      {
+        "id": "R1",
+        "status": "implemented_verified",
+        "scope": "Descendant deletion protection and browser owner close"
+      },
+      {
+        "id": "R2",
+        "status": "implemented_verified",
+        "scope": "Terminal recording finalization, strict source proof and idempotent ACK; no action replay"
+      },
+      {
+        "id": "R3",
+        "status": "implemented_verified",
+        "scope": "Unconfirmed lease recovery and managed strict action identity"
+      },
+      {
+        "id": "R4",
+        "status": "implemented_verified",
+        "scope": "Retained cancellation coordination and no same-key restart"
+      },
+      {
+        "id": "R5",
+        "status": "implemented_verified",
+        "scope": "Runtime deletion namespace, startup and cleanup generation ownership"
+      },
+      {
+        "id": "R6",
+        "status": "implemented_verified",
+        "scope": "Default E2E exclusion and pre-request fixture guard"
+      },
+      {
+        "id": "R7",
+        "status": "implemented_verified",
+        "scope": "In-page session/run notice recovery and late-frame retirement"
+      },
+      {
+        "id": "4.1",
+        "status": "implemented_verified",
+        "scope": "Three-second notice covers cancelled root cleanup lifecycle"
+      },
+      {
+        "id": "4.2",
+        "status": "not_a_separate_confirmed_defect",
+        "scope": "Bounded per-entry finalization remains; no global fairness guarantee claimed"
+      },
+      {
+        "id": "4.3",
+        "status": "excluded",
+        "scope": "Historical sealed merge compatibility is outside greenfield scope"
+      }
+    ],
+    "knownLimits": [
+      "Baseline successful machine evidence producer/run FK and immutability rules still block deletion of some sessions; HEAD and current schema both reproduce it. No schema or evidence deletion policy changed.",
+      "Cancellation warning recovery is in-page memory only; no new-page diagnostic replay protocol was added.",
+      "Five paid/external provider tests remain intentionally unrun; ignored native tests are separately executed and counted once per suite.",
+      "Default Playwright collected 261 tests in 34 files; this is collection-only validation, not 261 executed tests. Production and analysis suites are executed separately against private fixtures.",
+      "safe_dom_v1 is not a complete frame/shadow accessibility tree; recording batch count is not a disk peak limit; single large BLOB lock behavior is unchanged.",
+      "No actual power-loss/disk-exhaustion campaign, remote OAuth end-to-end, or long-duration native Node/Ruby REPL campaign was performed."
+    ],
+    "historicalValidationBeforeFollowup": {
+      "schemaVersion": 1,
+      "recordedAt": "2026-10-07T18:40:55.823266+00:00",
+      "localDate": "2026-10-08",
+      "timezone": "Asia/Shanghai",
+      "assessment": {
+        "status": "followup_fixes_in_progress",
+        "submissionReadyForAuthorizedScope": false,
+        "reason": "Independent review confirmed R1-R7 and cancellation cleanup notice coverage gap; historical passing gates remain evidence of their executed scope only.",
+        "committed": false,
+        "pushed": false,
+        "prCreated": false,
+        "activeServicesRestarted": false
+      },
+      "baseline": {
+        "head": "298d2b30b3d310420c12d953bb4382ec8064d1bb",
+        "branch": "main",
+        "databaseSchemaChanged": false,
+        "userDatabaseRebuilt": false,
+        "dependencyLockfilesChanged": false
+      },
+      "source": {
+        "capturedAt": "2026-10-07T18:36:23.536399+00:00",
+        "head": "298d2b30b3d310420c12d953bb4382ec8064d1bb",
+        "branch": "main",
+        "algorithm": "sorted tracked and non-ignored untracked files excluding docs/: SHA256(relative UTF-8 path + NUL + raw SHA256(file bytes))",
+        "sourceSha256": "20331dc0e52035229c3df5f3b66294f0380953f7ec0f7380a7581359bd3a37a5",
+        "fileCount": 1367,
+        "buildSourceSha256": "b402af935f36ba8552f8dfd8b4b92d26204abbb85aabb5cbd78b763b269d52d2",
+        "postBuildTestOnlyChanges": [
+          {
+            "path": "frontend/e2e/production-backend.spec.ts",
+            "before": "21eb7224e22cd5af852b779be09c41dc7f776f31d1c9e65b738463c9c6060359",
+            "after": "44a4deee80f1149720886e1cd9dae10a333930d75061fb2b7cbb1c759b717f17"
+          },
+          {
+            "path": "scripts/testing/start-production-e2e-server.sh",
+            "before": "1c001b00995d5d76d97acc9dded50f3320fbff6acbc4edf14cc70deb94c4face",
+            "after": "f8d8bcc7db8e49769bcaae9844bf0f20e882049740a200767351b88a9e531bc6"
+          }
+        ],
+        "productionSourceUnchangedSinceBuild": true
+      },
+      "build": {
+        "path": "target/release/zk-server",
+        "sha256": "3d72352480df1fb53e3fd5939dfb7f5e4b1638d5963dde40ab9f01e03decead6",
+        "bytes": 38455968,
+        "mtime": "2026-10-07T18:22:51.273472+00:00",
+        "sourceSha256": "b402af935f36ba8552f8dfd8b4b92d26204abbb85aabb5cbd78b763b269d52d2"
+      },
+      "reproduction": {
+        "commandFormat": "argv arrays; resolve {repo} to an absolute checkout path. cwd paths are relative to {repo}. No shell interpolation is required.",
+        "gateEntry": "scripts/parity/run-local-gates.sh",
+        "execution": "Executed component commands individually, not one invocation of the full script. Candidate doctor root and private LSP override avoid changing the active service environment.",
+        "privateLspInstall": [
+          "python-service/.venv/bin/python",
+          "scripts/dev/lsp-toolchains.py",
+          "--root",
+          "{repo}",
+          "--home",
+          "{repo}/target/necessary-fixes/lsp-native",
+          "--install",
+          "--offline"
+        ],
+        "privateLspManifest": "{repo}/target/necessary-fixes/lsp-native/current.json",
+        "browserEnvironment": {
+          "PLAYWRIGHT_BROWSERS_PATH": "{repo}/.runtime/playwright"
+        },
+        "doctorPreparation": "Isolated root uses code/dependency links, new release binary, private LSP manifest, no copied credentials or running PID state. Run the eight actual lock/runtime/browser/probe checks in doctor-validation/results.json before recording candidate state with existing state.py. Doctor health at 5273 observes the existing frontend and is not proof of the new runtime; separate 13 real backend E2Es provide that proof.",
+        "evidencePolicy": "Gate commands, counts, identities and scope are durable in this file. Relative target/ evidence files are locally accessible generated artifacts with SHA-256; do not mistake their absence in a fresh checkout for archived CI evidence. Rerun commands to recreate evidence."
+      },
+      "gates": [
+        {
+          "id": "fmt",
+          "status": "passed",
+          "exitCode": 0,
+          "command": [
+            "cargo",
+            "fmt",
+            "--all",
+            "--",
+            "--check"
+          ],
+          "cwd": ".",
+          "environment": {},
+          "summary": "all workspace source formatting passed",
+          "evidence": {
+            "path": "target/necessary-fixes/final/fmt-final.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "bytes": 0
+          }
+        },
+        {
+          "id": "rust-engine-no-default",
+          "status": "passed",
+          "exitCode": 0,
+          "command": [
+            "cargo",
+            "test",
+            "-p",
+            "zk-engine",
+            "--no-default-features",
+            "--locked"
+          ],
+          "cwd": ".",
+          "environment": {
+            "ZK_RUN_GIT_TESTS": "true",
+            "CARGO_INCREMENTAL": "0"
+          },
+          "summary": {
+            "harnesses": 16,
+            "passed": 722,
+            "failed": 0,
+            "ignored": 0
+          },
+          "evidence": {
+            "path": "target/necessary-fixes/final/engine-no-default.log",
+            "sha256": "0108a53ce32f013cfab56c1315f7cb15214713e67947203a68fba4bff8ea828c",
+            "bytes": 63475
+          },
+          "seconds": 73.36
+        },
+        {
+          "id": "native-lsp",
+          "status": "passed",
+          "exitCode": 0,
+          "command": [
+            "cargo",
+            "test",
+            "-p",
+            "zk-tools",
+            "--test",
+            "lsp_native",
+            "--locked",
+            "--",
+            "--ignored"
+          ],
+          "cwd": ".",
+          "environment": {
+            "ZK_LSP_MANIFEST": "{repo}/target/necessary-fixes/lsp-native/current.json",
+            "CARGO_INCREMENTAL": "0"
+          },
+          "summary": "1 native suite passed, five real language servers",
+          "evidence": {
+            "path": "target/necessary-fixes/final/lsp-native.log",
+            "sha256": "8c0f833d7f7de657bcb31ba564827bae4439a2117db944056832a294e0c2fa68",
+            "bytes": 435
+          },
+          "seconds": 34.39
+        },
+        {
+          "id": "rust-db",
+          "status": "passed",
+          "exitCode": 0,
+          "command": [
+            "cargo",
+            "test",
+            "-p",
+            "zk-db",
+            "--locked",
+            "--no-fail-fast"
+          ],
+          "cwd": ".",
+          "environment": {
+            "CARGO_INCREMENTAL": "0"
+          },
+          "summary": {
+            "harnesses": 24,
+            "passed": 244,
+            "failed": 0,
+            "ignored": 0
+          },
+          "evidence": {
+            "path": "target/necessary-fixes/final/db-frozen.log",
+            "sha256": "8f2d47b01b113f659657fcc94bdf55b88791f5c7884e94de0b0eb2f978f3241e",
+            "bytes": 25272
+          },
+          "seconds": 63.19
+        },
+        {
+          "id": "merge-single-worker",
+          "status": "passed",
+          "exitCode": 0,
+          "command": [
+            "cargo",
+            "test",
+            "-p",
+            "zk-server",
+            "--lib",
+            "same_database_workers_capture_one_at_a_time_and_cancel_releases_the_permit",
+            "--locked"
+          ],
+          "cwd": ".",
+          "environment": {
+            "CARGO_INCREMENTAL": "0"
+          },
+          "summary": "1 production-worker contention/cancellation regression passed",
+          "evidence": {
+            "path": "target/necessary-fixes/final/merge-permit.log",
+            "sha256": "46fabd125139967f01d6565be8fdb20dfcfa6ce7bb3f1b3ceb818aa882e17893",
+            "bytes": 996
+          },
+          "seconds": 59.34
+        },
+        {
+          "id": "native-browser",
+          "status": "passed",
+          "exitCode": 0,
+          "command": [
+            "cargo",
+            "test",
+            "-p",
+            "zk-server",
+            "--test",
+            "verify_journey_native",
+            "--locked",
+            "--",
+            "--ignored",
+            "--nocapture"
+          ],
+          "cwd": ".",
+          "environment": {
+            "CARGO_INCREMENTAL": "0",
+            "ZK_RUN_GIT_TESTS": "true"
+          },
+          "summary": "2 outer tests passed; nested child-harness summaries not counted twice",
+          "evidence": {
+            "path": "target/necessary-fixes/final/journey-native-round2.log",
+            "sha256": "c95e07ae0c9e1f559a8b5976cdbce324141be1acd6065cb23e53fe51a454ca39",
+            "bytes": 962
+          },
+          "seconds": 16.2
+        },
+        {
+          "id": "clippy",
+          "status": "passed",
+          "exitCode": 0,
+          "command": [
+            "cargo",
+            "clippy",
+            "--workspace",
+            "--all-targets",
+            "--all-features",
+            "--locked",
+            "--",
+            "-D",
+            "warnings"
+          ],
+          "cwd": ".",
+          "environment": {
+            "CARGO_INCREMENTAL": "0",
+            "ZK_RUN_GIT_TESTS": "true"
+          },
+          "summary": "workspace/all-targets/all-features, -D warnings",
+          "evidence": {
+            "path": "target/necessary-fixes/final/clippy-frozen-round2.log",
+            "sha256": "9bc62bc158d215202e0ce9d447c6a04ebf5393f622d02b46bf73e30f5670cc81",
+            "bytes": 163
+          },
+          "seconds": 2.35
+        },
+        {
+          "id": "rust-workspace",
+          "status": "passed",
+          "exitCode": 0,
+          "command": [
+            "cargo",
+            "test",
+            "--workspace",
+            "--locked",
+            "--no-fail-fast"
+          ],
+          "cwd": ".",
+          "environment": {
+            "CARGO_INCREMENTAL": "0",
+            "ZK_RUN_GIT_TESTS": "true"
+          },
+          "summary": {
+            "harnesses": 148,
+            "passed": 3262,
+            "failed": 0,
+            "ignored": 9
+          },
+          "evidence": {
+            "path": "target/necessary-fixes/final/workspace-frozen.log",
+            "sha256": "206b01b8b72947525dabe199ee449c6dfa2e20a814007729dd42e4f6ef98135d",
+            "bytes": 276653
+          },
+          "seconds": 569.53
+        },
+        {
+          "id": "release-build",
+          "status": "passed",
+          "exitCode": 0,
+          "command": [
+            "cargo",
+            "build",
+            "--workspace",
+            "--release",
+            "--locked"
+          ],
+          "cwd": ".",
+          "environment": {
+            "CARGO_INCREMENTAL": "0",
+            "ZK_RUN_GIT_TESTS": "true"
+          },
+          "summary": "workspace release --locked succeeded",
+          "evidence": {
+            "path": "target/necessary-fixes/final/release.log",
+            "sha256": "dddad2dfa266f269e79b78b7944f552e5afd4342b1e10a8e3134d0eff1a940b0",
+            "bytes": 676
+          },
+          "seconds": 279.49
+        },
+        {
+          "id": "native-keychain",
+          "status": "passed",
+          "exitCode": 0,
+          "command": [
+            "cargo",
+            "test",
+            "-p",
+            "zk-mcp",
+            "--lib",
+            "oauth::tests::native_keychain_round_trip",
+            "--locked",
+            "--",
+            "--ignored",
+            "--exact",
+            "--nocapture"
+          ],
+          "cwd": ".",
+          "environment": {},
+          "summary": "1 real macOS Keychain round trip passed",
+          "evidence": {
+            "path": "target/necessary-fixes/targeted/oauth-native.log",
+            "sha256": "3d50d8ff119ad2abc993c204efe2f9d587eb4a1d66310776df1a4c7f55bfafd6",
+            "bytes": 318
+          },
+          "seconds": 1.01
+        },
+        {
+          "id": "frontend-lint",
+          "status": "passed",
+          "exitCode": 0,
+          "command": [
+            "npm",
+            "run",
+            "lint"
+          ],
+          "cwd": "frontend",
+          "environment": {},
+          "summary": {
+            "exitCode": 0
+          },
+          "evidence": {
+            "path": "target/necessary-fixes/frontend-final/lint.log",
+            "sha256": "b60802a2486a38abed82876ac6a1e311e4fc7c1c79b586671b867ae4dab4a448",
+            "bytes": 59
+          }
+        },
+        {
+          "id": "frontend-unit",
+          "status": "passed",
+          "exitCode": 0,
+          "command": [
+            "npm",
+            "run",
+            "test:run"
+          ],
+          "cwd": "frontend",
+          "environment": {},
+          "summary": {
+            "exitCode": 0,
+            "filesPassed": 149,
+            "testsPassed": 1317,
+            "durationSeconds": 154.59
+          },
+          "evidence": {
+            "path": "target/necessary-fixes/frontend-final/unit.log",
+            "sha256": "1a7eafd40bf24d6c5e295adc8ef2356c2be20e291e2e865095870869e9d214bd",
+            "bytes": 302
+          }
+        },
+        {
+          "id": "frontend-build",
+          "status": "passed",
+          "exitCode": 0,
+          "command": [
+            "npm",
+            "run",
+            "build"
+          ],
+          "cwd": "frontend",
+          "environment": {},
+          "summary": {
+            "exitCode": 0,
+            "existingWarnings": [
+              "large chunks",
+              "mixed static/dynamic imports",
+              "empty editor/terminal chunks"
+            ]
+          },
+          "evidence": {
+            "path": "target/necessary-fixes/frontend-final/build.log",
+            "sha256": "96ebaca28c2d9b066c4b0b677962eba33dbc33919fd57fc92c89b2a3c14b8985",
+            "bytes": 10521
+          }
+        },
+        {
+          "id": "frontend-theme",
+          "status": "passed",
+          "exitCode": 0,
+          "command": [
+            "npm",
+            "run",
+            "test:theme-regression"
+          ],
+          "cwd": "frontend",
+          "environment": {},
+          "summary": {
+            "exitCode": 0,
+            "scenarios": 20,
+            "assertions": 12688,
+            "businessRequests": 0
+          },
+          "evidence": {
+            "path": "target/necessary-fixes/frontend-final/theme.log",
+            "sha256": "b1ffcb6e6700b837a9c9c5a7b452b628df7c51d7cfabb325a95f9ebe4c52411c",
+            "bytes": 1423
+          }
+        },
+        {
+          "id": "frontend-jelly",
+          "status": "passed",
+          "exitCode": 0,
+          "command": [
+            "npm",
+            "run",
+            "test:jelly-regression"
+          ],
+          "cwd": "frontend",
+          "environment": {},
+          "summary": {
+            "exitCode": 0,
+            "scenarios": 42,
+            "businessRequests": 0
+          },
+          "evidence": {
+            "path": "target/necessary-fixes/frontend-final/jelly.log",
+            "sha256": "0f3f5e13033729148a98c05e331562f7811337abdc593f9d59c43e47caf43ca2",
+            "bytes": 287
+          }
+        },
+        {
+          "id": "e2e-production",
+          "status": "passed",
+          "exitCode": 0,
+          "command": [
+            "npm",
+            "run",
+            "test:e2e:production"
+          ],
+          "cwd": "frontend",
+          "environment": {
+            "ZK_E2E_SERVER_BINARY": "{repo}/target/release/zk-server",
+            "ZK_LSP_MANIFEST": "{repo}/target/necessary-fixes/lsp-native/current.json"
+          },
+          "summary": {
+            "passed": 10,
+            "failed": 0,
+            "skipped": 0,
+            "binaryBeforeSha256": "3d72352480df1fb53e3fd5939dfb7f5e4b1638d5963dde40ab9f01e03decead6",
+            "binaryAfterSha256": "3d72352480df1fb53e3fd5939dfb7f5e4b1638d5963dde40ab9f01e03decead6",
+            "binaryUnchanged": true
+          },
+          "evidence": {
+            "path": "target/necessary-fixes/final/production-e2e.log",
+            "sha256": "ff73f2925f3e3e53b5a38e26bdca0838639cd8c82b1cea4c20b2f6b647c65197",
+            "bytes": 4103
+          },
+          "seconds": 51.42
+        },
+        {
+          "id": "e2e-analysis",
+          "status": "passed",
+          "exitCode": 0,
+          "command": [
+            "npm",
+            "run",
+            "test:e2e:analysis"
+          ],
+          "cwd": "frontend",
+          "environment": {
+            "ZK_E2E_SERVER_BINARY": "{repo}/target/release/zk-server",
+            "ZK_LSP_MANIFEST": "{repo}/target/necessary-fixes/lsp-native/current.json"
+          },
+          "summary": {
+            "passed": 3,
+            "failed": 0,
+            "skipped": 0,
+            "binaryBeforeSha256": "3d72352480df1fb53e3fd5939dfb7f5e4b1638d5963dde40ab9f01e03decead6",
+            "binaryAfterSha256": "3d72352480df1fb53e3fd5939dfb7f5e4b1638d5963dde40ab9f01e03decead6",
+            "binaryUnchanged": true
+          },
+          "evidence": {
+            "path": "target/necessary-fixes/final/analysis-e2e.log",
+            "sha256": "cee4a6a2212b1331201de6cb6eae15c6294b9de568824807f84395331e6c79da",
+            "bytes": 2434
+          },
+          "seconds": 16.03
+        },
+        {
+          "id": "e2e-frontend-lint-post-build",
+          "status": "passed",
+          "exitCode": 0,
+          "command": [
+            "npm",
+            "run",
+            "lint"
+          ],
+          "cwd": "frontend",
+          "environment": {},
+          "summary": "passed",
+          "evidence": {
+            "path": "target/necessary-fixes/final/frontend-lint-post-build.log",
+            "sha256": "b60802a2486a38abed82876ac6a1e311e4fc7c1c79b586671b867ae4dab4a448",
+            "bytes": 59
+          },
+          "seconds": 4.05
+        },
+        {
+          "id": "e2e-production-runner-shell-syntax",
+          "status": "passed",
+          "exitCode": 0,
+          "command": [
+            "sh",
+            "-n",
+            "scripts/testing/start-production-e2e-server.sh"
+          ],
+          "cwd": ".",
+          "environment": {},
+          "summary": "passed",
+          "evidence": {
+            "path": "target/necessary-fixes/final/production-runner-shell-syntax.log",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "bytes": 0
+          },
+          "seconds": 0.01
+        },
+        {
+          "id": "python",
+          "status": "passed",
+          "exitCode": 0,
+          "command": [
+            ".venv/bin/python",
+            "-m",
+            "pytest",
+            "--cov=src",
+            "--cov-fail-under=70"
+          ],
+          "cwd": "python-service",
+          "environment": {
+            "PLAYWRIGHT_BROWSERS_PATH": "{repo}/.runtime/playwright"
+          },
+          "summary": {
+            "passed": 362,
+            "failed": 0,
+            "coveragePercent": 76.52,
+            "warnings": 9
+          },
+          "evidence": {
+            "path": "target/necessary-fixes/targeted/python-full-browser-final.log",
+            "sha256": "d3c97e487bd2b3e81995109b9f92d04d9d4f0a95a841fd0cdc16ed1287fc04d7",
+            "bytes": 11836
+          }
+        },
+        {
+          "id": "office",
+          "status": "passed",
+          "exitCode": 0,
+          "command": [
+            "./dev",
+            "test",
+            "office"
+          ],
+          "cwd": ".",
+          "environment": {
+            "PLAYWRIGHT_BROWSERS_PATH": "{repo}/.runtime/playwright"
+          },
+          "summary": {
+            "passed": 41,
+            "failed": 0,
+            "seconds": 25.5,
+            "toolLimit": "LibreOfficeDev 26.8.0.0.alpha0 is alpha, not stable Office validation"
+          },
+          "evidence": {
+            "path": "target/necessary-fixes/targeted/office-native.log",
+            "sha256": "649fb433edd6317d2a603473433dee79afb8a3c055814f8f313ca6629aa97b47",
+            "bytes": 866
+          }
+        },
+        {
+          "id": "installer",
+          "status": "passed",
+          "exitCode": 0,
+          "command": [
+            "python-service/.venv/bin/python",
+            "-m",
+            "pytest",
+            "-q",
+            "scripts/dev/tests/test_install_boundaries.py",
+            "scripts/dev/tests/test_lsp_toolchains.py"
+          ],
+          "cwd": ".",
+          "environment": {},
+          "summary": {
+            "passed": 11,
+            "failed": 0,
+            "scope": "unit/stub tests; real private install, probe and five native LSP tests recorded separately"
+          },
+          "evidence": {
+            "path": "target/necessary-fixes/final/installer-tests-round2.log",
+            "sha256": "6004f7170aee0fd32ca7a9a2d691824d75c60798ebc4395248ee1e4e461057d3",
+            "bytes": 777
+          }
+        },
+        {
+          "id": "contracts",
+          "status": "passed",
+          "exitCode": 0,
+          "command": [
+            "scripts/parity/check-contracts.sh"
+          ],
+          "cwd": ".",
+          "environment": {},
+          "summary": "parity-contract ok and public demo credential database valid",
+          "evidence": {
+            "path": "target/necessary-fixes/final/contracts.log",
+            "sha256": "dd7dca9f28ae775b866302044d05a2c4700f78b16d8efd9ce8ec2ee7f9173de5",
+            "bytes": 92
+          }
+        },
+        {
+          "id": "cargo-deny",
+          "status": "passed",
+          "exitCode": 0,
+          "command": [
+            "cargo",
+            "deny",
+            "check"
+          ],
+          "cwd": ".",
+          "environment": {},
+          "summary": "advisories/bans/licenses/sources ok; duplicate crates and unmatched license allowance warnings retained",
+          "evidence": {
+            "path": "target/necessary-fixes/targeted/dependency-deny.log",
+            "sha256": "065e43f402ae34ce8cd56214071005290ea89c6810f4e3f4c7d8117a1a408bc9",
+            "bytes": 62851
+          }
+        },
+        {
+          "id": "npm-audit",
+          "status": "passed",
+          "exitCode": 0,
+          "command": [
+            "scripts/parity/npm-audit.sh"
+          ],
+          "cwd": ".",
+          "environment": {},
+          "summary": "0 vulnerabilities",
+          "evidence": {
+            "path": "target/necessary-fixes/targeted/npm-audit.log",
+            "sha256": "6d8c5c8f3d7684adb070417bd608d01ae90aa3dc26a65af03ffda4955f38d9a3",
+            "bytes": 24
+          }
+        },
+        {
+          "id": "doctor-normal",
+          "status": "passed",
+          "exitCode": 0,
+          "command": [
+            "{repo}/target/necessary-fixes/doctor-workspace/python-service/.venv/bin/python",
+            "{repo}/scripts/dev/inspect.py",
+            "doctor",
+            "--root",
+            "{repo}/target/necessary-fixes/doctor-workspace",
+            "--port",
+            "63416",
+            "--json"
+          ],
+          "cwd": "target/necessary-fixes/doctor-workspace",
+          "environment": {},
+          "summary": {
+            "passed": 29,
+            "total": 29,
+            "deep": false,
+            "binarySha256": "3d72352480df1fb53e3fd5939dfb7f5e4b1638d5963dde40ab9f01e03decead6",
+            "protectedUnchanged": true
+          },
+          "evidence": {
+            "path": "target/necessary-fixes/final/doctor-final.json",
+            "sha256": "ffe1fc9134fe8f5dc182f7b5f4ef2bbc1702eee2b6ef42fc156ffa3939aff7f5",
+            "bytes": 4963
+          },
+          "seconds": 5.64
+        },
+        {
+          "id": "doctor-deep",
+          "status": "passed",
+          "exitCode": 0,
+          "command": [
+            "{repo}/target/necessary-fixes/doctor-workspace/python-service/.venv/bin/python",
+            "{repo}/scripts/dev/inspect.py",
+            "doctor",
+            "--root",
+            "{repo}/target/necessary-fixes/doctor-workspace",
+            "--port",
+            "63416",
+            "--deep",
+            "--json"
+          ],
+          "cwd": "target/necessary-fixes/doctor-workspace",
+          "environment": {},
+          "summary": {
+            "passed": 37,
+            "total": 37,
+            "deep": true,
+            "binarySha256": "3d72352480df1fb53e3fd5939dfb7f5e4b1638d5963dde40ab9f01e03decead6",
+            "protectedUnchanged": true
+          },
+          "evidence": {
+            "path": "target/necessary-fixes/final/doctor-deep-final.json",
+            "sha256": "b495ee783c016dc194325703607ae65a4be6c37566cd93374c718685a965093b",
+            "bytes": 5978
+          },
+          "seconds": 23.55
+        },
+        {
+          "id": "release-secrets",
+          "status": "passed",
+          "exitCode": 0,
+          "command": [
+            "scripts/parity/scan-release-secrets.sh"
+          ],
+          "cwd": ".",
+          "environment": {},
+          "summary": "Final publication candidate scan passed; no secret findings; includes final Markdown/ledger and the two post-build test changes.",
+          "seconds": 3.23,
+          "evidence": {
+            "path": "target/necessary-fixes/final/secrets-final.log",
+            "sha256": "0c56e3c2c3cae5f4d7347bfbf23da9bde749df886fdcdceefba9d5eda8f133aa",
+            "bytes": 146
+          }
+        }
+      ],
+      "embeddedE2ETypechecks": [
+        {
+          "name": "typecheck:e2e:production",
+          "command": [
+            "npm",
+            "run",
+            "typecheck:e2e:production"
+          ],
+          "typescriptCommand": "tsc --noEmit --target ES2022 --module ESNext --moduleResolution bundler --strict --skipLibCheck --types node e2e/production-backend.spec.ts e2e/mobile-prompt-bar.spec.ts playwright.production.config.ts",
+          "execution": "Executed as the first nested command of npm run test:e2e:production; its && chain reached Playwright and the parent command exited 0. Not a separate rerun.",
+          "exitCode": 0,
+          "parentCommand": [
+            "npm",
+            "run",
+            "test:e2e:production"
+          ],
+          "logPath": "{repo}/target/necessary-fixes/final/production-e2e.log"
+        },
+        {
+          "name": "typecheck:e2e:analysis",
+          "command": [
+            "npm",
+            "run",
+            "typecheck:e2e:analysis"
+          ],
+          "typescriptCommand": "tsc --noEmit --target ES2022 --module ESNext --moduleResolution bundler --strict --skipLibCheck --types node e2e/analysis-backend.spec.ts playwright.analysis.config.ts",
+          "execution": "Executed as the first nested command of npm run test:e2e:analysis; its && chain reached Playwright and the parent command exited 0. Not a separate rerun.",
+          "exitCode": 0,
+          "parentCommand": [
+            "npm",
+            "run",
+            "test:e2e:analysis"
+          ],
+          "logPath": "{repo}/target/necessary-fixes/final/analysis-e2e.log"
+        }
+      ],
+      "groups": [
+        {
+          "id": "01",
+          "name": "Grep HTML",
+          "reportBasis": "DSH E1、Kimi P0；工具结果来自不可信文件",
+          "implementationAndBoundary": "`SearchResultRenderer.tsx` 使用文本节点和 mark；不改变 Markdown",
+          "verificationEntrypoints": "同名前端回归：标签、实体、事件属性、Unicode、查询特殊字符",
+          "gates": [
+            "frontend-unit",
+            "e2e-production"
+          ],
+          "status": "implemented_and_verified_in_local_scope"
+        },
+        {
+          "id": "02",
+          "name": "文件权限",
+          "reportBasis": "DSH G1；原子替换确实重建 inode",
+          "implementationAndBoundary": "`zk-tools/atomic.rs` 保留访问/执行位，同一独占 FD 创建即 0600，正文 flush 后才设置最终权限；新文件通过无正文探针保留 umask；复核 inode/mode/content",
+          "verificationEntrypoints": "`atomic::tests`，含 0600/0644/0755、并发 chmod、同内容替换、chmod 失败、创建权限及 umask 探针",
+          "gates": [
+            "rust-workspace"
+          ],
+          "status": "implemented_and_verified_in_local_scope"
+        },
+        {
+          "id": "03",
+          "name": "密码快照",
+          "reportBasis": "DSH F2；原生 ARIA 在真实 Chromium 中读取密码",
+          "implementationAndBoundary": "经用户确认，统一采用同步安全 DOM 语义投影，`tree.source=safe_dom_v1`；原生 ARIA 标为未请求。不读取密码 value、长度、摘要，不改网页 DOM",
+          "verificationEntrypoints": "Python 真实浏览器 getter canary、动态 text→password、普通输入；Rust 原生 Journey 联调",
+          "gates": [
+            "python",
+            "native-browser"
+          ],
+          "status": "implemented_and_verified_in_local_scope"
+        },
+        {
+          "id": "04",
+          "name": "最终权限复核",
+          "reportBasis": "Kimi P2；批准与启动之间模式可变",
+          "implementationAndBoundary": "`zk-authz/service.rs` 在既有准入事务读取当前模式；旧授权不得穿越 PLAN；保留安全读取/内部操作",
+          "verificationEntrypoints": "`decision_matrix` 模式切换、批准单次/记忆授权；完整 authz suite",
+          "gates": [
+            "rust-workspace"
+          ],
+          "status": "implemented_and_verified_in_local_scope"
+        },
+        {
+          "id": "05",
+          "name": "会话恢复",
+          "reportBasis": "Kimi P1-7/P2；重复 REST 等待和队列溢出可卡绑定",
+          "implementationAndBoundary": "`dispatch.ts` WS 提交后完成绑定；独立 REST 8 秒覆盖 body，取消和版本防迟到；5,000 帧首次溢出仅重绑一次，原期限不延长",
+          "verificationEntrypoints": "`dispatchSafety`、`dispatchRecovery`、真实 Rust E2E",
+          "gates": [
+            "frontend-unit",
+            "e2e-production"
+          ],
+          "status": "implemented_and_verified_in_local_scope"
+        },
+        {
+          "id": "06",
+          "name": "合并",
+          "reportBasis": "Kimi P1-8、GLM D1/D2；writer 内慢 I/O 与累计预算缺口",
+          "implementationAndBoundary": "显式 reserve 短事务→一致读/私有暂存→有界导入→封存→发布；单库一个 worker；32 MiB 单记录、64 MiB 总元数据、20k 条（含继承）；120 秒捕获导入期限",
+          "verificationEntrypoints": "`session_merge::capture` 真 WAL writer 并发、预算、封存、恢复；server merge summary 真实 SQLite 故障",
+          "gates": [
+            "rust-db",
+            "merge-single-worker",
+            "rust-workspace",
+            "e2e-production"
+          ],
+          "status": "implemented_and_verified_in_local_scope"
+        },
+        {
+          "id": "07",
+          "name": "浏览器生命周期",
+          "reportBasis": "GLM P1、Kimi P2；分配等待与迟到 ready/空闲清理",
+          "implementationAndBoundary": "30 秒绝对创建期限；保留迟到资源回收主体；Session 浏览器+Run 使用租约（15 秒续租/60 秒失效），临时模式 Run 结束释放",
+          "verificationEntrypoints": "Python lifecycle 与真实 Chromium；Rust owner/resource 回归",
+          "gates": [
+            "python",
+            "native-browser",
+            "rust-workspace"
+          ],
+          "status": "implemented_and_verified_in_local_scope"
+        },
+        {
+          "id": "08",
+          "name": "取消 / REPL",
+          "reportBasis": "DSH B2、Kimi P2；取消保存失败与启动槽位竞态",
+          "implementationAndBoundary": "3 秒后一次非终态通知，唯此通知可绕 outbox；原 worker/lease 保留。同步 Query 返回 503 和原身份。REPL Starting/Running/Stopping+generation 保留普通跨轮状态",
+          "verificationEntrypoints": "真实 SQLite trigger + HTTP/SSE/WS；REPL 并发启动、等待方丢失、迟到 receipt/超时 first cause",
+          "gates": [
+            "rust-workspace",
+            "frontend-unit"
+          ],
+          "status": "implemented_and_verified_in_local_scope"
+        },
+        {
+          "id": "09",
+          "name": "快照",
+          "reportBasis": "GLM E7；保存失败后旧对象可冒充成功",
+          "implementationAndBoundary": "`session_snapshot.rs` 唯一同目录临时文件、文件与目录同步；替换后同步失败明确未确认；成功直接返回本次保存对象",
+          "verificationEntrypoints": "engine snapshot 和 `session_snapshot_api` 的 I/O 故障、并发保存、内存临时模式",
+          "gates": [
+            "rust-workspace",
+            "rust-engine-no-default"
+          ],
+          "status": "implemented_and_verified_in_local_scope"
+        },
+        {
+          "id": "10",
+          "name": "浏览器证据",
+          "reportBasis": "DSH F1/F2、GLM P3/P5；语义失败/录制归档状态缺失",
+          "implementationAndBoundary": "complete/partial/failed 分组件报告；拒绝空 Journey。私有暂存→封存→Rust 校验/证据持久化/后处理→ACK；ACK 不重跑 Journey。复用 execution_resources 元数据/CAS",
+          "verificationEntrypoints": "Python 真录制；DB 状态回归；`verify_journey_native` 真实 UDS/DB/监督器",
+          "gates": [
+            "python",
+            "native-browser",
+            "rust-workspace",
+            "frontend-unit"
+          ],
+          "status": "implemented_and_verified_in_local_scope"
+        },
+        {
+          "id": "11",
+          "name": "协议诊断",
+          "reportBasis": "DSH D4、GLM D5；无限行/错误体与诊断泄密",
+          "implementationAndBoundary": "增量 SSE 行/事件 16 MiB，HTTP 错误体 256 KiB；保留先行 usage/终态与 HTTP status/Retry-After；URL 凭据移除；Hook 显示 Authorization/Bearer 脱敏；Responses Stream 独立类型",
+          "verificationEntrypoints": "zk-llm 全套、同字节不同切块、错误体本地 TCP；authz 脱敏回归",
+          "gates": [
+            "rust-workspace",
+            "python"
+          ],
+          "status": "implemented_and_verified_in_local_scope"
+        },
+        {
+          "id": "12",
+          "name": "MCP / 本机 API",
+          "reportBasis": "DSH C2/G3、Kimi P1-6；目录碰撞/关闭责任/跨站访问",
+          "implementationAndBoundary": "merge/Query 恢复加入现有 Origin/Bearer；命名规范化/前缀/工具碰撞拒绝；关闭未确认保留 transport/PGID/lease；OAuth 先持久停用再 Keychain 清理",
+          "verificationEntrypoints": "MCP 进程树、close abort、重启/Keychain fixture；真实 Router；原生 Keychain 另验",
+          "gates": [
+            "rust-workspace",
+            "native-keychain",
+            "e2e-production"
+          ],
+          "status": "implemented_and_verified_in_local_scope"
+        },
+        {
+          "id": "13",
+          "name": "Hook 校验",
+          "reportBasis": "Kimi P2、GLM E5；保存与加载接受无效条目",
+          "implementationAndBoundary": "共用 validate；拒绝非法 matcher/角色，整份配置不部分接纳，热重载保留最近有效配置；REST 提供脱敏命名诊断",
+          "verificationEntrypoints": "hook registry/service、`hooks_api`、HooksEditor",
+          "gates": [
+            "rust-workspace",
+            "frontend-unit"
+          ],
+          "status": "implemented_and_verified_in_local_scope"
+        },
+        {
+          "id": "14",
+          "name": "安装边界",
+          "reportBasis": "DSH H1/H2、Kimi Python；sync 隐式系统安装与全局 rust-src",
+          "implementationAndBoundary": "缺 brew 要求 bootstrap；OCR 验证 prefix 成功且绝对；私有 rust-src 固定版本/校验/完整树身份，cargo.sysrootSrc 显式设置；安装 Python 下限 3.11.4",
+          "verificationEntrypoints": "本地 shell stub、私有安装测试、五类真实 LSP；不改变 Python 服务支持范围",
+          "gates": [
+            "installer",
+            "native-lsp",
+            "doctor-deep"
+          ],
+          "status": "implemented_and_verified_in_local_scope"
+        },
+        {
+          "id": "15",
+          "name": "前端体验",
+          "reportBasis": "四报告；未知图片能力和主题/布局接线",
+          "implementationAndBoundary": "unknown 不显示 0/0、不删附件；可重试且阻止新增/发送未确认图片；system Monaco、OAuth 颜色、侧栏宽度、停止说明；Starting/Hook 诊断接线",
+          "verificationEntrypoints": "前端单元、lint/build、真实后端桌面/移动/可访问性 E2E",
+          "gates": [
+            "frontend-unit",
+            "frontend-theme",
+            "frontend-jelly",
+            "e2e-production",
+            "e2e-analysis"
+          ],
+          "status": "implemented_and_verified_in_local_scope"
+        },
+        {
+          "id": "16",
+          "name": "门禁台账",
+          "reportBasis": "四报告；旧证据不能代表修后源码",
+          "implementationAndBoundary": "本记录和机器可读门禁记录关联源码/构建身份，保留红测及失败/跳过",
+          "verificationEntrypoints": "Cargo、前端、Python、契约、依赖、适用原生门禁",
+          "gates": [
+            "fmt",
+            "rust-engine-no-default",
+            "native-lsp",
+            "rust-db",
+            "merge-single-worker",
+            "native-browser",
+            "clippy",
+            "rust-workspace",
+            "release-build",
+            "native-keychain",
+            "frontend-lint",
+            "frontend-unit",
+            "frontend-build",
+            "frontend-theme",
+            "frontend-jelly",
+            "e2e-production",
+            "e2e-analysis",
+            "e2e-frontend-lint-post-build",
+            "e2e-production-runner-shell-syntax",
+            "python",
+            "office",
+            "installer",
+            "contracts",
+            "cargo-deny",
+            "npm-audit",
+            "doctor-normal",
+            "doctor-deep",
+            "release-secrets"
+          ],
+          "status": "implemented_and_verified_in_local_scope"
+        }
+      ],
+      "history": [
+        {
+          "phase": "targeted",
+          "name": "merge-cancel-red",
+          "command": [
+            "cargo",
+            "test",
+            "-p",
+            "zk-server",
+            "--lib",
+            "local_cancel_stops_paid_merge_when_epoch_write_fails",
+            "--locked"
+          ],
+          "exitCode": 101,
+          "seconds": 83.87,
+          "evidence": {
+            "path": "target/necessary-fixes/targeted/merge-cancel-red.log",
+            "sha256": "70d38bcab3a71ae0fdcd444a6960962ab95381b8fefea1f5f97fcbd427ff72cf",
+            "bytes": 1551
+          },
+          "supersededBy": "rust-workspace",
+          "note": "Historical nonzero status retained; reason and resolution are documented in necessary-fixes-2026-10.md. Exit -2 is the deliberate low-space interruption, not a completed gate."
+        },
+        {
+          "phase": "targeted",
+          "name": "merge-inherited-red",
+          "command": [
+            "cargo",
+            "test",
+            "-p",
+            "zk-db",
+            "--lib",
+            "inherited_snapshot_rows_are_not_hidden_inside_one_serialized_record",
+            "--locked"
+          ],
+          "exitCode": 101,
+          "seconds": 5.86,
+          "evidence": {
+            "path": "target/necessary-fixes/targeted/merge-inherited-red.log",
+            "sha256": "cee8701514a13846e7e5287e0d502b7193a85399aab93fabad9bf8263e04de0e",
+            "bytes": 1591
+          },
+          "supersededBy": "rust-workspace",
+          "note": "Historical nonzero status retained; reason and resolution are documented in necessary-fixes-2026-10.md. Exit -2 is the deliberate low-space interruption, not a completed gate."
+        },
+        {
+          "phase": "targeted",
+          "name": "llm",
+          "command": [
+            "cargo",
+            "test",
+            "-p",
+            "zk-llm",
+            "--lib",
+            "--locked"
+          ],
+          "exitCode": 101,
+          "seconds": 6.45,
+          "evidence": {
+            "path": "target/necessary-fixes/targeted/llm.log",
+            "sha256": "8a00d64adb2e966afa0a569f8dcb4bb5e332e22aba3854978ee77a6f5e78b720",
+            "bytes": 18912
+          },
+          "supersededBy": "rust-workspace",
+          "note": "Historical nonzero status retained; reason and resolution are documented in necessary-fixes-2026-10.md. Exit -2 is the deliberate low-space interruption, not a completed gate."
+        },
+        {
+          "phase": "targeted",
+          "name": "authz",
+          "command": [
+            "cargo",
+            "test",
+            "-p",
+            "zk-authz",
+            "--locked"
+          ],
+          "exitCode": 101,
+          "seconds": 24.82,
+          "evidence": {
+            "path": "target/necessary-fixes/targeted/authz.log",
+            "sha256": "48ad55adeec310d0e6a0c1dd3237792c9872e5665f01578cfeaff0f29d9b5504",
+            "bytes": 15281
+          },
+          "supersededBy": "rust-workspace",
+          "note": "Historical nonzero status retained; reason and resolution are documented in necessary-fixes-2026-10.md. Exit -2 is the deliberate low-space interruption, not a completed gate."
+        },
+        {
+          "phase": "targeted",
+          "name": "repl-late-red",
+          "command": [
+            "cargo",
+            "test",
+            "-p",
+            "zk-server",
+            "--lib",
+            "startup_timeout_cause_precedes_late_admission_receipt",
+            "--locked"
+          ],
+          "exitCode": 101,
+          "seconds": 86.97,
+          "evidence": {
+            "path": "target/necessary-fixes/targeted/repl-late-red.log",
+            "sha256": "07cf4605294d68fcdfa03c8af8c9895d78c74ecf7e28ac5ccbe81e588e61ba03",
+            "bytes": 1369
+          },
+          "supersededBy": "rust-workspace",
+          "note": "Historical nonzero status retained; reason and resolution are documented in necessary-fixes-2026-10.md. Exit -2 is the deliberate low-space interruption, not a completed gate."
+        },
+        {
+          "phase": "targeted",
+          "name": "merge-inherited-red-fixed-fixture",
+          "command": [
+            "cargo",
+            "test",
+            "-p",
+            "zk-db",
+            "--lib",
+            "inherited_snapshot_rows_are_not_hidden_inside_one_serialized_record",
+            "--locked"
+          ],
+          "exitCode": 101,
+          "seconds": 22.01,
+          "evidence": {
+            "path": "target/necessary-fixes/targeted/merge-inherited-red-fixed-fixture.log",
+            "sha256": "6ca823c480d25477dd79adcb50d932b98e01fe4f1eae40aae894f55c3449cf23",
+            "bytes": 421102
+          },
+          "supersededBy": "rust-workspace",
+          "note": "Historical nonzero status retained; reason and resolution are documented in necessary-fixes-2026-10.md. Exit -2 is the deliberate low-space interruption, not a completed gate."
+        },
+        {
+          "phase": "targeted",
+          "name": "query-stream",
+          "command": [
+            "cargo",
+            "test",
+            "-p",
+            "zk-server",
+            "--test",
+            "query_stream",
+            "--locked"
+          ],
+          "exitCode": 101,
+          "seconds": 98.91,
+          "evidence": {
+            "path": "target/necessary-fixes/targeted/query-stream.log",
+            "sha256": "da0140a17d8bd58777f44a8a2c63d2030e6dcb5a31c03f08a2d09b83a8e78990",
+            "bytes": 2865
+          },
+          "supersededBy": "rust-workspace",
+          "note": "Historical nonzero status retained; reason and resolution are documented in necessary-fixes-2026-10.md. Exit -2 is the deliberate low-space interruption, not a completed gate."
+        },
+        {
+          "phase": "targeted",
+          "name": "fmt",
+          "command": [
+            "cargo",
+            "fmt",
+            "--all",
+            "--",
+            "--check"
+          ],
+          "exitCode": 1,
+          "seconds": 2.99,
+          "evidence": {
+            "path": "target/necessary-fixes/targeted/fmt.log",
+            "sha256": "de654de2473775a6783edb76e6e207192b2758ebe6a69bdeb1d44313e6176e1c",
+            "bytes": 887
+          },
+          "supersededBy": "fmt",
+          "note": "Historical nonzero status retained; reason and resolution are documented in necessary-fixes-2026-10.md. Exit -2 is the deliberate low-space interruption, not a completed gate."
+        },
+        {
+          "phase": "targeted",
+          "name": "clippy",
+          "command": [
+            "cargo",
+            "clippy",
+            "--workspace",
+            "--all-targets",
+            "--all-features",
+            "--locked",
+            "--",
+            "-D",
+            "warnings"
+          ],
+          "exitCode": 101,
+          "seconds": 14.79,
+          "evidence": {
+            "path": "target/necessary-fixes/targeted/clippy.log",
+            "sha256": "8036ab6c5060aba5e098136081364ba1fa0161c7e24ab1d7ae25cc2cf0ae0919",
+            "bytes": 17222
+          },
+          "supersededBy": "clippy",
+          "note": "Historical nonzero status retained; reason and resolution are documented in necessary-fixes-2026-10.md. Exit -2 is the deliberate low-space interruption, not a completed gate."
+        },
+        {
+          "phase": "targeted",
+          "name": "query-stream-green",
+          "command": [
+            "cargo",
+            "test",
+            "-p",
+            "zk-server",
+            "--test",
+            "query_stream",
+            "--locked"
+          ],
+          "exitCode": 101,
+          "seconds": 23.94,
+          "evidence": {
+            "path": "target/necessary-fixes/targeted/query-stream-green.log",
+            "sha256": "9c44f4e3f74b870e6fead4c297066cf28c6264af7784cbb43d6e683729f7da48",
+            "bytes": 2155
+          },
+          "supersededBy": "rust-workspace",
+          "note": "Historical nonzero status retained; reason and resolution are documented in necessary-fixes-2026-10.md. Exit -2 is the deliberate low-space interruption, not a completed gate."
+        },
+        {
+          "phase": "targeted",
+          "name": "journey-native",
+          "command": [
+            "cargo",
+            "test",
+            "-p",
+            "zk-server",
+            "--test",
+            "verify_journey_native",
+            "--locked",
+            "--",
+            "--ignored",
+            "--nocapture"
+          ],
+          "exitCode": 101,
+          "seconds": 13.7,
+          "evidence": {
+            "path": "target/necessary-fixes/targeted/journey-native.log",
+            "sha256": "428c6d4f4231097b057346ff65de2f5ee897df48a4793c136426b426c54a8d5d",
+            "bytes": 1984
+          },
+          "supersededBy": "native-browser",
+          "note": "Historical nonzero status retained; reason and resolution are documented in necessary-fixes-2026-10.md. Exit -2 is the deliberate low-space interruption, not a completed gate."
+        },
+        {
+          "phase": "targeted",
+          "name": "lsp-native",
+          "command": [
+            "cargo",
+            "test",
+            "-p",
+            "zk-tools",
+            "--test",
+            "lsp_native",
+            "--locked",
+            "--",
+            "--ignored"
+          ],
+          "exitCode": 101,
+          "seconds": 14.64,
+          "evidence": {
+            "path": "target/necessary-fixes/targeted/lsp-native.log",
+            "sha256": "82f499f1932431abd7cac0502b38dc22e8d02af9d34f296183cc91eef285e853",
+            "bytes": 1020
+          },
+          "supersededBy": "native-lsp",
+          "note": "Historical nonzero status retained; reason and resolution are documented in necessary-fixes-2026-10.md. Exit -2 is the deliberate low-space interruption, not a completed gate."
+        },
+        {
+          "phase": "final",
+          "name": "clippy",
+          "command": [
+            "cargo",
+            "clippy",
+            "--workspace",
+            "--all-targets",
+            "--all-features",
+            "--locked",
+            "--",
+            "-D",
+            "warnings"
+          ],
+          "exitCode": 101,
+          "seconds": 31.69,
+          "evidence": {
+            "path": "target/necessary-fixes/final/clippy.log",
+            "sha256": "a1a54b1ff5c803a0cca92653cc3ae2d93d7c9dbfdb21fd70c236e27de7e72365",
+            "bytes": 1430
+          },
+          "supersededBy": "clippy",
+          "note": "Historical nonzero status retained; reason and resolution are documented in necessary-fixes-2026-10.md. Exit -2 is the deliberate low-space interruption, not a completed gate."
+        },
+        {
+          "phase": "final",
+          "name": "workspace",
+          "command": [
+            "cargo",
+            "test",
+            "--workspace",
+            "--locked"
+          ],
+          "exitCode": -2,
+          "seconds": 193.96,
+          "evidence": {
+            "path": "target/necessary-fixes/final/workspace.log",
+            "sha256": "9148d38e82f39a3ed72390f5881117e64355a27a593d7c764f3165ee7ca5263d",
+            "bytes": 795
+          },
+          "supersededBy": "rust-workspace",
+          "note": "Historical nonzero status retained; reason and resolution are documented in necessary-fixes-2026-10.md. Exit -2 is the deliberate low-space interruption, not a completed gate."
+        },
+        {
+          "phase": "final",
+          "name": "workspace-round2",
+          "command": [
+            "cargo",
+            "test",
+            "--workspace",
+            "--locked"
+          ],
+          "exitCode": 101,
+          "seconds": 168.77,
+          "evidence": {
+            "path": "target/necessary-fixes/final/workspace-round2.log",
+            "sha256": "f57c686c09c8a94c3543b2685c350ad0f79b1e079ea366088fc8815085a382a4",
+            "bytes": 39156
+          },
+          "supersededBy": "rust-workspace",
+          "note": "Historical nonzero status retained; reason and resolution are documented in necessary-fixes-2026-10.md. Exit -2 is the deliberate low-space interruption, not a completed gate."
+        },
+        {
+          "phase": "final",
+          "name": "clippy-frozen",
+          "command": [
+            "cargo",
+            "clippy",
+            "--workspace",
+            "--all-targets",
+            "--all-features",
+            "--locked",
+            "--",
+            "-D",
+            "warnings"
+          ],
+          "exitCode": 101,
+          "seconds": 29.95,
+          "evidence": {
+            "path": "target/necessary-fixes/final/clippy-frozen.log",
+            "sha256": "5a8c1928f1566eae61767a116852d42eb694094cfbf3bcbf358fccc1e3a08cb7",
+            "bytes": 2400
+          },
+          "supersededBy": "clippy",
+          "note": "Historical nonzero status retained; reason and resolution are documented in necessary-fixes-2026-10.md. Exit -2 is the deliberate low-space interruption, not a completed gate."
+        },
+        {
+          "phase": "final",
+          "name": "journey-native",
+          "command": [
+            "cargo",
+            "test",
+            "-p",
+            "zk-server",
+            "--test",
+            "verify_journey_native",
+            "--locked",
+            "--",
+            "--ignored",
+            "--nocapture"
+          ],
+          "exitCode": 101,
+          "seconds": 47.92,
+          "evidence": {
+            "path": "target/necessary-fixes/final/journey-native.log",
+            "sha256": "b03749de4503f19a452124242ad3f1bb4d56f561b31cc11b9cdd5dac6ddb3176",
+            "bytes": 3108
+          },
+          "supersededBy": "native-browser",
+          "note": "Historical nonzero status retained; reason and resolution are documented in necessary-fixes-2026-10.md. Exit -2 is the deliberate low-space interruption, not a completed gate."
+        },
+        {
+          "name": "installer-timeout",
+          "evidence": {
+            "path": "target/necessary-fixes/final/installer-tests.log",
+            "sha256": "330b3162932a6d1f331216100fbfaa04c932b5b88430c329a90a42aa00342a8a",
+            "bytes": 4937
+          },
+          "reason": "5 second fixture process timeout under concurrent gate load; fixture-only cap raised to 30 seconds",
+          "supersededBy": "installer"
+        },
+        {
+          "name": "initial-production-e2e",
+          "evidence": {
+            "path": "target/necessary-fixes/final/production-e2e-initial.log",
+            "sha256": "e5a6a71badeeaf4b4f9092d164fdc4817e9f2c936eb3de33187451688e12516f",
+            "bytes": 7051
+          },
+          "reason": "9/10; direct replay lacked Origin and was correctly rejected with 403. Test now sends page Origin and checks existing 202 Accepted contract. Disabled-Python harness now uses isolated missing socket after initial old UDS probe returned 404.",
+          "supersededBy": "e2e-production"
+        },
+        {
+          "name": "initial-secret-scan",
+          "evidence": {
+            "path": "target/necessary-fixes/targeted/secrets.log",
+            "sha256": "2b3fb95f545f0ac1713963c631ea87a22bc7f6365fb4cf64e8d4c52a7562a0b0",
+            "bytes": 146
+          },
+          "reason": "Fake HTTP command triggered detector. Fixture command renamed; no scanning rule or allowlist change.",
+          "supersededBy": "release-secrets"
+        },
+        {
+          "name": "source-order-red",
+          "evidence": {
+            "path": "target/necessary-fixes/lsp-source-sort-red.log",
+            "sha256": "476eb49efbcb0a31d5c0ed5e2f9335870ad5c65f17e45a8ab50345e88da304b2",
+            "bytes": 2635
+          },
+          "reason": "Python/Rust private source tree ordering differed. Unified POSIX UTF-8 relative path ordering, then reinstalled and revalidated.",
+          "supersededBy": "native-lsp"
+        }
+      ],
+      "ignoredOrNotRun": [
+        {
+          "name": "dashscope_live",
+          "status": "not_run",
+          "reason": "Real external provider/paid call outside the approved local fixture gate scope"
+        },
+        {
+          "name": "dashscope_token_plan_live",
+          "status": "not_run",
+          "reason": "Real external provider/paid call outside the approved local fixture gate scope"
+        },
+        {
+          "name": "deepseek_live",
+          "status": "not_run",
+          "reason": "Real external provider/paid call outside the approved local fixture gate scope"
+        },
+        {
+          "name": "moonshot_kimi_live",
+          "status": "not_run",
+          "reason": "Real external provider/paid call outside the approved local fixture gate scope"
+        },
+        {
+          "name": "mcp_search::tests::dashscope_web_search_live",
+          "status": "not_run",
+          "reason": "Real external provider/paid call outside the approved local fixture gate scope"
+        },
+        {
+          "name": "remote-provider-oauth",
+          "status": "not_run",
+          "reason": "Local protocol fixtures and actual macOS Keychain passed; no real remote provider login/revocation claim"
+        },
+        {
+          "name": "physical-power-loss-or-disk-exhaustion",
+          "status": "not_run",
+          "reason": "Deterministic SQLite triggers, I/O failure injection, disconnection and restart used instead"
+        },
+        {
+          "name": "one-GiB-single-BLOB",
+          "status": "excluded",
+          "reason": "Explicit user boundary; existing single BLOB storage retained"
+        },
+        {
+          "name": "Node-and-Ruby-long-lived-native-REPL-soak",
+          "status": "not_run",
+          "reason": "Native cross-round regression used Python; all interpreters share managed slot and cleanup chain"
+        }
+      ],
+      "defaultIgnoredAccounting": {
+        "workspaceIgnored": 9,
+        "explicitNativeTestsRunAndPassed": 4,
+        "providerTestsNotRun": 5,
+        "nativeDetails": [
+          "Keychain: 1",
+          "browser: 2",
+          "LSP suite: 1"
+        ],
+        "overlapRule": "Do not sum workspace, package, no-default, normal/deep doctor, nested harness or supplemental regression counts as disjoint test totals."
+      },
+      "runtimeIdentities": {
+        "privateLsp": {
+          "schemaVersion": 2,
+          "fingerprint": "c409746b9911dfed20d8abaff78eb36938a9070d4e9c3d7f6311e5faa67c0656",
+          "bundle": "c409746b9911dfed20d8abaff78eb36938a9070d4e9c3d7f6311e5faa67c0656",
+          "versions": {
+            "node": "22.23.3",
+            "go": "1.27.1",
+            "java": "21.0.12.1+1",
+            "jdtls": "1.61.0",
+            "rust-analyzer": "2026-10-05",
+            "rust-src": "1.97.1",
+            "typescript": "6.0.3",
+            "typescript-language-server": "6.0.1",
+            "pyright": "1.1.414",
+            "gopls": "v0.23.0",
+            "rustCompiler": "1.97.1"
+          },
+          "identities": {
+            "node/bin/node": "68f4d07ca49e0500cc135c7e0a445093e228e42e126ac22306d045f0a8c2636b",
+            "go/bin/go": "132b69336a1f809932a8a20b0201dbbb980e86e3a323ae32e893639d83d71598",
+            "java/Contents/Home/bin/java": "9be1d0a740ff6502df1a762145e62860f5de4b7e17658d9cb9498da3acf9d16c",
+            "jdtls/plugins/org.eclipse.equinox.launcher_1.8.0.v20260804-1928.jar": "9b3b1da60813ac5fa09dd5c198f1884be7076d0a5daec54faa3f351a787e34b7",
+            "rust-analyzer/rust-analyzer": "6e232bb1835fee8106ee985d90702e2cef9647392b28b91dcfa2cae17a975983",
+            "bin/gopls": "770955922ccbc33cc58bb8e2737801eb17efd38e6a1cc6ba67e8adfb5fe18cd3",
+            "npm/node_modules/typescript-language-server/lib/cli.mjs": "089c72139e7eafc8d54cde69f884d1dd9464712e5278185ec0d7a49baf1f8247",
+            "npm/node_modules/typescript/lib/tsserver.js": "e3ccfeec65ec5c470b8ffc5611878a31182650c7e8a062c38a719f83b523edcb",
+            "npm/node_modules/pyright/dist/pyright-langserver.js": "467344c79457ec74f7f7b6cb0f52c3c5ebc7ea77bf53edeb6d2dc6217687b507"
+          },
+          "servers": {
+            "typescript": {
+              "program": "node/bin/node",
+              "args": [
+                "{bundle}/npm/node_modules/typescript-language-server/lib/cli.mjs",
+                "--stdio"
+              ]
+            },
+            "python": {
+              "program": "node/bin/node",
+              "args": [
+                "{bundle}/npm/node_modules/pyright/dist/pyright-langserver.js",
+                "--stdio"
+              ]
+            },
+            "rust": {
+              "program": "rust-analyzer/rust-analyzer",
+              "args": []
+            },
+            "go": {
+              "program": "bin/gopls",
+              "args": [
+                "serve"
+              ]
+            },
+            "java": {
+              "program": "java/Contents/Home/bin/java",
+              "args": [
+                "-Declipse.application=org.eclipse.jdt.ls.core.id1",
+                "-Dosgi.bundles.defaultStartLevel=4",
+                "-Dosgi.install.area={bundle}/jdtls",
+                "-Dlog.protocol=false",
+                "-Djava.io.tmpdir={state}/tmp",
+                "-Declipse.product=org.eclipse.jdt.ls.core.product",
+                "-Xmx1024m",
+                "--add-modules=ALL-SYSTEM",
+                "--add-opens",
+                "java.base/java.util=ALL-UNNAMED",
+                "--add-opens",
+                "java.base/java.lang=ALL-UNNAMED",
+                "-jar",
+                "{bundle}/jdtls/plugins/org.eclipse.equinox.launcher_1.8.0.v20260804-1928.jar",
+                "-configuration",
+                "{state}/java-config",
+                "-data",
+                "{state}/java"
+              ]
+            }
+          },
+          "rustSourceRoot": "rust-src/rust-src/lib/rustlib/src/rust/library",
+          "rustSourceSha256": "37f0c50967c8fe5dc7ebdc721a3efba591861f913d156c45f34eec1df727ee07",
+          "rustCompilerSha256": "210df6794001b73ec3d453878707fa1e0bdcb63c427024a6e6574bbe5615a4da",
+          "cargoSha256": "7672ead309d505577c018fff2cafb3433601f073e38cbe87359ac1f7b944bbf5",
+          "manifestPath": "{repo}/target/necessary-fixes/lsp-native/current.json",
+          "manifestSha256": "4aadbf823de48f42ad54bb1789d4614ea48317ebd85f0449cbb8f00b7b8fb0d1",
+          "activeManifestPreserved": true
+        },
+        "office": {
+          "checks": [
+            {
+              "detail": "LibreOfficeDev 26.8.0.0.alpha0 2c87e51eeaa2b413ff4ae097b2705eea1995d8e5",
+              "name": "libreoffice",
+              "ok": true
+            },
+            {
+              "detail": "pdftoppm version 26.10.0",
+              "name": "pdf",
+              "ok": true
+            },
+            {
+              "detail": "pdftotext version 26.10.0",
+              "name": "pdf-text",
+              "ok": true
+            },
+            {
+              "detail": "pdfinfo version 26.10.0",
+              "name": "pdf-info",
+              "ok": true
+            },
+            {
+              "detail": "qpdf version 12.4.2",
+              "name": "qpdf",
+              "ok": true
+            },
+            {
+              "detail": "ffmpeg version 9.0.2 Copyright (c) 2000-2026 the FFmpeg developers",
+              "name": "media",
+              "ok": true
+            },
+            {
+              "detail": "Version: ImageMagick 7.1.2-32 Q16-HDRI aarch64 68f8d115a:20260926 https://imagemagick.org",
+              "name": "images",
+              "ok": true
+            },
+            {
+              "detail": "dot - graphviz version 16.1.0 (20260904.0139)",
+              "name": "diagrams",
+              "ok": true
+            },
+            {
+              "detail": "pandoc 3.12",
+              "name": "documents",
+              "ok": true
+            },
+            {
+              "detail": "tesseract 5.5.3",
+              "name": "ocr",
+              "ok": true
+            },
+            {
+              "detail": "chi_sim and chi_tra required",
+              "name": "ocr-chinese",
+              "ok": true
+            },
+            {
+              "detail": "Noto Sans CJK or native PingFang",
+              "name": "cjk-fonts",
+              "ok": true
+            }
+          ],
+          "identities": [
+            {
+              "name": "libreoffice",
+              "file": "soffice",
+              "sha256": "81c7db1c6dbcdd606d95abef337b4529aeda6a4fa1cf23a5a567f9c5655c8b66"
+            },
+            {
+              "name": "pdf",
+              "file": "pdftoppm",
+              "sha256": "3bdab16e11c8d10b4fd9615231210125dbb195ae3ec2f22d641758242b159cb1"
+            },
+            {
+              "name": "pdf-text",
+              "file": "pdftotext",
+              "sha256": "83c5be5ea8da9fdeae4df5bb15395265770a84e89fe81d89b9b2535a669ec214"
+            },
+            {
+              "name": "pdf-info",
+              "file": "pdfinfo",
+              "sha256": "a6c5a5a30d25cb70a22707c9f8000e7bccdf3fad7ff810a3f1af8cddf075a454"
+            },
+            {
+              "name": "qpdf",
+              "file": "qpdf",
+              "sha256": "a6f9eb3ea45df2d5a1e044e06fcdfec8defa523ac9fc362c02180b4427459b0e"
+            },
+            {
+              "name": "media",
+              "file": "ffmpeg",
+              "sha256": "1ede5c7fd4e97d832ec69c97c78231875de7d69c55423158f5f4a4d923227dd5"
+            },
+            {
+              "name": "images",
+              "file": "magick",
+              "sha256": "b4af751707a5b8aecd5729d85f8f0e28863472cb154fbf3e6ed61840271be97f"
+            },
+            {
+              "name": "diagrams",
+              "file": "dot",
+              "sha256": "a0a492e997c991ad95256eaf9b8f1d4a1a7033f494dd4f3dd33e91afe9caf2ec"
+            },
+            {
+              "name": "documents",
+              "file": "pandoc",
+              "sha256": "facb69e317dfea78d0b34d7637e2eca0920fef08f554551e6b9f6b0ed664b5d6"
+            },
+            {
+              "name": "ocr",
+              "file": "tesseract",
+              "sha256": "21674e0595020d02c049765fba6a51cedccdbae26eac94c5d15b55e3e6ecdec3"
+            },
+            {
+              "name": "cjk-fonts",
+              "file": "NotoSansCJKsc-Bold.otf",
+              "sha256": "b5f0d1a190a7f9b43c310a8850630af12553df32c4c050543f9059732d9b4c0a"
+            },
+            {
+              "name": "cjk-fonts",
+              "file": "NotoSansCJKsc-Regular.otf",
+              "sha256": "2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b"
+            },
+            {
+              "name": "cjk-fonts",
+              "file": "NotoSansCJKsc-Thin.otf",
+              "sha256": "89bb8179d1b285ac0ca236b37ff29929ee3cc4526048dc11630a55728063e5ba"
+            },
+            {
+              "name": "cjk-fonts",
+              "file": "NotoSansCJKsc-Black.otf",
+              "sha256": "2267c4a0312d267dff8c0d1609948f7d949a3da8be3e126f5e2690cb9cc883b4"
+            },
+            {
+              "name": "cjk-fonts",
+              "file": "NotoSansCJKsc-DemiLight.otf",
+              "sha256": "4600700d1b10c8e82074de7c91fa60d2ff5d0a7b9588edea6ab0929424b1699f"
+            },
+            {
+              "name": "cjk-fonts",
+              "file": "NotoSansCJKsc-Light.otf",
+              "sha256": "e78bbbe1573bbb006156c1198f5c8cd6329470cb6e0b6702c7a3c83913db4abf"
+            },
+            {
+              "name": "cjk-fonts",
+              "file": "NotoSansCJKsc-Medium.otf",
+              "sha256": "ca094f6b0001fb048ca39ddd797a0cdb0179e1e55c6561e111c49c3e6a61d7b7"
+            },
+            {
+              "name": "ocr-chi_sim",
+              "file": "chi_sim.traineddata",
+              "sha256": "a5fcb6f0db1e1d6d8522f39db4e848f05984669172e584e8d76b6b3141e1f730"
+            },
+            {
+              "name": "ocr-chi_tra",
+              "file": "chi_tra.traineddata",
+              "sha256": "529c5b5797d64b126065cd55f2bb4c7fd7b15790798091b1ff259941a829330b"
+            }
+          ]
+        },
+        "nativeBrowser": {
+          "path": "{repo}/.runtime/playwright/chromium_headless_shell-1208/chrome-headless-shell-mac-arm64/chrome-headless-shell",
+          "sha256": "a46b3b1e63163fa2d2437fb6ae967cb5a73b50050bca32f1964e6129b6228244",
+          "version": "145.0.7632.6"
+        },
+        "frontendBrowser": "installed Chrome 154.0.8037.98",
+        "frontendVerifiedSourceSha256": "8dfffc2236af901036db776924ef92064b0f75c3907548b6e7086e70cd9deded",
+        "frontendVerifiedFiles": 543
+      },
+      "activeEnvironment": {
+        "status": "intentionally_not_updated",
+        "originalDoctorEvidence": {
+          "path": "target/necessary-fixes/doctor-validation/doctor-original.json",
+          "sha256": "3b368f21c345eca4b29d6f186af4c08fa3f3ac8e8ac8c534716ab33e6f5eb421",
+          "bytes": 5062
+        },
+        "reason": "Old active build/state and schema-1 LSP manifest intentionally retained. Original-root doctor is stale; isolated candidate deep doctor 37/37 passed. Activation requires a separately authorized service stop/sync/start.",
+        "protectedBefore": {
+          "{repo}/.runtime/dev/dev-state.json": "a550cf248c911346ceb1ace1bd26b3119cfbc22ad1c6659a42755407332756bd",
+          "{repo}/.runtime/lsp/current.json": "e789c506977fdb30ffec3c14d467b60940c65b3af704923ea11103ab21f12cfd",
+          "{repo}/target/necessary-fixes/doctor-workspace/.runtime/dev/dev-state.json": "682bc1ed4294a4123aa0cb0c4c5dd5644d7c5f900a91b5cf8f28768b8ac4d2fb"
+        },
+        "protectedAfter": {
+          "{repo}/.runtime/dev/dev-state.json": "a550cf248c911346ceb1ace1bd26b3119cfbc22ad1c6659a42755407332756bd",
+          "{repo}/.runtime/lsp/current.json": "e789c506977fdb30ffec3c14d467b60940c65b3af704923ea11103ab21f12cfd",
+          "{repo}/target/necessary-fixes/doctor-workspace/.runtime/dev/dev-state.json": "682bc1ed4294a4123aa0cb0c4c5dd5644d7c5f900a91b5cf8f28768b8ac4d2fb"
+        }
+      },
+      "warningsAndLimits": [
+        "Safe DOM projection safe_dom_v1 covers the current document; not native ARIA and not complete frame/shadow accessibility coverage. Password-input values are not read; no claim of arbitrary secrets detection in visible labels/text.",
+        "Frontend build retains large-chunk, mixed import and empty chunk warnings.",
+        "Python dependency deprecation warnings and cargo-deny duplicate/unmatched-license warnings remain.",
+        "Office actual LibreOfficeDev 26.8.0.0.alpha0 identity is an alpha tool, not stable Office acceptance.",
+        "Recording batch count 10 is not a recording peak-byte limit; owned/unacknowledged batches retain cleanup responsibility.",
+        "Existing single BLOB large writes can still hold a write lock; extreme BLOB engineering was excluded.",
+        "No real provider cost or unknown-price policy change in this task."
+      ],
+      "supportingArtifacts": [
+        {
+          "path": "target/necessary-fixes/final/source-freeze.json",
+          "sha256": "faf332f344983574dec265b1b839a95cf464aa7a21eb7bc9698bcfe04119c40b",
+          "bytes": 212938
+        },
+        {
+          "path": "target/necessary-fixes/final/source-final.json",
+          "sha256": "050366db101f4cdda64f6e1646994f6453f2a1e4499dc5d8a4addef3cb112711",
+          "bytes": 213579
+        },
+        {
+          "path": "target/necessary-fixes/final/post-build-test-changes.json",
+          "sha256": "06893e5bc1d5e33ecb5861d69569dd0442c08973568da7dcbacb2e835d419d97",
+          "bytes": 462
+        },
+        {
+          "path": "target/necessary-fixes/final/e2e-results.json",
+          "sha256": "a1125086ef7eca8312133835b864d5643c2fc66cb0f4ec058bf29d292ec4794d",
+          "bytes": 5074
+        },
+        {
+          "path": "target/necessary-fixes/final/doctor-deep-final-result.json",
+          "sha256": "68f36742c33f8e9070e10642f8a2df170615b910f727bb3c7627e1057f434613",
+          "bytes": 2570
+        },
+        {
+          "path": "target/necessary-fixes/doctor-validation/results.json",
+          "sha256": "6cafebe3592cc8f44dd4ba6425507dfbf7958f48e4cd36334cb79ce3f68e9e3a",
+          "bytes": 4143
+        },
+        {
+          "path": "target/necessary-fixes/office-evidence/run-identity.json",
+          "sha256": "c62cdd5936242cb89a3ca2e72fd4e5a0a792db19b4a79170886b110a276d05d4",
+          "bytes": 495
+        },
+        {
+          "path": "target/necessary-fixes/office-evidence/evidence/preflight-toolchain.json",
+          "sha256": "1f7dd7f399283a37e287036ac3a311655084a314986ca41962aeac7a23cff49c",
+          "bytes": 6046
+        },
+        {
+          "path": "target/necessary-fixes/stale-test-cache-cleanup.json",
+          "sha256": "6b93d63bf6ba32cb8f358b7d4adc19fc68d8ff45661e1c99c631ca9864027741",
+          "bytes": 19932
+        }
+      ],
+      "finalConsistency": {
+        "checkedAt": "2026-10-07T18:41:47.940079+00:00",
+        "diffCheckExitCode": 0,
+        "sourceFilesRechecked": 1367,
+        "sourceUnchangedSinceFinalE2E": true,
+        "headUnchanged": true,
+        "branchUnchanged": true,
+        "changedOrUntrackedFiles": 123,
+        "schemaAndLockfilesUnchanged": true
+      },
+      "historicalAssessmentBeforeIndependentReview": {
+        "status": "passed_with_explicit_scope_limits",
+        "submissionReadyForAuthorizedScope": true,
+        "scope": "16 necessary defect groups only; no fee-policy rewrite or full-source parity claim",
+        "noRemainingLocalGateFailures": true,
+        "notRunIsNotPassed": true,
+        "committed": false,
+        "pushed": false,
+        "prCreated": false,
+        "activeServicesRestarted": false
+      }
+    }
+  },
+  "buildCacheCleanup": {
+    "recordedAt": "2026-10-08T06:08:14.045472+00:00",
+    "removedGeneratedDirectory": "target/evidence-delete-build/debug",
+    "directoryKiBBefore": 13384560,
+    "freeBytesBefore": 47109144576,
+    "freeBytesAfter": 60587917312,
+    "releaseSha256Preserved": "9be53c8f103586deeb81fb69743b4ccb5ae7bbe3247004370e2587e97fa04d18",
+    "activeTestProcessesDetected": false,
+    "existingTargetDebugTouched": false
+  }
+}

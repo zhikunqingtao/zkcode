@@ -35,6 +35,14 @@ pub enum ProviderError {
         /// 是否可重试（429 / 5xx 为 `true`）。
         retryable: bool,
     },
+    /// Provider-declared stream failure, distinct from an HTTP response status.
+    #[error("provider stream error ({code}): {message}")]
+    Stream {
+        /// Exact provider error code; unknown codes never imply retryability.
+        code: String,
+        /// Bounded provider diagnostic.
+        message: String,
+    },
     /// 网络层错误：连接失败、连接超时、读超时、流中断。
     ///
     /// 恒为可重试（对齐旧 Java：`OkHttp` `IOException` → `retryable = true`）。
@@ -79,9 +87,10 @@ pub enum ProviderError {
 impl ProviderError {
     /// Preserve typed connection-establishment failures for the small retry budget.
     #[must_use]
-    pub fn from_transport(error: &reqwest::Error) -> Self {
-        let message = error.to_string();
-        if error.is_connect() {
+    pub fn from_transport(error: reqwest::Error) -> Self {
+        let connect = error.is_connect();
+        let message = error.without_url().to_string();
+        if connect {
             Self::Connect { message }
         } else {
             Self::Network { message }
@@ -128,6 +137,9 @@ impl ProviderError {
             | Self::Config { .. }
             | Self::Preflight { .. } => false,
             Self::Http { retryable, .. } => *retryable,
+            Self::Stream { code, .. } => {
+                matches!(code.as_str(), "server_error" | "rate_limit_exceeded")
+            }
             Self::Network { .. } | Self::Connect { .. } => true,
         }
     }
@@ -136,6 +148,21 @@ impl ProviderError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn transport_diagnostic_does_not_reveal_url_credentials() {
+        let error = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get("http://127.0.0.1:1/?api_key=zk-secret-canary")
+            .send()
+            .await
+            .unwrap_err();
+        let classified = ProviderError::from_transport(error);
+        assert!(!classified.to_string().contains("zk-secret-canary"));
+        assert!(matches!(classified, ProviderError::Connect { .. }));
+    }
 
     #[test]
     fn http_retryable_classification_matches_legacy() {

@@ -230,7 +230,7 @@ async fn native_images_survive_source_deletion_and_reopen_without_trusting_forge
 }
 
 #[tokio::test]
-async fn corrupt_trusted_payload_or_source_metadata_rolls_back_the_complete_snapshot() {
+async fn corrupt_trusted_payload_or_source_metadata_pauses_unsealed_capture_without_assets() {
     for corrupt_source in [false, true] {
         let db = Db::open_in_memory().unwrap();
         let (request, run) = fixture(&db).await;
@@ -278,6 +278,20 @@ async fn corrupt_trusted_payload_or_source_metadata_rolls_back_the_complete_snap
                 ))
             })
             .unwrap();
-        assert_eq!(counts, (0, 0));
+        assert_eq!(counts, (1, 0));
+        let paused = db.active_session_merge().await.unwrap().unwrap();
+        assert_eq!(paused.status, "paused");
+        assert!(!paused.snapshot_sealed);
+        assert!(paused.locked_source_session_ids.is_empty());
+        assert!(!paused.target_available);
+        assert!(
+            db.get_session(&paused.target_session_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        for source in &request.source_session_ids {
+            db.ensure_session_idle(source).await.unwrap();
+        }
     }
 }

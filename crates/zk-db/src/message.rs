@@ -258,6 +258,74 @@ pub(super) fn load_message_rows(
         .collect())
 }
 
+/// Decorate display copies only; stored messages and model history stay immutable.
+pub(super) fn project_runtime_diagnostics(
+    conn: &Connection,
+    session_id: &str,
+    messages: &mut [MessageRecord],
+) -> Result<(), DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT r.id,r.task_id,r.status,r.exit_reason,r.error_summary,r.cleanup_status,
+                (SELECT result.error_code FROM task_results result
+                 WHERE result.run_id=r.id AND result.task_id=r.task_id
+                 ORDER BY result.result_version DESC LIMIT 1)
+         FROM messages m
+         JOIN run_envelopes r ON r.id=m.run_id AND r.task_id=m.task_id
+         JOIN tasks t ON t.id=r.task_id AND t.session_id=r.session_id
+         WHERE m.id=?1 AND m.session_id=?2 AND r.session_id=?2
+           AND m.role='system' AND m.origin='runtime' AND m.source_task_id IS NULL
+           AND r.parent_run_id IS NULL AND t.parent_task_id IS NULL",
+    )?;
+    for message in messages {
+        if message.session_id != session_id || message.role != MessageRole::System {
+            continue;
+        }
+        let Some(meta) = message
+            .meta
+            .as_mut()
+            .and_then(serde_json::Value::as_object_mut)
+        else {
+            continue;
+        };
+        // Never accept a diagnostic supplied in persisted/user-controlled metadata.
+        meta.remove("runtimeDiagnostic");
+        if meta.get("subtype").and_then(serde_json::Value::as_str) != Some("task_boundary")
+            || meta
+                .get("boundary_kind")
+                .and_then(serde_json::Value::as_str)
+                != Some("run")
+        {
+            continue;
+        }
+        let diagnostic = stmt
+            .query_row(params![message.id, session_id], |row| {
+                let status: String = row.get(2)?;
+                let code = crate::content::load_diagnostic(conn, session_id, row.get(6)?)?;
+                if !matches!(status.as_str(), "failed" | "cancelled" | "interrupted")
+                    && code.as_deref() != Some("CLEANUP_UNCONFIRMED")
+                {
+                    return Ok(None);
+                }
+                let summary = crate::content::load_diagnostic(conn, session_id, row.get(4)?)?;
+                Ok(Some(serde_json::json!({
+                    "runId":row.get::<_,String>(0)?,
+                    "taskId":row.get::<_,String>(1)?,
+                    "status":status,
+                    "exitReason":row.get::<_,Option<String>>(3)?,
+                    "code":code,
+                    "message":summary.map(|value|value.chars().take(4096).collect::<String>()),
+                    "cleanupStatus":row.get::<_,String>(5)?,
+                })))
+            })
+            .optional()?
+            .flatten();
+        if let Some(diagnostic) = diagnostic {
+            meta.insert("runtimeDiagnostic".to_owned(), diagnostic);
+        }
+    }
+    Ok(())
+}
+
 fn validate_attribution(
     conn: &Connection,
     session_id: &str,
@@ -296,6 +364,25 @@ fn validate_attribution(
 }
 
 impl crate::Db {
+    /// Attach authoritative root-run diagnostics to UI copies under one read snapshot.
+    ///
+    /// # Errors
+    /// Query or content-ownership failures propagate; no message is persisted.
+    pub async fn project_message_runtime_diagnostics(
+        &self,
+        session_id: &str,
+        mut messages: Vec<MessageRecord>,
+    ) -> Result<Vec<MessageRecord>, DbError> {
+        let session_id = session_id.to_owned();
+        self.with_reader(move |conn| {
+            let tx = conn.transaction()?;
+            project_runtime_diagnostics(&tx, &session_id, &mut messages)?;
+            tx.commit()?;
+            Ok(messages)
+        })
+        .await
+    }
+
     /// Idempotently queue a user instruction on its active root Run.
     /// # Errors
     /// Rejects changed payloads, cross-session ids and inactive/child Runs.
@@ -572,6 +659,31 @@ impl crate::Db {
         cursor: Option<&str>,
         limit: u32,
     ) -> Result<Option<MessagePage>, DbError> {
+        self.list_messages_inner(session_id, cursor, limit, false)
+            .await
+    }
+
+    /// Read a UI page with root diagnostics, preserving its original cursor and size.
+    ///
+    /// # Errors
+    /// Returns query or content-ownership errors without fabricating success.
+    pub async fn list_messages_for_display(
+        &self,
+        session_id: &str,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<Option<MessagePage>, DbError> {
+        self.list_messages_inner(session_id, cursor, limit, true)
+            .await
+    }
+
+    async fn list_messages_inner(
+        &self,
+        session_id: &str,
+        cursor: Option<&str>,
+        limit: u32,
+        display: bool,
+    ) -> Result<Option<MessagePage>, DbError> {
         let session_id = session_id.to_owned();
         let offset = cursor.and_then(decode_message_cursor).unwrap_or(0);
         if cursor.is_some() && cursor.map(decode_message_cursor) == Some(None) {
@@ -581,6 +693,8 @@ impl crate::Db {
         // u64（游标索引）→ i64（SQLite 参数）；越界游标饱和为 i64::MAX 即空页。
         let offset = i64::try_from(offset).unwrap_or(i64::MAX);
         self.with_reader(move |conn| {
+            let tx = conn.transaction()?;
+            let conn = &tx;
             let exists: bool = conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ?1)",
                 params![session_id],
@@ -620,7 +734,7 @@ impl crate::Db {
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             let has_more = rows.len() > limit as usize;
-            let messages: Vec<MessageRecord> = rows
+            let mut messages: Vec<MessageRecord> = rows
                 .into_iter()
                 .take(limit as usize)
                 .filter_map(
@@ -652,6 +766,11 @@ impl crate::Db {
                     },
                 )
                 .collect();
+            drop(stmt);
+            if display {
+                project_runtime_diagnostics(conn, &session_id, &mut messages)?;
+            }
+            tx.commit()?;
             let next_cursor = has_more.then(|| {
                 encode_message_cursor(u64::try_from(offset + i64::from(limit)).unwrap_or(u64::MAX))
             });
@@ -771,4 +890,269 @@ fn parse_metadata(raw: Option<String>) -> rusqlite::Result<Option<serde_json::Va
         })
     })
     .transpose()
+}
+
+#[cfg(test)]
+mod display_tests {
+    use super::*;
+    use crate::{
+        CleanupStatus, CommitTaskResult, CreateTaskWithRun, ResultStatus, VerificationStatus,
+    };
+
+    async fn failed_boundary(db: &crate::Db, session: &str) -> MessageRecord {
+        let task = db
+            .create_task_with_run(&CreateTaskWithRun {
+                task_id: uuid::Uuid::new_v4().to_string(),
+                run_id: uuid::Uuid::new_v4().to_string(),
+                root_session_id: session.to_owned(),
+                transcript_session_id: session.to_owned(),
+                parent_task_id: None,
+                parent_run_id: None,
+                creator_tool_use_id: None,
+                ordinal: 0,
+                description: "diagnostic regression".into(),
+                prompt: None,
+                task_type: "agent".into(),
+                model: "fixture".into(),
+                working_dir: "/tmp".into(),
+                execution_config_json: "{}".into(),
+                startup_epoch: 1,
+            })
+            .await
+            .unwrap();
+        let message = db.append_attributed_message(session, NewMessage {
+            meta: Some(serde_json::json!({"subtype":"task_boundary","boundary_kind":"run","task_id":"not-the-run-id"})),
+            role: MessageRole::System,
+            content: vec![StoredBlock::Text {text:"request".into()}],
+            stop_reason: None,
+            input_tokens: 0,
+            output_tokens: 0,
+        }, MessageAttribution {
+            task_id: Some(task.task.id.clone()),
+            run_id: Some(task.run_id.clone()),
+            origin: "runtime".into(),
+            source_task_id: None,
+        }).await.unwrap();
+        db.commit_task_result(&CommitTaskResult {
+            task_id: task.task.id,
+            run_id: task.run_id,
+            expected_task_version: task.task.version,
+            status: ResultStatus::Error,
+            content: "provider rejected the request".into(),
+            media_type: "text/plain".into(),
+            error_code: Some("PROVIDER_FAILED".into()),
+            cleanup_status: CleanupStatus::Confirmed,
+            verification_status: VerificationStatus::NotRequested,
+        })
+        .await
+        .unwrap();
+        message
+    }
+
+    #[tokio::test]
+    async fn restore_projects_failed_run_without_mutating_canonical_messages() {
+        let db = crate::Db::open_in_memory().unwrap();
+        db.create_session_with_id("display-failure", "fixture", "/tmp")
+            .await
+            .unwrap();
+        let original = failed_boundary(&db, "display-failure").await;
+        let restore = db
+            .get_session_runtime_restore("display-failure")
+            .await
+            .unwrap()
+            .unwrap();
+        let diagnostic = &restore.detail.messages[0].meta.as_ref().unwrap()["runtimeDiagnostic"];
+        assert_eq!(diagnostic["status"], "failed");
+        assert_eq!(diagnostic["code"], "PROVIDER_FAILED");
+        assert_ne!(diagnostic["runId"], "not-the-run-id");
+        assert_eq!(
+            db.get_message_by_id(&original.id).await.unwrap().unwrap(),
+            original
+        );
+        assert_eq!(
+            db.get_session("display-failure")
+                .await
+                .unwrap()
+                .unwrap()
+                .messages,
+            vec![original]
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_pricing_is_independent_of_usage_integrity() {
+        let db = crate::Db::open_in_memory().unwrap();
+        db.create_session_with_id("pricing-display", "fixture", "/tmp")
+            .await
+            .unwrap();
+        let restore = db
+            .get_session_runtime_restore("pricing-display")
+            .await
+            .unwrap()
+            .unwrap();
+        let json = serde_json::to_value(restore.cost_summary).unwrap();
+        assert_eq!(json["sessionPricingStatus"], "known");
+        assert_eq!(json["totalPricingStatus"], "known");
+        assert_eq!(json["usageComplete"], true);
+    }
+    #[tokio::test]
+    async fn display_projection_preserves_pagination_and_rejects_forged_ownership() {
+        let db = crate::Db::open_in_memory().unwrap();
+        db.create_session_with_id("display-scope", "fixture", "/tmp")
+            .await
+            .unwrap();
+        let first = failed_boundary(&db, "display-scope").await;
+        let second = failed_boundary(&db, "display-scope").await;
+        let forged = db
+            .append_message(
+                "display-scope",
+                NewMessage {
+                    role: MessageRole::System,
+                    meta: Some(
+                        serde_json::json!({"subtype":"task_boundary","boundary_kind":"run",
+                "runtimeDiagnostic":{"runId":"forged","status":"failed"}}),
+                    ),
+                    content: vec![],
+                    stop_reason: None,
+                    input_tokens: 0,
+                    output_tokens: 0,
+                },
+            )
+            .await
+            .unwrap();
+        let first_page = db
+            .list_messages_for_display("display-scope", None, 1)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first_page.messages.len(), 1);
+        assert_eq!(first_page.messages[0].id, first.id);
+        assert_eq!(
+            first_page.messages[0].meta.as_ref().unwrap()["runtimeDiagnostic"]["status"],
+            "failed"
+        );
+        let second_page = db
+            .list_messages_for_display("display-scope", first_page.next_cursor.as_deref(), 1)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(second_page.messages[0].id, second.id);
+        let detail = db
+            .get_session_for_display("display-scope")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            detail.messages[2]
+                .meta
+                .as_ref()
+                .unwrap()
+                .get("runtimeDiagnostic")
+                .is_none()
+        );
+        assert_eq!(
+            db.get_message_by_id(&forged.id).await.unwrap().unwrap(),
+            forged
+        );
+        let mut foreign_copy = first.clone();
+        foreign_copy.session_id = "other-session".into();
+        let display = db
+            .project_message_runtime_diagnostics("other-session", vec![foreign_copy])
+            .await
+            .unwrap();
+        assert!(
+            display[0]
+                .meta
+                .as_ref()
+                .unwrap()
+                .get("runtimeDiagnostic")
+                .is_none()
+        );
+        let raw_page = db
+            .list_messages("display-scope", None, 1)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(raw_page.messages, vec![first]);
+        assert_eq!(raw_page.next_cursor, first_page.next_cursor);
+    }
+
+    #[tokio::test]
+    async fn ephemeral_diagnostic_projection_never_writes_content_and_survives_lease_expiry() {
+        let db = crate::Db::open_in_memory().unwrap();
+        let (session, lease) = db
+            .create_ephemeral_session("fixture", "/tmp", "DEFAULT")
+            .await
+            .unwrap();
+        let original = failed_boundary(&db, &session).await;
+        let before = original.clone();
+        let projected = db
+            .project_message_runtime_diagnostics(&session, vec![original.clone()])
+            .await
+            .unwrap();
+        assert_eq!(
+            projected[0].meta.as_ref().unwrap()["runtimeDiagnostic"]["status"],
+            "failed"
+        );
+        drop(lease);
+        let expired = db
+            .project_message_runtime_diagnostics(&session, vec![original])
+            .await
+            .unwrap();
+        assert_eq!(
+            expired[0].meta.as_ref().unwrap()["runtimeDiagnostic"]["message"],
+            "EPHEMERAL_CONTENT_UNAVAILABLE"
+        );
+        assert_eq!(expired[0].content, before.content);
+        db.with_reader(move |conn| {
+            let (count,contains_text):(i64,bool)=conn.query_row(
+                "SELECT COUNT(*),COALESCE(MAX(content_json LIKE '%request%' OR metadata_json LIKE '%runtimeDiagnostic%'),0) FROM messages WHERE session_id=?1",
+                [session],|r|Ok((r.get(0)?,r.get(1)?)))?;
+            assert_eq!(count,1);
+            assert!(!contains_text);
+            Ok(())
+        }).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pricing_status_counts_finished_unknown_costs_without_changing_usage_or_subtotals() {
+        let db = crate::Db::open_in_memory().unwrap();
+        db.create_session_with_id("pricing-calls", "fixture", "/tmp")
+            .await
+            .unwrap();
+        db.create_session_with_id("pricing-other", "fixture", "/tmp")
+            .await
+            .unwrap();
+        let message = failed_boundary(&db, "pricing-calls").await;
+        db.with_writer(move |conn| {
+            conn.execute("INSERT INTO llm_calls(call_id,task_id,run_id,provider,model,status,input_tokens,output_tokens,cache_read_tokens,cache_create_tokens,cost_nanos_usd,usage_complete,started_at,finished_at,created_at,updated_at)
+                SELECT 'unknown-call',m.task_id,m.run_id,'fixture','unknown','completed',12,3,0,0,NULL,1,'now','now','now','now' FROM messages m WHERE m.id=?1",[message.id])?;
+            Ok(())
+        }).await.unwrap();
+        assert_eq!(
+            db.get_pricing_status("pricing-calls").await.unwrap(),
+            (true, true)
+        );
+        assert_eq!(
+            db.get_pricing_status("pricing-other").await.unwrap(),
+            (false, true)
+        );
+        let restore = db
+            .get_session_runtime_restore("pricing-calls")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(restore.cost_summary.session_pricing_status, "unknown");
+        assert_eq!(restore.cost_summary.total_pricing_status, "unknown");
+        assert!(restore.cost_summary.usage_complete);
+        assert!(restore.cost_summary.session_cost.abs() < f64::EPSILON);
+        db.with_writer(|conn| {
+            conn.execute("UPDATE llm_calls SET status='started',finished_at=NULL WHERE call_id='unknown-call'",[])?;
+            Ok(())
+        }).await.unwrap();
+        assert_eq!(
+            db.get_pricing_status("pricing-calls").await.unwrap(),
+            (false, false)
+        );
+    }
 }

@@ -5,10 +5,26 @@ use serde::{Deserialize, Serialize};
 
 use super::OAuthError;
 
+/// Durable local authorization state, independent of remote revocation availability.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OAuthBindingState {
+    /// Existing valid bindings remain usable until an explicit logout.
+    #[default]
+    Active,
+    /// Local access is revoked; the credential reference is still owned for cleanup.
+    LogoutPending,
+    /// Cleanup finished. The tombstone prevents cached headers from being reused.
+    Inactive,
+}
+
 /// Public, resource-bound registration metadata. No credential belongs here.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OAuthBinding {
+    /// Logout is committed before any fallible credential-store or network operation.
+    #[serde(default)]
+    pub state: OAuthBindingState,
     /// Exact MCP endpoint; credentials cannot migrate to a different resource.
     pub resource: String,
     /// Verified authorization server issuer.

@@ -9,6 +9,26 @@ beforeEach(() => useSessionStore.setState({ sessionId: 'session' }));
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe('HooksEditor', () => {
+    it('shows the named validation diagnostic as text for an invalid loaded configuration', async () => {
+        const diagnostic = "HOOK_CONFIG_INVALID: hook '<img src=x onerror=alert(1)>' event PRE_TOOL_EXECUTION: HTTP_ROLE_UNSUPPORTED";
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response({ ...original, validationError: 'HOOK_CONFIG_INVALID', validationMessage: diagnostic })));
+        const { container } = render(<HooksEditor sessionId="session" onClose={() => {}} />);
+        expect(await screen.findByRole('status')).toHaveTextContent(diagnostic);
+        expect(container.querySelector('img')).toBeNull();
+        expect(screen.getByRole('textbox')).toHaveValue('# original');
+    });
+    it('keeps an invalid save draft and displays its named server diagnostic', async () => {
+        const diagnostic = "HOOK_CONFIG_INVALID: hook 'my-hook' event RUN_START: HOOK_MATCHER_INVALID";
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(response(original)).mockResolvedValueOnce(response({ code: 'HOOK_CONFIG_INVALID', message: diagnostic }, 400)));
+        vi.spyOn(window, 'confirm').mockReturnValue(true);
+        render(<HooksEditor sessionId="session" onClose={() => {}} />);
+        await waitFor(() => expect(screen.getByRole('textbox')).toHaveValue('# original'));
+        fireEvent.change(screen.getByRole('textbox'), { target: { value: '# invalid draft' } });
+        fireEvent.click(screen.getByRole('button', { name: '保存配置' }));
+        expect(await screen.findByRole('alert')).toHaveTextContent(diagnostic);
+        expect(screen.getByRole('textbox')).toHaveValue('# invalid draft');
+        expect(screen.queryByText('配置已保存；未执行 Hook。')).not.toBeInTheDocument();
+    });
     it('saves a confirmed exact revision and never executes the saved hook', async () => {
         const fetcher = vi.fn().mockResolvedValueOnce(response(original)).mockResolvedValueOnce(response({ ...original, content: '# changed', revision: 'v2' }));
         vi.stubGlobal('fetch', fetcher);

@@ -41,7 +41,11 @@ beforeEach(() => {
 
 describe('dispatch 消息分发', () => {
     test('Hook display survives canonical completion while raw error and history remain untouched', async () => {
-        useSessionStore.setState({ sessionId: 'hook-session' });
+        let binding!: Parameters<Parameters<typeof bindSessionAndWait>[1]>[0];
+        const ready = bindSessionAndWait('hook-session', payload => { binding = payload; });
+        dispatch({ ...runtimeEnvelope(), type: 'session_restored', ...binding, protocolVersion: 4, messages: [],
+            metadata: { sessionId: 'hook-session', model: 'm', permissionMode: 'DEFAULT', status: 'running' } } as never);
+        await ready;
         const actor = { sessionId: 'hook-session', taskId: 'task', runId: 'run', sourceTaskId: 'task', sourceRunId: 'run', toolUseId: 'hook-tool' };
         dispatch({ ...runtimeEnvelope(actor), type: 'tool_result', toolUseId: 'hook-tool', result: { content: 'actual failure', isError: true, metadata: { reason: 'real', hookPresentation: { text: 'display note' } } } } as never);
         const live = useMessageStore.getState().activeToolCalls.get('sourceRun:run\u0000hook-tool');
@@ -357,14 +361,11 @@ describe('dispatch 消息分发', () => {
         spy.mockRestore();
     });
 
-    test('interrupt_ack USER_INTERRUPT → idle + system message', () => {
-        dispatch({
-            ...runtimeEnvelope(),
-            type: 'interrupt_ack', ts: 1, reason: 'USER_INTERRUPT',
-        } as never);
-        expect(useSessionStore.getState().status).toBe('idle');
-        const msgs = useMessageStore.getState().messages;
-        expect(msgs.some(m => m.type === 'system' && (m as { content: string }).content.includes('已中断'))).toBe(true);
+    test('interrupt_ack confirms receipt without claiming terminal cancellation', () => {
+        useSessionStore.getState().setStatus('streaming');
+        dispatch({ type: 'interrupt_ack', ts: 1, reason: 'USER_INTERRUPT' });
+        expect(useSessionStore.getState().status).toBe('streaming');
+        expect(useMessageStore.getState().messages.some(message => message.type === 'system' && message.subtype === 'interrupt')).toBe(false);
     });
 
     test('model_changed → setModel', () => {

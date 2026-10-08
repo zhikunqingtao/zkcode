@@ -5,7 +5,7 @@ minimum_macos = "15.0"
 rust = "1.97.1"
 node = ">=22.0.0,<23.0.0"
 npm = ">=10.0.0,<11.0.0"
-python = ">=3.11.0,<3.12.0"
+python = ">=3.11.4,<3.12.0"
 
 # Native document, PDF, media, diagram and Chinese OCR capabilities.
 document_formulas = "ffmpeg imagemagick poppler qpdf graphviz pandoc tesseract fontconfig"

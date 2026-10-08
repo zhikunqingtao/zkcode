@@ -1138,6 +1138,9 @@ END;
 
 -- data：RV-1 证据包（V007 建表；V021 ALTER 增 run_id 列，此处内联为
 -- 建表列，累积态一致）。session_id 为逻辑外键（无 DDL）。
+-- Evidence outlives its Session and execution rows. Preserve the original source
+-- IDs without DELETE actions; INSERT triggers validate their live ownership.
+-- Clearing a source or cascading an evidence deletion would break immutability.
 CREATE TABLE IF NOT EXISTS evidence_bundles (
     bundle_id    TEXT PRIMARY KEY,
     session_id   TEXT NOT NULL,
@@ -1145,16 +1148,26 @@ CREATE TABLE IF NOT EXISTS evidence_bundles (
     kind         TEXT NOT NULL,
     claim        TEXT,
     origin       TEXT NOT NULL CHECK(origin IN ('machine','modelAssertion','human')),
-    producer_invocation_id TEXT REFERENCES tool_invocations(invocation_id) ON DELETE RESTRICT,
+    producer_invocation_id TEXT,
     verdict      TEXT NOT NULL CHECK(verdict IN
         ('pending','verified','failed','inconclusive','unavailable','stale')),
     created_at   TEXT NOT NULL,
-    run_id       TEXT REFERENCES run_envelopes(id) ON DELETE SET NULL,
+    run_id       TEXT,
     CHECK(origin!='modelAssertion' OR verdict IN ('pending','inconclusive')),
     CHECK(producer_invocation_id IS NULL OR run_id IS NOT NULL)
 );
 CREATE INDEX IF NOT EXISTS idx_evidence_bundles_session ON evidence_bundles(session_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_evidence_bundles_run ON evidence_bundles(run_id, created_at DESC);
+
+CREATE TRIGGER IF NOT EXISTS trg_evidence_run_owner_insert
+BEFORE INSERT ON evidence_bundles
+WHEN NEW.run_id IS NOT NULL AND NOT EXISTS(
+    SELECT 1 FROM run_envelopes run
+    WHERE run.id=NEW.run_id AND run.session_id=NEW.session_id
+)
+BEGIN
+    SELECT RAISE(ABORT,'EVIDENCE_RUN_SESSION_MISMATCH');
+END;
 
 CREATE TRIGGER IF NOT EXISTS trg_evidence_bundles_update_immutable
 BEFORE UPDATE ON evidence_bundles
@@ -1232,7 +1245,7 @@ END;
 CREATE TABLE IF NOT EXISTS evidence_items (
     id           TEXT PRIMARY KEY,
     bundle_id    TEXT NOT NULL REFERENCES evidence_bundles(bundle_id) ON DELETE CASCADE,
-    producer_invocation_id TEXT REFERENCES tool_invocations(invocation_id) ON DELETE RESTRICT,
+    producer_invocation_id TEXT,
     type         TEXT NOT NULL,
     summary      TEXT,
     blob_sha256  TEXT,

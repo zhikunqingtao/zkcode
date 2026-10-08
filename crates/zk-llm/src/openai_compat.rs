@@ -167,7 +167,7 @@ impl ChatProvider for OpenAiCompatProvider {
                 .json(&body)
                 .send()
                 .await
-                .map_err(|error| ProviderError::from_transport(&error))?;
+                .map_err(ProviderError::from_transport)?;
             if !response.status().is_success() {
                 return Err(read_response_error(response, &provider, summary, &keys, &key).await);
             }
@@ -181,7 +181,7 @@ impl ChatProvider for OpenAiCompatProvider {
                 }
                 Ok(response) => response
                     .bytes_stream()
-                    .map(|r| r.map_err(|error| ProviderError::from_transport(&error)))
+                    .map(|r| r.map_err(ProviderError::from_transport))
                     .boxed(),
                 Err(error) => futures::stream::once(futures::future::ready(Err(error))).boxed(),
             },
@@ -225,8 +225,8 @@ async fn read_response_error(
         .get(reqwest::header::RETRY_AFTER)
         .and_then(|v| v.to_str().ok())
         .map(str::to_owned);
-    let body = response.text().await.unwrap_or_default();
-    response_error(
+    let (body, diagnostic) = read_bounded_error_body(response).await;
+    let mut error = response_error(
         provider,
         status,
         &body,
@@ -234,7 +234,46 @@ async fn read_response_error(
         summary,
         keys,
         key,
-    )
+    );
+    attach_body_diagnostic(&mut error, diagnostic);
+    error
+}
+
+const ERROR_BODY_LIMIT: usize = 256 * 1024;
+
+pub(crate) async fn read_bounded_error_body(
+    mut response: reqwest::Response,
+) -> (String, Option<&'static str>) {
+    let mut bytes = Vec::new();
+    let diagnostic = loop {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                let remaining = ERROR_BODY_LIMIT - bytes.len();
+                bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+                if chunk.len() > remaining {
+                    break Some("ERROR_BODY_TRUNCATED");
+                }
+            }
+            Ok(None) => break None,
+            Err(_) => break Some("ERROR_BODY_READ_FAILED"),
+        }
+    };
+    (String::from_utf8_lossy(&bytes).into_owned(), diagnostic)
+}
+
+pub(crate) fn attach_body_diagnostic(error: &mut ProviderError, diagnostic: Option<&str>) {
+    if let ProviderError::Http { message, .. } = error {
+        let suffix = diagnostic.map(|value| format!(" [{value}]"));
+        let limit = ERROR_BODY_LIMIT - suffix.as_ref().map_or(0, String::len);
+        let mut end = message.len().min(limit);
+        while !message.is_char_boundary(end) {
+            end -= 1;
+        }
+        message.truncate(end);
+        if let Some(suffix) = suffix {
+            message.push_str(&suffix);
+        }
+    }
 }
 
 fn response_error(
@@ -283,6 +322,25 @@ struct SseState<S> {
     cancel: CancellationToken,
     done: bool,
     saw_finish: bool,
+}
+
+impl<S> SseState<S> {
+    fn require_finish_or_error(&mut self) {
+        if !self.saw_finish
+            && !self.pending.iter().any(|event| {
+                matches!(
+                    event,
+                    ProviderEvent::Finish { .. } | ProviderEvent::Error { .. }
+                )
+            })
+        {
+            self.pending.push_back(ProviderEvent::Error {
+                error: ProviderError::Network {
+                    message: "INCOMPLETE_CHAT_STREAM: finish_reason missing".into(),
+                },
+            });
+        }
+    }
 }
 
 /// 将 `OpenAI` 兼容 SSE 字节流转换为统一事件流。
@@ -355,23 +413,14 @@ where
                             );
                         }
                         st.done = true;
-                        if !st.saw_finish
-                            && !st.pending.iter().any(|event| {
-                                matches!(
-                                    event,
-                                    ProviderEvent::Finish { .. } | ProviderEvent::Error { .. }
-                                )
-                            })
-                        {
-                            st.pending.push_back(ProviderEvent::Error {
-                                error: ProviderError::Network {
-                                    message: "INCOMPLETE_CHAT_STREAM: finish_reason missing".into(),
-                                },
-                            });
-                        }
+                        st.require_finish_or_error();
                     }
                     Some(Ok(bytes)) => {
-                        for line in st.splitter.feed(&bytes) {
+                        let (lines, failure) = match st.splitter.feed(&bytes) {
+                            Ok(lines) => (lines, None),
+                            Err(failure) => (failure.lines, Some(failure.error)),
+                        };
+                        for line in lines {
                             process_line(
                                 &line,
                                 &mut st.pending,
@@ -379,25 +428,15 @@ where
                                 &mut st.accumulators,
                             );
                             if st.done {
-                                if !st.saw_finish
-                                    && !st.pending.iter().any(|event| {
-                                        matches!(
-                                            event,
-                                            ProviderEvent::Finish { .. }
-                                                | ProviderEvent::Error { .. }
-                                        )
-                                    })
-                                {
-                                    st.pending.push_back(ProviderEvent::Error {
-                                        error: ProviderError::Network {
-                                            message:
-                                                "INCOMPLETE_CHAT_STREAM: finish_reason missing"
-                                                    .into(),
-                                        },
-                                    });
-                                }
+                                st.require_finish_or_error();
                                 break;
                             }
+                        }
+                        if !st.done
+                            && let Some(error) = failure
+                        {
+                            st.pending.push_back(ProviderEvent::Error { error });
+                            st.done = true;
                         }
                     }
                     Some(Err(error)) => {
@@ -1104,32 +1143,82 @@ pub fn is_deepseek_vision_model(model: &str) -> bool {
 /// 行尾语义对齐 okio `readUtf8LineStrict`：`\n`、`\r\n`、单独 `\r` 均切行；
 /// 半行缓冲等待后续字节；[`LineSplitter::flush`] 在 EOF 时回收无行尾的
 /// 残留尾行（部分简易服务端末行不带换行）。
+pub(crate) const MAX_SSE_EVENT_BYTES: usize = 16 * 1024 * 1024;
+
 #[derive(Debug, Default)]
 pub(crate) struct LineSplitter {
     buf: Vec<u8>,
+    skip_lf: bool,
+    event_bytes: usize,
+    failed: bool,
+}
+
+/// A terminal framing error must not discard complete earlier lines from the
+/// same network chunk. Consumers process these lines before emitting the error.
+#[derive(Debug)]
+pub(crate) struct LineSplitFailure {
+    pub(crate) lines: Vec<String>,
+    pub(crate) error: ProviderError,
 }
 
 impl LineSplitter {
-    /// 喂入字节块，返回切出的完整行（UTF-8 有损解码）。
-    pub(crate) fn feed(&mut self, chunk: &[u8]) -> Vec<String> {
-        self.buf.extend_from_slice(chunk);
-        let mut lines = Vec::new();
-        while let Some(pos) = self.buf.iter().position(|&b| b == b'\n' || b == b'\r') {
-            let terminated_by_cr = self.buf[pos] == b'\r';
-            let mut line_bytes: Vec<u8> = self.buf.drain(..=pos).collect();
-            line_bytes.pop(); // 去行尾符
-            if terminated_by_cr && self.buf.first() == Some(&b'\n') {
-                self.buf.remove(0); // CRLF：吞掉跟随的 \n
-            }
-            lines.push(String::from_utf8_lossy(&line_bytes).into_owned());
+    /// Scan only incoming bytes; neither a line nor an SSE event may grow unbounded.
+    pub(crate) fn feed(&mut self, chunk: &[u8]) -> Result<Vec<String>, LineSplitFailure> {
+        if self.failed {
+            return Err(LineSplitFailure {
+                lines: Vec::new(),
+                error: Self::limit_error(),
+            });
         }
-        lines
+        let mut lines = Vec::new();
+        let mut start = 0;
+        for (index, byte) in chunk.iter().copied().enumerate() {
+            if self.skip_lf {
+                self.skip_lf = false;
+                if byte == b'\n' {
+                    start = index + 1;
+                    continue;
+                }
+            }
+            if byte == b'\r' || byte == b'\n' {
+                if let Err(error) = self.append(&chunk[start..index]) {
+                    return Err(LineSplitFailure { lines, error });
+                }
+                if self.buf.is_empty() {
+                    self.event_bytes = 0;
+                }
+                lines.push(String::from_utf8_lossy(&std::mem::take(&mut self.buf)).into_owned());
+                self.skip_lf = byte == b'\r';
+                start = index + 1;
+            }
+        }
+        if let Err(error) = self.append(&chunk[start..]) {
+            return Err(LineSplitFailure { lines, error });
+        }
+        Ok(lines)
     }
 
-    /// EOF 冲刷残留尾行（无行尾也作为一行返回）；冲刷是排干语义——
-    /// 后续再调用返回 `None`（幂等）。
+    fn append(&mut self, bytes: &[u8]) -> Result<(), ProviderError> {
+        if bytes.len() > MAX_SSE_EVENT_BYTES.saturating_sub(self.buf.len())
+            || bytes.len() > MAX_SSE_EVENT_BYTES.saturating_sub(self.event_bytes)
+        {
+            self.failed = true;
+            self.buf.clear();
+            return Err(Self::limit_error());
+        }
+        self.buf.extend_from_slice(bytes);
+        self.event_bytes += bytes.len();
+        Ok(())
+    }
+
+    fn limit_error() -> ProviderError {
+        ProviderError::Parse {
+            message: "PROVIDER_SSE_EVENT_TOO_LARGE: 16 MiB limit".into(),
+        }
+    }
+
     pub(crate) fn flush(&mut self) -> Option<String> {
-        if self.buf.is_empty() {
+        if self.failed || self.buf.is_empty() {
             None
         } else {
             Some(String::from_utf8_lossy(&std::mem::take(&mut self.buf)).into_owned())
@@ -1158,6 +1247,203 @@ mod tests {
     use super::*;
     use crate::cache::{SystemPrompt, ToolOrigin};
     use crate::provider::{ChatMessage, ToolCallRequest, ToolSpec};
+
+    #[tokio::test]
+    async fn http_error_body_is_bounded_without_losing_status_or_retry_after() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            let _ = stream.read(&mut request).await;
+            let body = serde_json::json!({"error":{"message":"x".repeat(300 * 1024)}}).to_string();
+            let header = format!(
+                "HTTP/1.1 429 Too Many Requests\r\nContent-Length: {}\r\nRetry-After: 2\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(header.as_bytes()).await;
+            let _ = stream.write_all(body.as_bytes()).await;
+        });
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(format!("http://{address}"))
+            .send()
+            .await
+            .unwrap();
+        let key = crate::ApiKey::new("fixture");
+        let keys = crate::ApiKeyRing::new(vec![key.clone()]);
+        let error = read_response_error(response, "fixture", true, &keys, &key).await;
+        server.await.unwrap();
+        let ProviderError::Http {
+            status,
+            message,
+            retry_after_ms,
+            ..
+        } = error
+        else {
+            panic!("HTTP status must be preserved");
+        };
+        assert_eq!(status, 429);
+        assert_eq!(retry_after_ms, Some(2000));
+        assert!(message.len() <= 256 * 1024 && message.contains("TRUNCATED"));
+    }
+
+    #[test]
+    fn unterminated_sse_line_cannot_accumulate_unbounded_bytes() {
+        let mut splitter = LineSplitter::default();
+        let block = vec![b'x'; 1024 * 1024];
+        for _ in 0..17 {
+            let _ = splitter.feed(&block);
+        }
+        assert!(splitter.buf.len() <= 16 * 1024 * 1024);
+    }
+
+    #[test]
+    fn split_crlf_does_not_create_a_second_empty_event_boundary() {
+        let mut splitter = LineSplitter::default();
+        let _ = splitter.feed(b"data: first\r");
+        assert_eq!(
+            splitter.feed(b"\ndata: second\n").unwrap(),
+            vec!["data: second"]
+        );
+    }
+
+    #[test]
+    fn sse_bounds_whole_multiline_event_but_resets_after_event_separator() {
+        let line = format!("data: {}\n", "x".repeat(1024));
+        let mut splitter = LineSplitter::default();
+        for _ in 0..(MAX_SSE_EVENT_BYTES / (line.len() - 1)) {
+            splitter.feed(line.as_bytes()).unwrap();
+        }
+        assert!(splitter.feed(line.as_bytes()).is_err());
+        assert!(splitter.flush().is_none());
+        let mut splitter = LineSplitter::default();
+        let event = format!("{line}\n");
+        for _ in 0..(MAX_SSE_EVENT_BYTES / line.len() + 100) {
+            assert_eq!(splitter.feed(event.as_bytes()).unwrap().len(), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_sse_stream_ends_with_one_error_and_no_success() {
+        let source = futures::stream::iter([
+            Ok(bytes::Bytes::from(vec![b'x'; MAX_SSE_EVENT_BYTES + 1])),
+            Ok(bytes::Bytes::from_static(b"data: [DONE]\n\n")),
+        ]);
+        let events: Vec<_> = sse_event_stream(source, CancellationToken::new())
+            .collect()
+            .await;
+        assert!(matches!(
+            events.as_slice(),
+            [ProviderEvent::Error {
+                error: ProviderError::Parse { .. }
+            }]
+        ));
+    }
+
+    #[tokio::test]
+    async fn complete_usage_before_oversized_event_is_independent_of_chunk_boundaries() {
+        let prefix =
+            b"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":13,\"completion_tokens\":2}}\n\n";
+        let oversized = vec![b'x'; MAX_SSE_EVENT_BYTES + 1];
+        let split_source = futures::stream::iter([
+            Ok(Bytes::copy_from_slice(prefix)),
+            Ok(Bytes::copy_from_slice(&oversized)),
+        ]);
+        let expected: Vec<_> = sse_event_stream(split_source, CancellationToken::new())
+            .collect()
+            .await;
+        assert!(matches!(
+            expected.as_slice(),
+            [
+                ProviderEvent::UsageUpdate { .. },
+                ProviderEvent::Error { .. }
+            ]
+        ));
+        let mut combined = prefix.to_vec();
+        combined.extend_from_slice(&oversized);
+        let combined_source = futures::stream::iter([Ok(Bytes::from(combined))]);
+        let actual: Vec<_> = sse_event_stream(combined_source, CancellationToken::new())
+            .collect()
+            .await;
+        assert_eq!(
+            actual, expected,
+            "valid usage must precede the oversized-event error for either network chunking"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_events_before_oversized_tail_are_independent_of_chunk_boundaries() {
+        let cases = [
+            (
+                "chat",
+                concat!(
+                    "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":13,\"completion_tokens\":2}}\n\n",
+                    "data: [DONE]\n\n",
+                ),
+            ),
+            (
+                "anthropic",
+                concat!(
+                    "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":13,\"output_tokens\":0}}}\n\n",
+                    "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":2}}\n\n",
+                    "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+                ),
+            ),
+            (
+                "responses",
+                "data: {\"type\":\"response.completed\",\"response\":{\"output\":[],\"usage\":{\"input_tokens\":13,\"output_tokens\":2}}}\n\n",
+            ),
+        ];
+        for (provider, prefix) in cases {
+            let oversized = Bytes::from(vec![b'x'; MAX_SSE_EVENT_BYTES + 1]);
+            let split = vec![Bytes::copy_from_slice(prefix.as_bytes()), oversized.clone()];
+            let mut combined = prefix.as_bytes().to_vec();
+            combined.extend_from_slice(&oversized);
+            let expected = chunked_events(provider, split).await;
+            assert!(expected.iter().any(|event| matches!(event, ProviderEvent::Finish { usage: Some(usage), .. } if usage.input_tokens == 13 && usage.output_tokens == 2)), "{provider}: {expected:?}");
+            assert!(
+                !expected
+                    .iter()
+                    .any(|event| matches!(event, ProviderEvent::Error { .. }))
+            );
+            let actual = chunked_events(provider, vec![Bytes::from(combined)]).await;
+            assert_eq!(
+                actual, expected,
+                "{provider}: an earlier terminal event must keep its usage and terminal result"
+            );
+        }
+    }
+
+    async fn chunked_events(provider: &str, chunks: Vec<Bytes>) -> Vec<ProviderEvent> {
+        let source = futures::stream::iter(chunks.into_iter().map(Ok));
+        match provider {
+            "chat" => {
+                sse_event_stream(source, CancellationToken::new())
+                    .collect()
+                    .await
+            }
+            "anthropic" => {
+                crate::anthropic::anthropic_event_stream(source, CancellationToken::new())
+                    .collect()
+                    .await
+            }
+            "responses" => {
+                crate::responses::event_stream(
+                    source,
+                    CancellationToken::new(),
+                    "fixture".into(),
+                    "fixture".into(),
+                )
+                .collect()
+                .await
+            }
+            _ => unreachable!("fixed fixture providers"),
+        }
+    }
 
     fn qwen_request() -> ChatRequest {
         ChatRequest::new("qwen3.8-max-0902")
@@ -1696,27 +1982,32 @@ mod tests {
         let mut splitter = LineSplitter::default();
         // \n / \r\n / 单独 \r 三种行尾 + 跨块 CRLF。
         assert_eq!(
-            splitter.feed(b"data: a\ndata: b\r\ndata: c\r"),
+            splitter.feed(b"data: a\ndata: b\r\ndata: c\r").unwrap(),
             vec!["data: a", "data: b", "data: c"]
         );
         // \r 在上块末尾、\n 在下块开头 → 只切一行。
         let mut splitter = LineSplitter::default();
-        assert_eq!(splitter.feed(b"data: x\r").len(), 1);
-        assert!(!splitter.feed(b"\ndata: y\n").is_empty());
+        assert_eq!(splitter.feed(b"data: x\r").unwrap().len(), 1);
+        assert!(!splitter.feed(b"\ndata: y\n").unwrap().is_empty());
         // 半行缓冲。
         let mut splitter = LineSplitter::default();
-        assert!(splitter.feed(b"da").is_empty());
-        assert!(splitter.feed(b"ta: z").is_empty());
-        assert_eq!(splitter.feed(b"\n"), vec!["data: z"]);
+        assert!(splitter.feed(b"da").unwrap().is_empty());
+        assert!(splitter.feed(b"ta: z").unwrap().is_empty());
+        assert_eq!(splitter.feed(b"\n").unwrap(), vec!["data: z"]);
         // EOF 残留尾行。
         let mut splitter = LineSplitter::default();
-        assert!(splitter.feed(b"tail").is_empty());
+        assert!(splitter.feed(b"tail").unwrap().is_empty());
         assert_eq!(splitter.flush().as_deref(), Some("tail"));
         assert_eq!(splitter.flush(), None);
         // 多字节 UTF-8 跨块不损坏（`你` 的 3 字节跨块边界）。
         let mut splitter = LineSplitter::default();
-        assert!(splitter.feed(&"data: 你\n".as_bytes()[..6]).is_empty());
-        let lines = splitter.feed(&"data: 你\n".as_bytes()[6..]);
+        assert!(
+            splitter
+                .feed(&"data: 你\n".as_bytes()[..6])
+                .unwrap()
+                .is_empty()
+        );
+        let lines = splitter.feed(&"data: 你\n".as_bytes()[6..]).unwrap();
         assert_eq!(lines, vec!["data: 你"]);
     }
 

@@ -21,7 +21,7 @@ use tokio::sync::{Mutex as AsyncMutex, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::sse::lock;
-use storage::{OAuthBinding, OAuthBindingStore, OAuthSecretStore, OAuthSecrets};
+use storage::{OAuthBinding, OAuthBindingState, OAuthBindingStore, OAuthSecretStore, OAuthSecrets};
 
 const AUTH_LIFETIME: Duration = Duration::from_mins(5);
 
@@ -63,6 +63,9 @@ pub enum OAuthError {
     /// Credentials are absent or no longer refreshable.
     #[error("OAuth authorization is required")]
     AuthorizationRequired,
+    /// A failed logout still owns its Keychain reference; retry logout before new consent.
+    #[error("MCP_OAUTH_LOGOUT_PENDING: retry logout to finish credential cleanup")]
+    LogoutPending,
     /// User/service cancellation or expiration.
     #[error("OAuth authorization was cancelled or expired")]
     Cancelled,
@@ -186,14 +189,15 @@ impl OAuthCoordinator {
         {
             return Ok(status);
         }
+        let state = self.bindings.load(name).await?.map(|binding| binding.state);
         Ok(OAuthStatus {
-            state: if self.bindings.load(name).await?.is_some() {
-                "authorized"
-            } else {
-                "idle"
-            }
-            .into(),
-            error: None,
+            state: match state {
+                Some(OAuthBindingState::Active) => "authorized",
+                Some(OAuthBindingState::LogoutPending) => "error",
+                _ => "idle",
+            }.into(),
+            error: (state == Some(OAuthBindingState::LogoutPending))
+                .then(|| "MCP_OAUTH_LOGOUT_PENDING: local authorization revoked; credential cleanup requires retry".into()),
         })
     }
 
@@ -212,6 +216,14 @@ impl OAuthCoordinator {
         let service_lock = self.service_lock(name);
         let _guard = service_lock.lock().await;
         self.cancel(name);
+        if self
+            .bindings
+            .load(name)
+            .await?
+            .is_some_and(|binding| binding.state == OAuthBindingState::LogoutPending)
+        {
+            return Err(OAuthError::LogoutPending);
+        }
         let resource_url = self.http.validate_url(resource)?;
         if resource_url.query().is_some() {
             return Err(OAuthError::UnsafeEndpoint);
@@ -308,6 +320,7 @@ impl OAuthCoordinator {
             expires_in: AUTH_LIFETIME.as_secs(),
         };
         let binding = OAuthBinding {
+            state: OAuthBindingState::Active,
             resource,
             issuer: metadata.issuer,
             token_endpoint: metadata.token_endpoint,
@@ -444,6 +457,9 @@ impl OAuthCoordinator {
         let Some(binding) = self.bindings.load(name).await? else {
             return Ok(None);
         };
+        if binding.state != OAuthBindingState::Active {
+            return Err(OAuthError::AuthorizationRequired);
+        }
         let configured = self.http.validate_url(resource)?;
         if self.http.validate_url(&binding.resource)? != configured {
             return Err(OAuthError::BindingMismatch);
@@ -501,37 +517,42 @@ impl OAuthCoordinator {
         self.cancel(name);
         let service_lock = self.service_lock(name);
         let _guard = service_lock.lock().await;
-        let Some(binding) = self.bindings.load(name).await? else {
+        let Some(mut binding) = self.bindings.load(name).await? else {
             return Ok(false);
         };
+        if binding.state == OAuthBindingState::Inactive {
+            return Ok(false);
+        }
+        binding.state = OAuthBindingState::LogoutPending;
+        self.bindings.save(name, Some(binding.clone())).await?;
         let secrets = self.secrets.load(&binding.credential_ref).await?;
-        self.bindings.save(name, None).await?;
+        let revoked =
+            if let (Some(endpoint), Some(secrets)) = (&binding.revocation_endpoint, secrets) {
+                let fields = [
+                    (
+                        "token",
+                        secrets.refresh_token.unwrap_or(secrets.access_token),
+                    ),
+                    ("client_id", binding.client_id.clone()),
+                ];
+                self.http
+                    .revoke(
+                        endpoint,
+                        &fields,
+                        secrets
+                            .client_secret
+                            .as_deref()
+                            .map(|secret| (binding.client_id.as_str(), secret)),
+                    )
+                    .await
+                    .is_ok()
+            } else {
+                false
+            };
         self.secrets.delete(&binding.credential_ref).await?;
-        let Some(endpoint) = binding.revocation_endpoint else {
-            return Ok(false);
-        };
-        let Some(secrets) = secrets else {
-            return Ok(false);
-        };
-        let fields = [
-            (
-                "token",
-                secrets.refresh_token.unwrap_or(secrets.access_token),
-            ),
-            ("client_id", binding.client_id.clone()),
-        ];
-        Ok(self
-            .http
-            .revoke(
-                &endpoint,
-                &fields,
-                secrets
-                    .client_secret
-                    .as_deref()
-                    .map(|secret| (binding.client_id.as_str(), secret)),
-            )
-            .await
-            .is_ok())
+        binding.state = OAuthBindingState::Inactive;
+        self.bindings.save(name, Some(binding)).await?;
+        Ok(revoked)
     }
 
     async fn cancellable<T>(

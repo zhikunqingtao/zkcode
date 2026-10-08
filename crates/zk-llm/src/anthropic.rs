@@ -173,7 +173,7 @@ impl ChatProvider for AnthropicProvider {
             let response = client
                 .execute(signed)
                 .await
-                .map_err(|error| ProviderError::from_transport(&error))?;
+                .map_err(ProviderError::from_transport)?;
             let status = response.status();
             if !status.is_success() {
                 if status.as_u16() == 429 {
@@ -184,12 +184,12 @@ impl ChatProvider for AnthropicProvider {
                     .get(reqwest::header::RETRY_AFTER)
                     .and_then(|v| v.to_str().ok())
                     .map(str::to_owned);
-                let body_text = response.text().await.unwrap_or_default();
-                return Err(map_anthropic_http(
-                    status.as_u16(),
-                    &body_text,
-                    retry_after.as_deref(),
-                ));
+                let (body_text, diagnostic) =
+                    crate::openai_compat::read_bounded_error_body(response).await;
+                let mut error =
+                    map_anthropic_http(status.as_u16(), &body_text, retry_after.as_deref());
+                crate::openai_compat::attach_body_diagnostic(&mut error, diagnostic);
+                return Err(error);
             }
             Ok(response)
         })
@@ -197,7 +197,7 @@ impl ChatProvider for AnthropicProvider {
             |result: Result<reqwest::Response, ProviderError>| match result {
                 Ok(response) => response
                     .bytes_stream()
-                    .map(|r| r.map_err(|error| ProviderError::from_transport(&error)))
+                    .map(|r| r.map_err(ProviderError::from_transport))
                     .left_stream(),
                 Err(error) => {
                     futures::stream::once(futures::future::ready(Err(error))).right_stream()
@@ -512,11 +512,21 @@ where
                         st.done = true;
                     }
                     Some(Ok(bytes)) => {
-                        for line in st.splitter.feed(&bytes) {
+                        let (lines, failure) = match st.splitter.feed(&bytes) {
+                            Ok(lines) => (lines, None),
+                            Err(failure) => (failure.lines, Some(failure.error)),
+                        };
+                        for line in lines {
                             st.parser.feed_line(&line, &mut st.pending, &mut st.done);
                             if st.done {
                                 break;
                             }
+                        }
+                        if !st.done
+                            && let Some(error) = failure
+                        {
+                            st.pending.push_back(ProviderEvent::Error { error });
+                            st.done = true;
                         }
                     }
                     Some(Err(error)) => {

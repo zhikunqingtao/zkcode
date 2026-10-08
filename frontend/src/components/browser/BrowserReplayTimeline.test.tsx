@@ -22,6 +22,26 @@ describe('Browser replay production panel', () => {
         fireEvent.click(screen.getByTitle('刷新'));
         await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
     });
+    it('renders the password-safe projection without treating the ARIA replacement as a failure', async () => {
+        vi.mocked(fetch).mockResolvedValueOnce(response([{ ...frame, captureStatus: 'complete',
+            tree: { source: 'safe_dom_v1', safe_dom: '<input type="password" value="[redacted]">' },
+            components: { safe_dom: { status: 'ok' }, interactive: { status: 'ok' }, aria: { status: 'not_requested', reason: 'PASSWORD_SAFE_PROJECTION' }, screenshot: { status: 'not_requested' } },
+        }]));
+        render(<BrowserReplayTimeline {...props} />);
+        fireEvent.click(await screen.findByText('Example'));
+        expect(screen.getByText('<input type="password" value="[redacted]">')).toBeInTheDocument();
+        expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+        expect(document.querySelector('input[type=password]')).toBeNull();
+    });
+    it('reports partial capture and component failure rather than claiming a complete snapshot', async () => {
+        vi.mocked(fetch).mockResolvedValueOnce(response([{ ...frame, captureStatus: 'partial',
+            components: { screenshot: { status: 'failed', error_code: 'SCREENSHOT_TIMEOUT' }, safe_dom: { status: 'ok', truncated: true } },
+        }]));
+        render(<BrowserReplayTimeline {...props} />);
+        fireEvent.click(await screen.findByText('Example'));
+        expect(screen.getByRole('alert')).toHaveTextContent('SCREENSHOT_TIMEOUT');
+        expect(screen.getByRole('alert')).toHaveTextContent('截断');
+    });
     it('requires ordinary confirmation and server acknowledgement before clearing', async () => {
         const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
         render(<BrowserReplayTimeline {...props} />);

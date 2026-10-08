@@ -167,6 +167,8 @@ def test_browser_session_expiration_uses_real_clock_values():
     # No browser I/O is needed for this small state invariant.
     session = object.__new__(BrowserSession)
     session.owner_task = None
+    session.run_leases = {}
+    session.retired_run_leases = set()
     session.created_at = datetime.now() - timedelta(minutes=10)
     session.last_activity = datetime.now() - timedelta(minutes=6)
     assert session.is_expired(timedelta(minutes=5)) is True
@@ -253,3 +255,30 @@ async def test_real_journey_dsl_runs_in_chromium(local_page_url):
         for session_id in session_ids:
             await browser_service.close_session(session_id)
         await browser_service.shutdown()
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(30)
+async def test_password_value_is_never_read_or_serialized_by_semantic_snapshot():
+    import json
+    service = BrowserService()
+    await service.startup()
+    try:
+        session = await service.get_or_create_session("password-fixture")
+        await session.page.set_content('<input id="password" type="text" aria-label="Password"><input id="normal" value="visible">')
+        await session.page.locator("#password").fill("zk-password-canary-937146")
+        await session.page.evaluate('''() => {
+          const input = document.querySelector('#password');
+          input.type = 'password'; // dynamic type transition before atomic projection
+          const getter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').get;
+          window.passwordReads = 0;
+          Object.defineProperty(input, 'value', {get() {window.passwordReads++; return getter.call(this);}});
+        }''')
+        result = await service.snapshot_semantic("password-fixture")
+        assert "zk-password-canary-937146" not in json.dumps(result)
+        assert await session.page.evaluate("window.passwordReads") == 0
+        assert any(item.get("value") == "visible" for item in result["interactive"])
+        assert result["capture_status"] == "complete"
+        assert result["tree"]["source"] == "safe_dom_v1"
+        assert result["components"]["aria"]["status"] == "not_requested"
+    finally:
+        await service.shutdown()

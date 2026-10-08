@@ -202,3 +202,228 @@ async fn invalid_snapshot_id_is_rejected_without_filesystem_traversal() {
         json_body(&body)
     );
 }
+
+#[tokio::test]
+async fn failed_snapshot_save_is_not_reported_as_successful_old_snapshot() {
+    let (workspace, snapshot_dir) = fixture("save-failure");
+    let db = zk_db::Db::open_in_memory().unwrap();
+    let session = db
+        .create_session("fixture", workspace.to_str().unwrap())
+        .await
+        .unwrap();
+    let mut config = Config::test_config();
+    config.snapshot_dir = Some(snapshot_dir.clone());
+    let mut router = build_router(AppState::new(db, config));
+    std::fs::create_dir(snapshot_dir.join(format!("{}.json", session.id))).unwrap();
+    let (status, _, body) = call(
+        &mut router,
+        local_post(&format!("/api/sessions/{}/snapshot", session.id), None),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "{}",
+        json_body(&body)
+    );
+    assert_eq!(json_body(&body)["code"], "SNAPSHOT_WRITE_FAILED");
+}
+
+async fn restore_fixture(tag: &str) -> (AppState, String) {
+    let (workspace, snapshot_dir) = fixture(tag);
+    let db = zk_db::Db::open_in_memory().unwrap();
+    let session = db
+        .create_session("saved-model", workspace.to_str().unwrap())
+        .await
+        .unwrap();
+    let mut config = Config::test_config();
+    config.snapshot_dir = Some(snapshot_dir.clone());
+    config.mcp_registry_path = snapshot_dir.with_file_name("absent-mcp.json");
+    config.scratchpad_system_root = snapshot_dir.with_file_name("scratchpad");
+    config.workspace_default_root = workspace.to_string_lossy().into_owned();
+    config.workspace_allowed_roots = vec![workspace];
+    let state = AppState::new(db, config);
+    let mut router = build_router(state.clone());
+    let (status, _, body) = call(
+        &mut router,
+        local_post(&format!("/api/sessions/{}/snapshot", session.id), None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", json_body(&body));
+    (state, session.id)
+}
+
+#[tokio::test]
+async fn snapshot_restore_shares_query_admission_without_blocking_other_sessions() {
+    let (state, session) = restore_fixture("query-admission").await;
+    let engine = zk_server::engine_bridge::wire_engine(&state);
+    state
+        .db
+        .update_session_model(&session, "current-model")
+        .await
+        .unwrap();
+    let before = state.db.get_session(&session).await.unwrap().unwrap();
+    // The real query lease exists before a durable Run has been created.
+    let conversation = state.conversation().unwrap();
+    let query = conversation.reserve(&session).unwrap();
+    state.db.ensure_session_idle(&session).await.unwrap();
+    let mut router = build_router(state.clone());
+    let path = format!("/api/sessions/{session}/snapshot/resume");
+    let (status, _, body) = call(&mut router, local_post(&path, None)).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{}", json_body(&body));
+    assert_eq!(json_body(&body)["code"], "SESSION_BUSY");
+    assert_eq!(
+        state.db.get_session(&session).await.unwrap().unwrap(),
+        before
+    );
+    assert!(conversation.reserve(&session).is_none());
+
+    let other = state
+        .db
+        .create_session("other-model", &before.working_dir)
+        .await
+        .unwrap();
+    for suffix in ["snapshot", "snapshot/resume"] {
+        let (status, _, body) = call(
+            &mut router,
+            local_post(&format!("/api/sessions/{}/{suffix}", other.id), None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{}", json_body(&body));
+    }
+    drop(query);
+    let (status, _, body) = call(&mut router, local_post(&path, None)).await;
+    assert_eq!(status, StatusCode::OK, "{}", json_body(&body));
+    assert_eq!(
+        state.db.get_session(&session).await.unwrap().unwrap().model,
+        "saved-model"
+    );
+    assert!(engine.try_reserve_session_mutation(&session).is_some());
+}
+
+async fn seed_pending_recording(state: &AppState, session: &str, needs_attention: bool) -> String {
+    use serde_json::json;
+    use zk_db::{
+        CleanupStatus, CommitToolInvocationResult, ExecutionResourceStatus, NewExecutionResource,
+        NewToolInvocation, ToolInvocationStatus,
+    };
+
+    let db = &state.db;
+    db.start_run("run", session, None, None, "fixture")
+        .await
+        .unwrap();
+    let run = db.find_run_by_id("run").await.unwrap().unwrap();
+    db.create_tool_invocation(&NewToolInvocation {
+        invocation_id: "invocation".into(),
+        task_id: run.task_id.clone(),
+        run_id: run.id.clone(),
+        tool_use_id: "tool-use".into(),
+        tool_name: "VerifyJourney".into(),
+        input_json: Some("{}".into()),
+        side_effect_class: "read".into(),
+        directory_generation: None,
+        connection_generation: None,
+    })
+    .await
+    .unwrap();
+    let identity = json!({"session_id":session,"run_id":run.id,"invocation_id":"invocation"});
+    let recording = json!({"kind":"browserSession","recordingFinalization":{
+        "version":1,"phase":"sealed","identity":identity,
+        "manifest":{"identity":identity},"dispositions":[]
+    }})
+    .to_string();
+    db.register_execution_resource(&NewExecutionResource {
+        resource_id: "recording".into(),
+        task_id: run.task_id.clone(),
+        run_id: run.id.clone(),
+        invocation_id: Some("invocation".into()),
+        resource_kind: "stream".into(),
+        external_id: Some("fixture-browser".into()),
+        metadata_json: recording.clone(),
+    })
+    .await
+    .unwrap();
+    db.finalize_execution_resource("recording", ExecutionResourceStatus::Released)
+        .await
+        .unwrap();
+    let metadata = json!({"structuredResult":{"evidence":{
+        "schemaVersion":1,"kind":"browser_journey","verdict":"verified",
+        "observedAt":"2026-10-08T00:00:00Z","items":[]
+    }}});
+    db.commit_tool_invocation_result(&CommitToolInvocationResult {
+        invocation_id: "invocation".into(),
+        expected_version: 0,
+        session_id: session.to_owned(),
+        target: ToolInvocationStatus::Succeeded,
+        input_json: Some("{}".into()),
+        content: "original result".into(),
+        is_error: false,
+        metadata: Some(metadata.clone()),
+        output_sha256: None,
+        error_code: None,
+        cleanup_status: CleanupStatus::Confirmed,
+        postprocessing: Some(json!({"schemaVersion":1,"toolName":"VerifyJourney",
+            "requiredKinds":["evidence"],"metadata":metadata})),
+    })
+    .await
+    .unwrap();
+    if needs_attention {
+        let task = db
+            .find_runtime_task_by_id(&run.task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        db.mark_task_run_needs_attention(
+            &task.id,
+            &run.id,
+            task.version,
+            "fixture postprocessing failure",
+            CleanupStatus::Confirmed,
+        )
+        .await
+        .unwrap();
+    }
+    recording
+}
+
+#[tokio::test]
+async fn snapshot_restore_preserves_running_and_needs_attention_results() {
+    for needs_attention in [false, true] {
+        let (state, session) = restore_fixture("durable-result").await;
+        let recording = seed_pending_recording(&state, &session, needs_attention).await;
+        let db = &state.db;
+        // Wiring a fresh Engine must not hide persisted work from the DB guard.
+        let engine = zk_server::engine_bridge::wire_engine(&state);
+        let before = db.get_session(&session).await.unwrap().unwrap();
+        let obligation = db
+            .recorded_journey_postprocessing("invocation")
+            .await
+            .unwrap();
+        assert!(obligation.is_some());
+        let mut router = build_router(state.clone());
+        let (status, _, body) = call(
+            &mut router,
+            local_post(&format!("/api/sessions/{session}/snapshot/resume"), None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{}", json_body(&body));
+        assert_eq!(db.get_session(&session).await.unwrap().unwrap(), before);
+        assert_eq!(
+            db.recorded_journey_postprocessing("invocation")
+                .await
+                .unwrap(),
+            obligation
+        );
+        let remaining: String = db
+            .with_conn_blocking(|conn| {
+                Ok(conn.query_row(
+                    "SELECT metadata_json FROM execution_resources WHERE resource_id='recording'",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(remaining, recording);
+        assert!(engine.try_reserve_session_mutation(&session).is_some());
+    }
+}

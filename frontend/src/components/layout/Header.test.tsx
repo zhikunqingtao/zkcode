@@ -5,6 +5,7 @@ import { ThemeProvider } from '@/components/theme/ThemeProvider';
 import { useConfigStore } from '@/store/configStore';
 import { useModelStore } from '@/store/modelStore';
 import { useSessionStore } from '@/store/sessionStore';
+import { useCostStore } from '@/store/costStore';
 import { useBridgeStore } from '@/store/bridgeStore';
 import { useAppUiStore } from '@/store/appUiStore';
 import { useDialogStore } from '@/store/dialogStore';
@@ -12,12 +13,25 @@ import { usePromptDraftStore } from '@/store/promptDraftStore';
 import { captureSessionSelectionGuard } from '@/services/sessionActivation';
 
 describe('Header', () => {
+    it.each([['unknown', '费用未知'], ['unavailable', '费用未确认']] as const)('marks %s prices independently of complete token usage', (pricingStatus, label) => {
+        useModelStore.setState({ loaded: true, loading: false, models: [], defaultModel: null });
+        useCostStore.getState().updateCost({ sessionCost: 0, totalCost: 0.012,
+            usage: { inputTokens: 10, outputTokens: 2, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 }, usageComplete: true,
+            sessionPricingStatus: pricingStatus, totalPricingStatus: pricingStatus,
+        });
+        render(<Header />);
+        expect(screen.getByTitle(new RegExp(`当前会话成本.*${label}`))).toHaveTextContent(label);
+        expect(screen.getByTitle(new RegExp(`全局累计.*${label}`))).toHaveTextContent(label);
+        expect(useCostStore.getState().usageComplete).toBe(true);
+    });
+
     beforeEach(() => {
         useConfigStore.setState({
             theme: { ...useConfigStore.getState().theme, mode: 'dark' },
         });
         useSessionStore.setState({ sessionId: null, model: null });
         useBridgeStore.setState({ bridgeStatus: 'connected' });
+        useCostStore.setState({ sessionPricingStatus: 'unavailable', totalPricingStatus: 'unavailable' });
     });
 
     afterEach(() => {

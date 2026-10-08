@@ -325,6 +325,8 @@ pub(crate) async fn mcp_mutation_guard(
 fn is_mcp_protected_request(method: &Method, path: &str) -> bool {
     (path == "/ws" && *method == Method::GET)
         || (*method == Method::POST && (path == "/api/query" || path.starts_with("/api/query/")))
+        || (*method == Method::GET && path.starts_with("/api/query/") && path.ends_with("/stream"))
+        || is_merge_mutation(method, path)
         || (path == "/api/llm-keys" && *method == Method::PUT)
         || (*method == Method::DELETE
             && path.starts_with("/api/sessions/")
@@ -338,6 +340,13 @@ fn is_mcp_protected_request(method: &Method, path: &str) -> bool {
                 || method == Method::PUT
                 || method == Method::PATCH
                 || method == Method::DELETE))
+}
+
+fn is_merge_mutation(method: &Method, path: &str) -> bool {
+    *method == Method::POST
+        && (path == "/api/sessions/merge"
+            || (path.starts_with("/api/session-merges/")
+                && (path.ends_with("/resume") || path.ends_with("/cancel"))))
 }
 
 fn is_interaction_decision(method: &Method, path: &str) -> bool {
@@ -364,6 +373,7 @@ fn is_network_backed_mcp_get(method: &Method, path: &str) -> bool {
 
 fn mcp_route_requires_json(method: &Method, path: &str) -> bool {
     is_interaction_decision(method, path)
+        || is_merge_mutation(method, path)
         || (*method == Method::POST
             && path.starts_with("/api/mcp/contexts/")
             && path.ends_with("/capabilities/requests"))
@@ -645,5 +655,30 @@ mod tests {
             );
         }
         assert!(!is_mcp_protected_request(&Method::GET, "/api/mcp/servers"));
+    }
+
+    #[test]
+    fn merge_mutations_and_query_resume_require_local_origin_or_bearer() {
+        for path in [
+            "/api/sessions/merge",
+            "/api/session-merges/m/resume",
+            "/api/session-merges/m/cancel",
+        ] {
+            assert!(is_mcp_protected_request(&Method::POST, path), "{path}");
+            assert!(mcp_route_requires_json(&Method::POST, path), "{path}");
+        }
+        assert!(is_mcp_protected_request(
+            &Method::GET,
+            "/api/query/r/stream"
+        ));
+        // This is an execution ownership boundary, not the weaker network-read fallback.
+        assert!(!is_network_backed_mcp_get(
+            &Method::GET,
+            "/api/query/r/stream"
+        ));
+        assert!(!is_mcp_protected_request(
+            &Method::GET,
+            "/api/session-merges"
+        ));
     }
 }

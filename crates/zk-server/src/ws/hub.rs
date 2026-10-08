@@ -650,6 +650,36 @@ impl WsHub {
         self.deliver(session_id, envelope, critical).await;
     }
 
+    /// Narrow memory-only diagnostic for a still-owned cancellation. Authoritative
+    /// outcomes, tool results and evidence must continue through the durable outbox.
+    pub(crate) async fn push_local_cancellation_notice(&self, session_id: &str, run_id: &str) {
+        let seq = self.next_seq(session_id);
+        let now = now_millis();
+        let context = RuntimeEventContext::ephemeral(now, Some(seq)).with_actor(
+            Some(session_id.to_owned()),
+            None,
+            Some(run_id.to_owned()),
+            None,
+            Some(run_id.to_owned()),
+            None,
+        );
+        let mut envelope = ServerEnvelope::new(
+            ServerMessage::Notification {
+                key: format!("cancellation-pending:{run_id}"),
+                level: "warning".into(),
+                message:
+                    "已请求停止，取消状态保存或资源清理仍待确认；原执行仍在收尾，请勿重新提交。"
+                        .into(),
+                timeout: 0,
+            },
+            now,
+            Some(seq),
+        )
+        .with_event_context(context);
+        envelope.session_id = Some(session_id.to_owned());
+        self.deliver(session_id, envelope, true).await;
+    }
+
     /// Persist and publish one Run-attributed v4 event.
     ///
     /// The database row is committed before delivery and its global ID becomes

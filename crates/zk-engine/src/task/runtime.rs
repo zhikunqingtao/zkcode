@@ -3053,7 +3053,7 @@ async fn commit_outcome(
     }
 
     // The executor may finish at the same instant as the cancellation select.
-    // The durable cause, not whichever future was polled first, determines a timeout.
+    // The persisted first cause, not whichever future was polled first, owns cancellation.
     let normalized_outcome = if matches!(
         outcome,
         TaskExecutionResult::Cancelled { .. } | TaskExecutionResult::Complete(_)
@@ -3063,6 +3063,17 @@ async fn commit_outcome(
                 if run.requested_exit_reason.as_deref() == Some(zk_db::run::EXIT_TIMEOUT) =>
             {
                 recover_timeout_result(inner, task_id, outcome.clone()).await
+            }
+            Ok(Some(run))
+                if run.requested_exit_reason.as_deref()
+                    == Some(zk_db::run::EXIT_USER_CANCELLED) =>
+            {
+                TaskExecutionResult::Cancelled {
+                    message: match outcome {
+                        TaskExecutionResult::Cancelled { message } => message.clone(),
+                        _ => "Task cancelled by user".to_owned(),
+                    },
+                }
             }
             Ok(_) => outcome.clone(),
             Err(error) => return db_failure("read_terminal_cancellation_cause", &error),
@@ -3890,6 +3901,67 @@ mod tests {
             result.result.error_code.as_deref(),
             Some("SUBAGENT_DEADLINE_EXCEEDED")
         );
+    }
+
+    #[tokio::test]
+    async fn persisted_user_stop_wins_late_complete_without_hiding_failure_or_cleanup() {
+        for (outcome, cleanup, expected, code) in [
+            (
+                TaskExecutionResult::complete("executor returned after stop"),
+                CleanupStatus::Confirmed,
+                ResultStatus::Cancelled,
+                "USER_CANCELLED",
+            ),
+            (
+                TaskExecutionResult::complete("executor returned after stop"),
+                CleanupStatus::Unconfirmed,
+                ResultStatus::Partial,
+                "CLEANUP_UNCONFIRMED",
+            ),
+            (
+                TaskExecutionResult::Failed {
+                    message: "real executor failure".into(),
+                    code: "EXECUTOR_FAILED".into(),
+                },
+                CleanupStatus::Confirmed,
+                ResultStatus::Error,
+                "EXECUTOR_FAILED",
+            ),
+        ] {
+            let (runtime, _, root, run) = fixture().await;
+            request_cancelling(
+                &runtime.inner,
+                &root.id,
+                zk_db::run::EXIT_USER_CANCELLED,
+                "explicit stop",
+            )
+            .await
+            .unwrap();
+            let committed = commit_outcome(&runtime.inner, &root.id, &run, &outcome, cleanup).await;
+            assert!(
+                matches!(committed, TerminalCommitResult::Committed { .. }),
+                "{committed:?}"
+            );
+            let saved = runtime
+                .db()
+                .read_task_result(&root.id, None, 0, 4096)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(saved.result.status, expected);
+            assert_eq!(saved.result.error_code.as_deref(), Some(code));
+            assert_eq!(
+                runtime
+                    .db()
+                    .find_run_by_id(&run)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .requested_exit_reason
+                    .as_deref(),
+                Some(zk_db::run::EXIT_USER_CANCELLED)
+            );
+        }
     }
 
     impl MessageSink for NoopSink {

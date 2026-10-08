@@ -50,6 +50,29 @@ function assistantWith(uuid: string, timestamp: number, content: ContentBlock[])
 // ==================== resolveTurnOutcome ====================
 
 describe('resolveTurnOutcome', () => {
+    it.each([['failed', 'error'], ['interrupted', 'interrupted'], ['cancelled', 'interrupted']])('resolves a persisted %s Run after transient error removal', (status, outcome) => {
+        const root: Message = { type: 'system', uuid: 'boundary', timestamp: 0, subtype: 'task_boundary', content: '', metadata: {
+            runtimeDiagnostic: { runId: 'run', taskId: 'task', status, message: '持久化失败原因' },
+        } };
+        const [turn] = buildTurns([root, userText('u1', 1), assistantMsg('partial', 2)]);
+        expect(resolveTurnOutcome(turn)).toBe(outcome);
+    });
+
+    it('uses the durable cancellation over a superseded live error for the same Run', () => {
+        const root: Message = { type: 'system', uuid: 'boundary', timestamp: 0, subtype: 'task_boundary', content: '', metadata: {
+            runtimeDiagnostic: { runId: 'run', taskId: 'task', status: 'cancelled', message: '用户已停止' },
+        } };
+        const transient: Message = { type: 'system', uuid: 'live-error', timestamp: 2, subtype: 'error', content: 'earlier error', metadata: { runId: 'run' } };
+        expect(resolveTurnOutcome(buildTurns([root, userText('u1', 1), transient])[0])).toBe('interrupted');
+    });
+
+    it('does not mark unconfirmed cleanup as a successful turn', () => {
+        const root: Message = { type: 'system', uuid: 'boundary', timestamp: 0, subtype: 'task_boundary', content: '', metadata: {
+            runtimeDiagnostic: { runId: 'run', taskId: 'task', status: 'completed', code: 'CLEANUP_UNCONFIRMED', message: '资源清理未确认' },
+        } };
+        expect(resolveTurnOutcome(buildTurns([root, userText('u1', 1)])[0])).toBe('error');
+    });
+
     it('无异常 system 消息 → success', () => {
         const [turn] = buildTurns([userText('u1', 1), assistantMsg('a1', 2)]);
         expect(resolveTurnOutcome(turn)).toBe('success');

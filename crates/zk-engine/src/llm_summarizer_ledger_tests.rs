@@ -31,13 +31,19 @@ const MODEL: &str = "deepseek-flash";
 
 #[derive(Default)]
 struct ProtocolFixture {
+    model: String,
     calls: AtomicUsize,
     attempts: Mutex<VecDeque<Vec<ProviderEvent>>>,
 }
 
 impl ProtocolFixture {
     fn new(attempts: Vec<Vec<ProviderEvent>>) -> Arc<Self> {
+        Self::for_model(MODEL, attempts)
+    }
+
+    fn for_model(model: &str, attempts: Vec<Vec<ProviderEvent>>) -> Arc<Self> {
         Arc::new(Self {
+            model: model.into(),
             calls: AtomicUsize::new(0),
             attempts: Mutex::new(attempts.into()),
         })
@@ -58,7 +64,7 @@ impl ChatProvider for ProtocolFixture {
         request: ChatRequest,
         _cancel: CancellationToken,
     ) -> Result<BoxStream<'static, ProviderEvent>, ProviderError> {
-        assert_eq!(request.model, MODEL);
+        assert_eq!(request.model, self.model);
         assert!(request.tools.is_empty());
         self.calls.fetch_add(1, Ordering::SeqCst);
         let events = self
@@ -693,6 +699,115 @@ async fn real_ledger_known_usage_allows_one_summary_retry_and_accounts_both_call
         );
     }
     run.assert_live_charge_and_terminal_settlement(&calls).await;
+}
+
+#[tokio::test]
+async fn unknown_pricing_summary_retry_retains_usage_without_inventing_cost() {
+    for model in ["bailian/glm-5.3", "custom-summary-model"] {
+        let run = BudgetedRun::new().await;
+        let fixture = ProtocolFixture::for_model(model, vec![limited(true), success()]);
+        let mut registry = ProviderRegistry::new();
+        registry.register(fixture.provider_name(), fixture.clone(), vec![model.into()]);
+        let summarizer =
+            LlmSummarizer::with_timeout(Arc::new(registry), model, Duration::from_secs(3));
+        let summary = LightModelSummarizer::summarize_scoped(
+            &summarizer,
+            "Summarize",
+            "local input",
+            512,
+            &run.execution,
+        );
+        assert!(
+            summary
+                .as_deref()
+                .is_some_and(|text| text.contains("Durable summary")),
+            "model={model}"
+        );
+        assert_eq!(fixture.calls(), 2);
+        let calls = run.calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            calls.iter().filter(|call| call.status == "failed").count(),
+            1
+        );
+        for call in &calls {
+            assert!(call.complete);
+            assert_eq!((call.input, call.output), (Some(12), Some(4)));
+            assert_eq!(call.cost, None, "unknown price must remain unknown");
+        }
+        let live = run.db.find_run_by_id(&run.run).await.unwrap().unwrap();
+        assert!(live.usage_complete);
+        assert_eq!(live.total_tokens, 32);
+        run.assert_terminal_settlement(&live.session_id, 32, 0)
+            .await;
+    }
+}
+
+#[tokio::test]
+async fn unknown_pricing_cannot_bypass_already_exhausted_known_cost_budget() {
+    let run = BudgetedRun::new().await;
+    let run_id = run.run.clone();
+    let limit = run.limits.cost_limit_nanos_usd.unwrap();
+    run.db
+        .with_conn_blocking(move |conn| {
+            conn.execute(
+                "UPDATE run_envelopes SET cost_nanos_usd=?1 WHERE id=?2",
+                (limit, run_id),
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let observer = DbLlmCallObserver::shared_budgeted(run.db.clone(), run.limits.clone(), 10, 10);
+    let result = observer
+        .call_started(zk_llm::LlmCallStarted {
+            call_id: "unknown-at-exhausted-budget".into(),
+            attribution: LlmExecutionAttribution::new(&run.task, &run.run, "summary"),
+            provider: "local-fixture".into(),
+            model: "custom-summary-model".into(),
+            route: "{}".into(),
+            provider_request_id: None,
+        })
+        .await;
+    assert!(
+        result
+            .as_ref()
+            .is_err_and(|error| error.contains("COST_BUDGET_EXHAUSTED")),
+        "{result:?}"
+    );
+    assert!(run.calls().is_empty());
+}
+
+#[tokio::test]
+async fn unknown_pricing_with_missing_usage_still_refuses_retry() {
+    let run = BudgetedRun::new().await;
+    let model = "custom-summary-model";
+    let fixture = ProtocolFixture::for_model(model, vec![limited(false), success()]);
+    let mut registry = ProviderRegistry::new();
+    registry.register(fixture.provider_name(), fixture.clone(), vec![model.into()]);
+    let summarizer = LlmSummarizer::with_timeout(Arc::new(registry), model, Duration::from_secs(3));
+    assert!(
+        LightModelSummarizer::summarize_scoped(
+            &summarizer,
+            "Summarize",
+            "local input",
+            512,
+            &run.execution,
+        )
+        .is_none()
+    );
+    assert_eq!(fixture.calls(), 1);
+    let calls = run.calls();
+    assert_eq!(calls.len(), 1);
+    assert!(!calls[0].complete);
+    assert_eq!(calls[0].cost, None);
+    assert!(
+        !run.db
+            .find_run_by_id(&run.run)
+            .await
+            .unwrap()
+            .unwrap()
+            .usage_complete
+    );
 }
 
 #[tokio::test]

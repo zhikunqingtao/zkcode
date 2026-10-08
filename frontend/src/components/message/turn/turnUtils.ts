@@ -15,7 +15,7 @@ import {
     findTurnIndexByMessageId,
     type Turn,
 } from '@/store/selectors/turnProjection';
-import type { TurnTaskSection } from '@/store/selectors/turnSections';
+import { splitTurnLayers, type TurnTaskSection } from '@/store/selectors/turnSections';
 import { isCancelledResult, resolveToolCallState } from '../toolCallState';
 
 // ==================== 轮次结果 ====================
@@ -28,12 +28,13 @@ const ERROR_SUBTYPES = new Set(['error', 'provider_error']);
 const INTERRUPT_SUBTYPE = 'interrupt';
 
 /**
- * 轮次结果推导：轮内 system 消息 subtype 含 error/provider_error → 'error'；
+ * 轮次结果推导：先以持久化 Run 诊断替换同 Run 的瞬时错误，再检查可见尾部。
+ * system 消息 subtype 含 error/provider_error → 'error'；
  * 否则含 interrupt → 'interrupted'；否则 'success'。error 优先于 interrupt。
  */
 export function resolveTurnOutcome(turn: Turn): TurnOutcome {
     let interrupted = false;
-    for (const message of turn.messages) {
+    for (const message of splitTurnLayers(turn).tail) {
         if (message.type !== 'system') continue;
         if (message.subtype && ERROR_SUBTYPES.has(message.subtype)) return 'error';
         if (message.subtype === INTERRUPT_SUBTYPE) interrupted = true;

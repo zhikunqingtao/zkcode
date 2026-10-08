@@ -129,8 +129,15 @@ where
                     return None;
                 }
                 let chunk = tokio::select! { biased; ()=state.cancel.cancelled()=>return None, chunk=state.source.next()=>chunk };
+                let mut framing_error = None;
                 let lines = match chunk {
-                    Some(Ok(bytes)) => state.splitter.feed(&bytes),
+                    Some(Ok(bytes)) => match state.splitter.feed(&bytes) {
+                        Ok(lines) => lines,
+                        Err(failure) => {
+                            framing_error = Some(failure.error);
+                            failure.lines
+                        }
+                    },
                     Some(Err(error)) => {
                         state.terminal = true;
                         state.pending.push_back(ProviderEvent::Error { error });
@@ -204,15 +211,10 @@ where
                                 &event
                             };
                             let code = error["code"].as_str().unwrap_or("responses_error");
-                            let retryable = ["rate_limit", "overloaded", "server", "internal"]
-                                .iter()
-                                .any(|part| code.contains(part));
                             state.pending.push_back(ProviderEvent::Error {
-                                error: ProviderError::Http {
-                                    status: 0,
+                                error: ProviderError::Stream {
+                                    code: code.into(),
                                     message: error["message"].as_str().unwrap_or(code).into(),
-                                    retry_after_ms: None,
-                                    retryable,
                                 },
                             });
                             completed = true;
@@ -222,6 +224,9 @@ where
                     }
                 }
                 if completed {
+                    state.terminal = true;
+                } else if let Some(error) = framing_error {
+                    state.pending.push_back(ProviderEvent::Error { error });
                     state.terminal = true;
                 } else if ended {
                     state.pending.push_back(ProviderEvent::Error {
@@ -348,6 +353,43 @@ fn finish(
 mod tests {
     use super::*;
     use crate::{ChatMessage, ToolCallRequest};
+
+    #[tokio::test]
+    async fn provider_stream_error_keeps_exact_code_without_inventing_http_status() {
+        for (code, retryable) in [
+            ("server_error", true),
+            ("rate_limit_exceeded", true),
+            ("not_a_rate_limit", false),
+            ("internal_server_error", false),
+            ("invalid_prompt", false),
+        ] {
+            for kind in ["response.failed", "error"] {
+                let detail = json!({"code":code,"message":"provider failure"});
+                let event = if kind == "response.failed" {
+                    json!({"type":kind,"response":{"error":detail}})
+                } else {
+                    json!({"type":kind,"code":code,"message":"provider failure"})
+                };
+                let source = futures::stream::iter([Ok(Bytes::from(format!("data: {event}\n\n")))]);
+                let events: Vec<_> = event_stream(
+                    source,
+                    CancellationToken::new(),
+                    "fixture".into(),
+                    "model".into(),
+                )
+                .collect()
+                .await;
+                assert!(
+                    matches!(events.as_slice(), [ProviderEvent::Error { error: ProviderError::Stream { code: actual, .. } }] if actual == code)
+                );
+                let ProviderEvent::Error { error } = &events[0] else {
+                    unreachable!()
+                };
+                assert_eq!(error.is_retryable(), retryable);
+                assert!(!error.to_string().contains("http"));
+            }
+        }
+    }
     #[test]
     fn assistant_history_uses_output_text_and_provider_state_is_origin_scoped() {
         let state = ProviderResponseState {

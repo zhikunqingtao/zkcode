@@ -1663,6 +1663,7 @@ fn provider_error_code(error: &ProviderError) -> String {
         ProviderError::Parse { .. } => "PROVIDER_PARSE".to_owned(),
         ProviderError::Config { .. } => "PROVIDER_CONFIG".to_owned(),
         ProviderError::Preflight { .. } => "PROVIDER_PREFLIGHT".to_owned(),
+        ProviderError::Stream { .. } => "PROVIDER_STREAM_ERROR".to_owned(),
     }
 }
 

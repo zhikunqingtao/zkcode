@@ -589,6 +589,10 @@ impl PythonClient {
 
 fn journey_refusal_code(body: &str) -> Option<&'static str> {
     const CODES: &[&str] = &[
+        "BROWSER_CREATE_TIMEOUT",
+        "BROWSER_CLEANUP_UNCONFIRMED",
+        "RECORDING_CAPACITY_REACHED",
+        "RECORDING_OWNER_REQUIRED",
         "BROWSER_CAPACITY_REACHED",
         "BROWSER_SESSION_CONFLICT",
         "BROWSER_CLEANUP_PENDING",

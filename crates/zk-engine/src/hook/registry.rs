@@ -101,6 +101,7 @@ impl HookRegistry {
         let mut registry = Self::new();
         let expected = file.hook.len();
         for config in file.hook {
+            Self::validate(&config)?;
             registry.register(config);
         }
         if registry.invalid_security_config || registry.len() != expected {
@@ -112,44 +113,49 @@ impl HookRegistry {
     /// Register a validated declaration. Invalid entries mark the configuration
     /// unusable for security decisions instead of silently disappearing.
     pub fn register(&mut self, config: HookConfig) {
-        let invalid_role = (config.event == HookEvent::PreToolExecution
-            && config.role == HookRole::Presentation)
-            || (config.event == HookEvent::PostToolExecution
-                && matches!(config.role, HookRole::Security | HookRole::Transform))
-            || (config.async_mode
-                && matches!(
-                    config.role,
-                    HookRole::Security | HookRole::Transform | HookRole::Presentation
-                ));
-        if invalid_role
-            || config.timeout_secs == 0
-            || config.timeout_secs > 300
-            || config.name.trim().is_empty()
-        {
+        if let Err(error) = Self::validate(&config) {
             self.invalid_security_config = true;
-            tracing::error!(name=%config.name, "invalid hook role, timeout or name");
-            return;
-        }
-        if !config.is_http() && !config.is_command() {
-            self.invalid_security_config = true;
-            tracing::error!(name=%config.name, event=%config.event, "hook has neither command nor url");
-            return;
-        }
-        if let Some(matcher) = config.matcher.as_deref()
-            && regex::Regex::new(matcher).is_err()
-        {
-            tracing::warn!(
-                code = "HOOK_MATCHER_INVALID",
-                "hook matcher is invalid; skipping"
-            );
-            if config.role == HookRole::Security {
-                self.invalid_security_config = true;
-            }
+            tracing::error!(%error, "hooks configuration rejected; keeping the security gate closed");
             return;
         }
         let hooks = self.by_event.entry(config.event).or_default();
         hooks.push(config);
         hooks.sort_by_key(|hook| hook.priority);
+    }
+
+    fn validate(config: &HookConfig) -> Result<(), String> {
+        let invalid = |reason: &str| {
+            format!(
+                "HOOK_CONFIG_INVALID: hook '{}' event {}: {reason}",
+                config.name, config.event
+            )
+        };
+        if config.name.trim().is_empty() || config.timeout_secs == 0 || config.timeout_secs > 300 {
+            return Err(invalid("invalid name or timeout"));
+        }
+        if !config.is_http() && !config.is_command() {
+            return Err(invalid("a command or URL is required"));
+        }
+        if config.is_http() && config.role != HookRole::Notification {
+            return Err(invalid(
+                "HTTP_ROLE_UNSUPPORTED: HTTP hooks only support notification",
+            ));
+        }
+        if (config.event == HookEvent::PreToolExecution && config.role == HookRole::Presentation)
+            || (config.event == HookEvent::PostToolExecution
+                && matches!(config.role, HookRole::Security | HookRole::Transform))
+            || (config.async_mode && config.role != HookRole::Notification)
+        {
+            return Err(invalid(
+                "role is incompatible with event or asynchronous execution",
+            ));
+        }
+        if let Some(matcher) = config.matcher.as_deref()
+            && let Err(error) = regex::Regex::new(matcher)
+        {
+            return Err(invalid(&format!("HOOK_MATCHER_INVALID: {error}")));
+        }
+        Ok(())
     }
 
     /// 注销指定名的全部 hook（跨所有事件），返回移除条数。
@@ -192,6 +198,34 @@ impl HookRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn configuration_rejects_unsupported_http_roles_with_named_diagnostics() {
+        for role in ["security", "transform", "presentation"] {
+            let event = if role == "presentation" {
+                "POST_TOOL_EXECUTION"
+            } else {
+                "PRE_TOOL_EXECUTION"
+            };
+            let text = format!(
+                "[[hook]]\nname = 'http-role'\nevent = '{event}'\nrole = '{role}'\nurl = 'https://example.com/hook'\n"
+            );
+            let error = HookRegistry::try_parse(&text)
+                .expect_err("unsupported HTTP roles must fail before saving");
+            assert!(
+                error.contains("http-role") && error.contains(event),
+                "{error}"
+            );
+        }
+        let text = "[[hook]]\nname = 'broken-notice'\nevent = 'RUN_START'\nrole = 'notification'\ncommand = 'true'\nmatcher = '['\n";
+        let error = HookRegistry::try_parse(text).unwrap_err();
+        assert!(
+            error.contains("broken-notice")
+                && error.contains("RUN_START")
+                && error.contains("MATCHER"),
+            "{error}"
+        );
+    }
 
     #[test]
     fn register_indexes_by_event_and_skips_invalid() {

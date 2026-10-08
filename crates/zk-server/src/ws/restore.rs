@@ -98,6 +98,8 @@ mod tests {
                 total_cost: 0.0,
                 usage: Usage::default(),
                 usage_complete: true,
+                session_pricing_status: "known".to_owned(),
+                total_pricing_status: "known".to_owned(),
             },
         }
     }
@@ -145,6 +147,8 @@ mod tests {
         assert_eq!(value["activeToolCalls"], serde_json::json!([]));
         assert_eq!(value["costSummary"]["sessionCost"], 0.0);
         assert_eq!(value["costSummary"]["usageComplete"], true);
+        assert_eq!(value["costSummary"]["sessionPricingStatus"], "known");
+        assert_eq!(value["costSummary"]["totalPricingStatus"], "known");
     }
 
     #[test]
@@ -318,5 +322,44 @@ mod tests {
         assert!(value["messages"][0].get("stopReason").is_none());
         assert_eq!(value["messages"][1]["type"], "system");
         assert_eq!(value["messages"][1]["content"], "ab");
+    }
+    #[test]
+    fn restored_keeps_root_diagnostic_and_unknown_pricing_separate_from_usage() {
+        let diagnostic = serde_json::json!({"runId":"run-1","taskId":"task-1",
+            "status":"failed","code":"PROVIDER_FAILED","message":"request failed"});
+        let record = MessageRecord {
+            meta: Some(
+                serde_json::json!({"subtype":"task_boundary","boundary_kind":"run",
+                "runtimeDiagnostic":diagnostic}),
+            ),
+            id: "boundary".into(),
+            session_id: "s-1".into(),
+            role: MessageRole::System,
+            content: vec![StoredBlock::Text {
+                text: "task".into(),
+            }],
+            stop_reason: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            seq_num: 1,
+            created_at: 1_000,
+        };
+        let mut saved = runtime(detail(vec![record], "active"));
+        saved.cost_summary.session_pricing_status = "unknown".into();
+        saved.cost_summary.total_pricing_status = "unavailable".into();
+        let json = serde_json::to_value(build_session_restored(
+            saved,
+            None,
+            1,
+            PermissionMode::Default,
+        ))
+        .unwrap();
+        assert_eq!(
+            json["messages"][0]["metadata"]["runtimeDiagnostic"],
+            diagnostic
+        );
+        assert_eq!(json["costSummary"]["sessionPricingStatus"], "unknown");
+        assert_eq!(json["costSummary"]["totalPricingStatus"], "unavailable");
+        assert_eq!(json["costSummary"]["usageComplete"], true);
     }
 }

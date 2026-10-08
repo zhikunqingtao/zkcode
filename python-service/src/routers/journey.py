@@ -15,7 +15,7 @@ from typing import Dict, Any
 
 from fastapi import APIRouter, HTTPException, Request
 
-from services.browser_service import BrowserAdmissionError
+from services.browser_service import BrowserAdmissionError, creation_deadline
 from services.journey_models import JourneyRunRequest, JourneyRunResponse, StepResultModel
 
 from services.content_privacy import ephemeral_request, require_body_free_browser_logging
@@ -58,7 +58,11 @@ async def journey_run(request: JourneyRunRequest, http_request: Request = None) 
         raise HTTPException(status_code=504, detail="JOURNEY_DEADLINE_EXCEEDED")
 
     stop_watcher = asyncio.Event()
-    execution = asyncio.create_task(_run_owned_journey(browser_service, request))
+    token = creation_deadline.set(time.monotonic() + remaining)
+    try:
+        execution = asyncio.create_task(_run_owned_journey(browser_service, request))
+    finally:
+        creation_deadline.reset(token)
     disconnected = (asyncio.create_task(_wait_for_disconnect(http_request, stop_watcher))
                     if http_request is not None else None)
     try:
@@ -115,11 +119,11 @@ async def _run_owned_journey(browser_service, request: JourneyRunRequest) -> Jou
     # (a duplicate request must never close the existing owner's context).
     if request.ephemeral_content:
         session = await browser_service._create_context_for_journey(
-            session_id, request.record, request.viewport, ephemeral_content=True
+            session_id, request.record, request.viewport, ephemeral_content=True, recording=request.recording
         )
     else:
         session = await browser_service._create_context_for_journey(
-            session_id, request.record, request.viewport
+            session_id, request.record, request.viewport, recording=request.recording
         )
     # A cancelled Playwright await abandons its protocol response future. Let
     # closing the owned context resolve the active RPC before cancelling its
@@ -230,9 +234,7 @@ async def _execute_journey(browser_service, request, session_id, session) -> Jou
     artifacts: Dict[str, str] = {}
     record_opts = getattr(session, '_record_opts', {})
     if record_opts.get("trace"):
-        import tempfile
-        import os
-        trace_path = os.path.join(tempfile.mkdtemp(prefix="rv-trace-"), f"{session_id}.zip")
+        trace_path = str(session._recording_batch / "trace.zip")
         try:
             await session.context.tracing.stop(path=trace_path)
             artifacts["trace_path"] = trace_path

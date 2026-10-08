@@ -587,3 +587,84 @@ async fn cors_preflight_for_dev_frontend() {
             .is_some_and(|value| value.contains("POST"))
     );
 }
+
+#[tokio::test]
+async fn failed_run_diagnostic_survives_detail_resume_and_message_pagination() {
+    let (mut router, db) = app_with_db();
+    let session = create_session(&mut router).await;
+    let root = db
+        .create_task_with_run(&zk_db::CreateTaskWithRun {
+            task_id: uuid::Uuid::new_v4().to_string(),
+            run_id: uuid::Uuid::new_v4().to_string(),
+            root_session_id: session.clone(),
+            transcript_session_id: session.clone(),
+            parent_task_id: None,
+            parent_run_id: None,
+            creator_tool_use_id: None,
+            ordinal: 0,
+            description: "failed turn".into(),
+            prompt: None,
+            task_type: "agent".into(),
+            model: "fixture".into(),
+            working_dir: "/tmp".into(),
+            execution_config_json: "{}".into(),
+            startup_epoch: 1,
+        })
+        .await
+        .unwrap();
+    let boundary = db
+        .append_attributed_message(
+            &session,
+            NewMessage {
+                meta: Some(
+                    json!({"subtype":"task_boundary","boundary_kind":"run","task_id":root.run_id}),
+                ),
+                role: MessageRole::System,
+                content: vec![StoredBlock::Text {
+                    text: "failed turn".into(),
+                }],
+                stop_reason: None,
+                input_tokens: 0,
+                output_tokens: 0,
+            },
+            zk_db::MessageAttribution {
+                task_id: Some(root.task.id.clone()),
+                run_id: Some(root.run_id.clone()),
+                origin: "runtime".into(),
+                source_task_id: None,
+            },
+        )
+        .await
+        .unwrap();
+    db.commit_task_result(&zk_db::CommitTaskResult {
+        task_id: root.task.id,
+        run_id: root.run_id.clone(),
+        expected_task_version: root.task.version,
+        status: zk_db::ResultStatus::Error,
+        content: "fixture failed".into(),
+        media_type: "text/plain".into(),
+        error_code: Some("PROVIDER_FAILED".into()),
+        cleanup_status: zk_db::CleanupStatus::Confirmed,
+        verification_status: zk_db::VerificationStatus::NotRequested,
+    })
+    .await
+    .unwrap();
+    for request in [
+        local_get(&format!("/api/sessions/{session}")),
+        local_post(&format!("/api/sessions/{session}/resume"), None),
+        local_get(&format!("/api/sessions/{session}/messages?limit=1")),
+    ] {
+        let (status, _, body) = call(&mut router, request).await;
+        assert_eq!(status, StatusCode::OK);
+        let response = json_body(&body);
+        let diagnostic = &response["messages"][0]["metadata"]["runtimeDiagnostic"];
+        assert_eq!(diagnostic["runId"], root.run_id);
+        assert_eq!(diagnostic["status"], "failed");
+        assert_eq!(diagnostic["code"], "PROVIDER_FAILED");
+        assert_eq!(response["messages"].as_array().unwrap().len(), 1);
+    }
+    assert_eq!(
+        db.get_message_by_id(&boundary.id).await.unwrap().unwrap(),
+        boundary
+    );
+}

@@ -25,17 +25,15 @@
 //!
 //! 生产构造绑定 [`Db`] 后，临时会话全文只进入有界内存 `ContentStore`，
 //! 不创建 JSON 文件；失效 scope、存储容量不足和 policy 查询失败显式返回，
-//! 绝不回退磁盘。正常持久会话保留下面的旧 IO 行为。
+//! 绝不回退磁盘。持久保存的序列化、写入与同步失败显式返回。
 //!
-//! 保存 / 加载 / 列出 / 删除的 IO 与解析失败全部只记日志并返回「无结果」
-//! （`Ok(())` / `Ok(None)` / 空表 / `Ok(false)`），与旧实现逐字一致——快照是
-//! 尽力而为的旁路能力，磁盘异常不得让主流程失败。**参数非法**是唯一例外
-//! （旧实现同样抛异常）。
+//! 加载 / 列出 / 删除保留既有缺失与损坏容错。显式保存只有本次数据已写入
+//! 并同步后才成功；rename 后目录同步失败报告持久化未确认，不回滚已替换文件。
 //!
 //! # 与旧实现的差异
 //!
 //! 1. **原子替换**：[`SessionSnapshotService::save_snapshot`] 写
-//!    `{sessionId}.json.tmp` 后 `rename`；旧 `objectMapper.writeValue(file, ...)`
+//!    同目录唯一临时文件后 `rename` 并同步目录；旧 `objectMapper.writeValue(file, ...)`
 //!    直接截断原文件，写入中途崩溃会留下半截 JSON（下次 `loadSnapshot` 解析失败
 //!    → 快照静默丢失）。同 [`crate::memdir`] 的 `replace_file` 取向。
 //! 2. **JSON 缩进风格**：本端 `serde_json::to_vec_pretty`（`"key": value`）；
@@ -79,6 +77,15 @@ pub enum SessionSnapshotError {
     /// Content policy, scope lifetime or capacity failure.
     #[error(transparent)]
     Content(#[from] DbError),
+    /// Serialization failed before the destination was changed.
+    #[error("Snapshot serialization failed: {0}")]
+    Serialize(#[from] serde_json::Error),
+    /// The destination was not replaced; an earlier valid snapshot remains intact.
+    #[error("Snapshot write failed: {0}")]
+    Write(#[source] std::io::Error),
+    /// Rename succeeded, but durability of the directory entry could not be confirmed.
+    #[error("Snapshot persistence could not be confirmed: {0}")]
+    PersistenceUnconfirmed(#[source] std::io::Error),
 }
 
 // ==================== 载荷 ====================
@@ -273,11 +280,11 @@ impl SessionSnapshotService {
 
     /// 保存快照（旧 `saveSnapshot`）。
     ///
-    /// 序列化 / IO 失败只记 `error` 并返回 `Ok(())`（旧实现 void + `log.error`）。
+    /// 仅在本次快照成功写入并同步后返回成功。
     ///
     /// # Errors
     ///
-    /// 路径非法、临时内容失效或容量不足时显式失败，不回退持久存储。
+    /// 路径、序列化、IO、同步或临时内容失败均显式返回，不回退其他存储。
     pub async fn save_snapshot(
         &self,
         session_id: &str,
@@ -305,26 +312,13 @@ impl SessionSnapshotService {
             return Ok(());
         }
         let file = self.snapshot_file(session_id);
-        match serde_json::to_vec_pretty(snapshot) {
-            Ok(bytes) => match replace_file(&file, &bytes).await {
-                Ok(()) => tracing::info!(
-                    session_id,
-                    messages = snapshot.messages.len(),
-                    model = snapshot.model.as_deref().unwrap_or_default(),
-                    "Session snapshot saved"
-                ),
-                Err(error) => tracing::error!(
-                    session_id,
-                    %error,
-                    "Failed to save snapshot for session"
-                ),
-            },
-            Err(error) => tracing::error!(
-                session_id,
-                %error,
-                "Failed to serialize snapshot for session"
-            ),
-        }
+        let bytes = serde_json::to_vec_pretty(snapshot)?;
+        replace_file(&file, &bytes).await?;
+        tracing::info!(
+            session_id,
+            messages = snapshot.messages.len(),
+            "Session snapshot saved"
+        );
         Ok(())
     }
 
@@ -524,13 +518,85 @@ where
     Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
 
-/// 原子替换：写 `{file}.tmp` → rename（差异 1，见模块文档）。
-async fn replace_file(file: &Path, bytes: &[u8]) -> Result<(), std::io::Error> {
-    let mut temp = file.to_path_buf().into_os_string();
-    temp.push(".tmp");
-    let temp = PathBuf::from(temp);
-    tokio::fs::write(&temp, bytes).await?;
-    tokio::fs::rename(&temp, file).await
+/// 同目录独占临时文件避免并发写互相覆盖；只清理本次创建的文件。
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SnapshotWriteFault {
+    Write,
+    FileSync,
+    Rename,
+    ParentSync,
+}
+#[cfg(test)]
+static SNAPSHOT_WRITE_FAULTS: std::sync::OnceLock<Mutex<HashMap<PathBuf, SnapshotWriteFault>>> =
+    std::sync::OnceLock::new();
+#[cfg(test)]
+fn snapshot_write_fault(file: &Path, point: SnapshotWriteFault) -> std::io::Result<()> {
+    let mut faults = SNAPSHOT_WRITE_FAULTS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if faults.get(file) == Some(&point) {
+        faults.remove(file);
+        Err(std::io::Error::other(format!(
+            "injected snapshot {point:?} failure"
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+async fn replace_file(file: &Path, bytes: &[u8]) -> Result<(), SessionSnapshotError> {
+    use tokio::io::AsyncWriteExt as _;
+    struct Temporary(PathBuf);
+    impl Drop for Temporary {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+    let parent = file.parent().ok_or_else(|| {
+        SessionSnapshotError::Write(std::io::Error::other("snapshot parent missing"))
+    })?;
+    let path = parent.join(format!(".snapshot-{}.tmp", uuid::Uuid::new_v4()));
+    let mut options = tokio::fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut output = options
+        .open(&path)
+        .await
+        .map_err(SessionSnapshotError::Write)?;
+    let temporary = Temporary(path);
+    #[cfg(test)]
+    snapshot_write_fault(file, SnapshotWriteFault::Write).map_err(SessionSnapshotError::Write)?;
+    output
+        .write_all(bytes)
+        .await
+        .map_err(SessionSnapshotError::Write)?;
+    #[cfg(test)]
+    snapshot_write_fault(file, SnapshotWriteFault::FileSync)
+        .map_err(SessionSnapshotError::Write)?;
+    output
+        .sync_all()
+        .await
+        .map_err(SessionSnapshotError::Write)?;
+    drop(output);
+    #[cfg(test)]
+    snapshot_write_fault(file, SnapshotWriteFault::Rename).map_err(SessionSnapshotError::Write)?;
+    tokio::fs::rename(&temporary.0, file)
+        .await
+        .map_err(SessionSnapshotError::Write)?;
+    let directory = tokio::fs::File::open(parent)
+        .await
+        .map_err(SessionSnapshotError::PersistenceUnconfirmed)?;
+    #[cfg(test)]
+    snapshot_write_fault(file, SnapshotWriteFault::ParentSync)
+        .map_err(SessionSnapshotError::PersistenceUnconfirmed)?;
+    directory
+        .sync_all()
+        .await
+        .map_err(SessionSnapshotError::PersistenceUnconfirmed)?;
+    Ok(())
 }
 
 /// `Option<i64>`（epoch 毫秒）↔ RFC 3339 字符串 / `null` 的 serde 适配。
@@ -706,6 +772,99 @@ mod tests {
         assert_eq!(loaded, original);
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn snapshot_save_reports_io_failure_and_does_not_remove_foreign_temp() {
+        let root = fixture();
+        let service = SessionSnapshotService::with_dir(root.clone());
+        std::fs::create_dir(root.join("blocked.json")).unwrap();
+        assert!(
+            service
+                .save_snapshot("blocked", &snapshot("blocked", Some(0)))
+                .await
+                .is_err()
+        );
+        assert!(root.join("blocked.json").is_dir());
+
+        // An older writer's temporary name must neither block nor be removed by this save.
+        std::fs::create_dir(root.join("saved.json.tmp")).unwrap();
+        let expected = snapshot("saved", Some(123));
+        service.save_snapshot("saved", &expected).await.unwrap();
+        assert_eq!(
+            service.load_snapshot("saved").await.unwrap(),
+            Some(expected)
+        );
+        assert!(root.join("saved.json.tmp").is_dir());
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 3);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn snapshot_io_faults_preserve_old_bytes_or_report_unconfirmed_replacement() {
+        for point in [
+            SnapshotWriteFault::Write,
+            SnapshotWriteFault::FileSync,
+            SnapshotWriteFault::Rename,
+            SnapshotWriteFault::ParentSync,
+        ] {
+            let root = fixture();
+            let service = SessionSnapshotService::with_dir(root.clone());
+            let old = snapshot("saved", Some(1));
+            let new = snapshot("saved", Some(2));
+            service.save_snapshot("saved", &old).await.unwrap();
+            let path = root.join("saved.json");
+            let old_bytes = std::fs::read(&path).unwrap();
+            SNAPSHOT_WRITE_FAULTS
+                .get_or_init(Default::default)
+                .lock()
+                .unwrap()
+                .insert(path.clone(), point);
+            let result = service.save_snapshot("saved", &new).await;
+            if point == SnapshotWriteFault::ParentSync {
+                assert!(
+                    matches!(result, Err(SessionSnapshotError::PersistenceUnconfirmed(_))),
+                    "{point:?}: {result:?}"
+                );
+                assert_eq!(service.load_snapshot("saved").await.unwrap(), Some(new));
+            } else {
+                assert!(
+                    matches!(result, Err(SessionSnapshotError::Write(_))),
+                    "{point:?}: {result:?}"
+                );
+                assert_eq!(std::fs::read(&path).unwrap(), old_bytes, "{point:?}");
+                assert_eq!(service.load_snapshot("saved").await.unwrap(), Some(old));
+            }
+            assert_eq!(
+                std::fs::read_dir(&root).unwrap().count(),
+                1,
+                "temporary file leaked at {point:?}"
+            );
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_snapshot_saves_publish_complete_files_without_temp_collisions() {
+        let root = fixture();
+        let service = std::sync::Arc::new(SessionSnapshotService::with_dir(root.clone()));
+        let mut saves = tokio::task::JoinSet::new();
+        for index in 0..16 {
+            let service = service.clone();
+            saves.spawn(async move {
+                service
+                    .save_snapshot("shared", &snapshot("shared", Some(index)))
+                    .await
+            });
+        }
+        while let Some(result) = saves.join_next().await {
+            result.unwrap().unwrap();
+        }
+        let loaded = service.load_snapshot("shared").await.unwrap().unwrap();
+        assert_eq!(loaded.messages, snapshot("shared", None).messages);
+        assert!((0..16).contains(&loaded.created_at.unwrap()));
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// 落盘形状：camelCase 键 + `createdAt` 为 RFC 3339 字符串。

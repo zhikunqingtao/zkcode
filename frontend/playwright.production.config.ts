@@ -1,4 +1,5 @@
 import { defineConfig, devices } from '@playwright/test';
+import { PRODUCTION_FIXTURE_KIND } from './e2e/support/production-fixture-guard';
 
 const inheritedBase = process.env.ZK_E2E_PORT_BASE;
 const explicitBase = Number.parseInt(inheritedBase ?? '', 10);
@@ -18,8 +19,9 @@ const frontendPort = portBase + 2;
 const frontendUrl = `http://127.0.0.1:${frontendPort}`;
 
 export default defineConfig({
+  metadata: { zkProductionFixture: { kind: PRODUCTION_FIXTURE_KIND, portBase } },
   testDir: './e2e',
-  testMatch: 'production-backend.spec.ts',
+  testMatch: ['production-backend.spec.ts', 'mobile-prompt-bar.spec.ts'],
   outputDir: '../docs/test-results/screenshots/production-backend',
   fullyParallel: false,
   forbidOnly: true,

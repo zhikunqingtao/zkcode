@@ -32,7 +32,7 @@ const server = http.createServer((request, response) => {
       writeJson(response, 400, { error: { message: 'invalid JSON request' } });
       return;
     }
-    if (!['qwen3.8-max-0902', 'deepseek-flash'].includes(body.model) || body.stream !== true
+    if (!['qwen3.8-max-0902', 'qwen3.8-flash', 'deepseek-flash'].includes(body.model) || body.stream !== true
         || !Array.isArray(body.messages)) {
       writeJson(response, 422, { error: { message: 'unexpected fixture request shape' } });
       return;

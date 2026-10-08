@@ -1,4 +1,5 @@
 //! Immutable relational projections and owned file copies for session handoff.
+use super::capture::CaptureBudget;
 use super::{DbError, MergeSummaryInput, Snapshot, digest};
 use crate::session_merge_budget::MergeWriteBudget;
 use base64::Engine as _;
@@ -12,37 +13,88 @@ const MAX_COPY_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_FILE_BYTES: u64 = MAX_COPY_BYTES;
 
 pub(super) fn descendants(conn: &Connection, root: &str) -> Result<Vec<String>, DbError> {
-    let mut stmt=conn.prepare("WITH RECURSIVE tree(id) AS (SELECT id FROM sessions WHERE id=?1 UNION SELECT s.id FROM sessions s JOIN tree ON s.parent_session_id=tree.id WHERE s.kind='internal') SELECT id FROM tree ORDER BY id")?;
-    Ok(stmt
-        .query_map([root], |r| r.get(0))?
-        .collect::<Result<Vec<_>, _>>()?)
+    let mut stmt=conn.prepare("WITH RECURSIVE tree(id) AS (SELECT id FROM sessions WHERE id=?1 UNION SELECT s.id FROM sessions s JOIN tree ON s.parent_session_id=tree.id WHERE s.kind='internal') SELECT id FROM tree ORDER BY id LIMIT 20001")?;
+    let sources = stmt
+        .query_map([root], |row| row.get(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if sources.len() > 20_000 {
+        return Err(DbError::Invalid("MERGE_METADATA_ROW_LIMIT".into()));
+    }
+    Ok(sources)
 }
 
-fn rows(conn: &Connection, table: &str, filter: &str, source: &str) -> Result<Vec<Value>, DbError> {
-    let mut stmt = conn.prepare(&format!(
-        "SELECT * FROM {table} WHERE {filter} ORDER BY rowid"
-    ))?;
-    let names = stmt
+fn rows(
+    conn: &Connection,
+    table: &str,
+    filter: &str,
+    source: &str,
+    budget: &mut CaptureBudget,
+) -> Result<Vec<String>, DbError> {
+    let columns = conn
+        .prepare(&format!("SELECT * FROM {table} LIMIT 0"))?
         .column_names()
         .into_iter()
         .map(str::to_owned)
         .collect::<Vec<_>>();
-    let result=stmt.query_map([source],|row|{
-        let mut value=serde_json::Map::new();
-        for (index,name) in names.iter().enumerate(){
-            let field=match row.get_ref(index)? {
-                ValueRef::Null=>Value::Null, ValueRef::Integer(n)=>json!(n),ValueRef::Real(n)=>json!(n),
-                ValueRef::Text(text)=>Value::String(String::from_utf8_lossy(text).into_owned()),
-                ValueRef::Blob(bytes)=>json!({"encoding":"base64","data":base64::engine::general_purpose::STANDARD.encode(bytes)}),
-            };
-            value.insert(name.clone(),field);
-        }
-        Ok(Value::Object(value))
-    })?.collect::<Result<Vec<_>,_>>()?;
+    // SQLite reports byte lengths before Rust materializes values; base64 BLOB expansion is explicit.
+    let sizes = columns.iter().map(|name| format!("CASE typeof({name}) WHEN 'blob' THEN ((length({name})+2)/3)*4 WHEN 'text' THEN length(CAST({name} AS BLOB)) ELSE 32 END")).collect::<Vec<_>>().join("+");
+    let mut statement = conn.prepare(&format!(
+        "SELECT rowid,({sizes}) FROM {table} WHERE {filter} ORDER BY rowid"
+    ))?;
+    let mut selected = statement.query([source])?;
+    let mut result = Vec::new();
+    while let Some(row) = selected.next()? {
+        let size: i64 = row.get(1)?;
+        budget.preflight(
+            usize::try_from(size).map_err(|_| DbError::Invalid("MERGE_RECORD_TOO_LARGE".into()))?,
+        )?;
+        let rowid: i64 = row.get(0)?;
+        let value = conn.query_row(&format!("SELECT * FROM {table} WHERE rowid=?1"), [rowid], |row| {
+            let mut value=serde_json::Map::new();
+            for (index,name) in columns.iter().enumerate() {
+                let field=match row.get_ref(index)? {
+                    ValueRef::Null=>Value::Null, ValueRef::Integer(n)=>json!(n),ValueRef::Real(n)=>json!(n),
+                    ValueRef::Text(text)=>Value::String(String::from_utf8_lossy(text).into_owned()),
+                    ValueRef::Blob(bytes)=>json!({"encoding":"base64","data":base64::engine::general_purpose::STANDARD.encode(bytes)}),
+                };
+                value.insert(name.clone(),field);
+            }
+            Ok(Value::Object(value))
+        })?;
+        result.push(budget.record(&value)?);
+    }
     Ok(result)
 }
 
-pub(super) fn records(conn: &Connection, source: &str) -> Result<Vec<MergeSummaryInput>, DbError> {
+pub(super) fn messages(
+    conn: &Connection,
+    source: &str,
+    budget: &mut CaptureBudget,
+) -> Result<Vec<crate::MessageRecord>, DbError> {
+    let mut sizes=conn.prepare("SELECT id,length(CAST(content_json AS BLOB))+COALESCE(length(CAST(metadata_json AS BLOB)),0) FROM messages WHERE session_id=?1 ORDER BY seq_num")?;
+    let mut rows = sizes.query([source])?;
+    let mut result = Vec::new();
+    while let Some(row) = rows.next()? {
+        let size: i64 = row.get(1)?;
+        budget.preflight(
+            usize::try_from(size).map_err(|_| DbError::Invalid("MERGE_RECORD_TOO_LARGE".into()))?,
+        )?;
+        let id: String = row.get(0)?;
+        let message=conn.query_row("SELECT id,session_id,role,content_json,stop_reason,input_tokens,output_tokens,seq_num,created_at,metadata_json FROM messages WHERE id=?1",[id],|row| {
+            let role:String=row.get(2)?; let content:String=row.get(3)?; let meta:Option<String>=row.get(9)?;
+            Ok(crate::MessageRecord {id:row.get(0)?,session_id:row.get(1)?,role:crate::MessageRole::parse(&role).ok_or(rusqlite::Error::InvalidQuery)?,content:crate::model::parse_blocks(&content),stop_reason:row.get(4)?,input_tokens:row.get(5)?,output_tokens:row.get(6)?,seq_num:row.get(7)?,created_at:crate::time::parse_rfc3339_millis(&row.get::<_,String>(8)?).unwrap_or(0),meta:meta.map(|value|serde_json::from_str(&value)).transpose().map_err(|error|rusqlite::Error::FromSqlConversionFailure(9,rusqlite::types::Type::Text,Box::new(error)))?})
+        })?;
+        budget.record(&message)?;
+        result.push(message);
+    }
+    Ok(result)
+}
+
+pub(super) fn records(
+    conn: &Connection,
+    source: &str,
+    budget: &mut CaptureBudget,
+) -> Result<Vec<MergeSummaryInput>, DbError> {
     let mut records = Vec::new();
     // SQL identifiers are constants, never supplied by a handoff request.
     let tables = [
@@ -107,8 +159,10 @@ pub(super) fn records(conn: &Connection, source: &str) -> Result<Vec<MergeSummar
         ),
     ];
     for (table, filter) in tables {
-        for (index, row) in rows(conn, table, filter, source)?.into_iter().enumerate() {
-            let text = serde_json::to_string(&row)?;
+        for (index, text) in rows(conn, table, filter, source, budget)?
+            .into_iter()
+            .enumerate()
+        {
             records.push(MergeSummaryInput {
                 reference: format!("record:{source}:{table}:{index}"),
                 source_id: source.into(),
@@ -117,16 +171,27 @@ pub(super) fn records(conn: &Connection, source: &str) -> Result<Vec<MergeSummar
             });
         }
     }
-    records.extend(inherited_records(conn, source)?);
+    records.extend(inherited_records(conn, source, budget)?);
     Ok(records)
 }
 
-fn collect_tree(root: &Path, current: &Path, paths: &mut BTreeSet<PathBuf>) -> Result<(), DbError> {
-    if !current.exists() {
-        return Ok(());
+fn collect_tree(
+    root: &Path,
+    current: &Path,
+    paths: &mut BTreeSet<PathBuf>,
+    budget: &CaptureBudget,
+    visited: &mut usize,
+) -> Result<(), DbError> {
+    budget.check()?;
+    *visited += 1;
+    if *visited > 20_000 {
+        return Err(DbError::Invalid("MERGE_ASSET_ENTRY_LIMIT".into()));
     }
-    let metadata = std::fs::symlink_metadata(current)
-        .map_err(|e| DbError::Invalid(format!("MERGE_ASSET_READ: {e}")))?;
+    let metadata = match std::fs::symlink_metadata(current) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(DbError::Invalid(format!("MERGE_ASSET_READ: {error}"))),
+    };
     if metadata.is_dir() && !metadata.file_type().is_symlink() {
         for entry in std::fs::read_dir(current)
             .map_err(|e| DbError::Invalid(format!("MERGE_ASSET_READ: {e}")))?
@@ -134,7 +199,7 @@ fn collect_tree(root: &Path, current: &Path, paths: &mut BTreeSet<PathBuf>) -> R
             let entry = entry.map_err(|e| DbError::Invalid(format!("MERGE_ASSET_READ: {e}")))?;
             let path = entry.path();
             if path.starts_with(root) {
-                collect_tree(root, &path, paths)?;
+                collect_tree(root, &path, paths, budget, visited)?;
             }
         }
     } else {
@@ -143,17 +208,23 @@ fn collect_tree(root: &Path, current: &Path, paths: &mut BTreeSet<PathBuf>) -> R
     Ok(())
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Asset capture keeps its consistent reader, private destination, authorized source and independent disk/metadata budgets explicit"
+)]
 pub(super) fn copy_assets(
     conn: &Connection,
+    destination: &Connection,
     operation: &str,
     snapshot: &Snapshot,
     scratchpad: Option<&Path>,
     used: &mut u64,
     disk: &mut MergeWriteBudget,
+    budget: &mut CaptureBudget,
 ) -> Result<(), DbError> {
     let source = &snapshot.session_id;
-    copy_inline_images(conn, operation, snapshot, used, disk)?;
-    copy_inherited_assets(conn, operation, source, used, disk)?;
+    copy_inline_images(conn, destination, operation, snapshot, used, disk, budget)?;
+    copy_inherited_assets(conn, destination, operation, source, used, disk, budget)?;
     let workspace = Path::new(&snapshot.working_directory);
     let mut paths = BTreeSet::new();
     let mut expected = std::collections::BTreeMap::new();
@@ -180,7 +251,7 @@ pub(super) fn copy_assets(
     let own = scratchpad
         .map_or_else(|| workspace.join(".zk/scratchpad"), Path::to_owned)
         .join(source);
-    collect_tree(&own, &own, &mut paths)?;
+    collect_tree(&own, &own, &mut paths, budget, &mut 0)?;
     let references = snapshot_references(snapshot)?;
     for reference in &references {
         let path = Path::new(reference);
@@ -197,7 +268,9 @@ pub(super) fn copy_assets(
     let workspace = std::fs::canonicalize(workspace).ok();
     let own = std::fs::canonicalize(&own).ok();
     for path in paths {
+        budget.check()?;
         let original = path.to_string_lossy().into_owned();
+        budget.record(&original)?;
         let reference = format!(
             "asset:{}",
             digest(format!("{source}\0{original}").as_bytes())
@@ -208,6 +281,7 @@ pub(super) fn copy_assets(
             own.as_deref(),
             expected.get(&path).map(String::as_str),
             *used,
+            budget,
         );
         let (status, reason, hash, data) = match copy {
             Ok(bytes) => {
@@ -215,6 +289,7 @@ pub(super) fn copy_assets(
                 ("copied", None, Some(digest(&bytes)), Some(bytes))
             }
             Err(reason) => {
+                budget.check()?;
                 if matches!(
                     reason.as_str(),
                     "copy_budget_exceeded" | "copy_failed" | "changed_during_copy"
@@ -230,15 +305,20 @@ pub(super) fn copy_assets(
                 .saturating_add(original.len())
                 .saturating_add(1024),
         )?;
-        conn.execute("INSERT INTO session_merge_assets(operation_id,reference,source_session_id,original_path,status,reason,sha256,size,content) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",params![operation,reference,source,original,status,reason,hash,i64::try_from(data.as_ref().map_or(0,Vec::len)).map_err(|_|DbError::Invalid("asset too large".into()))?,data])?;
+        destination.execute("INSERT INTO session_merge_assets(operation_id,reference,source_session_id,original_path,status,reason,sha256,size,content) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",params![operation,reference,source,original,status,reason,hash,i64::try_from(data.as_ref().map_or(0,Vec::len)).map_err(|_|DbError::Invalid("asset too large".into()))?,data])?;
     }
     for reference in references {
+        budget.record(&reference)?;
         let key = format!(
             "asset:{}",
             digest(format!("{source}\0{reference}").as_bytes())
         );
         disk.reserve(reference.len().saturating_add(1024))?;
-        conn.execute("INSERT OR IGNORE INTO session_merge_assets(operation_id,reference,source_session_id,original_path,status,reason) VALUES(?1,?2,?3,?4,'external_reference','Historical reference only; not a file snapshot or permission to access')",params![operation,key,source,reference])?;
+        let exists: bool = destination.query_row("SELECT EXISTS(SELECT 1 FROM session_merge_assets WHERE operation_id=?1 AND reference=?2)", params![operation,key], |row| row.get(0))?;
+        if exists {
+            continue;
+        }
+        destination.execute("INSERT INTO session_merge_assets(operation_id,reference,source_session_id,original_path,status,reason) VALUES(?1,?2,?3,?4,'external_reference','Historical reference only; not a file snapshot or permission to access')",params![operation,key,source,reference])?;
     }
     Ok(())
 }
@@ -307,6 +387,7 @@ fn copy_owned_file(
     own: Option<&Path>,
     expected_hash: Option<&str>,
     used: u64,
+    budget: &CaptureBudget,
 ) -> Result<Vec<u8>, String> {
     let before = std::fs::symlink_metadata(path).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
@@ -339,10 +420,18 @@ fn copy_owned_file(
         }
     }
     let mut bytes = Vec::new();
-    (&mut file)
-        .take(MAX_FILE_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| "copy_failed")?;
+    let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
+    loop {
+        budget.check().map_err(|error| error.to_string())?;
+        let count = file.read(&mut buffer).map_err(|_| "copy_failed")?;
+        if count == 0 {
+            break;
+        }
+        if bytes.len().saturating_add(count) as u64 > MAX_FILE_BYTES {
+            return Err("copy_budget_exceeded".into());
+        }
+        bytes.extend_from_slice(&buffer[..count]);
+    }
     let after = file.metadata().map_err(|_| "copy_failed")?;
     if bytes.len() as u64 != before.len()
         || after.len() != before.len()
@@ -459,19 +548,23 @@ fn sealed_tool_images<'a>(
 
 fn copy_inline_images(
     conn: &Connection,
+    destination: &Connection,
     operation: &str,
     snapshot: &Snapshot,
     used: &mut u64,
     disk: &mut MergeWriteBudget,
+    budget: &mut CaptureBudget,
 ) -> Result<(), DbError> {
     let source = &snapshot.session_id;
     for message in &snapshot.messages {
+        budget.check()?;
         for (index, block) in message.content.iter().enumerate() {
             if let crate::StoredBlock::Image { source: image, .. } = block
                 && let Some(data) = &image.data
             {
+                budget.record(&json!({"messageId":message.id,"block":index}))?;
                 save_inline_copy(
-                    conn,
+                    destination,
                     operation,
                     source,
                     InlineCopy {
@@ -495,8 +588,9 @@ fn copy_inline_images(
             {
                 for (ordinal, image) in images.iter().enumerate() {
                     let source_hash = image["sourceDigest"].as_str().unwrap_or_default();
+                    budget.record(&json!({"messageId":message.id,"block":index}))?;
                     save_inline_copy(
-                        conn,
+                        destination,
                         operation,
                         source,
                         InlineCopy {
@@ -533,22 +627,42 @@ fn prior_operation(conn: &Connection, source: &str) -> Result<Option<String>, Db
         .optional()?)
 }
 
-fn inherited_records(conn: &Connection, source: &str) -> Result<Vec<MergeSummaryInput>, DbError> {
+fn inherited_records(
+    conn: &Connection,
+    source: &str,
+    budget: &mut CaptureBudget,
+) -> Result<Vec<MergeSummaryInput>, DbError> {
     let Some(prior) = prior_operation(conn, source)? else {
         return Ok(Vec::new());
     };
     let mut records = Vec::new();
-    for snapshot in super::load_snapshots(conn, &prior)? {
-        let text = serde_json::to_string(&snapshot)?;
+    let mut sources=conn.prepare("SELECT source_session_id,length(CAST(snapshot_json AS BLOB)) FROM session_merge_sources WHERE operation_id=?1 ORDER BY ordinal")?;
+    let mut rows = sources.query([&prior])?;
+    while let Some(row) = rows.next()? {
+        let source_id: String = row.get(0)?;
+        let length: i64 = row.get(1)?;
+        budget.preflight(
+            usize::try_from(length)
+                .map_err(|_| DbError::Invalid("MERGE_RECORD_TOO_LARGE".into()))?,
+        )?;
+        let (text,hash):(String,String)=conn.query_row("SELECT snapshot_json,snapshot_hash FROM session_merge_sources WHERE operation_id=?1 AND source_session_id=?2",params![prior,source_id],|row|Ok((row.get(0)?,row.get(1)?)))?;
+        if digest(text.as_bytes()) != hash {
+            return Err(DbError::Invalid("MERGE_SNAPSHOT_HASH_MISMATCH".into()));
+        }
+        let value: Value = serde_json::from_str(&text)?;
+        let text = budget.inherited_snapshot(&value)?;
         records.push(MergeSummaryInput {
-            reference: format!(
-                "record:{source}:prior_handoff:{prior}:{}",
-                snapshot.session_id
-            ),
+            reference: format!("record:{source}:prior_handoff:{prior}:{source_id}"),
             source_id: source.into(),
             sha256: digest(text.as_bytes()),
             text,
         });
+    }
+    let mut size_query=conn.prepare("SELECT length(CAST(result_json AS BLOB)) FROM session_merge_units WHERE operation_id=?1 AND state='completed'")?;
+    for row in size_query.query_map([&prior], |row| row.get::<_, i64>(0))? {
+        budget.preflight(
+            usize::try_from(row?).map_err(|_| DbError::Invalid("MERGE_RECORD_TOO_LARGE".into()))?,
+        )?;
     }
     let mut stmt=conn.prepare("SELECT unit_id,result_json,result_hash FROM session_merge_units WHERE operation_id=?1 AND state='completed' ORDER BY ordinal,unit_id")?;
     for row in stmt.query_map([&prior], |r| {
@@ -559,6 +673,7 @@ fn inherited_records(conn: &Connection, source: &str) -> Result<Vec<MergeSummary
         ))
     })? {
         let (unit, text, sha256) = row?;
+        budget.record(&serde_json::from_str::<Value>(&text)?)?;
         if digest(text.as_bytes()) != sha256 {
             return Err(DbError::Invalid("MERGE_DETAIL_HASH_MISMATCH".into()));
         }
@@ -574,10 +689,12 @@ fn inherited_records(conn: &Connection, source: &str) -> Result<Vec<MergeSummary
 
 fn copy_inherited_assets(
     conn: &Connection,
+    destination: &Connection,
     operation: &str,
     source: &str,
     used: &mut u64,
     disk: &mut MergeWriteBudget,
+    budget: &mut CaptureBudget,
 ) -> Result<(), DbError> {
     let Some(prior) = prior_operation(conn, source)? else {
         return Ok(());
@@ -595,7 +712,9 @@ fn copy_inherited_assets(
             r.get::<_, Option<Vec<u8>>>(7)?,
         ))
     })? {
+        budget.check()?;
         let (reference, path, status, reason, hash, mime, size, content) = row?;
+        budget.record(&json!([reference, path, status, reason, hash, mime, size]))?;
         if status == "copied" {
             let data = content
                 .as_deref()
@@ -623,7 +742,7 @@ fn copy_inherited_assets(
                 .saturating_add(path.len())
                 .saturating_add(1024),
         )?;
-        conn.execute("INSERT INTO session_merge_assets(operation_id,reference,source_session_id,original_path,status,reason,sha256,mime_type,size,content) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",params![operation,new_ref,source,format!("handoff:{prior}:{path}"),status,reason,hash,mime,size,content])?;
+        destination.execute("INSERT INTO session_merge_assets(operation_id,reference,source_session_id,original_path,status,reason,sha256,mime_type,size,content) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",params![operation,new_ref,source,format!("handoff:{prior}:{path}"),status,reason,hash,mime,size,content])?;
     }
     Ok(())
 }

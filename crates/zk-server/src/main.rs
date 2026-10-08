@@ -235,6 +235,10 @@ async fn main() {
     let run_cleanup = engine.spawn_run_cleanup();
     let runtime_health_metrics = zk_server::runtime_health_metrics::spawn(state.db.clone());
     let runtime_maintenance = zk_server::maintenance::spawn(state.db.clone());
+    let recording_maintenance = zk_server::maintenance::spawn_browser_recording_reconciliation(
+        state.db.clone(),
+        state.python.clone(),
+    );
     // 2.5：交互生命周期常驻任务——启动期容量对账（旧 `@PostConstruct
     // reconcileCapacityAfterRestart`）+ 1s 截止扫描（旧 `@Scheduled(fixedRate=1000)
     // expireDeadlines`）+ 250ms 未 ACK 重投（旧 `@Scheduled(fixedDelay=250)`）。
@@ -281,6 +285,7 @@ async fn main() {
     coordinator_events.abort();
     runtime_health_metrics.abort();
     runtime_maintenance.abort();
+    recording_maintenance.abort();
     if let Some(task) = cron_scheduler {
         task.abort();
     }

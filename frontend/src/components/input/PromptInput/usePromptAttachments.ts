@@ -88,11 +88,27 @@ export function usePromptAttachments({
         };
     }, []);
 
-    // 图片上传按钮始终可用：后端的智能视觉路由会处理模型适配，
-    // 前端不再基于 supportsImages 进行前置禁用，仅保留通用数量上限。
     const selectedModel = useSessionStore(state => state.model);
-    const modelInfo = useModelStore(state => state.models.find(model => model.id === (selectedModel ?? state.defaultModel)));
-    const maxImages = modelInfo?.maxImages ?? 0;
+    const models = useModelStore(state => state.models);
+    const defaultModel = useModelStore(state => state.defaultModel);
+    const loading = useModelStore(state => state.loading);
+    const loaded = useModelStore(state => state.loaded);
+    const error = useModelStore(state => state.error);
+    const modelInfo = models.find(model => model.id === (selectedModel ?? defaultModel));
+    const limit = modelInfo?.maxImages;
+    const knownLimit = typeof limit === 'number' && Number.isSafeInteger(limit) && limit >= 0;
+    const imageCapability: 'loading' | 'unavailable' | 'unsupported' | 'ready' = loading || (!loaded && !error && models.length === 0)
+        ? 'loading' : error || !knownLimit ? 'unavailable' : limit === 0 ? 'unsupported' : 'ready';
+    const maxImages = knownLimit ? limit : 0;
+    const imageCapabilityMessage = imageCapability === 'loading' ? '图片能力正在加载，请稍后添加图片'
+        : imageCapability === 'unavailable' ? '图片能力暂不可用，请重试加载模型目录'
+        : imageCapability === 'unsupported' ? '当前模型没有可用的图片处理能力'
+        : `上传图片（当前模型有效上限 ${maxImages} 张）`;
+    const retryImageCapabilities = useCallback(() => useModelStore.getState().fetchModels(), []);
+    const notifyUnavailable = useCallback(() => {
+        useNotificationStore.getState().addNotification({ key: 'image-capability-unavailable', level: 'warning',
+            message: imageCapabilityMessage, ...(imageCapability === 'unavailable' ? { onRetry: retryImageCapabilities } : {}) });
+    }, [imageCapability, imageCapabilityMessage, retryImageCapabilities]);
 
     const imageCount = useMemo(
         () => attachments.filter(a => a.type.startsWith('image/')).length,
@@ -112,6 +128,7 @@ export function usePromptAttachments({
             });
             return;
         }
+        if (imageCapability !== 'ready') { notifyUnavailable(); return; }
         const accepted: LocalAttachment[] = [];
         const notify = useNotificationStore.getState().addNotification;
         // 使用独立计数器避免同一批多张图片同时越限
@@ -196,7 +213,7 @@ export function usePromptAttachments({
                 return [...prev, ...accepted.slice(0, remaining)];
             });
         }
-    }, [imageCount, maxImages, runActive, compacting, draftKey]);
+    }, [imageCount, maxImages, runActive, compacting, draftKey, imageCapability, notifyUnavailable]);
 
     const handlePaste = useCallback((event: ClipboardEvent<HTMLTextAreaElement>) => {
         const itemFiles = Array.from(event.clipboardData.items)
@@ -218,6 +235,7 @@ export function usePromptAttachments({
             return;
         }
 
+        if (imageCapability !== 'ready') { notifyUnavailable(); return; }
         const remaining = Math.max(0, maxImages - imageCount);
         const accepted = imageFiles.slice(0, remaining).filter(file => file.size <= MAX_IMAGE_SIZE);
         const notify = useNotificationStore.getState().addNotification;
@@ -251,7 +269,7 @@ export function usePromptAttachments({
             if (isMountedRef.current) setIsUploadingPaste(false);
         });
     }, [compacting, handleFiles, imageCount, isUploadingPaste, maxImages,
-        runActive, draftKey]);
+        runActive, draftKey, imageCapability, notifyUnavailable]);
 
     // Drag & drop file upload
     const handleDrop = useCallback((e: React.DragEvent) => {
@@ -295,6 +313,10 @@ export function usePromptAttachments({
         isUploadingPaste,
         imageCount,
         maxImages,
+        imageCapability,
+        imageCapabilityMessage,
+        retryImageCapabilities,
+        notifyUnavailable,
         handleFiles,
         handlePaste,
         handleDrop,

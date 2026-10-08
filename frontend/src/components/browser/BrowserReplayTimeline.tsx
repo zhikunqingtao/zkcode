@@ -31,6 +31,13 @@ export interface BrowserSnapshot {
     interactive: Array<{ role: string; name?: string; value?: string; disabled?: boolean }>;
     tree: Record<string, unknown> | null;
     screenshotBase64: string | null;
+    captureStatus?: 'complete' | 'partial' | 'failed';
+    components?: Record<string, {
+        status: 'ok' | 'failed' | 'not_requested';
+        error_code?: string;
+        reason?: string;
+        truncated?: boolean;
+    }>;
 }
 
 interface BrowserReplayTimelineProps {
@@ -191,6 +198,7 @@ const BrowserReplayTimeline: React.FC<BrowserReplayTimelineProps> = ({
 
             {selected && (
                 <div className="border-t border-[var(--v2-border-hairline)] max-h-64 overflow-y-auto p-3 bg-[var(--v2-bg-sunken)]/30">
+                    <CaptureDetail snapshot={selected} />
                     <InteractiveList interactive={selected.interactive} />
                 </div>
             )}
@@ -199,6 +207,27 @@ const BrowserReplayTimeline: React.FC<BrowserReplayTimelineProps> = ({
     return inline ? <section className="flex h-full min-h-0 flex-col" aria-label="浏览器快照时间线">{content}</section>
         : <Drawer open={open} onClose={onClose} width={width} side="right">{content}</Drawer>;
 };
+
+function CaptureDetail({ snapshot }: { snapshot: BrowserSnapshot }) {
+    const incomplete = Object.entries(snapshot.components ?? {})
+        .filter(([, component]) => component.status === 'failed' || component.truncated);
+    return <>
+        {(snapshot.captureStatus === 'partial' || snapshot.captureStatus === 'failed' || incomplete.length > 0) && (
+            <div role="alert" className="mb-3 text-[13px] text-warnstrong">
+                {snapshot.captureStatus === 'failed' ? '快照采集失败' : '快照包含不完整内容'}
+                {incomplete.map(([name, component]) => <div key={name}>
+                    {name}：{component.truncated ? '内容已截断' : '采集失败'}{component.error_code ? ` (${component.error_code})` : ''}
+                </div>)}
+            </div>
+        )}
+        {snapshot.tree?.source === 'safe_dom_v1' && typeof snapshot.tree.safe_dom === 'string' && (
+            <div className="mb-3">
+                <div className="text-[13px] font-semibold text-[var(--v2-text-2)] mb-2">安全 DOM 快照</div>
+                <pre className="whitespace-pre-wrap break-words text-[13px] text-[var(--v2-text-1)]">{snapshot.tree.safe_dom}</pre>
+            </div>
+        )}
+    </>;
+}
 
 function hasCode(value: unknown, code: string): boolean {
     return !!value && typeof value === 'object' && 'code' in value && value.code === code;
@@ -212,6 +241,12 @@ function validSnapshot(value: unknown, sessionId: string): value is BrowserSnaps
         && frame.interactive.every(item => !!item && typeof item.role === 'string')
         && (frame.url === null || typeof frame.url === 'string')
         && (frame.title === null || typeof frame.title === 'string')
+        && (frame.captureStatus === undefined || ['complete', 'partial', 'failed'].includes(frame.captureStatus))
+        && (frame.components === undefined || (!!frame.components && typeof frame.components === 'object'
+            && Object.values(frame.components).every(component => !!component
+                && ['ok', 'failed', 'not_requested'].includes(component.status)
+                && (component.error_code === undefined || typeof component.error_code === 'string')
+                && (component.truncated === undefined || typeof component.truncated === 'boolean'))))
         && (frame.screenshotBase64 === null || typeof frame.screenshotBase64 === 'string');
 }
 

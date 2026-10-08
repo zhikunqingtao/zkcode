@@ -1,5 +1,7 @@
 # Query 与 CLI 实施记录
 
+> **2026-10-08 必要修复：** 取消保存或清理超过 3 秒仍未确认时，WS/SSE 收到一次 `notification`（key=`cancellation-pending:<runId>`，归属位于 V4 `eventContext`）。唯此非终态诊断可在 outbox 不可写时以内存方式投递；不生成虚假的 `complete`。同步 Query 可返回 503 `CANCELLATION_PERSISTENCE_PENDING`，包含 `queryRequestId/sessionId/runId/terminal:false`，仅 HTTP 等待结束，原 worker、请求注册、会话占用及清理责任仍保留；禁止自动重发 Query。取消 ACK 的 `stopRequested/admissionBlocked/persistencePending/cleanupConfirmed` 分别表示局部请求与当前持久化/清理状态。流恢复 GET 与合并写接口均要求现有可信 Origin 或 Bearer，`X-Session-Id` 不能替代认证。当前验收见 [必要修复记录](necessary-fixes-2026-10.md)，下方旧证据仅为历史。
+
 > **2026-10-07 F1–F5 修复更新：** F5 将 Query 与根任务的同一绝对期限贯通到停止首因、SQLite 和终态投影，取消不再被展示为正常 end_turn；已提交原始模型事实不改写。 最新验证见 [修复记录](f1-f5-fixes.md)、[回归定位表](f1-f5-regression-map.md) 和 [门禁](full-alignment-gates.json)。下方较早的通过数量、状态和构建身份保留为历史，不代表本轮验证。
 
 固定源 `053adf90`，沿用当前 Rust Engine / TaskRuntime / SQLite / 物理请求费用账本。

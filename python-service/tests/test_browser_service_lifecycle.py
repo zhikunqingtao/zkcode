@@ -13,8 +13,10 @@ from services.browser_service import BrowserService, BrowserSession
 
 
 @pytest.fixture
-def service():
+def service(tmp_path):
     service = BrowserService()
+    from services.browser_recordings import RecordingSpool
+    service.recordings = RecordingSpool(tmp_path / "recordings")
     service.cleanup_timeout = 0.05
     page = SimpleNamespace(
         set_default_timeout=Mock(), add_init_script=AsyncMock(), on=Mock(),
@@ -32,7 +34,7 @@ def service():
 
 async def create(service, kind, session_id="resource"):
     if kind == "journey":
-        return await service._create_context_for_journey(session_id, {"trace": True}, {"width": 800, "height": 600})
+        return await service._create_context_for_journey(session_id, {"trace": True}, {"width": 800, "height": 600}, recording={"batch_id": str(__import__("uuid").uuid4()), "session_id":"fixture", "run_id":"run", "invocation_id":"invocation"})
     return await service.get_or_create_session(session_id)
 
 
@@ -160,6 +162,9 @@ async def test_concurrent_ordinary_callers_share_one_creation(service):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("close", [False, True])
 async def test_waiting_ordinary_caller_shares_failure_without_recreating(service, close):
+    # This tests shared failure ownership, not a cleanup timeout. Let the
+    # cancellation/rollback task chain settle even during concurrent native builds.
+    service.cleanup_timeout = 2.0
     context = service._browser.new_context.return_value
     entered, release = asyncio.Event(), asyncio.Event()
     failure = RuntimeError("creation failed")
@@ -726,9 +731,10 @@ async def test_cancelled_context_rpc_retains_capacity_until_late_context_is_clos
             await service.close_session("resource")
         assert reservation.rollback is rollback  # one late-result owner, not a retry
         await service.shutdown()
-        assert service._creating["resource"] is reservation
-        with pytest.raises(RuntimeError, match="unreleased resources"):
-            await service.startup()
+        assert "resource" not in service._creating
+        assert reservation.ancestor_released and reservation.cleanup_confirmed
+        assert reservation.allocation in service._retired_creation_tasks
+        assert not reservation.allocation.done()  # retain late result, never discard it
     finally:
         release.set()
         if not owner.done():
@@ -736,7 +742,7 @@ async def test_cancelled_context_rpc_retains_capacity_until_late_context_is_clos
             await asyncio.gather(owner, return_exceptions=True)
         if reservation.rollback:
             await asyncio.wait_for(reservation.rollback, timeout=0.5)
-    context.close.assert_awaited_once()
+    context.close.assert_not_awaited()  # confirmed ancestor release already proves absence
     assert service._browser is None
     assert not service._sessions and not service._creating
     assert not service._unclosed_contexts and not service._resource_close_tasks
@@ -963,3 +969,167 @@ async def test_recovery_does_not_start_a_service_without_failed_recovery(service
     monkeypatch.setattr("services.browser_service.async_playwright", factory)
     assert not await service.recover_failed_cleanup()
     factory.assert_not_called()
+
+@pytest.mark.asyncio
+async def test_creation_deadline_retains_late_allocation_and_closes_it(service):
+    service.creation_timeout = 0.015
+    service.cleanup_timeout = 0.01
+    released = asyncio.Event()
+    context = service._browser.new_context.return_value
+    async def late_context(**kwargs):
+        await released.wait()
+        return context
+    service._browser.new_context.side_effect = late_context
+    from services.browser_service import BrowserAdmissionError
+    try:
+        with pytest.raises(BrowserAdmissionError, match="creation deadline"):
+            await asyncio.wait_for(create(service, "ordinary"), 0.15)
+        assert "resource" in service._creating
+        with pytest.raises(BrowserAdmissionError):
+            await create(service, "ordinary", "another")
+    finally:
+        released.set()
+        await asyncio.sleep(0.02)
+    context.close.assert_awaited_once()
+    assert not service._sessions
+
+@pytest.mark.asyncio
+async def test_active_run_lease_protects_ordinary_long_thinking(service):
+    session = await create(service, "ordinary")
+    await service.renew_run_lease("resource", "run", "host", service.generation, 60)
+    session.last_activity = datetime.now() - timedelta(days=1)
+    await service._cleanup_expired_sessions()
+    session.context.close.assert_not_awaited()
+    await service.release_run_lease("resource", "run", "host", service.generation)
+    assert not session.is_expired(service.idle_timeout)
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("aria_ok,dom_ok,expected", [(True, False, "failed"), (False, True, "complete"), (False, False, "failed"), (True, True, "complete")])
+async def test_snapshot_component_failures_are_not_empty_page_success(service, aria_ok, dom_ok, expected):
+    from playwright.async_api import Error
+    session = await create(service, "ordinary")
+    session.page.url = "https://example.invalid"
+    session.page.title = AsyncMock(return_value="fixture")
+    aria = AsyncMock(return_value="")
+    evaluate = AsyncMock(return_value={"nodeCount": 0, "interactive": [], "truncated": False})
+    if not aria_ok:
+        aria.side_effect = Error("fixture ARIA failure")
+    if not dom_ok:
+        evaluate.side_effect = Error("fixture DOM failure")
+    session.page.locator = Mock(return_value=SimpleNamespace(first=SimpleNamespace(aria_snapshot=aria)))
+    session.page.evaluate = evaluate
+    result = await service.snapshot_semantic("resource")
+    assert result["capture_status"] == expected
+    assert result.get("success", True) == (expected != "failed")
+
+
+def test_journey_rejects_path_ids_and_empty_steps():
+    from pydantic import ValidationError
+    from services.journey_models import JourneyRunRequest
+    for data in ({"session_id": "../escape", "steps": [{"action": "navigate"}]}, {"steps": []}):
+        with pytest.raises(ValidationError):
+            JourneyRunRequest(base_url="https://example.invalid", **data)
+
+@pytest.mark.asyncio
+async def test_late_usage_renewal_never_recreates_closed_context(service, monkeypatch):
+    from routers import browser
+    from services.browser_models import BrowserLeaseRequest
+    monkeypatch.setattr(browser, 'browser_service', service)
+    request = BrowserLeaseRequest(session_id='managed', owner_session_id='session', run_id='run', host_epoch='host')
+    acquired = await browser.acquire_run_lease(request)
+    assert acquired.success
+    request.generation = acquired.data['generation']
+    assert (await browser.release_run_lease(request)).success
+    assert not (await browser.acquire_run_lease(request)).success
+    await service.close_session('managed')
+    assert not (await browser.acquire_run_lease(request)).success
+    assert service._browser.new_context.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_release_pending_usage_cancels_only_matching_creation(service, monkeypatch):
+    from routers import browser
+    from services.browser_models import BrowserLeaseRequest
+    monkeypatch.setattr(browser, 'browser_service', service)
+    gate, entered = asyncio.Event(), asyncio.Event()
+    context = service._browser.new_context.return_value
+    async def pending(**kwargs):
+        entered.set()
+        await gate.wait()
+        return context
+    service._browser.new_context.side_effect = pending
+    request = BrowserLeaseRequest(session_id='managed', owner_session_id='session', run_id='run', host_epoch='host')
+    task = asyncio.create_task(browser.acquire_run_lease(request))
+    await entered.wait()
+    try:
+        assert (await browser.release_run_lease(request)).success
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert 'managed' in service._creating
+    finally:
+        gate.set()
+        await asyncio.sleep(0.01)
+    assert not service._sessions
+    context.close.assert_awaited_once()
+
+@pytest.mark.asyncio
+async def test_usage_release_isolated_by_context_and_reopen_uses_new_epoch(service, monkeypatch):
+    from routers import browser
+    from services.browser_models import BrowserLeaseRequest
+    monkeypatch.setattr(browser, 'browser_service', service)
+    first = BrowserLeaseRequest(session_id='first', owner_session_id='session', run_id='run', host_epoch='host')
+    second = BrowserLeaseRequest(session_id='second', owner_session_id='session', run_id='run', host_epoch='host')
+    first.generation = (await browser.acquire_run_lease(first)).data['generation']
+    second.generation = (await browser.acquire_run_lease(second)).data['generation']
+    assert (await browser.release_run_lease(first)).success
+    assert (await browser.acquire_run_lease(second)).success
+    await service.close_session('first')
+    first.host_epoch = 'reopened-usage'
+    first.generation = None
+    assert (await browser.acquire_run_lease(first)).success
+    assert (await browser.release_run_lease(first)).success
+    assert (await browser.release_run_lease(second)).success
+
+
+@pytest.mark.asyncio
+async def test_scope_capture_has_no_native_aria_and_reports_screenshot_partial(service):
+    session = await create(service, 'ordinary')
+    session.page.url = 'https://fixture.invalid'
+    session.page.title = AsyncMock(return_value='fixture')
+    session.page.evaluate = AsyncMock(return_value={'nodeCount':1,'interactive':[],'safeDom':'body'})
+    session.page.locator = Mock(side_effect=AssertionError('native ARIA is prohibited'))
+    session.page.screenshot = AsyncMock(side_effect=RuntimeError('capture failed'))
+    snapshot = await service.snapshot_semantic('resource', include_screenshot=True)
+    assert snapshot['capture_status'] == 'partial'
+    assert snapshot['components']['safe_dom']['status'] == 'ok'
+    assert snapshot['components']['screenshot']['error_code'] == 'SNAPSHOT_SCREENSHOT_FAILED'
+    assert snapshot['tree'] == {'safe_dom':'body','source':'safe_dom_v1'}
+
+@pytest.mark.asyncio
+async def test_recording_preparation_timeout_retains_late_filesystem_owner(service):
+    from services.browser_service import BrowserAdmissionError
+    service.creation_timeout = 0.01
+    entered, release = asyncio.Event(), asyncio.Event()
+    async def prepare():
+        entered.set()
+        await release.wait()
+        return {}
+    task = asyncio.create_task(service._create_session('preparing', prepare, AsyncMock()))
+    await entered.wait()
+    try:
+        with pytest.raises(BrowserAdmissionError, match='creation deadline'):
+            await asyncio.wait_for(task, 0.2)
+        reservation = service._creating['preparing']
+        assert not reservation.preparation.done()
+        service._release_browser_ownership()
+        assert service._creating['preparing'] is reservation, 'browser close cannot prove filesystem preparation stopped'
+        service._browser = SimpleNamespace(new_context=AsyncMock(), close=AsyncMock())
+        release.set()
+        await asyncio.wait_for(reservation.done.wait(), 0.2)
+        service._browser.new_context.assert_not_awaited()
+        assert 'preparing' not in service._creating
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)

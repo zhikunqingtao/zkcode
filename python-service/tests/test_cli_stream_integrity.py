@@ -69,6 +69,30 @@ def test_request_cancellation_uses_exact_id(monkeypatch):
     assert "json" not in calls[0][1]
 
 
+def test_cancellation_pending_is_explained_without_resubmission(monkeypatch):
+    calls = []
+
+    class Client:
+        def __init__(self, **kwargs):
+            pass
+
+        def sync_query(self, body):
+            calls.append(body)
+            request = httpx.Request("POST", "http://127.0.0.1/api/query")
+            response = httpx.Response(503, request=request, json={
+                "code": "CANCELLATION_PERSISTENCE_PENDING", "terminal": False,
+                "queryRequestId": body["requestId"], "sessionId": "session", "runId": "run",
+            })
+            raise httpx.HTTPStatusError("pending", request=request, response=response)
+
+    monkeypatch.setattr(cli_main, "ZkcodeClient", Client)
+    result = CliRunner().invoke(cli_main.app, ["hello", "--project-id", "project"])
+    assert result.exit_code == 1
+    assert "原执行仍在" in result.output
+    assert "请勿重发" in result.output
+    assert len(calls) == 1
+
+
 def test_run_mcp_configuration_is_explicit_and_kept_out_of_prompt(tmp_path, monkeypatch):
     secret = "PRIVATE_MCP_TEST_TOKEN"
     config = {"mcpServers": {"private": {"command": "/bin/example", "env": {"TOKEN": secret}}}}

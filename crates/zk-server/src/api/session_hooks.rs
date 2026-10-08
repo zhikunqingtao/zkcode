@@ -92,6 +92,13 @@ pub(super) async fn execute(
         }
         let result = match operation {
             Operation::Delete => {
+                crate::python::tools::close_session_browser_contexts(
+                    &state.db,
+                    &state.python,
+                    &session,
+                )
+                .await
+                .map_err(|code| failure(&code, "Browser session cleanup is not confirmed"))?;
                 state.db.delete_session(&session).await?;
                 Response::Deleted
             }
@@ -228,6 +235,9 @@ async fn run_owned(
     }
     if matches!(operation, Operation::Delete) {
         state.db.ensure_session_idle(&session).await?;
+        crate::python::tools::close_session_browser_contexts(&state.db, &state.python, &session)
+            .await
+            .map_err(|code| failure(&code, "Browser session cleanup is not confirmed"))?;
         state.db.delete_session(&session).await?;
     }
     Ok(outcome)

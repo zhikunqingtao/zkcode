@@ -23,6 +23,81 @@ use serde_json::json;
 use zk_authz::model::{DiagnosticSource, PermissionScope, RiskClass};
 use zk_authz::tool_facts::{BashParseOutcome, ToolFacts};
 
+#[tokio::test]
+async fn final_admission_rechecks_plan_after_ordinary_tool_approval() {
+    use zk_authz::model::PermissionMode;
+    for remembered in [false, true] {
+        let h = Harness::new();
+        h.seed_run("s-final-plan", "r-final-plan").await;
+        let (tool, input) = guarded_read(&h);
+        let frozen = h.freeze(tool.name(), &input);
+        let ctx = h.context("r-final-plan", "tu-final-plan", "s-final-plan");
+        let prepared = h
+            .service
+            .prepare(&tool, &frozen, &input, &ctx)
+            .await
+            .unwrap();
+        if remembered {
+            h.gateway.allow_remember(
+                &h.grants,
+                &prepared.subject,
+                &prepared.descriptor,
+                PermissionScope::Session,
+            );
+        } else {
+            h.gateway.allow_once(&prepared.descriptor.operation_hash);
+        }
+        let authorized = h
+            .service
+            .authorize_prepared(&tool, &frozen, input, &ctx, prepared)
+            .await
+            .unwrap();
+        h.modes.set(PermissionMode::Plan);
+        assert!(
+            h.execution_gateway()
+                .admit(&tool, &authorized, &ctx)
+                .await
+                .is_err(),
+            "PLAN must invalidate ordinary prior approval"
+        );
+        assert!(h.events.of_type("tool_started").is_empty());
+    }
+}
+
+#[tokio::test]
+async fn final_admission_rechecks_auto_approve_but_preserves_safe_reads() {
+    use zk_authz::model::PermissionMode;
+    for (safe, current) in [
+        (false, PermissionMode::Default),
+        (false, PermissionMode::Plan),
+        (true, PermissionMode::Plan),
+    ] {
+        let h = Harness::new();
+        h.seed_run("s-final-mode", "r-final-mode").await;
+        h.modes.set(PermissionMode::AutoApprove);
+        let (tool, input) = if safe {
+            safe_read(&h)
+        } else {
+            guarded_read(&h)
+        };
+        let frozen = h.freeze(tool.name(), &input);
+        let ctx = h.context("r-final-mode", "tu-final-mode", "s-final-mode");
+        let allowed = h
+            .service
+            .authorize(&tool, &frozen, input, &ctx)
+            .await
+            .unwrap();
+        h.modes.set(current);
+        assert_eq!(
+            h.execution_gateway()
+                .admit(&tool, &allowed, &ctx)
+                .await
+                .is_ok(),
+            safe
+        );
+    }
+}
+
 /// 建一个「读工作区内文件」的 SAFE 操作素材。
 fn safe_read(harness: &Harness) -> (FakeTool, serde_json::Value) {
     let target = harness.workspace.join("inside.txt");
@@ -31,6 +106,38 @@ fn safe_read(harness: &Harness) -> (FakeTool, serde_json::Value) {
         FakeTool::new("Read"),
         json!({ "file_path": target.to_string_lossy() }),
     )
+}
+
+#[tokio::test]
+async fn final_admission_rechecks_accept_edits_downgrade() {
+    use zk_authz::model::PermissionMode;
+    for current in [
+        PermissionMode::AcceptEdits,
+        PermissionMode::Default,
+        PermissionMode::Plan,
+    ] {
+        let h = Harness::new();
+        h.seed_run("s-edit-mode", "r-edit-mode").await;
+        h.modes.set(PermissionMode::AcceptEdits);
+        let tool = FakeTool::new("Write");
+        let input = json!({"file_path":h.workspace.join("new.txt"),"content":"new"});
+        let frozen = h.freeze(tool.name(), &input);
+        let ctx = h.context("r-edit-mode", "tu-edit-mode", "s-edit-mode");
+        let allowed = h
+            .service
+            .authorize(&tool, &frozen, input, &ctx)
+            .await
+            .unwrap();
+        assert_eq!(allowed.reason_code, "ACCEPT_EDITS");
+        h.modes.set(current);
+        assert_eq!(
+            h.execution_gateway()
+                .admit(&tool, &allowed, &ctx)
+                .await
+                .is_ok(),
+            current == PermissionMode::AcceptEdits
+        );
+    }
 }
 
 /// 建一个「读工作区外文件」的 GUARDED 操作素材。

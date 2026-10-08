@@ -4,7 +4,7 @@ import { useSessionStore } from '@/store/sessionStore';
 
 interface ReplServiceStatus {
     sessionId: string;
-    state: 'absent' | 'running' | 'stopping' | 'stopped' | 'cleanupUnconfirmed';
+    state: 'absent' | 'starting' | 'running' | 'stopping' | 'stopped' | 'cleanupUnconfirmed';
     cleanupStatus: 'notRequired' | 'pending' | 'confirmed' | 'unconfirmed';
     idleTimeoutSeconds: number;
     maxLifetimeSeconds: number;
@@ -12,7 +12,7 @@ interface ReplServiceStatus {
 }
 function validate(value: unknown, id: string): ReplServiceStatus {
     const item = value as ReplServiceStatus;
-    if (!item || item.sessionId !== id || !['absent', 'running', 'stopping', 'stopped', 'cleanupUnconfirmed'].includes(item.state)
+    if (!item || item.sessionId !== id || !['absent', 'starting', 'running', 'stopping', 'stopped', 'cleanupUnconfirmed'].includes(item.state)
         || !['notRequired', 'pending', 'confirmed', 'unconfirmed'].includes(item.cleanupStatus)
         || !Number.isFinite(item.idleTimeoutSeconds) || !Number.isFinite(item.maxLifetimeSeconds)) throw new Error('REPL 服务状态响应无效');
     return item;
@@ -20,6 +20,7 @@ function validate(value: unknown, id: string): ReplServiceStatus {
 function label(value: ReplServiceStatus): string {
     if (value.state === 'absent' && ['notRequired', 'confirmed'].includes(value.cleanupStatus)) return '未启动';
     if (value.state === 'stopped' && value.cleanupStatus === 'confirmed') return '已停止';
+    if (value.state === 'starting') return '启动中';
     if (value.state === 'running' && value.cleanupStatus !== 'unconfirmed') return '运行中';
     if (value.state === 'stopping') return '正在停止，等待清理完成';
     return '清理未确认，请检查后重试';
@@ -52,7 +53,7 @@ function BoundSessionReplService({ sessionId }: { sessionId: string }) {
                 const next = validate(await response.json(), sessionId);
                 if (generation.current !== current) return;
                 setValue(next); setError(undefined);
-                delay = next.state === 'stopping' ? 1000 : 5000;
+                delay = ['starting', 'stopping'].includes(next.state) ? 1000 : 5000;
             } catch (cause) {
                 if (generation.current !== current || controller.signal.aborted) return;
                 setError(cause instanceof Error ? cause.message : '读取 REPL 服务失败');
@@ -79,7 +80,7 @@ function BoundSessionReplService({ sessionId }: { sessionId: string }) {
             if (generation.current === current) { setSaving(false); setRefresh(count => count + 1); }
         }
     };
-    const canStop = !saving && (value?.state === 'running' || value?.state === 'cleanupUnconfirmed');
+    const canStop = !saving && (value?.state === 'starting' || value?.state === 'running' || value?.state === 'cleanupUnconfirmed');
     return <section className="space-y-2 border-t border-hairline pt-3" aria-label="当前会话 REPL 服务">
         <div className="flex flex-wrap items-center justify-between gap-2">
             <p>当前会话 REPL 服务：<span role="status">{saving ? '正在请求停止' : value ? label(value) : '读取中'}</span></p>

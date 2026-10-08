@@ -63,10 +63,28 @@ impl Command for CostCommand {
                 .map_or_else(Usage::default, |detail| detail.total_usage);
             let total_cost = ctx.state.costs.global_cost();
             let session_cost = ctx.state.costs.session_cost(&ctx.session_id);
+            let pricing = ctx.state.db.get_pricing_status(&ctx.session_id).await;
+            if let Err(error) = &pricing {
+                tracing::warn!(session_id = %ctx.session_id, %error, "pricing coverage unavailable for cost command");
+            }
             // 旧 L32-39 的六行（对齐空格与 `$` 前缀逐字，`%.4f` 四位小数）。
             let mut text = String::from("Session Cost Summary:\n\n");
-            let _ = writeln!(text, "  Total Cost:     ${total_cost:.4}");
-            let _ = writeln!(text, "  Session Cost:   ${session_cost:.4}");
+            let _ = writeln!(
+                text,
+                "  Total Cost:     {}",
+                render_cost(
+                    total_cost,
+                    pricing.as_ref().ok().map(|(_, unknown)| *unknown)
+                )
+            );
+            let _ = writeln!(
+                text,
+                "  Session Cost:   {}",
+                render_cost(
+                    session_cost,
+                    pricing.as_ref().ok().map(|(unknown, _)| *unknown)
+                )
+            );
             let _ = writeln!(text, "  Input Tokens:   {}", usage.input_tokens);
             let _ = writeln!(text, "  Output Tokens:  {}", usage.output_tokens);
             let _ = writeln!(text, "  Cache Read:     {}", usage.cache_read_input_tokens);
@@ -77,6 +95,14 @@ impl Command for CostCommand {
             );
             CommandResult::text(text)
         })
+    }
+}
+
+fn render_cost(cost: f64, has_unknown: Option<bool>) -> String {
+    match has_unknown {
+        Some(false) => format!("${cost:.4}"),
+        Some(true) => format!("费用未知（参考费用 ${cost:.4}，不完整）"),
+        None => "费用未确认（计价状态读取失败）".to_owned(),
     }
 }
 
@@ -205,7 +231,7 @@ mod tests {
     use zk_engine::CostTracker;
     use zk_protocol::Usage;
 
-    use super::render_usage;
+    use super::{render_cost, render_usage};
     use crate::command::traits::CommandResult;
     use crate::command::{CommandContext, CommandRegistry};
     use crate::state::AppState;
@@ -215,6 +241,16 @@ mod tests {
         let registry = CommandRegistry::with_builtin_commands();
         let command = registry.find_command(name).expect("registered");
         command.execute("", &ctx).await
+    }
+
+    #[test]
+    fn cost_labels_do_not_present_unknown_or_unavailable_as_zero() {
+        assert_eq!(render_cost(0.0, Some(false)), "$0.0000");
+        assert_eq!(
+            render_cost(0.0, Some(true)),
+            "费用未知（参考费用 $0.0000，不完整）"
+        );
+        assert_eq!(render_cost(0.0, None), "费用未确认（计价状态读取失败）");
     }
 
     /// `/cost` 全零态的六行逐字（`$0.0000` 四位小数）。

@@ -76,6 +76,8 @@ pub mod summarizer;
 pub mod system_prompt;
 // Batch 7b Step 1：工具调用追踪器（连续错误 / 滑动窗口 / 相同错误重复）。
 pub mod tool_tracker;
+mod verify_journey_postprocessing;
+pub use verify_journey_postprocessing::complete_recorded_verify_journey_evidence;
 // Batch 6: 子代理核心引擎 + 任务系统。
 pub mod agent;
 pub mod task;

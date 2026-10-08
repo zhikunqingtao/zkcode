@@ -62,7 +62,7 @@ async def test_ephemeral_journey_propagates_policy_and_logs_no_page_body(monkeyp
     assert marker in response.step_results[0].screenshot_error
     assert marker not in caplog.text
     assert response.artifacts == {}
-    assert service._create_context_for_journey.call_args.kwargs == {"ephemeral_content":True}
+    assert service._create_context_for_journey.call_args.kwargs == {"ephemeral_content":True, "recording":None}
 
 
 @pytest.mark.asyncio
@@ -123,13 +123,23 @@ async def test_owned_browser_never_recreates_after_close_or_uses_other_context(m
 
 @pytest.mark.asyncio
 async def test_owned_action_forces_private_identity_and_existing_session(monkeypatch):
+    from contextlib import asynccontextmanager
+    entered = []
+
+    @asynccontextmanager
+    async def action_scope(session_id, lease, deadline):
+        entered.append((session_id, lease, deadline))
+        yield
+
     request = browser.OwnedBrowserAction(session_id="owned-00000000-0000-4000-8000-000000000000",
         action="evaluate", parameters={"session_id":"victim", "strict_session":False,
-                                        "ephemeral_content":False,"script":"1+1"})
-    service=SimpleNamespace(get_or_create_session=AsyncMock(), evaluate=AsyncMock(return_value={"result":2}))
+                                        "ephemeral_content":False,"script":"1+1",
+                                        "managed_lease":{"owner_session_id":"victim","run_id":"other","host_epoch":"fake","generation":"fake"}})
+    service=SimpleNamespace(get_or_create_session=AsyncMock(), evaluate=AsyncMock(return_value={"result":2}), action_scope=action_scope)
     monkeypatch.setattr(browser, "browser_service", service)
     response=await browser.owned_action(request)
     assert response.success
     assert service.evaluate.call_args.args[0] == request.session_id
     assert service.evaluate.call_args.kwargs["strict_session"] is True
     service.get_or_create_session.assert_awaited_once_with(request.session_id)
+    assert entered == [(request.session_id, None, None)]

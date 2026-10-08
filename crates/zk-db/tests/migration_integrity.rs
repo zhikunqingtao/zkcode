@@ -239,6 +239,20 @@ async fn merge_restart_resume_and_cancel_fence_old_workers() {
     let replay = db.start_session_merge("key".into(), request).await.unwrap();
     assert_eq!(replay.operation_id, op.operation_id);
     assert_eq!(replay.request.model.as_deref(), Some("replacement-model"));
+    assert!(
+        db.transition_session_merge(&op.operation_id, Some(op.run_epoch), None, true)
+            .await
+            .is_err(),
+        "an old local cancellation owner must not mutate a resumed generation"
+    );
+    assert_eq!(
+        db.session_merge(&op.operation_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .run_epoch,
+        resumed.run_epoch
+    );
     let cancelled = db
         .transition_session_merge(&op.operation_id, None, None, true)
         .await

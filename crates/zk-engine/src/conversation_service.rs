@@ -224,6 +224,18 @@ impl ConversationService {
         }
     }
 
+    /// Exact active request identity for cancellation acknowledgement. A later
+    /// Run in the same Session is never used as a substitute.
+    #[must_use]
+    pub fn request_cancellation(&self, id: &str) -> Option<ConversationCancellation> {
+        self.requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .active
+            .get(id)
+            .cloned()
+    }
+
     /// Execute a previously admitted query using the same production engine.
     pub async fn execute_reserved(
         &self,

@@ -491,12 +491,13 @@ impl ChatProvider for ChildBudgetFailureProvider {
 }
 
 /// Eight-way deterministic provider used to reproduce the original four-foreground /
-/// four-background incident without a paid model.  Every child must reach the provider
-/// before any of them may finish, so a serial implementation cannot accidentally pass.
+/// four-background incident without a paid model. The first provider-capacity wave
+/// rendezvous proves concurrency; each child response then has its own release gate.
 struct IncidentProvider {
     rendezvous: Arc<Barrier>,
     released: Arc<AtomicBool>,
-    release_signal: Arc<Notify>,
+    child_started: [Notify; 8],
+    child_release: [Arc<Notify>; 8],
     root_calls: AtomicUsize,
     child_calls: AtomicUsize,
     resumed_calls: AtomicUsize,
@@ -508,7 +509,8 @@ impl IncidentProvider {
         Self {
             rendezvous: Arc::new(Barrier::new(expected_children + 1)),
             released: Arc::new(AtomicBool::new(false)),
-            release_signal: Arc::new(Notify::new()),
+            child_started: std::array::from_fn(|_| Notify::new()),
+            child_release: std::array::from_fn(|_| Arc::new(Notify::new())),
             root_calls: AtomicUsize::new(0),
             child_calls: AtomicUsize::new(0),
             resumed_calls: AtomicUsize::new(0),
@@ -541,13 +543,32 @@ impl IncidentProvider {
         ))
     }
 
-    async fn wait_until_all_children_are_executing(&self) {
+    async fn wait_until_initial_wave_is_executing(&self) {
         self.rendezvous.wait().await;
+    }
+
+    fn child_response_gate(&self, prompt: &str) -> Arc<Notify> {
+        let ordinal = prompt
+            .rsplit_once(':')
+            .expect("child prompt contains ordinal")
+            .1
+            .parse::<usize>()
+            .expect("numeric child identity");
+        self.child_calls.fetch_add(1, Ordering::SeqCst);
+        self.child_started[ordinal].notify_one();
+        Arc::clone(&self.child_release[ordinal])
+    }
+
+    async fn wait_until_child_is_executing(&self, ordinal: usize) {
+        self.child_started[ordinal].notified().await;
+    }
+
+    fn release_child(&self, ordinal: usize) {
+        self.child_release[ordinal].notify_one();
     }
 
     fn release_children(&self) {
         self.released.store(true, Ordering::SeqCst);
-        self.release_signal.notify_waiters();
     }
 }
 
@@ -570,10 +591,9 @@ impl ChatProvider for IncidentProvider {
             .unwrap_or_default();
 
         if latest_user.starts_with(INCIDENT_CHILD_PREFIX) {
-            self.child_calls.fetch_add(1, Ordering::SeqCst);
+            let child_release = self.child_response_gate(&latest_user);
             let rendezvous = Arc::clone(&self.rendezvous);
             let released = Arc::clone(&self.released);
-            let release_signal = Arc::clone(&self.release_signal);
             let child_answer = format!("completed {latest_user}");
             let gated = futures::stream::once(async move {
                 // Hold the first provider-capacity wave so the test can inspect
@@ -583,16 +603,15 @@ impl ChatProvider for IncidentProvider {
                 if !released.load(Ordering::SeqCst) {
                     rendezvous.wait().await;
                 }
-                while !released.load(Ordering::SeqCst) {
-                    tokio::select! {
-                        () = release_signal.notified() => {}
-                        () = cancel.cancelled() => return Vec::new(),
+                tokio::select! {
+                    () = child_release.notified() => {
+                        if cancel.is_cancelled() {
+                            Vec::new()
+                        } else {
+                            text_completion(&child_answer, 7, 2)
+                        }
                     }
-                }
-                if cancel.is_cancelled() {
-                    Vec::new()
-                } else {
-                    text_completion(&child_answer, 7, 2)
+                    () = cancel.cancelled() => Vec::new(),
                 }
             })
             .flat_map(futures::stream::iter);
@@ -1778,8 +1797,13 @@ async fn missing_usage_fails_before_agent_tool_side_effects() {
     .await;
 
     let mut runtime_error = None;
+    let mut last_cost = None;
     let complete = loop {
         let frame = next_json(&mut ws).await;
+        if frame["type"] == "cost_update" {
+            last_cost = Some(frame);
+            continue;
+        }
         if frame["type"] == "error" {
             runtime_error = Some(frame);
             continue;
@@ -1792,6 +1816,42 @@ async fn missing_usage_fails_before_agent_tool_side_effects() {
     assert_eq!(runtime_error["code"], "BUDGET_USAGE_INCOMPLETE");
     assert_eq!(complete["stopReason"], "error");
     let run_id = complete["runId"].as_str().expect("terminal Run identity");
+    let diagnostic = complete["committedMessages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|message| message["metadata"].get("runtimeDiagnostic"))
+        .expect("completion keeps the durable failure diagnostic");
+    assert_eq!(diagnostic["runId"], run_id);
+    assert_eq!(diagnostic["code"], "BUDGET_USAGE_INCOMPLETE");
+    assert_eq!(diagnostic["status"], "failed");
+    let cost = last_cost.expect("terminal refresh reports unknown cost and missing usage");
+    assert_eq!(cost["sessionPricingStatus"], "unknown");
+    assert_eq!(cost["totalPricingStatus"], "unknown");
+    assert_eq!(cost["usageComplete"], false);
+
+    let mut restored_ws = connect(addr).await;
+    send_json(
+        &mut restored_ws,
+        serde_json::json!({
+            "type": "bind_session", "sessionId": session.id,
+            "bindRequestId": "failed-run-rebind", "bindingEpoch": 2,
+            "protocolVersion": 4
+        }),
+    )
+    .await;
+    let restored = next_json(&mut restored_ws).await;
+    assert_eq!(restored["type"], "session_restored");
+    let restored_diagnostic = restored["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|message| message["metadata"].get("runtimeDiagnostic"))
+        .expect("re-entry restores the same display diagnostic");
+    assert_eq!(restored_diagnostic, diagnostic);
+    assert_eq!(restored["costSummary"]["usageComplete"], false);
+    assert_eq!(restored["costSummary"]["sessionPricingStatus"], "unknown");
+    drop(restored_ws);
 
     let run = db
         .find_run_by_id(run_id)
@@ -1947,6 +2007,13 @@ async fn child_budget_failure_emits_agent_failed_and_persists_partial_budget_ter
         .find(|frame| frame["type"] == "agent_failed" && frame["agentId"] == child_task.id.as_str())
         .expect("budget rejection publishes AgentFailed");
     assert_eq!(failed["error"], "COST_BUDGET_EXHAUSTED");
+    let terminal_cost = frames
+        .iter()
+        .rev()
+        .find(|frame| frame["type"] == "cost_update")
+        .expect("terminal coverage includes child usage integrity");
+    assert_eq!(terminal_cost["usageComplete"], false);
+    assert!(terminal_cost.get("usage").is_none());
     assert!(
         !frames.iter().any(|frame| {
             frame["type"] == "agent_completed" && frame["agentId"] == child_task.id.as_str()
@@ -2217,7 +2284,8 @@ async fn wait_for_terminal_task(db: &Db, task_id: &str) -> zk_db::RuntimeTaskRec
 /// missing Task IDs, `TASK_NOT_FOUND`, cross-Agent tool cards and ghost `running` state.
 ///
 /// The test goes through the real websocket router, production `wire_engine`, the real Agent and
-/// `TaskCreate` bridges, a file-backed `SQLite` database and eight concurrently blocked child engines.
+/// `TaskCreate` bridges, a file-backed `SQLite` database and eight durable child engines
+/// executing in provider-capacity waves.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 #[allow(clippy::too_many_lines)]
 async fn production_incident_four_terminal_and_four_background_agents_are_durable_and_partitioned()
@@ -2295,16 +2363,33 @@ async fn production_incident_four_terminal_and_four_background_agents_are_durabl
 
     tokio::time::timeout(
         Duration::from_secs(20),
-        provider.wait_until_all_children_are_executing(),
+        provider.wait_until_initial_wave_is_executing(),
     )
     .await
-    .expect("all eight children execute concurrently");
+    .expect("first provider-capacity wave executes concurrently");
 
-    // Submission is the acknowledgement boundary. While every provider stream remains blocked,
-    // all Task/Run/internal-Session rows must already be visible and queryable.
+    // First-wave concurrency does not imply that later roots have submitted their
+    // children. Observe whichever child has actually reached the provider, inspect
+    // its durable identity while its response is blocked, then free its capacity.
+    // Waiting in ordinal order could deadlock behind four other blocked children.
+    let mut arrivals = (0..CHILDREN)
+        .map(|ordinal| {
+            let provider = &provider;
+            async move {
+                provider.wait_until_child_is_executing(ordinal).await;
+                ordinal
+            }
+        })
+        .collect::<futures::stream::FuturesUnordered<_>>();
+    provider.release_children();
     let runtime = state.task_runtime();
     let mut identities = Vec::with_capacity(CHILDREN);
-    for (ordinal, session_id) in session_ids.iter().enumerate() {
+    for _ in 0..CHILDREN {
+        let ordinal = tokio::time::timeout(Duration::from_secs(20), arrivals.next())
+            .await
+            .expect("next child reaches its initial provider request")
+            .expect("each child arrives once");
+        let session_id = &session_ids[ordinal];
         let mode = if ordinal < 4 {
             "terminal"
         } else {
@@ -2379,6 +2464,7 @@ async fn production_incident_four_terminal_and_four_background_agents_are_durabl
             );
         }
 
+        provider.release_child(ordinal);
         identities.push(IncidentTaskIdentity {
             session_id: session_id.clone(),
             mode,
@@ -2390,7 +2476,7 @@ async fn production_incident_four_terminal_and_four_background_agents_are_durabl
         });
     }
 
-    provider.release_children();
+    identities.sort_by_key(|identity| identity.ordinal);
     let mut all_frames = Vec::with_capacity(CHILDREN);
     for client in clients {
         let frames = tokio::time::timeout(Duration::from_secs(30), client)
@@ -2637,7 +2723,7 @@ async fn production_task_stop_and_parent_cancel_cascade_settle_without_late_wake
 
     tokio::time::timeout(
         Duration::from_secs(20),
-        provider.wait_until_all_children_are_executing(),
+        provider.wait_until_initial_wave_is_executing(),
     )
     .await
     .expect("both cancellation children enter provider execution");
@@ -2741,6 +2827,9 @@ async fn production_task_stop_and_parent_cancel_cascade_settle_without_late_wake
 
     // A late child result cannot reactivate a cancelled parent or create a second attempt.
     provider.release_children();
+    for ordinal in 0..CASES {
+        provider.release_child(ordinal);
+    }
     tokio::time::sleep(Duration::from_millis(100)).await;
     let parent_after_release = db
         .find_runtime_task_by_id(&task_pairs[1].0.id)

@@ -62,7 +62,7 @@ impl Command for BrowserSnapshotCommand {
                     BROWSER_AUTOMATION,
                     "/api/browser/snapshot-semantic",
                     &json!({
-                        "session_id": ctx.session_id,
+                        "session_id": crate::python::tools::session_browser_id(&ctx.session_id, "default"),
                         "selector": selector,
                         "interesting_only": true,
                         "include_screenshot": false,
@@ -90,7 +90,8 @@ impl Command for BrowserSnapshotCommand {
                 .append_python_snapshot(&ctx.session_id, &data)
             {
                 Ok(snapshot) => CommandResult::text(format!(
-                    "Browser semantic snapshot captured: {} interactive elements, {} nodes",
+                    "Browser semantic snapshot captured ({}): {} interactive elements, {} nodes",
+                    snapshot["captureStatus"].as_str().unwrap_or("unknown"),
                     snapshot["interactive"].as_array().map_or(0, Vec::len),
                     snapshot["nodeCount"].as_u64().unwrap_or(0)
                 )),

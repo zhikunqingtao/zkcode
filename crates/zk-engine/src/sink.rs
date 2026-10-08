@@ -18,6 +18,26 @@ pub trait MessageSink: Send + Sync {
     /// 向指定会话推送一条下行消息（推送失败由通道层自行吞吸，永不上抛）。
     fn push<'a>(&'a self, session_id: &'a str, message: ServerMessage) -> BoxFuture<'a, ()>;
 
+    /// A diagnostic only: the Run remains non-terminal and its owner retained.
+    /// The host may deliver this notice without a writable durable outbox.
+    fn push_local_cancellation_notice<'a>(
+        &'a self,
+        session_id: &'a str,
+        run_id: &'a str,
+    ) -> BoxFuture<'a, ()> {
+        self.push(
+            session_id,
+            ServerMessage::Notification {
+                key: format!("cancellation-pending:{run_id}"),
+                level: "warning".into(),
+                message:
+                    "已请求停止，取消状态保存或资源清理仍待确认；原执行仍在收尾，请勿重新提交。"
+                        .into(),
+                timeout: 0,
+            },
+        )
+    }
+
     /// Route an event to the visible root Session while retaining the Session
     /// that actually produced it. Root engines use the same value for both;
     /// child routing adapters override this method so the durable WS outbox can

@@ -204,9 +204,17 @@ export function SessionMergePanel() {
                         资料已整理：复制 {pending.operation.result.copiedCount} 项资料，资料缺口或未解析项 {pending.operation.result.warningCount ?? 0} 项。
                     </p>}
                     {pending.operation?.progress && <p>整理单元：{pending.operation.progress.completedUnits}/{pending.operation.progress.knownUnits}{pending.operation.progress.totalFinal ? '' : '（总数随分片增加）'}</p>}
-                    {pending.operation?.usage && <p>合并用量：{pending.operation.usage.tokens.toLocaleString()} tokens · ${(pending.operation.usage.costNanosUsd / 1_000_000_000).toFixed(6)}{pending.operation.usage.usageComplete ? '' : '（用量尚不完整，费用未确定）'}</p>}
+                    {pending.operation?.usage && <p>合并用量：{pending.operation.usage.tokens.toLocaleString()} tokens · {pending.operation.usage.pricingStatus === 'known'
+                        ? `$${(pending.operation.usage.costNanosUsd / 1_000_000_000).toFixed(6)}`
+                        : pending.operation.usage.pricingStatus === 'unknown'
+                            ? pending.operation.usage.costNanosUsd > 0
+                                ? `参考费用 $${(pending.operation.usage.costNanosUsd / 1_000_000_000).toFixed(6)}（参考费用不完整）`
+                                : '费用未知'
+                            : '费用状态未确认'}{pending.operation.usage.usageComplete ? '' : '（用量尚不完整）'}</p>}
                     {pending.operation?.retryAt && <p>正在等待重试：{pending.operation.retryAt}</p>}
-                    {['paused', 'failed'].includes(pending.operation?.status ?? '') && <p role="alert">{pending.operation?.error}</p>}
+                    {(['paused', 'failed'].includes(pending.operation?.status ?? '')
+                        || pending.operation?.error?.startsWith('MERGE_CANCELLATION_PENDING：'))
+                        && <p role="alert">{pending.operation?.error}</p>}
                     {!!pending.operation?.result.warnings?.length && <details open><summary>资料缺口与未解析项</summary><ul className="space-y-2 break-all">
                         {pending.operation.result.warnings.map((w, i) => <li key={i}>{w.sourceId ? `来源 ${w.sourceId}：` : ''}{w.originalPath}：{w.reason}</li>)}
                     </ul>

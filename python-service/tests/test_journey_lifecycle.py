@@ -42,7 +42,7 @@ def registered_service(monkeypatch):
     page.url = "http://local/"
     page.screenshot = AsyncMock(return_value=b"jpeg")
     page.title = AsyncMock(return_value="Failure page")
-    page.evaluate = AsyncMock(return_value={"nodeCount": 1, "interactive": []})
+    page.evaluate = AsyncMock(return_value={"nodeCount": 1, "interactive": [], "safeDom":"button: Retry"})
     page.locator.return_value.first.aria_snapshot = AsyncMock(return_value='- button "Retry"')
     context = SimpleNamespace(new_page=AsyncMock(return_value=page),
                               add_init_script=AsyncMock(), close=AsyncMock())
@@ -99,7 +99,7 @@ async def test_total_deadline_includes_screenshot_and_cleans_owned_context(owned
 async def test_creation_is_cancelled_and_joined_before_timeout_returns(owned_service, monkeypatch):
     service, _ = owned_service
     cleaned = asyncio.Event()
-    async def create(*args):
+    async def create(*args, **kwargs):
         try:
             await asyncio.Event().wait()
         finally:
@@ -197,7 +197,7 @@ async def test_real_registration_preserves_failure_snapshot_until_explicit_close
     assert service._sessions["rv-owned"].owner_task is None
     snapshot = await service.snapshot_semantic("rv-owned", strict_session=True)
     assert snapshot["title"] == "Failure page"
-    assert "Retry" in snapshot["tree"]["aria"]
+    assert "Retry" in snapshot["tree"]["safe_dom"]
     context.close.assert_not_awaited()
     assert await service.close_session("rv-owned")
     missing = await service.snapshot_semantic("rv-owned", strict_session=True)

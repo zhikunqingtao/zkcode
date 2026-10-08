@@ -26,6 +26,27 @@ def digest(path: Path) -> str:
     return value.hexdigest()
 
 
+def tree_digest(root: Path) -> str:
+    """Bind every private source file and relative name, without following links."""
+    value = hashlib.sha256()
+    count = 0
+    for path in sorted(root.rglob('*'), key=lambda entry: entry.relative_to(root).as_posix().encode()):
+        if path.is_symlink():
+            raise RuntimeError('LSP source links are not supported')
+        if path.is_dir():
+            continue
+        if not path.is_file():
+            raise RuntimeError('LSP source contains an unsupported file')
+        count += 1
+        if count > 100_000:
+            raise RuntimeError('LSP source file limit exceeded')
+        value.update(path.relative_to(root).as_posix().encode() + b'\0')
+        value.update(digest(path).encode() + b'\n')
+    if count == 0:
+        raise RuntimeError('LSP Rust source is empty')
+    return value.hexdigest()
+
+
 def atomic_json(path: Path, value: object) -> None:
     temporary = None
     try:
@@ -118,6 +139,11 @@ def fingerprint(root: Path) -> str:
 def probe(root: Path, home: Path) -> dict:
     try:
         current = json.loads((home / 'current.json').read_text())
+        if current.get('schemaVersion') != 2:
+            raise RuntimeError('LSP manifest needs private Rust source installation')
+        version = current['versions'].get('rustCompiler')
+        if not isinstance(version, str) or not version.strip():
+            raise RuntimeError('LSP Rust compiler version is missing')
         if current['fingerprint'] != fingerprint(root):
             raise RuntimeError('LSP lock or installer changed')
         bundle = (home / current['bundle']).resolve(strict=True)
@@ -129,14 +155,18 @@ def probe(root: Path, home: Path) -> dict:
                 raise RuntimeError('LSP installed executable identity mismatch')
         rust_root = Path(current['rustToolchainRoot']).resolve(strict=True)
         if (digest(rust_root / 'bin/rustc') != current['rustCompilerSha256']
-                or digest(rust_root / 'bin/cargo') != current['cargoSha256']
-                or not (rust_root / 'lib/rustlib/src/rust/library').is_dir()):
+                or digest(rust_root / 'bin/cargo') != current['cargoSha256']):
             raise RuntimeError('LSP pinned Rust compiler or source identity is unavailable')
+        source = (bundle / current['rustSourceRoot']).resolve(strict=True)
+        if not source.is_relative_to(bundle) or tree_digest(source) != current['rustSourceSha256']:
+            raise RuntimeError('LSP private Rust source identity mismatch')
+        if current['versions'].get('rust-src') != version:
+            raise RuntimeError('LSP Rust compiler and source versions differ')
         if set(current['servers']) != {'typescript', 'python', 'rust', 'go', 'java'}:
             raise RuntimeError('LSP language set is incomplete')
         return {'ok': True, 'fingerprint': current['fingerprint'], 'versions': current['versions'],
                 'manifest': str(home / 'current.json')}
-    except (OSError, ValueError, KeyError, RuntimeError) as error:
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, RuntimeError) as error:
         return {'ok': False, 'reason': str(error), 'remediation': './dev bootstrap'}
 
 
@@ -150,6 +180,9 @@ def install(root: Path, home: Path, offline: bool) -> dict:
     cache = home / 'downloads'
     cache.mkdir(exist_ok=True)
     policy = json.loads((root / 'configuration/lsp-toolchain.json').read_text())
+    rust_version = policy['rustCompiler']
+    if not isinstance(rust_version, str) or not rust_version.strip() or policy['artifacts']['rust-src']['version'] != rust_version:
+        raise RuntimeError('LSP Rust source must match the pinned compiler')
     stamp = fingerprint(root)
     stage = Path(tempfile.mkdtemp(prefix='stage-', dir=home))
     bundle = home / stamp
@@ -163,14 +196,8 @@ def install(root: Path, home: Path, offline: bool) -> dict:
         for unsafe in ('NODE_OPTIONS', 'NODE_PATH', 'JAVA_TOOL_OPTIONS', '_JAVA_OPTIONS', 'JDK_JAVA_OPTIONS', 'GOFLAGS', 'GOWORK'):
             env.pop(unsafe, None)
         env['PATH'] = str(stage / 'node/bin') + os.pathsep + str(stage / 'go/bin') + os.pathsep + env.get('PATH', '')
-        rust_version = policy['rustCompiler']
         rustc = Path(checked(['rustup', 'which', '--toolchain', rust_version, 'rustc'], env=env, cwd=stage)).resolve(strict=True)
         rust_root = rustc.parent.parent
-        components = checked(['rustup', 'component', 'list', '--installed', '--toolchain', rust_version], env=env, cwd=stage)
-        if 'rust-src' not in components.splitlines():
-            if offline:
-                raise RuntimeError('Pinned rust-src is unavailable offline; run ./dev bootstrap')
-            checked(['rustup', 'component', 'add', 'rust-src', '--toolchain', rust_version], env=env, cwd=stage)
         env['NPM_CONFIG_CACHE'] = str(home / 'npm-cache')
         npm = stage / 'node/bin/npm'
         checked([str(npm), 'ci', '--ignore-scripts', '--no-audit', '--no-fund'] + (['--offline'] if offline else []), env=env, cwd=npm_dir)
@@ -218,8 +245,10 @@ def install(root: Path, home: Path, offline: bool) -> dict:
         checked([str(java_home/'bin/java'), '-version'], env=env, cwd=stage)
         checked([str(stage/'rust-analyzer/rust-analyzer'), '--version'], env=env, cwd=stage)
         checked([str(stage/'bin/gopls'), 'version'], env=env, cwd=stage)
-        record = {'schemaVersion': 1, 'fingerprint': stamp, 'bundle': bundle.name,
+        source_relative = 'rust-src/rust-src/lib/rustlib/src/rust/library'
+        record = {'schemaVersion': 2, 'fingerprint': stamp, 'bundle': bundle.name,
                   'versions': versions, 'identities': identities, 'servers': servers, 'rustToolchainRoot': str(rust_root),
+                  'rustSourceRoot': source_relative, 'rustSourceSha256': tree_digest(stage / source_relative),
                   'rustCompilerSha256': digest(rustc), 'cargoSha256': digest(rust_root/'bin/cargo')}
         atomic_json(stage / 'manifest.json', record)
         if bundle.exists():

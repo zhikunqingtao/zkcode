@@ -12,7 +12,7 @@ import { openCommandPanel } from './commandPanels';
  */
 
 import { isPermissionMode, WS_PROTOCOL_VERSION } from '@/types';
-import type { Message, MessageCompletePayload, ServerMessage, ServerMessagePayload, RuntimeServerEnvelope, PermissionRequest, TokenWarningPayload, ToolPermissionDeniedPayload, InteractionUpdatedPayload, InteractionTerminalPayload, RuntimeEventContext, RuntimeRunSnapshot, RuntimeTaskSnapshot, TaskState, Usage } from '@/types';
+import type { Message, MessageCompletePayload, ServerMessage, ServerMessagePayload, RuntimeServerEnvelope, PermissionRequest, TokenWarningPayload, ToolPermissionDeniedPayload, InteractionUpdatedPayload, InteractionTerminalPayload, RuntimeEventContext, RuntimeRunSnapshot, RuntimeTaskSnapshot, TaskState, Usage, PricingStatus } from '@/types';
 import type { ActivityData } from '@/types/apos';
 import { useMessageStore } from '@/store/messageStore';
 import { useActivityStore } from '@/store/activityStore';
@@ -44,6 +44,13 @@ const seenEventIds = new Set<string>();
 const seenEventOrder: string[] = [];
 const MAX_SEEN_EVENT_IDS = 20_000;
 const durableEventHighWaterBySession = new Map<string, number>();
+const completedCancellationRuns = new Set<string>();
+function cancellationKey(sessionId: string, runId: string): string { return `${sessionId}:${runId}`; }
+function completeCancellationNotice(sessionId: string, runId: string): void {
+    completedCancellationRuns.add(cancellationKey(sessionId, runId));
+    if (completedCancellationRuns.size > 1000) completedCancellationRuns.delete(completedCancellationRuns.values().next().value!);
+    useNotificationStore.getState().forgetCancellationNotice(sessionId, runId);
+}
 
 /** source Run 是并发投影的最小隔离单元，其次才回退到 source Task/root Run。 */
 export function runtimePartitionKey(context: RuntimeEventContext): string {
@@ -128,12 +135,16 @@ function acceptV4Event(data: Partial<ServerMessage>): boolean {
     return true;
 }
 
+type BindPublisher = (payload: { sessionId: string; protocolVersion: number; bindRequestId: string; bindingEpoch: number; afterEventId?: number }) => void | boolean;
+
 interface PendingBind {
+    publish: BindPublisher;
+    deadline: number;
+    rebinds: number;
     sessionId: string;
     newSessionDraftId?: string;
     isCurrent?: () => boolean;
     bindingEpoch: number;
-    restoreAccepted: boolean;
     resolve: (restored: boolean) => void;
     timer: ReturnType<typeof setTimeout>;
     queued: RawServerMessage[];
@@ -283,6 +294,8 @@ export function isSessionBound(sessionId: string): boolean {
 
 /** 重置绑定状态 — WS 重连时调用，确保下次发消息时重新发送 bind-session */
 export function resetBoundSession(): void {
+    cancelInteractionRefresh();
+    if (activeRecoveryId) finishBind(activeRecoveryId, false, false);
     usePermissionStore.getState().clearModeChange();
     boundSessionId = null;
     notifySessionBinding();
@@ -333,48 +346,67 @@ async function flushPendingInteractionAcks(sessionId: string): Promise<void> {
  */
 export function bindSessionAndWait(
     sessionId: string,
-    publish: (payload: { sessionId: string; protocolVersion: number; bindRequestId: string; bindingEpoch: number; afterEventId?: number }) => void | boolean,
+    publish: BindPublisher,
     timeoutMs = 5000,
     options: { newSessionDraftId?: string; isCurrent?: () => boolean } = {},
 ): Promise<boolean> {
+    cancelInteractionRefresh();
     if (activeRecoveryId) finishBind(activeRecoveryId, false, false);
-    const bindRequestId = crypto.randomUUID();
-    const bindingEpoch = ++nextBindingEpoch;
     return new Promise(resolve => {
-        const timer = setTimeout(() => {
-            const pending = pendingBinds.get(bindRequestId);
-            const restored = pending?.restoreAccepted === true;
-            finishBind(bindRequestId, restored, restored);
-        }, timeoutMs);
-        pendingBinds.set(bindRequestId, {
-            sessionId,
-            newSessionDraftId: options.newSessionDraftId,
-            isCurrent: options.isCurrent,
-            bindingEpoch,
-            restoreAccepted: false,
-            resolve,
-            timer,
-            queued: [],
+        startBindAttempt({
+            sessionId, publish, deadline: Date.now() + timeoutMs, rebinds: 0,
+            newSessionDraftId: options.newSessionDraftId, isCurrent: options.isCurrent,
+            bindingEpoch: 0, resolve,
+            timer: undefined as unknown as ReturnType<typeof setTimeout>, queued: [],
         });
-        activeRecoveryId = bindRequestId;
-        try {
-            const published = publish({
-                sessionId,
-                protocolVersion: WS_PROTOCOL_VERSION,
-                bindRequestId,
-                bindingEpoch,
-                ...(durableEventHighWaterBySession.get(sessionId)
-                    ? { afterEventId: durableEventHighWaterBySession.get(sessionId) }
-                    : {}),
-            });
-            if (published === false) {
-                finishBind(bindRequestId, false, false);
-            }
-        } catch (error) {
-            console.error('[WS] Failed to publish Session bind:', error);
+    });
+}
+
+function bindingFailed(): void {
+    useNotificationStore.getState().addNotification({ key: 'session-sync-failed', level: 'error',
+        message: '会话同步失败，请重新选择会话以获取最新状态。原执行不会重新提交。', timeout: 0 });
+}
+
+/** Retry only transport binding; preserve the original activation, draft identity and deadline. */
+function startBindAttempt(pending: PendingBind): void {
+    const bindRequestId = crypto.randomUUID();
+    pending.bindingEpoch = ++nextBindingEpoch;
+    pending.timer = setTimeout(() => {
+        if (pending.rebinds) bindingFailed();
+        finishBind(bindRequestId, false, false);
+    }, Math.max(0, pending.deadline - Date.now()));
+    pendingBinds.set(bindRequestId, pending);
+    activeRecoveryId = bindRequestId;
+    notifySessionBinding();
+    try {
+        const published = pending.publish({ sessionId: pending.sessionId, protocolVersion: WS_PROTOCOL_VERSION,
+            bindRequestId, bindingEpoch: pending.bindingEpoch,
+            ...(durableEventHighWaterBySession.get(pending.sessionId)
+                ? { afterEventId: durableEventHighWaterBySession.get(pending.sessionId) } : {}),
+        });
+        if (published === false) {
+            if (pending.rebinds) bindingFailed();
             finishBind(bindRequestId, false, false);
         }
-    });
+    } catch (error) {
+        console.error('[WS] Failed to publish Session bind:', error);
+        if (pending.rebinds) bindingFailed();
+        finishBind(bindRequestId, false, false);
+    }
+}
+
+function rebindOverflow(bindRequestId: string, pending: PendingBind): void {
+    if (pending.rebinds || pending.deadline <= Date.now() || (pending.isCurrent && !pending.isCurrent())) {
+        bindingFailed();
+        finishBind(bindRequestId, false, false);
+        boundSessionId = null;
+        return;
+    }
+    clearTimeout(pending.timer);
+    pendingBinds.delete(bindRequestId);
+    pending.queued = [];
+    pending.rebinds += 1;
+    startBindAttempt(pending);
 }
 
 function finishBind(bindRequestId: string, restored: boolean, replayQueued: boolean): void {
@@ -382,6 +414,7 @@ function finishBind(bindRequestId: string, restored: boolean, replayQueued: bool
     if (!pending) return;
     clearTimeout(pending.timer);
     pendingBinds.delete(bindRequestId);
+    if (!restored && pending.rebinds) boundSessionId = null;
     if (activeRecoveryId === bindRequestId) activeRecoveryId = null;
     notifySessionBinding();
     pending.resolve(restored);
@@ -396,30 +429,23 @@ type RawServerMessage = ServerMessagePayload & Partial<RuntimeServerEnvelope>;
 
 export function dispatch(data: RawServerMessage): void {
     const routed = data as RawServerMessage;
-    if (activeRecoveryId && !RECOVERY_BYPASS_TYPES.has(data.type)) {
-        const pending = pendingBinds.get(activeRecoveryId);
-        if (pending) {
-            const routedSessionId = routed.eventContext?.sessionId ?? routed._sessionId;
-            if (routedSessionId && (routedSessionId !== pending.sessionId
-                    || (routed._bindingEpoch !== undefined
-                        && routed._bindingEpoch !== pending.bindingEpoch))) {
-                console.warn(`[WS] Recovery filter: discarding message type=${data.type}, sessionId mismatch`);
-                return;
-            }
-            if (pending.queued.length >= 5000) pending.queued.shift();
-            pending.queued.push(data);
-            console.warn(`[WS] Recovery filter: queuing message type=${data.type} until session restore completes`);
-            return;
-        }
-    }
+    const pending = activeRecoveryId ? pendingBinds.get(activeRecoveryId) : undefined;
     const routedSessionId = routed.eventContext?.sessionId ?? routed._sessionId;
-    if (!activeRecoveryId && routedSessionId && boundSessionId
-            && (routedSessionId !== boundSessionId
-                || (routed._bindingEpoch !== undefined
-                    && routed._bindingEpoch !== boundBindingEpoch))) {
+    const expectedSessionId = pending?.sessionId ?? boundSessionId;
+    const expectedEpoch = pending?.bindingEpoch ?? boundBindingEpoch;
+    // Apply the ownership fence before bypass handling or event-id/cursor bookkeeping.
+    if (routedSessionId && (routedSessionId !== expectedSessionId
+            || (routed._bindingEpoch !== undefined && routed._bindingEpoch !== expectedEpoch))) return;
+    if (pending && !RECOVERY_BYPASS_TYPES.has(data.type)) {
+        if (pending.queued.length >= 5000) rebindOverflow(activeRecoveryId!, pending);
+        else pending.queued.push(data);
         return;
     }
     if (!acceptV4Event(data)) return;
+    if (interactionRefresh && ['interaction_created', 'interaction_updated', 'interaction_terminal', 'permission_request'].includes(data.type)
+            && 'interactionId' in data && typeof data.interactionId === 'string') {
+        interactionRefresh.touched.add(data.interactionId);
+    }
     // 序列号/时间戳校验
     if (data.ts) {
         if (data.ts < lastSeqTs) {
@@ -697,7 +723,17 @@ const handlers: Record<string, (data: any) => void> = {
     'bridge_status':      (d) => useBridgeStore.getState().updateBridgeStatus(d),
 
     // === notificationStore (1 种) ===
-    'notification':       (d) => useNotificationStore.getState().addNotification(d),
+    'notification':       (d) => {
+        if (d.key.startsWith('cancellation-pending:')) {
+            const context = d.eventContext;
+            if (!context.sessionId || !context.runId || !isRootRuntimeEvent(context)
+                    || d.key !== `cancellation-pending:${context.runId}`
+                    || completedCancellationRuns.has(cancellationKey(context.sessionId, context.runId))) return;
+            useNotificationStore.getState().addCancellationNotice(context.sessionId, context.runId, d);
+            return;
+        }
+        useNotificationStore.getState().addNotification(d);
+    },
 
     // === inboxStore (1 种) ===
     'teammate_message':   (d) => {
@@ -771,17 +807,9 @@ const handlers: Record<string, (data: any) => void> = {
         });
         useMessageStore.getState().setTokenWarning(d as TokenWarningPayload);
     },
-    'interrupt_ack':      (d: { reason: string }) => {
-        useSessionStore.getState().setStatus('idle');
-        if (d.reason === 'USER_INTERRUPT') {
-            useMessageStore.getState().addMessage({
-                type: 'system',
-                uuid: generateUUID(),
-                timestamp: Date.now(),
-                content: '\u5df2\u4e2d\u65ad AI \u54cd\u5e94',
-                subtype: 'interrupt',
-            } as Message);
-        }
+    'interrupt_ack':      () => {
+        // Receipt is not a terminal fact. Durable completion or a restored
+        // runtime snapshot determines when the execution becomes idle.
     },
     // === 新增: 模型/权限模式切换确认 (2 种) ===
     'model_changed':            (d: { model: string }) => {
@@ -1068,6 +1096,7 @@ function handleMessageComplete(
     // not conversation messages. The agent_* lifecycle event carries their
     // terminal state and result into taskStore/coordinatorStore.
     if (!rootEvent) return;
+    if (context.sessionId && context.runId && data.stopReason !== 'tool_use') completeCancellationNotice(context.sessionId, context.runId);
     const partitionKey = runtimePartitionKey(context);
     // 延迟 finalizeStream，确保最后的 stream_delta 已渲染
     queueMicrotask(() => {
@@ -1145,6 +1174,10 @@ function handleError(
     // Child failures are surfaced by agent_failed/task_update. Projecting the
     // same error here would insert a global system message into the root chat.
     if (!isRootRuntimeEvent(context)) return;
+    if (data.code === 'CANCELLATION_PERSISTENCE_PENDING') {
+        useNotificationStore.getState().addNotification({ key: `cancellation-pending:${context.runId ?? 'unknown'}`, level: 'warning', message: data.message, timeout: 0 });
+        return;
+    }
     if (data.requestId) {
         const permission = usePermissionStore.getState();
         if (permission.pendingModeChange?.requestId === data.requestId) permission.clearModeChange();
@@ -1168,9 +1201,11 @@ function handleError(
         subtype: data.errorCode ? 'provider_error' : 'error',
         errorCode: data.errorCode ?? data.code,
         retryable: data.retryable,
-        metadata: data.errorCode ? { httpStatus: data.httpStatus } : {
-            sourceTaskId: context.sourceTaskId,
-            sourceRunId: context.sourceRunId,
+        metadata: {
+            ...(context.runId ? { runId: context.runId } : {}),
+            ...(context.sourceTaskId ? { sourceTaskId: context.sourceTaskId } : {}),
+            ...(context.sourceRunId ? { sourceRunId: context.sourceRunId } : {}),
+            ...(data.errorCode ? { httpStatus: data.httpStatus } : {}),
         },
     } as Message);
     useSessionStore.getState().setStatus('idle');
@@ -1238,7 +1273,7 @@ function handleSessionRestore(data: {
         phase?: 'preparing' | 'running';
         eventContext?: RuntimeEventContext;
     }>;
-    costSummary?: { sessionCost?: number; totalCost?: number; usage?: Usage; usageComplete?: boolean };
+    costSummary?: { sessionCost?: number; totalCost?: number; usage?: Usage; usageComplete?: boolean; sessionPricingStatus?: PricingStatus; totalPricingStatus?: PricingStatus };
 }): void {
     const pending = pendingBinds.get(data.bindRequestId);
     if (!pending || pending.sessionId !== data.metadata.sessionId
@@ -1258,9 +1293,6 @@ function handleSessionRestore(data: {
             data.metadata.permissionMode);
         return;
     }
-    // From this point the bind is confirmed. If interaction recovery exceeds
-    // the outer timeout, queued frames must be replayed rather than discarded.
-    pending.restoreAccepted = true;
     if (data.snapshotEventSeq !== undefined && data.snapshotEventSeq >= 0) {
         durableEventHighWaterBySession.set(
             data.metadata.sessionId,
@@ -1270,6 +1302,19 @@ function handleSessionRestore(data: {
             ),
         );
     }
+    const restoredRunId = data.runSnapshot?.id ?? null;
+    const restoredRunTerminal = data.runSnapshot
+        && ['completed', 'failed', 'cancelled', 'interrupted'].includes(data.runSnapshot.status);
+    for (const notice of Object.values(useNotificationStore.getState().cancellationNotices)) {
+        if (notice.sessionId === data.metadata.sessionId
+                && (notice.runId !== restoredRunId || restoredRunTerminal)) {
+            completeCancellationNotice(notice.sessionId, notice.runId);
+        }
+    }
+    if (restoredRunId && restoredRunTerminal) {
+        completeCancellationNotice(data.metadata.sessionId, restoredRunId);
+    }
+    useNotificationStore.getState().showCancellationNotices(data.metadata.sessionId, restoredRunId);
     // 1. 重置序列号
     resetSequence();
 
@@ -1390,6 +1435,8 @@ function handleSessionRestore(data: {
             cacheCreationInputTokens: 0,
         },
         usageComplete: data.costSummary?.usageComplete ?? true,
+        sessionPricingStatus: data.costSummary?.sessionPricingStatus,
+        totalPricingStatus: data.costSummary?.totalPricingStatus,
     });
 
     // 6. 更新连接状态
@@ -1415,22 +1462,10 @@ function handleSessionRestore(data: {
         }
     }
 
-    // 快照已包含 snapshotEventSeq；bind 后收到的帧由恢复门暂存，完成投影后再依次重放。
-    const authority: BindRecoveryAuthority = {
-        sessionId: data.metadata.sessionId,
-        bindRequestId: data.bindRequestId,
-        bindingEpoch: data.bindingEpoch,
-    };
-    void recoverPendingInteractionsForBind(authority)
-        .catch((error) => {
-            if (!isAuthoritativeBindRecovery(authority)) return;
-            useNotificationStore.getState().addNotification({
-                key: 'run-event-recovery-failed', level: 'warning',
-                message: `运行状态补齐失败：${error instanceof Error ? error.message : String(error)}`,
-                timeout: 8000,
-            });
-        })
-        .finally(() => finishBind(data.bindRequestId, true, true));
+    // The server replays pending interactions after this snapshot. A duplicate
+    // REST request must neither hold the binding gate nor resurrect stale prompts.
+    useNotificationStore.getState().removeNotification('session-sync-failed');
+    finishBind(data.bindRequestId, true, true);
 }
 
 function projectRestoredTask(task: RuntimeTaskSnapshot): TaskState {
@@ -1473,41 +1508,60 @@ function isAuthoritativeBindRecovery(authority: BindRecoveryAuthority): boolean 
         && authority.sessionId === useSessionStore.getState().sessionId;
 }
 
-async function fetchPendingInteractions(sessionId: string): Promise<InteractionView[]> {
-    const response = await fetch(`/api/interactions/pending?sessionId=${encodeURIComponent(sessionId)}`, {
-        headers: { 'X-Session-Id': sessionId },
-    });
-    if (!response.ok) throw new Error(`INTERACTION_RECOVERY_${response.status}`);
-    return await response.json() as InteractionView[];
+interface InteractionRefresh {
+    authority: BindRecoveryAuthority;
+    controller: AbortController;
+    touched: Set<string>;
+    cancelled: boolean;
+    promise: Promise<void>;
+}
+let interactionRefresh: InteractionRefresh | null = null;
+
+function cancelInteractionRefresh(): void {
+    if (!interactionRefresh) return;
+    interactionRefresh.cancelled = true;
+    interactionRefresh.controller.abort();
+    interactionRefresh = null;
 }
 
-function applyPendingInteractions(pending: InteractionView[]): void {
-    for (const interaction of pending) {
-        handleInteractionCreated(interaction);
-    }
-}
-
-async function recoverPendingInteractionsForBind(authority: BindRecoveryAuthority): Promise<void> {
-    const pending = await fetchPendingInteractions(authority.sessionId);
-    if (!isAuthoritativeBindRecovery(authority)) return;
-    applyPendingInteractions(pending);
-}
-
-/**
- * Refreshes pending interactions for callers already operating on a Session
- * (for example DialogManager after a decision conflict). Bind-time recovery
- * uses the generation-guarded private variant above.
- */
-export async function recoverPendingInteractions(sessionId: string): Promise<void> {
-    if (boundBindRequestId === null || boundBindingEpoch === 0
-            || boundSessionId !== sessionId
-            || useSessionStore.getState().sessionId !== sessionId) return;
-    const authority: BindRecoveryAuthority = {
-        sessionId,
-        bindRequestId: boundBindRequestId,
-        bindingEpoch: boundBindingEpoch,
+/** Explicit conflict refresh only. WS replay remains the bind authority. */
+export function recoverPendingInteractions(sessionId: string): Promise<void> {
+    if (boundBindRequestId === null || boundBindingEpoch === 0 || activeRecoveryId
+            || boundSessionId !== sessionId || useSessionStore.getState().sessionId !== sessionId) return Promise.resolve();
+    if (interactionRefresh && isAuthoritativeBindRecovery(interactionRefresh.authority)) return interactionRefresh.promise;
+    cancelInteractionRefresh();
+    const entry: InteractionRefresh = {
+        authority: { sessionId, bindRequestId: boundBindRequestId, bindingEpoch: boundBindingEpoch },
+        controller: new AbortController(), touched: new Set(), cancelled: false, promise: Promise.resolve(),
     };
-    const pending = await fetchPendingInteractions(sessionId);
-    if (!isAuthoritativeBindRecovery(authority)) return;
-    applyPendingInteractions(pending);
+    interactionRefresh = entry;
+    entry.promise = (async () => {
+        const timeout = setTimeout(() => entry.controller.abort(), 8000);
+        let onAbort!: () => void;
+        const aborted = new Promise<never>((_, reject) => {
+            onAbort = () => reject(new Error('INTERACTION_RECOVERY_TIMEOUT'));
+            entry.controller.signal.addEventListener('abort', onAbort, { once: true });
+        });
+        try {
+            const request = (async () => {
+                const response = await fetch(`/api/interactions/pending?sessionId=${encodeURIComponent(sessionId)}`, {
+                    headers: { 'X-Session-Id': sessionId }, signal: entry.controller.signal,
+                });
+                if (!response.ok) throw new Error(`INTERACTION_RECOVERY_${response.status}`);
+                return await response.json() as InteractionView[];
+            })();
+            const pending = await Promise.race([request, aborted]);
+            if (!isAuthoritativeBindRecovery(entry.authority) || entry.cancelled) return;
+            for (const interaction of pending) {
+                if (interaction.sessionId === sessionId && !entry.touched.has(interaction.interactionId)) handleInteractionCreated(interaction);
+            }
+        } catch (error) {
+            if (!entry.cancelled) throw error;
+        } finally {
+            clearTimeout(timeout);
+            entry.controller.signal.removeEventListener('abort', onAbort);
+            if (interactionRefresh === entry) interactionRefresh = null;
+        }
+    })();
+    return entry.promise;
 }

@@ -11,12 +11,22 @@ from pydantic import BaseModel, Field
 
 # ═══ 通用基类 ═══
 
+class BrowserActionLease(BaseModel):
+    """Host-only admission identity; never part of the model tool schema."""
+    owner_session_id: str = Field(min_length=1)
+    run_id: str = Field(min_length=1)
+    host_epoch: str = Field(min_length=1)
+    generation: str = Field(min_length=1)
+
+
 class BrowserRequestBase(BaseModel):
     """所有浏览器请求的基类 — 必含 session_id"""
     session_id: str = Field(default="default", description="Browser session ID")
     ephemeral_content: bool = False
     timeout: Optional[int] = Field(default=None, description="Timeout in milliseconds")
+    deadline_epoch_ms: Optional[int] = None
     strict_session: bool = Field(default=False, description="If true, fail when session does not exist instead of auto-creating")
+    managed_lease: Optional[BrowserActionLease] = None
 
 
 # ═══ 请求模型 ═══
@@ -109,6 +119,31 @@ class SemanticSnapshotRequest(BrowserRequestBase):
 class CloseSessionRequest(BaseModel):
     ephemeral_content: bool = False
     session_id: str = Field(..., description="Session ID to close")
+    recording: Optional[dict[str, Any]] = None
+    managed_lease: Optional[BrowserActionLease] = None
+
+
+class BrowserLeaseRequest(BaseModel):
+    session_id: str
+    owner_session_id: str
+    run_id: str
+    host_epoch: str
+    generation: Optional[str] = None
+    ttl: float = Field(default=60, gt=0, le=60)
+    deadline_epoch_ms: Optional[int] = None
+
+
+class BrowserOwnerRequest(BaseModel):
+    owner_session_id: str
+
+
+class RecordingPruneRequest(BaseModel):
+    batch_id: str = Field(pattern=r"^[0-9a-f-]{36}$")
+
+
+class RecordingAckRequest(BaseModel):
+    identity: dict[str, str]
+    manifest_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 # ═══ 响应模型 ═══

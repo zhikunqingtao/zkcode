@@ -77,6 +77,20 @@ pub struct RestoreCostSummary {
     pub usage: Usage,
     /// False when any physical call lacks authoritative usage.
     pub usage_complete: bool,
+    /// `known`, `unknown`, or `unavailable`; independent of token usage integrity.
+    pub session_pricing_status: String,
+    /// Application-wide pricing availability, independent of the displayed subtotal.
+    pub total_pricing_status: String,
+}
+
+fn pricing_status(conn: &Connection, session_id: &str) -> Result<(bool, bool), DbError> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM llm_calls c JOIN tasks t ON t.id=c.task_id
+                       WHERE t.session_id=?1 AND c.status!='started' AND c.cost_nanos_usd IS NULL),
+                EXISTS(SELECT 1 FROM llm_calls WHERE status!='started' AND cost_nanos_usd IS NULL)",
+        [session_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?)
 }
 
 #[allow(clippy::cast_precision_loss)] // UI projection intentionally converts exact nanos to USD
@@ -150,6 +164,54 @@ fn query_from_latest(
     Ok(stmt
         .query_map(params![fetch], map_summary_row)?
         .collect::<rusqlite::Result<_>>()?)
+}
+
+fn ensure_snapshot_messages_replaceable(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<(), DbError> {
+    // Restoring history is destructive, so admission and all message
+    // dependencies must be checked in the same transaction as DELETE.
+    crate::session_merge::ensure_idle(conn, session_id)?;
+    let merge_reserved: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM session_merge_locks WHERE session_id=?1)",
+        [session_id],
+        |row| row.get(0),
+    )?;
+    if merge_reserved {
+        return Err(DbError::Conflict(
+            "session is reserved by an active merge".into(),
+        ));
+    }
+    // The FK cascade removes journals even when the same message IDs
+    // will be reinserted. A succeeded sealed recording still needs its
+    // completed journal to become ackEligible. ACK itself does not.
+    // Scope this to messages being replaced, not descendant transcripts.
+    let messages_required: bool = conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM tool_result_postprocessing p
+            JOIN messages m ON m.id=p.result_message_id
+            WHERE m.session_id=?1 AND (
+                p.status='pending' OR EXISTS(
+                    SELECT 1 FROM execution_resources r
+                    JOIN tool_invocations i ON i.invocation_id=r.invocation_id
+                        AND i.run_id=r.run_id AND i.task_id=r.task_id
+                    WHERE r.invocation_id=p.invocation_id
+                        AND r.run_id=p.run_id AND r.task_id=p.task_id
+                        AND i.status='succeeded'
+                        AND json_extract(r.metadata_json,'$.recordingFinalization.phase')='sealed'
+                )
+            )
+        )",
+        [session_id],
+        |row| row.get(0),
+    )?;
+    if messages_required {
+        return Err(DbError::Conflict(
+            "SESSION_SNAPSHOT_MESSAGE_DEPENDENCY_PENDING".into(),
+        ));
+    }
+    Ok(())
 }
 
 impl crate::Db {
@@ -413,6 +475,41 @@ impl crate::Db {
             .await
     }
 
+    /// Read canonical content with display-only root-run diagnostics.
+    ///
+    /// # Errors
+    /// Query and content ownership errors propagate without modifying stored content.
+    pub async fn get_session_for_display(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<SessionDetail>, DbError> {
+        let session_id = session_id.to_owned();
+        self.with_reader(move |conn| {
+            let tx = conn.transaction()?;
+            let mut detail = load_session_detail(&tx, &session_id)?;
+            if let Some(detail) = detail.as_mut() {
+                crate::message::project_runtime_diagnostics(
+                    &tx,
+                    &session_id,
+                    &mut detail.messages,
+                )?;
+            }
+            tx.commit()?;
+            Ok(detail)
+        })
+        .await
+    }
+
+    /// Whether finished physical calls have unknown prices (session, application).
+    ///
+    /// # Errors
+    /// Errors must be shown as unavailable by callers, never converted to known zero.
+    pub async fn get_pricing_status(&self, session_id: &str) -> Result<(bool, bool), DbError> {
+        let session_id = session_id.to_owned();
+        self.with_reader(move |conn| pricing_status(conn, &session_id))
+            .await
+    }
+
     /// Read messages, root Run, event high-water mark, active tool invocations,
     /// and subtree usage under one deferred `SQLite` snapshot. Empty collections
     /// and zero summaries are authoritative and must overwrite stale UI state.
@@ -428,10 +525,11 @@ impl crate::Db {
         let session_id = session_id.to_owned();
         self.with_reader(move |conn| {
             let tx = conn.transaction()?;
-            let Some(detail) = load_session_detail(&tx, &session_id)? else {
+            let Some(mut detail) = load_session_detail(&tx, &session_id)? else {
                 tx.commit()?;
                 return Ok(None);
             };
+            crate::message::project_runtime_diagnostics(&tx, &session_id, &mut detail.messages)?;
             let run_snapshot = tx
                 .query_row(
                     "SELECT * FROM run_envelopes
@@ -571,6 +669,20 @@ impl crate::Db {
                 [],
                 |row| row.get(0),
             )?;
+            let (session_pricing_status, total_pricing_status) =
+                match pricing_status(&tx, &session_id) {
+                    Ok((session_unknown, total_unknown)) => (
+                        if session_unknown { "unknown" } else { "known" }.to_owned(),
+                        if total_unknown { "unknown" } else { "known" }.to_owned(),
+                    ),
+                    Err(error) => {
+                        tracing::warn!(
+                            code = error.diagnostic_code(),
+                            "pricing display status unavailable"
+                        );
+                        ("unavailable".to_owned(), "unavailable".to_owned())
+                    }
+                };
             tx.commit()?;
             Ok(Some(SessionRuntimeRestore {
                 detail,
@@ -583,6 +695,8 @@ impl crate::Db {
                     total_cost: nanos_to_usd(total_cost_nanos),
                     usage,
                     usage_complete,
+                    session_pricing_status,
+                    total_pricing_status,
                 },
             }))
         })
@@ -731,6 +845,7 @@ impl crate::Db {
         self.with_writer(move |conn| {
             let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             crate::session_merge::ensure_idle(&tx, &session_id)?;
+            crate::browser_recordings::ensure_recordings_consumed(&tx, &session_id)?;
             let billing: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM sessions WHERE id=?1 AND kind='merge_billing')",
                 [&session_id],
@@ -752,7 +867,7 @@ impl crate::Db {
     ///
     /// 重复调用会先删除再插入同一组稳定消息 ID，不产生重复消息；任一消息
     /// 序列化/约束失败时整个事务回滚。工作区在事务内复检，避免校验与写入间
-    /// 被替换。
+    /// 被替换。运行、合并或工具后处理仍依赖当前历史时拒绝恢复。
     ///
     /// # Errors
     /// 会话不存在、工作区不匹配、消息约束/序列化失败或事务写入失败时返回
@@ -799,6 +914,8 @@ impl crate::Db {
                     "snapshot message session mismatch".to_owned(),
                 ));
             }
+
+            ensure_snapshot_messages_replaceable(&tx, &session_id)?;
 
             tx.execute(
                 "DELETE FROM messages WHERE session_id = ?1",

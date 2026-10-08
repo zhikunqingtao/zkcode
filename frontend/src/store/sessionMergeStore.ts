@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import type { SessionSummary } from '@/utils/sessionGroups';
+import type { PricingStatus } from '@/types';
 import { generateUUID } from '@/utils/uuid';
 import { useNotificationStore } from '@/store/notificationStore';
 
@@ -16,7 +17,7 @@ export interface MergeOperation {
     protocolVersion?: number; runEpoch?: number; snapshotSealed?: boolean;
     lockedSourceSessionIds?: string[];
     progress?: { completedUnits: number; knownUnits: number; totalFinal: boolean };
-    usage?: { tokens: number; costNanosUsd: number; usageComplete: boolean };
+    usage?: { tokens: number; costNanosUsd: number; usageComplete: boolean; pricingStatus?: PricingStatus };
     retryAt?: string; errorCode?: string; canResume?: boolean; canCancel?: boolean; targetAvailable?: boolean;
     stage: string;
     request: MergeRequest;

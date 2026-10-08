@@ -60,6 +60,26 @@ function isTailSystemMessage(message: Message): boolean {
         && TAIL_SYSTEM_SUBTYPES.has(message.subtype);
 }
 
+/** Display-only projection from the root Run; never changes transcript identity or model history. */
+function runtimeDiagnosticMessage(message: Message): Extract<Message, { type: 'system' }> | null {
+    if (message.type !== 'system' || message.subtype !== 'task_boundary') return null;
+    const diagnostic = asRecord(message.metadata?.runtimeDiagnostic);
+    if (!diagnostic || typeof diagnostic.runId !== 'string' || !diagnostic.runId
+        || typeof diagnostic.taskId !== 'string' || !diagnostic.taskId) return null;
+    const cleanupUnconfirmed = diagnostic.status === 'completed' && diagnostic.code === 'CLEANUP_UNCONFIRMED';
+    if (!cleanupUnconfirmed && !['failed', 'cancelled', 'interrupted'].includes(String(diagnostic.status))) return null;
+    const interrupted = diagnostic.status === 'cancelled' || diagnostic.status === 'interrupted';
+    return {
+        type: 'system', uuid: `runtime-diagnostic:${diagnostic.runId}`, timestamp: message.timestamp,
+        subtype: interrupted ? 'interrupt' : 'error',
+        content: typeof diagnostic.message === 'string' && diagnostic.message.trim()
+            ? diagnostic.message : interrupted ? '任务已中断' : '任务执行失败',
+        errorCode: typeof diagnostic.code === 'string' ? diagnostic.code : undefined,
+        retryable: false,
+        metadata: { runId: diagnostic.runId, taskId: diagnostic.taskId },
+    };
+}
+
 /** steering / 轮内补充指令：含 text 或 image 块的 user 消息（与投影的「指令」判定同口径） */
 function isRenderableUserMessage(message: Message): boolean {
     return message.type === 'user'
@@ -99,6 +119,20 @@ export function splitTurnLayers(turn: Turn, streamingMessageId?: string | null):
         else body.push(message);
     }
 
+    const diagnostics = new Map<string, Extract<Message, { type: 'system' }>>();
+    for (const message of rest) {
+        const diagnostic = runtimeDiagnosticMessage(message);
+        if (diagnostic) diagnostics.set(diagnostic.metadata!.runId as string, diagnostic);
+    }
+    // A live transport error may overlap the authoritative boundary projection.
+    // Deduplicate by Run identity, not text/code, so unrelated request errors survive.
+    const visibleTail = tail.filter(message => {
+        if (message.type !== 'system' || !['error', 'provider_error', 'interrupt'].includes(message.subtype ?? '')) return true;
+        const runId = message.metadata?.runId ?? message.metadata?.sourceRunId;
+        return typeof runId !== 'string' || !diagnostics.has(runId);
+    });
+    visibleTail.push(...diagnostics.values());
+
     // 工具出现即归入过程区；只有无工具的流式段才保持在回复区。
     let answer: Message | null = null;
     if (streamingMessageId != null) {
@@ -126,7 +160,7 @@ export function splitTurnLayers(turn: Turn, streamingMessageId?: string | null):
         steering,
         process: answer ? body.filter(message => message !== answer) : body,
         answer,
-        tail,
+        tail: visibleTail,
     };
 }
 

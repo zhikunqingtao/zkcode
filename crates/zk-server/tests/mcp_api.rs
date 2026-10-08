@@ -972,6 +972,65 @@ async fn mcp_mutations_reject_untrusted_origin_and_simple_content_type() {
 }
 
 #[tokio::test]
+async fn merge_and_query_resume_reject_cross_site_requests_and_session_id_is_not_authorization() {
+    let mut app = app_with_isolated_registry();
+    for path in [
+        "/api/sessions/merge",
+        "/api/session-merges/m/resume",
+        "/api/session-merges/m/cancel",
+    ] {
+        let mut request = raw_mcp_request(
+            path,
+            "application/json",
+            Some("https://attacker.example"),
+            "{}".into(),
+        );
+        request
+            .headers_mut()
+            .insert("x-session-id", "known-session".parse().unwrap());
+        let (status, _, _) = call(&mut app, request).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{path}");
+        let (status, _, _) = call(
+            &mut app,
+            raw_mcp_request(
+                path,
+                "text/plain",
+                Some("http://127.0.0.1:5273"),
+                "{}".into(),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE, "{path}");
+    }
+    for origin in [Some("https://attacker.example"), None] {
+        let mut request = raw_mcp_get(
+            "/api/query/known-request/stream",
+            origin,
+            Some("same-origin"),
+        );
+        request
+            .headers_mut()
+            .insert("x-session-id", "known-session".parse().unwrap());
+        let (status, _, _) = call(&mut app, request).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+    let (status, _, _) = call(
+        &mut app,
+        raw_mcp_get(
+            "/api/query/unknown/stream",
+            Some("http://127.0.0.1:5273"),
+            None,
+        ),
+    )
+    .await;
+    assert_ne!(
+        status,
+        StatusCode::FORBIDDEN,
+        "trusted browser can reach the authoritative request lookup"
+    );
+}
+
+#[tokio::test]
 async fn network_backed_mcp_gets_reject_untrusted_browser_origin() {
     let mut app = app_with_isolated_registry();
     for path in [

@@ -1,16 +1,187 @@
 //! Durable merge coordination. Sealed source history is reference material,
 //! never a transfer of permission grants or new authorization.
-use crate::message::{MessageAttribution, insert_message_in_current_write, load_message_rows};
+use crate::message::{MessageAttribution, insert_message_in_current_write};
 use crate::time::{format_rfc3339_micros, now_millis};
 use crate::{Db, DbError, MessageRecord, MessageRole, NewMessage, StoredBlock};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+#[path = "session_merge_capture.rs"]
+mod capture;
 #[path = "session_handoff_catalog.rs"]
 mod catalog;
 #[path = "session_merge_snapshot.rs"]
 mod snapshot;
+
+#[cfg(test)]
+mod capture_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn merge_pricing_state_reads_finished_calls_across_all_attempts() {
+        // (cost, complete usage, finished): None never means an explicitly priced zero.
+        let cases = [
+            (vec![(None, true, true)], "unknown", 0, true),
+            (
+                vec![(Some(123), true, true), (None, true, true)],
+                "unknown",
+                123,
+                true,
+            ),
+            (vec![(Some(0), true, true)], "known", 0, true),
+            (vec![(Some(0), false, true)], "known", 0, false),
+            (vec![(None, false, true)], "unknown", 0, false),
+            (vec![], "known", 0, true),
+            (vec![(None, false, false)], "known", 0, false),
+        ];
+        for (calls, pricing, subtotal, complete) in cases {
+            let db = Db::open_in_memory().unwrap();
+            let first = db.create_session("fixture", "/tmp").await.unwrap();
+            let second = db.create_session("fixture", "/tmp").await.unwrap();
+            let operation = db
+                .start_session_merge(
+                    "pricing".into(),
+                    SessionMergeRequest {
+                        source_session_ids: vec![first.id.clone(), second.id],
+                        primary_session_id: first.id,
+                        title: None,
+                        model: None,
+                    },
+                )
+                .await
+                .unwrap();
+            for (index, (cost, usage_complete, finished)) in calls.iter().copied().enumerate() {
+                add_pricing_attempt(&db, &operation, index, cost, usage_complete, finished).await;
+            }
+            let actual = db
+                .session_merge(&operation.operation_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .usage;
+            assert_eq!(actual["pricingStatus"], pricing, "calls={calls:?}");
+            assert_eq!(actual["costNanosUsd"], subtotal);
+            assert_eq!(actual["usageComplete"], complete);
+            assert_eq!(
+                actual["tokens"],
+                calls.iter().filter(|(_, _, finished)| *finished).count() * 3
+            );
+        }
+    }
+
+    async fn add_pricing_attempt(
+        db: &Db,
+        operation: &SessionMergeOperation,
+        index: usize,
+        cost: Option<i64>,
+        usage_complete: bool,
+        finished: bool,
+    ) {
+        let session = db.create_session("fixture", "/tmp").await.unwrap();
+        let run = uuid::Uuid::new_v4().to_string();
+        db.start_root_run_with_budget_at_epoch(
+            &run,
+            &session.id,
+            Some("query"),
+            "fixture",
+            &crate::TaskBudgetLimits {
+                token_limit: Some(1000),
+                cost_limit_nanos_usd: None,
+                deadline_at_ms: Some(now_millis() + 60_000),
+            },
+            1,
+        )
+        .await
+        .unwrap();
+        let attempt = db
+            .begin_merge_summary_attempt(
+                &operation.operation_id,
+                operation.run_epoch,
+                &format!("unit-{index}"),
+                &run,
+                &run,
+            )
+            .await
+            .unwrap();
+        db.start_llm_call_with_budget(
+            &crate::NewLlmCall {
+                call_id: run.clone(),
+                task_id: run.clone(),
+                run_id: run.clone(),
+                provider: "fixture".into(),
+                model: "fixture".into(),
+                route: None,
+                provider_request_id: None,
+            },
+            &crate::LlmCallBudgetReservation {
+                input_tokens: 1,
+                output_tokens: 2,
+                cost_nanos_usd: cost.unwrap_or_default(),
+            },
+        )
+        .await
+        .unwrap();
+        if finished {
+            db.finish_llm_call(
+                &run,
+                "completed",
+                &crate::LlmUsageCompletion {
+                    input_tokens: Some(1),
+                    output_tokens: Some(2),
+                    cache_read_tokens: Some(0),
+                    cache_create_tokens: Some(0),
+                    cost_nanos_usd: cost,
+                    usage_complete,
+                    error_code: None,
+                },
+            )
+            .await
+            .unwrap();
+            db.finish_merge_summary_attempt(&attempt, None)
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn merge_creation_reserves_sources_without_copying_or_sealing_on_the_writer() {
+        let db = Db::open_in_memory().unwrap();
+        let first = db.create_session("fixture", "/tmp").await.unwrap();
+        let second = db.create_session("fixture", "/tmp").await.unwrap();
+        let operation = db
+            .reserve_session_merge(
+                "reservation-test".into(),
+                SessionMergeRequest {
+                    source_session_ids: vec![first.id.clone(), second.id.clone()],
+                    primary_session_id: first.id.clone(),
+                    title: None,
+                    model: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            !operation.snapshot_sealed,
+            "the request must reserve, then let its worker capture outside the writer"
+        );
+        assert_eq!(operation.stage, "capturing");
+        assert_eq!(operation.locked_source_session_ids.len(), 2);
+        assert!(db.ensure_session_idle(&first.id).await.is_err());
+        let id = operation.operation_id.clone();
+        let count: i64 = db
+            .with_reader(move |conn| {
+                Ok(conn.query_row(
+                    "SELECT count(*) FROM session_merge_sources WHERE operation_id=?1",
+                    [id],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+}
 
 struct CancelHandoffOnDrop(std::sync::Arc<std::sync::atomic::AtomicBool>);
 impl Drop for CancelHandoffOnDrop {
@@ -128,7 +299,15 @@ fn read_operation(conn: &Connection, id: &str) -> Result<Option<SessionMergeOper
         |r| r.get(0),
     )?;
     let (unit_count,completed):(i64,i64)=conn.query_row("SELECT COUNT(*),COALESCE(SUM(state='completed'),0) FROM session_merge_units WHERE operation_id=?1 AND state!='split'",[id],|r|Ok((r.get(0)?,r.get(1)?)))?;
-    let (tokens,cost,complete):(i64,i64,bool)=conn.query_row("SELECT COALESCE(SUM(input_tokens+output_tokens+cache_read_tokens+cache_create_tokens),0),COALESCE(SUM(cost_nanos_usd),0),COALESCE(MIN(usage_complete),1) FROM llm_calls WHERE run_id IN (SELECT DISTINCT run_id FROM session_merge_attempts WHERE operation_id=?1)",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
+    let (tokens, cost, complete, unknown_pricing): (i64, i64, bool, bool) = conn.query_row(
+        "SELECT COALESCE(SUM(input_tokens+output_tokens+cache_read_tokens+cache_create_tokens),0),
+                COALESCE(SUM(cost_nanos_usd),0), COALESCE(MIN(usage_complete),1),
+                COALESCE(MAX(status!='started' AND cost_nanos_usd IS NULL),0)
+         FROM llm_calls WHERE run_id IN
+           (SELECT DISTINCT run_id FROM session_merge_attempts WHERE operation_id=?1)",
+        [id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    )?;
     Ok(Some(SessionMergeOperation {
         operation_id: id.into(),
         target_session_id: target,
@@ -136,7 +315,7 @@ fn read_operation(conn: &Connection, id: &str) -> Result<Option<SessionMergeOper
         can_cancel: matches!(status.as_str(), "preparing" | "paused" | "failed"),
         target_available: status == "completed" && exists,
         progress: json!({"completedUnits":completed+i64::from(status=="completed"),"knownUnits":unit_count+1,"totalFinal":matches!(stage.as_str(),"publishing"|"completed")}),
-        usage: json!({"tokens":tokens,"costNanosUsd":cost,"usageComplete":complete}),
+        usage: json!({"tokens":tokens,"costNanosUsd":cost,"usageComplete":complete,"pricingStatus":if unknown_pricing {"unknown"} else {"known"}}),
         status,
         stage,
         request,
@@ -182,7 +361,7 @@ impl Db {
         .await
     }
 
-    /// Keep a failed worker recoverable without releasing its sealed sources.
+    /// Fence a stopped worker and release reservations; sealed history stays immutable.
     /// # Errors
     /// Persistence errors are returned to the caller.
     pub async fn pause_session_merge(
@@ -191,9 +370,15 @@ impl Db {
         epoch: i64,
         error: String,
     ) -> Result<(), DbError> {
-        self.with_writer(move|conn|{conn.execute("UPDATE session_merges SET status='paused',error=?1 WHERE id=?2 AND run_epoch=?3 AND status='preparing'",params![error,id,epoch])?;Ok(())}).await
+        self.with_writer(move |conn| {
+            let tx=conn.transaction()?;
+            let changed=tx.execute("UPDATE session_merges SET status='paused',run_epoch=run_epoch+1,error=?1 WHERE id=?2 AND run_epoch=?3 AND status='preparing'",params![error,id,epoch])?;
+            // The worker calls this only after capture/import has returned, so no old reader remains.
+            if changed==1 { tx.execute("DELETE FROM session_merge_locks WHERE operation_id=?1",[&id])?; }
+            tx.commit()?; Ok(())
+        }).await
     }
-    /// Atomically reserve all sources and seal complete snapshots. Replays with
+    /// Reserve and synchronously prepare immutable sources for internal callers. Replays with
     /// an identical key/request return the original operation, never a new target.
     /// # Errors
     /// Rejects invalid sources, busy sessions, duplicate keys and overlapping merges.
@@ -206,14 +391,45 @@ impl Db {
             .await
     }
 
-    /// Seal database records and explicitly owned scratchpad/artifact bytes.
+    /// Internal synchronous convenience: reserve and capture explicitly owned files.
     /// # Errors
-    /// Validation, ownership, capacity and copy failures are surfaced without a partial operation.
+    /// Capture failures are returned and leave a recoverable operation; no target is published.
     pub async fn start_session_merge_with_assets(
         &self,
         key: String,
-        mut request: SessionMergeRequest,
+        request: SessionMergeRequest,
         scratchpad: Option<std::path::PathBuf>,
+    ) -> Result<SessionMergeOperation, DbError> {
+        let operation = self.reserve_session_merge(key, request).await?;
+        if let Err(error) = self
+            .prepare_session_merge_capture(
+                &operation.operation_id,
+                operation.run_epoch,
+                scratchpad,
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            )
+            .await
+        {
+            self.pause_session_merge(
+                operation.operation_id.clone(),
+                operation.run_epoch,
+                error.to_string(),
+            )
+            .await?;
+            return Err(error);
+        }
+        self.session_merge(&operation.operation_id)
+            .await?
+            .ok_or_else(|| DbError::Invalid("merge disappeared".into()))
+    }
+
+    /// Reserve sources in a short transaction; the worker captures records and owned assets.
+    /// # Errors
+    /// Validation and reservation failures leave no partial operation. Capture errors remain resumable.
+    pub async fn reserve_session_merge(
+        &self,
+        key: String,
+        mut request: SessionMergeRequest,
     ) -> Result<SessionMergeOperation, DbError> {
         if key.trim().is_empty() || key.len() > 200 {
             return Err(DbError::Validation(
@@ -264,33 +480,21 @@ impl Db {
                 if !root {return Err(DbError::SessionNotFound(source.clone()));}
                 all_sources.extend(snapshot::descendants(&tx,source)?);
             }
-            let mut snapshots=Vec::new();
             for source in &all_sources {
                 let locked:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM session_merge_locks WHERE session_id=?1)",[source],|r|r.get(0))?;
                 if locked { return Err(DbError::Conflict(format!("source {source} is already being merged"))); }
                 crate::content::require_persistent_session(&tx,source)?;
                 ensure_idle(&tx,source)?;
-                let mut snapshot=tx.query_row("SELECT id,title,model,working_dir,permission_mode,summary FROM sessions WHERE id=?1",[source],|r|Ok(Snapshot {session_id:r.get(0)?,title:r.get(1)?,model:r.get(2)?,working_directory:r.get(3)?,permission_mode:r.get(4)?,summary:r.get(5)?,messages:Vec::new(),records:Vec::new()})).optional()?.ok_or_else(||DbError::SessionNotFound(source.clone()))?;
-                snapshot.messages=load_message_rows(&tx,source)?;
-                snapshot.records=snapshot::records(&tx,source)?;
-                snapshots.push(snapshot);
             }
             let mut disk=crate::session_merge_budget::MergeWriteBudget::new(&tx);
             disk.reserve(encoded.len().saturating_add(4096))?;
             let id=uuid::Uuid::new_v4().to_string();
             let target=uuid::Uuid::new_v4().to_string();
             let now=format_rfc3339_micros(now_millis());
-            tx.execute("INSERT INTO session_merges(id,idempotency_key,request_json,target_session_id,status,stage,snapshot_sealed,created_at,updated_at) VALUES(?1,?2,?3,?4,'preparing','sealed',1,?5,?5)",params![id,key,encoded,target,now])?;
-            let mut copied_bytes=0;
-            for (ordinal,snapshot) in snapshots.iter().enumerate() {
-                snapshot::copy_assets(&tx,&id,snapshot,scratchpad.as_deref(),&mut copied_bytes,&mut disk)?;
-                let encoded=serde_json::to_string(snapshot)?;
-                disk.reserve(encoded.len().saturating_add(1024))?;
-                tx.execute("INSERT INTO session_merge_sources VALUES(?1,?2,?3,?4,?5)",params![id,snapshot.session_id,i64::try_from(ordinal).map_err(|_|DbError::Invalid("too many merge sources".into()))?,encoded,digest(encoded.as_bytes())])?;
-                tx.execute("INSERT INTO session_merge_locks VALUES(?1,?2)",params![snapshot.session_id,id])?;
+            tx.execute("INSERT INTO session_merges(id,idempotency_key,request_json,target_session_id,status,stage,snapshot_sealed,created_at,updated_at) VALUES(?1,?2,?3,?4,'preparing','capturing',0,?5,?5)",params![id,key,encoded,target,now])?;
+            for source in &all_sources {
+                tx.execute("INSERT INTO session_merge_locks VALUES(?1,?2)",params![source,id])?;
             }
-            // Every retained byte is sealed now; later source edits/deletion cannot affect this operation.
-            tx.execute("DELETE FROM session_merge_locks WHERE operation_id=?1",[&id])?;
             let operation=read_operation(&tx,&id)?.ok_or_else(||DbError::Invalid("merge disappeared".into()))?;
             tx.commit()?;
             Ok(operation)
@@ -320,15 +524,19 @@ impl Db {
     /// # Errors
     /// A failure must prevent accepting new merge work.
     pub fn pause_session_merges_at_startup(&self) -> Result<(), DbError> {
-        let conn = self
+        let mut conn = self
             .writer
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        conn.execute("UPDATE session_merges SET status='paused',run_epoch=run_epoch+1,error='Interrupted by server restart' WHERE status='preparing'",[])?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute_batch("UPDATE session_merges SET status='paused',run_epoch=run_epoch+1,error='Interrupted by server restart' WHERE status='preparing'; DELETE FROM session_merge_locks WHERE operation_id IN (SELECT id FROM session_merges WHERE status IN ('paused','cancelled'));")?;
+        tx.commit()?;
         Ok(())
     }
 
     /// Resume or cancel using epoch fencing; cancellation cannot race past commit.
+    /// A supplied cancellation epoch belongs to its stopped local owner; an already
+    /// cancelled operation stays idempotent while that owner retries source release.
     /// # Errors
     /// Rejects stale epochs and incompatible terminal transitions.
     pub async fn transition_session_merge(
@@ -343,14 +551,39 @@ impl Db {
             let tx=conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             let op=read_operation(&tx,&id)?.ok_or_else(||DbError::Validation("merge not found".into()))?;
             if cancel && op.status=="cancelled" {return Ok(op);}
+            if cancel && expected_epoch.is_some_and(|epoch| epoch != op.run_epoch) {return Err(DbError::Conflict("merge cancellation epoch changed".into()));}
             if op.status=="completed" || (!cancel && (!op.can_resume || expected_epoch!=Some(op.run_epoch))) {return Err(DbError::Conflict("merge state or epoch changed".into()));}
             if !cancel && op.status=="cancelled" {return Err(DbError::Conflict("cancelled merge cannot resume".into()));}
             let status=if cancel {"cancelled"} else {"preparing"};
             tx.execute("UPDATE session_merges SET status=?1,stage=?1,run_epoch=run_epoch+1,error=NULL,resume_model=COALESCE(?2,resume_model),updated_at=?3 WHERE id=?4",params![status,model,format_rfc3339_micros(now_millis()),id])?;
-            if cancel {tx.execute("DELETE FROM session_merge_locks WHERE operation_id=?1",[&id])?;}
+            if !cancel && !op.snapshot_sealed && op.result.get("captureManifest").is_none() {
+                let has_summary:bool=tx.query_row("SELECT summary_body IS NOT NULL OR EXISTS(SELECT 1 FROM session_merge_units WHERE operation_id=?1) FROM session_merges WHERE id=?1",[&id],|row|row.get(0))?;
+                if has_summary { return Err(DbError::Invalid("MERGE_UNSEALED_SUMMARY_EXISTS".into())); }
+                let mut sources=std::collections::BTreeSet::new();
+                for source in &op.request.source_session_ids {
+                    crate::service_session::require_conversation(&tx,source)?;
+                    sources.extend(snapshot::descendants(&tx,source)?);
+                }
+                for source in sources {
+                    crate::content::require_persistent_session(&tx,&source)?; ensure_idle(&tx,&source)?;
+                    let owner:Option<String>=tx.query_row("SELECT operation_id FROM session_merge_locks WHERE session_id=?1",[&source],|r|r.get(0)).optional()?;
+                    if owner.as_deref().is_some_and(|owner|owner!=id) { return Err(DbError::Conflict("MERGE_SOURCE_BUSY".into())); }
+                    if owner.is_none() {tx.execute("INSERT INTO session_merge_locks VALUES(?1,?2)",params![source,id])?;}
+                }
+                for table in ["session_handoff_chunks","session_handoff_catalog","session_merge_assets","session_merge_sources"] { tx.execute(&format!("DELETE FROM {table} WHERE operation_id=?1"),[&id])?; }
+                tx.execute("UPDATE session_merges SET stage='capturing',result_json='{}' WHERE id=?1",[&id])?;
+            }
             let op=read_operation(&tx,&id)?.ok_or_else(||DbError::Invalid("merge disappeared".into()))?;
             tx.commit()?;Ok(op)
         }).await
+    }
+
+    /// Release source reservations only after the previous worker has exited.
+    /// # Errors
+    /// An active generation cannot release its reservations.
+    pub async fn release_stopped_merge_sources(&self, id: &str) -> Result<(), DbError> {
+        let id = id.to_owned();
+        self.with_writer(move|conn| { conn.execute("DELETE FROM session_merge_locks WHERE operation_id=?1 AND EXISTS(SELECT 1 FROM session_merges WHERE id=?1 AND status IN ('paused','failed','cancelled'))",[id])?; Ok(()) }).await
     }
 
     /// Publish the destination and handoff in one transaction. Source messages
@@ -362,19 +595,55 @@ impl Db {
         id: &str,
         epoch: i64,
     ) -> Result<SessionMergeOperation, DbError> {
+        self.complete_session_merge_with_cancel(
+            id,
+            epoch,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )
+        .await
+    }
+
+    /// Publish with the host's memory fence, including when a cancellation write failed.
+    /// # Errors
+    /// Local cancellation, stale durable epochs and persistence failures prevent publication.
+    pub async fn complete_session_merge_with_cancel(
+        &self,
+        id: &str,
+        epoch: i64,
+        cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<SessionMergeOperation, DbError> {
+        if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(DbError::Conflict("MERGE_WORKER_CANCELLED".into()));
+        }
         let id = id.to_owned();
-        self.with_writer(move|conn|{
-            let tx=conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            let op=read_operation(&tx,&id)?.ok_or_else(||DbError::Validation("merge not found".into()))?;
-            if op.status!="preparing" || op.run_epoch!=epoch {return Err(DbError::Conflict("merge worker has been fenced".into()));}
-            let snapshots=load_snapshots(&tx,&id)?;
+        let read_id = id.clone();
+        let (snapshots,summary,overview,summary_hash,overview_hash,inputs,capture_hash,copied,warnings)=self.with_reader(move|conn| {
+            let tx=conn.transaction()?;
+            let op=read_operation(&tx,&read_id)?.ok_or_else(||DbError::Validation("merge not found".into()))?;
+            if op.status!="preparing" || op.run_epoch!=epoch || !op.snapshot_sealed {return Err(DbError::Conflict("merge worker has been fenced".into()));}
+            let snapshots=load_snapshots(&tx,&read_id)?;
             {let mut assets=tx.prepare("SELECT content,sha256 FROM session_merge_assets WHERE operation_id=?1 AND status='copied'")?;
-                for asset in assets.query_map([&id],|r|Ok((r.get::<_,Vec<u8>>(0)?,r.get::<_,String>(1)?)))? {let (bytes,hash)=asset?;if digest(&bytes)!=hash{return Err(DbError::Invalid("MERGE_ASSET_HASH_MISMATCH".into()));}}
+                for asset in assets.query_map([&read_id],|r|Ok((r.get::<_,Vec<u8>>(0)?,r.get::<_,String>(1)?)))? {let (bytes,hash)=asset?;if digest(&bytes)!=hash{return Err(DbError::Invalid("MERGE_ASSET_HASH_MISMATCH".into()));}}
             }
-            let (summary,overview,summary_hash,overview_hash):(Option<String>,Option<String>,Option<String>,Option<String>)=tx.query_row("SELECT summary_body,summary_overview_json,summary_hash,summary_overview_hash FROM session_merges WHERE id=?1",[&id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
+            let (summary,overview,summary_hash,overview_hash):(Option<String>,Option<String>,Option<String>,Option<String>)=tx.query_row("SELECT summary_body,summary_overview_json,summary_hash,summary_overview_hash FROM session_merges WHERE id=?1",[&read_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
             let (Some(summary),Some(overview),Some(summary_hash),Some(overview_hash))=(summary,overview,summary_hash,overview_hash) else {return Err(DbError::Conflict("MERGE_SUMMARY_NOT_READY".into()));};
             if digest(overview.as_bytes())!=overview_hash || digest(summary.as_bytes())!=summary_hash {return Err(DbError::Invalid("MERGE_SUMMARY_HASH_MISMATCH".into()));}
-            catalog::seal(&tx,&id,catalog_in_connection(&tx,&id)?)?;
+            let inputs=catalog_in_connection(&tx,&read_id)?;
+            let copied:i64=tx.query_row("SELECT COUNT(*) FROM session_merge_assets WHERE operation_id=?1 AND status='copied'",[&read_id],|r|r.get(0))?;
+            let warnings=asset_warnings(&tx,&read_id)?;
+            let capture_hash=op.result.get("captureManifest").and_then(Value::as_str).ok_or_else(||DbError::Invalid("MERGE_MANIFEST_MISSING".into()))?.to_owned();
+            tx.commit()?;
+            Ok((snapshots,summary,overview,summary_hash,overview_hash,inputs,capture_hash,copied,warnings))
+        }).await?;
+        self.prepare_session_merge_catalog(&id, epoch, inputs, cancelled.clone())
+            .await?;
+        self.with_writer(move|conn|{
+            if cancelled.load(std::sync::atomic::Ordering::Acquire) {return Err(DbError::Conflict("MERGE_WORKER_CANCELLED".into()));}
+            let tx=conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let op=read_operation(&tx,&id)?.ok_or_else(||DbError::Validation("merge not found".into()))?;
+            if op.status!="preparing" || op.run_epoch!=epoch || !op.snapshot_sealed {return Err(DbError::Conflict("merge worker has been fenced".into()));}
+            let identity:(String,String,String)=tx.query_row("SELECT summary_hash,summary_overview_hash,json_extract(result_json,'$.captureManifest') FROM session_merges WHERE id=?1",[&id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
+            if identity!=(summary_hash,overview_hash,capture_hash) {return Err(DbError::Conflict("MERGE_PUBLICATION_CHANGED".into()));}
             let primary=snapshots.iter().find(|s|s.session_id==op.request.primary_session_id).ok_or_else(||DbError::Invalid("missing primary snapshot".into()))?;
             let now=format_rfc3339_micros(now_millis());
             let title=op.request.title.clone().filter(|s|!s.trim().is_empty()).unwrap_or_else(||"合并会话".into());
@@ -385,13 +654,12 @@ impl Db {
             let mut disk=crate::session_merge_budget::MergeWriteBudget::new(&tx);
             disk.reserve(content.len().saturating_add(overview.len()).saturating_add(metadata.to_string().len()).saturating_add(4096))?;
             insert_message_in_current_write(&tx,&uuid::Uuid::new_v4().to_string(),&op.target_session_id,&NewMessage {meta:Some(json!({"subtype":"session_merge","operationId":id,"sources":manifest})),role:MessageRole::System,content:vec![StoredBlock::Text{text:content}],stop_reason:None,input_tokens:0,output_tokens:0},&MessageAttribution::conversation())?;
-            let copied:i64=tx.query_row("SELECT COUNT(*) FROM session_merge_assets WHERE operation_id=?1 AND status='copied'",[&id],|r|r.get(0))?;
-            let warnings=asset_warnings(&tx,&id)?;
             let result=json!({"copiedCount":copied,"messageCount":snapshots.iter().map(|s|s.messages.len()).sum::<usize>(),"warningCount":warnings.len(),"warnings":warnings,"sourceCount":snapshots.len(),"handoffStorage":"sqlite","operationId":id,"overview":serde_json::from_str::<Value>(&overview)?});
             disk.reserve(result.to_string().len().saturating_add(1024))?;
             tx.execute("UPDATE session_merges SET status='completed',stage='completed',result_json=?1,updated_at=?2 WHERE id=?3 AND run_epoch=?4",params![result.to_string(),now,id,epoch])?;
             tx.execute("DELETE FROM session_merge_locks WHERE operation_id=?1",[&id])?;
             let operation=read_operation(&tx,&id)?.ok_or_else(||DbError::Invalid("merge disappeared".into()))?;
+            if cancelled.load(std::sync::atomic::Ordering::Acquire) {return Err(DbError::Conflict("MERGE_WORKER_CANCELLED".into()));}
             tx.commit()?;Ok(operation)
         }).await
     }

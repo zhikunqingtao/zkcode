@@ -58,3 +58,28 @@ pub fn spawn(db: zk_db::Db) -> tokio::task::JoinHandle<()> {
         }
     })
 }
+
+/// Recording acknowledgements require already committed evidence, and never
+/// repeat a browser action. The bounded scan resumes after either process restarts.
+#[must_use]
+pub fn spawn_browser_recording_reconciliation(
+    db: zk_db::Db,
+    python: std::sync::Arc<crate::python::PythonClient>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(15));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            if crate::python::tools::reconcile_browser_recordings(&db, &python)
+                .await
+                .is_err()
+            {
+                tracing::warn!(
+                    code = "RECORDING_FINALIZATION_PENDING",
+                    "Recording evidence retained pending consumption confirmation"
+                );
+            }
+        }
+    })
+}

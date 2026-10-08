@@ -25,9 +25,9 @@ test.describe('P2 PromptInput 关键路径', () => {
     await expect(sendBtn).toBeVisible();
     await expect(sendBtn).toBeDisabled();
 
-    // 本地文件引用按钮（aria-label 随能力二选一）
+    // 本地文件引用按钮
     const fileRefBtn = page.locator(
-      'button[aria-label="引用本地文件路径"], button[aria-label="上传本地文件到 OSS"]',
+      'button[aria-label="引用本地文件路径"]',
     );
     await expect(fileRefBtn).toHaveCount(1);
 

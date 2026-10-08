@@ -74,7 +74,11 @@ fn version(state: &ExpectedOldState) -> &str {
 }
 fn projection(content: &str, revision: &ExpectedOldState) -> Value {
     let parsed = zk_engine::hook::HookRegistry::try_parse(content);
-    json!({"content":content,"revision":version(revision),"path":".zk/hooks.toml","hookCount":parsed.as_ref().ok().map(zk_engine::hook::HookRegistry::len),"validationError":parsed.err().map(|_|"HOOK_CONFIG_INVALID"),"events":zk_engine::hook::HookEvent::ALL.map(zk_engine::hook::HookEvent::as_str)})
+    let diagnostic = parsed
+        .as_ref()
+        .err()
+        .map(|error| zk_authz::analyzer::redact_command(error));
+    json!({"content":content,"revision":version(revision),"path":".zk/hooks.toml","hookCount":parsed.as_ref().ok().map(zk_engine::hook::HookRegistry::len),"validationError":parsed.err().map(|_|"HOOK_CONFIG_INVALID"),"validationMessage":diagnostic,"events":zk_engine::hook::HookEvent::ALL.map(zk_engine::hook::HookEvent::as_str)})
 }
 
 #[utoipa::path(get,path="/api/sessions/{id}/hooks",tag="hooks",params(("id"=String,Path),("X-Session-Id"=String,Header)),responses((status=200,description="Bound hooks text, content revision and validation state"),(status=404,description="Session not accessible")))]
@@ -110,10 +114,13 @@ pub(crate) async fn put(
             "Temporary conversations cannot save hook configuration",
         ));
     }
-    zk_engine::hook::HookRegistry::try_parse(&input.content).map_err(|_| {
+    zk_engine::hook::HookRegistry::try_parse(&input.content).map_err(|error| {
         ApiError::validation_with_code(
             "HOOK_CONFIG_INVALID",
-            "Invalid hook declarations; no changes were saved",
+            &format!(
+                "{}; no changes were saved",
+                zk_authz::analyzer::redact_command(&error)
+            ),
         )
     })?;
     let conversation = state.conversation();

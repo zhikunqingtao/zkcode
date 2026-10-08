@@ -280,3 +280,10 @@ it('未配置验证码时确认删除直接发出 DELETE（不带验证码头）
     expect((deleteCallsOf(fetchMock)[0][1] as RequestInit).headers).toBeUndefined();
     expect(screen.queryByText('确定删除该会话？')).not.toBeInTheDocument();
 });
+
+ it.each(['NaN', 'bad-width', 'Infinity'])('ignores invalid saved sidebar width %s', async value => {
+    localStorage.setItem('sidebar-width', value);
+    render(<Sidebar />);
+    await screen.findByText('目标会话');
+    expect(document.querySelector('.app-sidebar')).toHaveStyle({ width: '320px' });
+});

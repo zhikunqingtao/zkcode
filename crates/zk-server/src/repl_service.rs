@@ -8,11 +8,11 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicI64, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
-use tokio::sync::{Mutex as AsyncMutex, RwLock};
+use tokio::sync::{Notify, RwLock};
 use tokio_util::sync::CancellationToken;
 use zk_db::{Db, content::ContentRetention};
 use zk_engine::{
@@ -45,7 +45,114 @@ impl Entry {
             (Instant::now(), crate::iso::now_millis());
     }
 }
-type Slot = Arc<AsyncMutex<Option<Arc<Entry>>>>;
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    Starting,
+    Running,
+    Stopping,
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StopCause {
+    User,
+    StartupTimeout,
+    StartupFailed,
+}
+impl StopCause {
+    fn reason(self) -> &'static str {
+        match self {
+            Self::User => zk_db::run::EXIT_USER_CANCELLED,
+            Self::StartupTimeout => zk_db::run::EXIT_TIMEOUT,
+            Self::StartupFailed => zk_db::run::EXIT_INTERNAL_ERROR,
+        }
+    }
+    fn message(self) -> &'static str {
+        match self {
+            Self::User => "REPL service stopped by user",
+            Self::StartupTimeout => "REPL service startup timed out",
+            Self::StartupFailed => "REPL service startup failed",
+        }
+    }
+    fn code(self) -> &'static str {
+        match self {
+            Self::User => "REPL_SERVICE_STOPPING",
+            Self::StartupTimeout => "REPL_SERVICE_START_TIMEOUT",
+            Self::StartupFailed => "REPL_SERVICE_START_INTERRUPTED",
+        }
+    }
+}
+struct GenerationState {
+    phase: Phase,
+    entry: Option<Arc<Entry>>,
+    identity: Option<(String, String)>,
+    result: Option<Result<Arc<Entry>, String>>,
+    cause: Option<StopCause>,
+    startup_finished: bool,
+}
+struct Generation {
+    id: u64,
+    state: Mutex<GenerationState>,
+    cancel: CancellationToken,
+    ready: Notify,
+}
+impl Generation {
+    fn new(id: u64) -> Self {
+        Self {
+            id,
+            state: Mutex::new(GenerationState {
+                phase: Phase::Starting,
+                entry: None,
+                identity: None,
+                result: None,
+                cause: None,
+                startup_finished: false,
+            }),
+            cancel: CancellationToken::new(),
+            ready: Notify::new(),
+        }
+    }
+    fn request_stop(&self, cause: StopCause) -> Option<String> {
+        let run = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if cause == StopCause::StartupTimeout && state.phase != Phase::Starting {
+                return None;
+            }
+            if state.cause.is_none() {
+                state.cause = Some(cause);
+            }
+            state.phase = Phase::Stopping;
+            if state.result.is_none() {
+                state.result = Some(Err(state.cause.unwrap_or(cause).code().into()));
+            }
+            if let Some(entry) = &state.entry {
+                entry.stopping.store(true, Ordering::Release);
+                entry.cancel.cancel();
+            }
+            state.identity.as_ref().map(|(_, run)| run.clone())
+        };
+        self.cancel.cancel();
+        self.ready.notify_waiters();
+        run
+    }
+    async fn wait(&self) -> Result<Arc<Entry>, String> {
+        loop {
+            let notified = self.ready.notified();
+            if let Some(result) = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .result
+                .clone()
+            {
+                return result;
+            }
+            notified.await;
+        }
+    }
+}
+type Slot = Arc<Mutex<Option<Arc<Generation>>>>;
 /// The host owns services; a query scope only borrows an authorized Session handle.
 pub(crate) struct ReplServices {
     db: Db,
@@ -53,6 +160,11 @@ pub(crate) struct ReplServices {
     supervisor: Arc<ExecutionSupervisor>,
     epoch: Arc<AtomicI64>,
     slots: Mutex<HashMap<String, Slot>>,
+    next_generation: AtomicU64,
+    #[cfg(test)]
+    startup_gate: Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
+    #[cfg(test)]
+    admitted_gate: Mutex<Option<(Arc<Notify>, Arc<Notify>)>>,
 }
 impl fmt::Debug for ReplServices {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -72,6 +184,11 @@ impl ReplServices {
             supervisor,
             epoch,
             slots: Mutex::new(HashMap::new()),
+            next_generation: AtomicU64::new(1),
+            #[cfg(test)]
+            startup_gate: Mutex::new(None),
+            #[cfg(test)]
+            admitted_gate: Mutex::new(None),
         }
     }
     fn slot(&self, session: &str) -> Slot {
@@ -79,10 +196,184 @@ impl ReplServices {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .entry(session.into())
-            .or_insert_with(|| Arc::new(AsyncMutex::new(None)))
+            .or_insert_with(|| Arc::new(Mutex::new(None)))
             .clone()
     }
     async fn get_or_start(self: &Arc<Self>, session: &str) -> Result<Arc<Entry>, String> {
+        let slot = self.slot(session);
+        loop {
+            let (generation, created) = {
+                let mut current = slot
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Some(generation) = current.as_ref() {
+                    (generation.clone(), false)
+                } else {
+                    let generation = Arc::new(Generation::new(
+                        self.next_generation.fetch_add(1, Ordering::Relaxed),
+                    ));
+                    *current = Some(generation.clone());
+                    (generation, true)
+                }
+            };
+            if created {
+                let host = self.clone();
+                let session = session.to_owned();
+                let worker_generation = generation.clone();
+                tokio::spawn(async move {
+                    host.start_generation(session, worker_generation).await;
+                });
+                return generation.wait().await;
+            }
+            let (phase, entry, identity, finished) = {
+                let state = generation
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                (
+                    state.phase,
+                    state.entry.clone(),
+                    state.identity.clone(),
+                    state.startup_finished,
+                )
+            };
+            match phase {
+                Phase::Starting => return generation.wait().await,
+                Phase::Running => {
+                    if let Some(entry) = entry
+                        && !entry.stopping.load(Ordering::Acquire)
+                        && !entry.cancel.is_cancelled()
+                    {
+                        return Ok(entry);
+                    }
+                    return Err("REPL_SERVICE_STOPPING".into());
+                }
+                Phase::Stopping => {
+                    if !finished {
+                        return Err("REPL_SERVICE_STOPPING".into());
+                    }
+                    if let Some((task, _)) = identity {
+                        let stored = self
+                            .db
+                            .find_runtime_task_by_id(&task)
+                            .await
+                            .map_err(|_| "REPL_SERVICE_STATUS_UNAVAILABLE")?
+                            .ok_or("REPL_SERVICE_TASK_MISSING")?;
+                        if !stored.status.is_terminal()
+                            || !matches!(
+                                stored.cleanup_status,
+                                zk_db::CleanupStatus::Confirmed | zk_db::CleanupStatus::NotRequired
+                            )
+                            || entry.is_some_and(|entry| !entry.closed.load(Ordering::Acquire))
+                        {
+                            return Err("REPL_SERVICE_STOPPING".into());
+                        }
+                    }
+                    let mut current = slot
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if current
+                        .as_ref()
+                        .is_some_and(|present| present.id == generation.id)
+                    {
+                        current.take();
+                    }
+                }
+            }
+        }
+    }
+    async fn start_generation(self: Arc<Self>, session: String, generation: Arc<Generation>) {
+        let timer_generation = generation.clone();
+        let runtime = self.runtime.clone();
+        let timer = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            let starting = timer_generation
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .phase
+                == Phase::Starting;
+            if starting && let Some(run) = timer_generation.request_stop(StopCause::StartupTimeout)
+            {
+                let _ = runtime
+                    .cancel_run_with_cause(
+                        &run,
+                        zk_db::run::EXIT_TIMEOUT,
+                        "REPL service startup timed out",
+                    )
+                    .await;
+            }
+        });
+        let result = self.prepare_generation(&session, generation.clone()).await;
+        timer.abort();
+        let late_run = {
+            let mut state = generation
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.startup_finished = true;
+            match result {
+                Ok(entry)
+                    if state.phase == Phase::Starting && !generation.cancel.is_cancelled() =>
+                {
+                    state.phase = Phase::Running;
+                    state.entry = Some(entry.clone());
+                    state.result = Some(Ok(entry));
+                    None
+                }
+                Ok(entry) => {
+                    entry.stopping.store(true, Ordering::Release);
+                    entry.cancel.cancel();
+                    state.entry = Some(entry);
+                    state.phase = Phase::Stopping;
+                    state.identity.as_ref().map(|(_, run)| run.clone())
+                }
+                Err(error) => {
+                    state.phase = Phase::Stopping;
+                    if state.result.is_none() {
+                        state.result = Some(Err(error));
+                    }
+                    if state.cause.is_none() {
+                        state.cause = Some(StopCause::StartupFailed);
+                    }
+                    state.identity.as_ref().map(|(_, run)| run.clone())
+                }
+            }
+        };
+        generation.ready.notify_waiters();
+        if let Some(run) = late_run {
+            generation.cancel.cancel();
+            let cause = generation
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .cause
+                .unwrap_or(StopCause::StartupFailed);
+            if let Err(error) = self
+                .runtime
+                .cancel_run_with_cause(&run, cause.reason(), cause.message())
+                .await
+            {
+                tracing::error!(%run,%error,"REPL startup cancellation requires reconciliation");
+            }
+        }
+    }
+    async fn prepare_generation(
+        self: &Arc<Self>,
+        session: &str,
+        generation: Arc<Generation>,
+    ) -> Result<Arc<Entry>, String> {
+        #[cfg(test)]
+        {
+            let gate = self.startup_gate.lock().unwrap().clone();
+            if let Some((entered, release)) = gate {
+                entered.notify_one();
+                release.notified().await;
+            }
+        }
+        if generation.cancel.is_cancelled() {
+            return Err("REPL_SERVICE_STOPPING".into());
+        }
         if self
             .db
             .session_retention(session)
@@ -91,32 +382,6 @@ impl ReplServices {
             != ContentRetention::Persistent
         {
             return Err("REPL_PERSISTENT_SERVICE_REQUIRED".into());
-        }
-        let slot = self.slot(session);
-        let mut current = slot.lock().await;
-        if let Some(entry) = current.as_ref() {
-            if !entry.stopping.load(Ordering::Acquire)
-                && !entry.closed.load(Ordering::Acquire)
-                && !entry.cancel.is_cancelled()
-            {
-                return Ok(entry.clone());
-            }
-            let task = self
-                .db
-                .find_runtime_task_by_id(&entry.task)
-                .await
-                .map_err(|_| "REPL_SERVICE_STATUS_UNAVAILABLE")?
-                .ok_or("REPL_SERVICE_TASK_MISSING")?;
-            if !entry.closed.load(Ordering::Acquire)
-                || !task.status.is_terminal()
-                || !matches!(
-                    task.cleanup_status,
-                    zk_db::CleanupStatus::Confirmed | zk_db::CleanupStatus::NotRequired
-                )
-            {
-                return Err("REPL_SERVICE_STOPPING".into());
-            }
-            current.take();
         }
         let stored = self
             .db
@@ -127,15 +392,14 @@ impl ReplServices {
         let workspace = PathBuf::from(stored.working_dir)
             .canonicalize()
             .map_err(|_| "REPL_WORKSPACE_UNAVAILABLE")?;
+        if generation.cancel.is_cancelled() {
+            return Err("REPL_SERVICE_STOPPING".into());
+        }
         let factory = Arc::new(zk_tools::repl::ReplServiceScopeFactory::new(session.into()));
         let scopes = Arc::new(RunToolScopes::new(vec![factory.clone()]));
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let host = self.clone();
-        let startup = CancellationToken::new();
-        let mut startup_guard = StartupGuard {
-            token: Some(startup.clone()),
-            run: None,
-        };
+        let driver_generation = generation.clone();
         let receipt = self
             .runtime
             .submit_repl_service(
@@ -143,7 +407,6 @@ impl ReplServices {
                     session_id: session.into(),
                     startup_epoch: self.epoch.load(Ordering::Acquire),
                     timeout: LIFETIME,
-                    // Native-only service has no model route or billable helper.
                     budget: zk_db::TaskBudgetLimits {
                         token_limit: Some(1),
                         cost_limit_nanos_usd: Some(1),
@@ -151,23 +414,46 @@ impl ReplServices {
                     },
                 },
                 move |execution| async move {
-                    host.drive(execution, workspace, scopes, factory, ready_tx, startup)
-                        .await
+                    host.drive(
+                        execution,
+                        workspace,
+                        scopes,
+                        factory,
+                        ready_tx,
+                        driver_generation,
+                    )
+                    .await
                 },
             )
             .await
             .map_err(|_| "REPL_SERVICE_ADMISSION_FAILED")?;
-        startup_guard.run = Some((self.runtime.clone(), receipt.run_id));
-        let entry = tokio::time::timeout(Duration::from_secs(30), ready_rx)
-            .await
-            .map_err(|_| "REPL_SERVICE_START_TIMEOUT")?
-            .map_err(|_| "REPL_SERVICE_START_INTERRUPTED")?
-            .map_err(str::to_owned)?;
-        startup_guard.token.take();
-        startup_guard.run.take();
-        *current = Some(entry.clone());
-        Ok(entry)
+        #[cfg(test)]
+        {
+            let gate = self.admitted_gate.lock().unwrap().clone();
+            if let Some((entered, release)) = gate {
+                entered.notify_one();
+                release.notified().await;
+            }
+        }
+        {
+            let mut state = generation
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.identity = Some((receipt.task.id, receipt.run_id.clone()));
+        }
+        if generation.cancel.is_cancelled() {
+            return Err("REPL_SERVICE_STOPPING".into());
+        }
+        tokio::select! {
+            result=ready_rx=>result.map_err(|_|"REPL_SERVICE_START_INTERRUPTED")?.map_err(str::to_owned),
+            ()=generation.cancel.cancelled()=>Err("REPL_SERVICE_STOPPING".into()),
+        }
     }
+    #[allow(
+        clippy::too_many_lines,
+        reason = "The service owner must keep startup publication, first stop cause and interpreter cleanup together through its terminal result"
+    )]
     async fn drive(
         self: Arc<Self>,
         execution: zk_engine::TaskExecutionContext,
@@ -175,7 +461,7 @@ impl ReplServices {
         scopes: Arc<RunToolScopes>,
         factory: Arc<zk_tools::repl::ReplServiceScopeFactory>,
         ready: tokio::sync::oneshot::Sender<Result<Arc<Entry>, &'static str>>,
-        startup: CancellationToken,
+        generation: Arc<Generation>,
     ) -> TaskExecutionResult {
         let base = Arc::new(ToolRegistry::new());
         base.register_dynamic(Arc::new(zk_tools::REPLTool::new(Arc::new(
@@ -203,11 +489,17 @@ impl ReplServices {
             seen: Mutex::new((Instant::now(), crate::iso::now_millis())),
             scopes,
         });
+        // Keep the cleanup handle even when startup is stopped before its ready reply is consumed.
+        generation
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry = Some(entry.clone());
         if ready.send(Ok(entry.clone())).is_ok() {
             loop {
                 tokio::select! {
                     ()=entry.cancel.cancelled()=>break,
-                    ()=startup.cancelled()=>break,
+                    ()=generation.cancel.cancelled()=>break,
                     ()=tokio::time::sleep(Duration::from_secs(5))=>{},
                 }
                 if let Ok(_idle) = entry.active.try_write()
@@ -226,6 +518,29 @@ impl ReplServices {
                 }
             }
         }
+        let was_cancelled = execution.cancel.is_cancelled()
+            || generation.cancel.is_cancelled()
+            || entry.cancel.is_cancelled();
+        let cause = generation
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .cause;
+        // The driver knows its Run before the admission receipt reaches the
+        // starter. Persist that first cause before publishing any terminal result.
+        let cancel_storage_failed = if let Some(cause) = cause {
+            self.runtime
+                .cancel_run_with_cause(&execution.run_id, cause.reason(), cause.message())
+                .await
+                .is_err()
+        } else {
+            false
+        };
+        generation
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .phase = Phase::Stopping;
         entry.stopping.store(true, Ordering::Release);
         entry.cancel.cancel();
         let _drained = entry.active.write().await;
@@ -241,7 +556,13 @@ impl ReplServices {
         }
         entry.cleanup_failed.store(!clean, Ordering::Release);
         entry.closed.store(clean, Ordering::Release);
-        if clean {
+        if clean && cancel_storage_failed {
+            TaskExecutionResult::failed("REPL_SERVICE_CANCEL_STORAGE_FAILED")
+        } else if clean && was_cancelled {
+            TaskExecutionResult::Cancelled {
+                message: "REPL service stopped; interpreter resources released".into(),
+            }
+        } else if clean {
             TaskExecutionResult::complete("REPL service ended; interpreter resources released")
         } else {
             TaskExecutionResult::failed("REPL_SERVICE_CLEANUP_UNCONFIRMED")
@@ -289,8 +610,36 @@ impl ReplServices {
         let Some(slot) = slot else {
             return self.persisted_status(session).await;
         };
-        let current = slot.lock().await;
-        let Some(entry) = current.as_ref() else {
+        let generation = slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let Some(generation) = generation else {
+            return self.persisted_status(session).await;
+        };
+        let (phase, entry, identity, finished) = {
+            let state = generation
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (
+                state.phase,
+                state.entry.clone(),
+                state.identity.clone(),
+                state.startup_finished,
+            )
+        };
+        if phase == Phase::Starting {
+            return Ok(
+                json!({"sessionId":session,"generation":generation.id,"taskId":identity.as_ref().map(|(task,_)|task),"runId":identity.as_ref().map(|(_,run)|run),"state":"starting","cleanupStatus":"pending","idleTimeoutSeconds":IDLE.as_secs(),"maxLifetimeSeconds":LIFETIME.as_secs()}),
+            );
+        }
+        let Some(entry) = entry else {
+            if phase == Phase::Starting || !finished {
+                return Ok(
+                    json!({"sessionId":session,"generation":generation.id,"taskId":identity.as_ref().map(|(task,_)|task),"runId":identity.as_ref().map(|(_,run)|run),"state":if phase==Phase::Starting{"starting"}else{"stopping"},"cleanupStatus":"pending","idleTimeoutSeconds":IDLE.as_secs(),"maxLifetimeSeconds":LIFETIME.as_secs()}),
+                );
+            }
             return self.persisted_status(session).await;
         };
         let run = self
@@ -309,7 +658,10 @@ impl ReplServices {
             && matches!(run.cleanup_status.as_str(), "confirmed" | "notRequired")
         {
             "stopped"
-        } else if entry.stopping.load(Ordering::Acquire) || entry.cancel.is_cancelled() {
+        } else if phase == Phase::Stopping
+            || entry.stopping.load(Ordering::Acquire)
+            || entry.cancel.is_cancelled()
+        {
             "stopping"
         } else {
             "running"
@@ -352,19 +704,54 @@ impl ReplServices {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(session)
             .cloned();
-        let entry = match slot {
-            Some(slot) => slot.lock().await.clone(),
-            None => None,
-        };
-        let run_id = if let Some(entry) = entry.as_ref() {
-            // Stop local work before attempting any persistence write.
-            entry.stopping.store(true, Ordering::Release);
-            entry.cancel.cancel();
-            Some(entry.run.clone())
+        let generation = slot.and_then(|slot| {
+            slot.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        });
+        let (entry, run_id, cause) = if let Some(generation) = generation {
+            let (starting, entry) = {
+                let state = generation
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                (
+                    state.phase == Phase::Starting || !state.startup_finished,
+                    state.entry.clone(),
+                )
+            };
+            let run = generation.request_stop(StopCause::User);
+            let cause = generation
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .cause
+                .unwrap_or(StopCause::User);
+            if starting {
+                if let Some(run) = run.clone() {
+                    let runtime = self.runtime.clone();
+                    tokio::spawn(async move {
+                        if let Err(error) = runtime
+                            .cancel_run_with_cause(&run, cause.reason(), cause.message())
+                            .await
+                        {
+                            tracing::error!(%run,%error,"REPL startup cancellation requires reconciliation");
+                        }
+                    });
+                }
+                return Ok(
+                    json!({"sessionId":session,"generation":generation.id,"runId":run,"state":"stopping","cleanupStatus":"pending","idleTimeoutSeconds":IDLE.as_secs(),"maxLifetimeSeconds":LIFETIME.as_secs()}),
+                );
+            }
+            (entry, run, cause)
         } else {
-            self.persisted_status(session).await?["runId"]
-                .as_str()
-                .map(str::to_owned)
+            (
+                None,
+                self.persisted_status(session).await?["runId"]
+                    .as_str()
+                    .map(str::to_owned),
+                StopCause::User,
+            )
         };
         if let Some(run_id) = run_id {
             let run = self
@@ -375,11 +762,7 @@ impl ReplServices {
                 .ok_or("REPL_SERVICE_RUN_MISSING")?;
             if run.finished_at.is_none() {
                 self.runtime
-                    .cancel_run_with_cause(
-                        &run_id,
-                        zk_db::run::EXIT_USER_CANCELLED,
-                        "REPL service stopped by user",
-                    )
+                    .cancel_run_with_cause(&run_id, cause.reason(), cause.message())
                     .await
                     .map_err(|_| "REPL_SERVICE_CANCEL_STORAGE_FAILED")?;
             } else if !matches!(run.cleanup_status.as_str(), "confirmed" | "notRequired") {
@@ -398,30 +781,6 @@ impl ReplServices {
             }
         }
         self.status(session).await
-    }
-}
-struct StartupGuard {
-    token: Option<CancellationToken>,
-    run: Option<(Arc<TaskRuntime>, String)>,
-}
-impl Drop for StartupGuard {
-    fn drop(&mut self) {
-        if let Some(token) = self.token.take() {
-            token.cancel();
-        }
-        if let Some((runtime, run)) = self.run.take()
-            && let Ok(executor) = tokio::runtime::Handle::try_current()
-        {
-            executor.spawn(async move {
-                let _ = runtime
-                    .cancel_run_with_cause(
-                        &run,
-                        zk_db::run::EXIT_INTERNAL_ERROR,
-                        "REPL service startup abandoned",
-                    )
-                    .await;
-            });
-        }
     }
 }
 struct AbortTask(tokio::task::JoinHandle<()>);
@@ -511,6 +870,159 @@ mod tests {
             .with_session_id(session)
             .with_run_id(run)
             .with_working_dir(workspace)
+    }
+
+    #[tokio::test]
+    async fn repl_starting_is_observable_and_stoppable_before_admission_finishes() {
+        let state = AppState::for_tests();
+        let session = state.db.create_session("fixture", "/tmp").await.unwrap();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        *state.repl_services.startup_gate.lock().unwrap() =
+            Some((entered.clone(), release.clone()));
+        let host = state.repl_services.clone();
+        let session_id = session.id.clone();
+        let start = tokio::spawn(async move { host.get_or_start(&session_id).await });
+        entered.notified().await;
+        let status = tokio::time::timeout(
+            Duration::from_millis(200),
+            state.repl_services.status(&session.id),
+        )
+        .await;
+        if status.is_err() {
+            release.notify_one();
+            let _ = start.await;
+            let _ = state.repl_services.stop(&session.id).await;
+            panic!("status waited for the startup operation's lock");
+        }
+        assert_eq!(status.unwrap().unwrap()["state"], "starting");
+        let stop = tokio::time::timeout(
+            Duration::from_millis(200),
+            state.repl_services.stop(&session.id),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(stop["state"], "stopping");
+        release.notify_one();
+        assert!(
+            start.await.unwrap().is_err(),
+            "a stopped startup must never publish a running service"
+        );
+        state
+            .execution_supervisor
+            .shutdown(Duration::from_secs(5))
+            .await;
+    }
+
+    #[tokio::test]
+    async fn concurrent_start_and_abandoned_caller_keep_one_owned_generation() {
+        let state = AppState::for_tests();
+        let session = state.db.create_session("fixture", "/tmp").await.unwrap();
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        *state.repl_services.startup_gate.lock().unwrap() =
+            Some((entered.clone(), release.clone()));
+        let host = state.repl_services.clone();
+        let id = session.id.clone();
+        let abandoned = tokio::spawn(async move { host.get_or_start(&id).await });
+        entered.notified().await;
+        abandoned.abort();
+        let host = state.repl_services.clone();
+        let id = session.id.clone();
+        let second = tokio::spawn(async move { host.get_or_start(&id).await });
+        let host = state.repl_services.clone();
+        let id = session.id.clone();
+        let third = tokio::spawn(async move { host.get_or_start(&id).await });
+        release.notify_one();
+        let second = second.await.unwrap().unwrap();
+        let third = third.await.unwrap().unwrap();
+        assert!(Arc::ptr_eq(&second, &third));
+        let count: i64 = state
+            .db
+            .with_reader(|conn| {
+                Ok(conn.query_row(
+                    "SELECT count(*) FROM tasks WHERE task_type='repl'",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(
+            state.repl_services.status(&session.id).await.unwrap()["state"],
+            "running"
+        );
+        state.repl_services.stop(&session.id).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if state.repl_services.status(&session.id).await.unwrap()["state"] == "stopped" {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        state
+            .execution_supervisor
+            .shutdown(Duration::from_secs(5))
+            .await;
+    }
+
+    #[tokio::test]
+    async fn startup_timeout_cause_precedes_late_admission_receipt() {
+        let state = AppState::for_tests();
+        let session = state.db.create_session("fixture", "/tmp").await.unwrap();
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        *state.repl_services.admitted_gate.lock().unwrap() =
+            Some((entered.clone(), release.clone()));
+        let host = state.repl_services.clone();
+        let id = session.id.clone();
+        let start = tokio::spawn(async move { host.get_or_start(&id).await });
+        entered.notified().await;
+        let slot = state.repl_services.slot(&session.id);
+        let generation = slot.lock().unwrap().clone().unwrap();
+        assert!(generation.request_stop(StopCause::StartupTimeout).is_none());
+        // A later user click must retain the timeout already chosen by startup.
+        assert_eq!(
+            state.repl_services.stop(&session.id).await.unwrap()["state"],
+            "stopping"
+        );
+        let session_id = session.id.clone();
+        let run_id: String = state
+            .db
+            .with_reader(move |conn| {
+                Ok(conn.query_row(
+                    "SELECT current_run_id FROM tasks WHERE session_id=?1 AND task_type='repl'",
+                    [session_id],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        let finished = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let run = state.db.find_run_by_id(&run_id).await.unwrap().unwrap();
+                if run.finished_at.is_some() {
+                    break run;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        release.notify_one();
+        assert!(start.await.unwrap().is_err());
+        state
+            .execution_supervisor
+            .shutdown(Duration::from_secs(5))
+            .await;
+        assert_eq!(
+            finished.unwrap().requested_exit_reason.as_deref(),
+            Some(zk_db::run::EXIT_TIMEOUT)
+        );
     }
 
     #[tokio::test]

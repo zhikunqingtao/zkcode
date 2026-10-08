@@ -1,4 +1,5 @@
 """Interaction failures must not become successful HTTP tool responses."""
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -30,7 +31,17 @@ async def test_explicit_failure_retains_details_and_never_retries(
     monkeypatch, action, data, expected_code, expected_message,
 ):
     operation = AsyncMock(return_value=data)
-    service = SimpleNamespace(**{"click" if action == "click" else "type_text": operation})
+    admitted = []
+
+    @asynccontextmanager
+    async def action_scope(session_id, lease, deadline):
+        admitted.append((session_id, lease, deadline))
+        yield
+
+    service = SimpleNamespace(
+        action_scope=action_scope,
+        **{"click" if action == "click" else "type_text": operation},
+    )
     monkeypatch.setattr(browser, "browser_service", service)
     app = FastAPI()
     app.include_router(browser.router, prefix="/api/browser")
@@ -45,6 +56,7 @@ async def test_explicit_failure_retains_details_and_never_retries(
     assert body["error_code"] == expected_code
     assert body["error_message"] == expected_message
     assert body["data"] == data
+    assert admitted == [("test", None, None)]
     operation.assert_awaited_once()
 
 

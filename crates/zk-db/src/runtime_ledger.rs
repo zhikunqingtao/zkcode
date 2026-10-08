@@ -982,6 +982,129 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn monetary_admission_respects_exhaustion_for_root_and_child_unknown_calls() {
+        for child in [false, true] {
+            for (charged, reserved, allowed) in [
+                (100, 0, false),
+                (101, 0, false),
+                (99, 0, true),
+                (99, 1, true),
+                (99, 2, false),
+                (0, 100, true),
+            ] {
+                let db = Db::open_in_memory().unwrap();
+                let session = db.create_session("m", "/tmp/admission").await.unwrap();
+                let root = db
+                    .create_task_with_run(&budgeted_root_request(&session.id))
+                    .await
+                    .unwrap();
+                db.claim_task_run_cas(&root.task.id, &root.run_id, root.task.version)
+                    .await
+                    .unwrap();
+                let owner = if child {
+                    let owner = db
+                        .create_task_with_run(&budgeted_child_request(&session.id, &root, 0))
+                        .await
+                        .unwrap();
+                    db.claim_task_run_cas(&owner.task.id, &owner.run_id, owner.task.version)
+                        .await
+                        .unwrap();
+                    owner
+                } else {
+                    root
+                };
+                let task = owner.task.id.clone();
+                let run = owner.run_id.clone();
+                db.with_writer(move |conn| {
+                    conn.execute(
+                        "UPDATE tasks SET cost_budget_nanos_usd=100 WHERE id=?1",
+                        [task],
+                    )?;
+                    conn.execute(
+                        "UPDATE run_envelopes SET cost_nanos_usd=?1 WHERE id=?2",
+                        params![charged, run],
+                    )?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+                let call_id = id();
+                let result = db
+                    .start_llm_call_with_budget(
+                        &budgeted_call(&owner.task.id, &owner.run_id, &call_id),
+                        &LlmCallBudgetReservation {
+                            input_tokens: 1,
+                            output_tokens: 1,
+                            cost_nanos_usd: reserved,
+                        },
+                    )
+                    .await;
+                assert_eq!(
+                    result.is_ok(),
+                    allowed,
+                    "child={child} charged={charged} reserve={reserved}: {result:?}"
+                );
+                if !allowed {
+                    assert!(
+                        result
+                            .unwrap_err()
+                            .to_string()
+                            .contains("COST_BUDGET_EXHAUSTED")
+                    );
+                    assert_no_llm_call(&db, &call_id).await;
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn monetary_admission_counts_active_reservations_inside_writer() {
+        let db = Db::open_in_memory().unwrap();
+        let session = db.create_session("m", "/tmp/admission-race").await.unwrap();
+        let root = db
+            .create_task_with_run(&budgeted_root_request(&session.id))
+            .await
+            .unwrap();
+        db.claim_task_run_cas(&root.task.id, &root.run_id, root.task.version)
+            .await
+            .unwrap();
+        let task = root.task.id.clone();
+        db.with_writer(move |conn| {
+            conn.execute(
+                "UPDATE tasks SET cost_budget_nanos_usd=100 WHERE id=?1",
+                [task],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let first = budgeted_call(&root.task.id, &root.run_id, &id());
+        let second = budgeted_call(&root.task.id, &root.run_id, &id());
+        let reservation = LlmCallBudgetReservation {
+            input_tokens: 1,
+            output_tokens: 1,
+            cost_nanos_usd: 100,
+        };
+        let (a, b) = tokio::join!(
+            db.start_llm_call_with_budget(&first, &reservation),
+            db.start_llm_call_with_budget(&second, &reservation)
+        );
+        assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
+        let unknown = budgeted_call(&root.task.id, &root.run_id, &id());
+        let result = db
+            .start_llm_call_with_budget(
+                &unknown,
+                &LlmCallBudgetReservation {
+                    cost_nanos_usd: 0,
+                    ..reservation
+                },
+            )
+            .await;
+        assert!(result.is_err_and(|e| e.to_string().contains("COST_BUDGET_EXHAUSTED")));
+        assert_no_llm_call(&db, &unknown.call_id).await;
+    }
+
     async fn assert_no_llm_call(db: &Db, call_id: &str) {
         let call_id = call_id.to_owned();
         let count: i64 = db
@@ -2746,13 +2869,12 @@ impl Db {
             }) {
                 return Err(DbError::Invalid("TOKEN_BUDGET_EXHAUSTED".to_owned()));
             }
+            let charged = owner
+                .run_cost_nanos_usd
+                .saturating_add(prior_cost_charge)
+                .saturating_add(active.1);
             if owner.cost_limit_nanos_usd.is_some_and(|limit| {
-                owner
-                    .run_cost_nanos_usd
-                    .saturating_add(prior_cost_charge)
-                    .saturating_add(active.1)
-                    .saturating_add(reservation.cost_nanos_usd)
-                    > limit
+                charged >= limit || charged.saturating_add(reservation.cost_nanos_usd) > limit
             }) {
                 return Err(DbError::Invalid("COST_BUDGET_EXHAUSTED".to_owned()));
             }

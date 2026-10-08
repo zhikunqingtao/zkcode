@@ -144,6 +144,39 @@ pub struct StdioTransport {
     tasks: Mutex<Vec<JoinHandle<()>>>,
 }
 
+/// Taking Child across an await must not turn cancellation into loss of ownership.
+/// PGID and the durable lease stay in their slots until actual cleanup is confirmed.
+struct ClosingChild<'a> {
+    owner: &'a StdioTransport,
+    child: Option<Child>,
+}
+impl Drop for ClosingChild<'_> {
+    fn drop(&mut self) {
+        if let Some(child) = self.child.take() {
+            *self.owner.child_slot() = Some(child);
+        }
+    }
+}
+
+/// Kill the owned group if runtime shutdown drops its cleanup task before confirmation.
+struct CleanupProcessGroup(Option<u32>);
+impl CleanupProcessGroup {
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+impl Drop for CleanupProcessGroup {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(pid) = self.0.and_then(|pid| i32::try_from(pid).ok()) {
+            let _ = nix::sys::signal::killpg(
+                nix::unistd::Pid::from_raw(pid),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+    }
+}
+
 impl std::fmt::Debug for StdioTransport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("StdioTransport")
@@ -151,6 +184,81 @@ impl std::fmt::Debug for StdioTransport {
             .field("argument_count", &self.args.len())
             .field("connected", &self.shared.connected.load(Ordering::SeqCst))
             .finish_non_exhaustive()
+    }
+}
+
+impl Drop for StdioTransport {
+    fn drop(&mut self) {
+        self.shared.mark_disconnected("Transport dropped", false);
+        for task in lock(&self.tasks).drain(..) {
+            task.abort();
+        }
+        let mut child = self.child_slot().take();
+        let pid = lock(&self.process_group).take();
+        let lease = lock(&self.resource_lease).take();
+        let confirmed_pid = *lock(&self.released_process_group);
+        let context = self
+            .execution_context
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        if child.is_none() && pid.is_none() && lease.is_none() {
+            return;
+        }
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let mut backstop = CleanupProcessGroup(pid);
+            // Match the existing detached process supervisor: caller cancellation
+            // cannot release this owner, and persistence failure remains retryable.
+            runtime.spawn(async move {
+                let mut released = child.is_none() && pid.is_none();
+                loop {
+                    if !released && let (Some(child), Some(pid)) = (child.as_mut(), pid) {
+                        released = zk_tools::process::terminate_process_group(child, pid).await;
+                    }
+                    if released {
+                        backstop.disarm();
+                    }
+                    let mut persisted = true;
+                    if let (Some(context), Some(lease)) = (&context, &lease) {
+                        let terminal = if released {
+                            zk_tools::ExecutionResourceTerminal::Released
+                        } else {
+                            zk_tools::ExecutionResourceTerminal::Unconfirmed
+                        };
+                        let mut result = context
+                            .finish_execution_resource(lease.clone(), terminal)
+                            .await;
+                        if released
+                            && result.is_err()
+                            && let Some(pid) = pid.or(confirmed_pid)
+                        {
+                            result = context
+                                .reconcile_execution_resource(lease, pid.to_string())
+                                .await;
+                        }
+                        persisted = result.is_ok();
+                    }
+                    if released && persisted {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            });
+        } else {
+            // Runtime shutdown cannot acknowledge async cleanup. Kill the entire
+            // owned group and leave any durable lease unreleased for host recovery.
+            #[cfg(unix)]
+            if let Some(pid) = pid.and_then(|pid| i32::try_from(pid).ok()) {
+                let _ = nix::sys::signal::killpg(
+                    nix::unistd::Pid::from_raw(pid),
+                    nix::sys::signal::Signal::SIGKILL,
+                );
+            }
+            if let Some(child) = child.as_mut() {
+                let _ = child.start_kill();
+            }
+            tracing::warn!("MCP cleanup runtime unavailable; durable cleanup remains unconfirmed");
+        }
     }
 }
 
@@ -401,21 +509,24 @@ impl McpTransport for StdioTransport {
         Box::pin(async move {
             let _close = self.close_lock.lock().await;
             self.shared.mark_disconnected("Transport closed", false);
-            let child = self.child_slot().take();
-            let pid = lock(&self.process_group).take();
-            let released = if let Some(mut child) = child {
-                let released = match pid {
-                    Some(pid) => zk_tools::process::terminate_process_group(&mut child, pid).await,
+            let mut closing = ClosingChild {
+                owner: self,
+                child: self.child_slot().take(),
+            };
+            let pid = *lock(&self.process_group);
+            let released = if let Some(child) = closing.child.as_mut() {
+                match pid {
+                    Some(pid) => zk_tools::process::terminate_process_group(child, pid).await,
                     None => false,
-                };
-                if !released {
-                    *self.child_slot() = Some(child);
-                    *lock(&self.process_group) = pid;
                 }
-                released
             } else {
                 pid.is_none()
             };
+            if released {
+                closing.child.take();
+                lock(&self.process_group).take();
+            }
+            drop(closing);
             if released && pid.is_some() {
                 *lock(&self.released_process_group) = pid;
             }
@@ -560,6 +671,60 @@ mod tests {
     use super::*;
     use crate::config::{McpConfigScope, McpTransportType};
     use crate::error::{REQUEST_TIMEOUT, SERVER_NOT_INITIALIZED};
+
+    #[tokio::test]
+    async fn cancelled_close_retains_process_ownership_until_confirmed() {
+        let transport =
+            StdioTransport::new(&script_config("trap '' TERM; while :; do sleep 1; done"));
+        transport.connect().await.unwrap();
+        let pid = *lock(&transport.process_group);
+        // Poll once to suspend termination while it still owns a live process group.
+        let mut closing = transport.close();
+        assert!(futures::poll!(&mut closing).is_pending());
+        drop(closing);
+        let retained = transport.child_slot().is_some() && *lock(&transport.process_group) == pid;
+        // Always reap the fixture, including on the pre-fix failure path.
+        if !retained && let Some(pid) = pid {
+            let _ = nix::sys::signal::killpg(
+                nix::unistd::Pid::from_raw(i32::try_from(pid).unwrap()),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+        transport.close().await;
+        assert!(retained, "cancelled close lost child/PGID ownership");
+        assert!(transport.cleanup_confirmed());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropping_transport_reaps_the_entire_owned_process_group() {
+        let marker = std::env::temp_dir().join(format!("zk-mcp-drop-{}", uuid::Uuid::new_v4()));
+        let script = format!("sleep 30 & printf ready > '{}'; wait", marker.display());
+        let transport = StdioTransport::new(&script_config(&script));
+        transport.connect().await.unwrap();
+        let pid = lock(&transport.process_group).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !marker.exists() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        drop(transport);
+        let group = nix::unistd::Pid::from_raw(i32::try_from(pid).unwrap());
+        let gone = tokio::time::timeout(Duration::from_secs(8), async {
+            while nix::sys::signal::killpg(group, None).is_ok() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .is_ok();
+        if !gone {
+            let _ = nix::sys::signal::killpg(group, nix::sys::signal::Signal::SIGKILL);
+        }
+        std::fs::remove_file(marker).unwrap();
+        assert!(gone, "transport Drop left a descendant running");
+    }
 
     /// 以 `sh -c` 脚本充当 MCP 服务器（回显 id 的最小 JSON-RPC 实现）。
     fn script_config(script: &str) -> McpServerConfig {

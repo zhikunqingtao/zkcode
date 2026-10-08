@@ -16,6 +16,8 @@ it('shows an explicit consent link and clears the client secret after sending it
     await act(async () => { fireEvent.click(screen.getByText('开始授权')); });
     expect(secret).toHaveValue('');
     const link = await screen.findByRole('link', { name: '在浏览器中审核并授权' });
+    expect(link).toHaveClass('text-accent2-ink');
+    expect(screen.getByText('OAuth 授权设置')).toHaveClass('text-accent2-ink');
     expect(link).toHaveAttribute('href', 'https://auth.example/authorize?state=public');
     expect(link).toHaveAttribute('rel', 'noopener noreferrer');
     expect(fetch).toHaveBeenCalledWith('/api/mcp/services/alpha/oauth/authorize', expect.objectContaining({ method: 'POST', body: '{"clientId":"issued-client","clientSecret":"form-secret"}' }));

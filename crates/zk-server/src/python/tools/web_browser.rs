@@ -17,7 +17,6 @@ use zk_tools::{ChildToolAccess, Tool, ToolContext, ToolOutput};
 
 use super::{BROWSER_AUTOMATION, PythonEnvelope, allowed_list, failure, int_or, is_blank, opt_str};
 use crate::api::browser_replay::BrowserReplayStore;
-use crate::iso::now_millis;
 use crate::python::client::{Correlation, PythonClient};
 
 /// 允许的 action（旧 `ALLOWED_ACTIONS`，:34-38，共 15 个）。
@@ -338,6 +337,21 @@ impl Tool for WebBrowserTool {
                      pip install playwright && playwright install chromium",
                 );
             };
+            if action == "snapshot-semantic"
+                && let Some(replay) = &self.replay
+                && let Some(data) = envelope.data.as_ref()
+                && let Err(error) =
+                    replay.append_python_snapshot(ctx.session_id().unwrap_or(&session_id), data)
+            {
+                tracing::error!(
+                    error_type = ?error.kind(),
+                    "browser semantic snapshot persistence failed"
+                );
+                return failure(
+                    "BROWSER_REPLAY_PERSIST_FAILED",
+                    "Browser snapshot was captured but could not be persisted",
+                );
+            }
             if !envelope.success {
                 return browser_failure(&action, &envelope);
             }
@@ -356,19 +370,7 @@ impl Tool for WebBrowserTool {
                 )
                 .await;
             }
-            if action == "snapshot-semantic"
-                && let Some(replay) = &self.replay
-                && let Err(error) = replay.append_python_snapshot(&session_id, &data)
-            {
-                tracing::error!(
-                    error_type = ?error.kind(),
-                    "browser semantic snapshot persistence failed"
-                );
-                return failure(
-                    "BROWSER_REPLAY_PERSIST_FAILED",
-                    "Browser snapshot was captured but could not be persisted",
-                );
-            }
+
             ToolOutput::ok(data.to_string())
         })
     }
@@ -377,6 +379,12 @@ impl Tool for WebBrowserTool {
 pub(super) fn browser_failure(action: &str, envelope: &PythonEnvelope) -> ToolOutput {
     let mut output = failure(envelope.code(), envelope.message());
     let mut metadata = json!({"retryability": "NEVER", "effectState": "UNKNOWN"});
+    if action == "snapshot-semantic"
+        && let Some(data) = &envelope.data
+    {
+        metadata["captureStatus"] = data["capture_status"].clone();
+        metadata["components"] = data["components"].clone();
+    }
     if matches!(action, "click" | "type") {
         for key in ["method", "warning"] {
             if let Some(value) = envelope
@@ -407,9 +415,15 @@ pub(super) fn browser_failure(action: &str, envelope: &PythonEnvelope) -> ToolOu
 async fn persist_screenshot(
     base64_png: &str,
     reported_size: Option<i64>,
-    session_id: &str,
+    _session_id: &str,
     working_dir: &Path,
 ) -> ToolOutput {
+    if base64_png.len() > 4 * (10 * 1024 * 1024usize).div_ceil(3) {
+        return failure(
+            "BROWSER_SCREENSHOT_BUDGET_EXCEEDED",
+            "Screenshot exceeds the image byte budget",
+        );
+    }
     let bytes = match BASE64_STANDARD.decode(base64_png.as_bytes()) {
         Ok(bytes) => bytes,
         Err(error) => {
@@ -424,7 +438,7 @@ async fn persist_screenshot(
             );
         }
     };
-    let filename = format!("screenshot_{session_id}_{}.png", now_millis());
+    let filename = format!("screenshot_{}.png", uuid::Uuid::new_v4());
     let filepath = working_dir.join("screenshots").join(filename);
     let outcome = write_checked_bytes_authorized(
         &filepath,
@@ -728,7 +742,11 @@ mod tests {
         assert!(out.content.ends_with(" bytes)"));
         let metadata = out.metadata.expect("metadata present");
         let path = metadata["filePath"].as_str().expect("filePath");
-        assert!(path.contains("/screenshots/screenshot_sess-1_"));
+        assert!(path.contains("/screenshots/screenshot_"));
+        assert!(
+            !path.contains("sess-1"),
+            "session input is never part of a filename"
+        );
         assert_eq!(
             std::path::Path::new(path)
                 .extension()

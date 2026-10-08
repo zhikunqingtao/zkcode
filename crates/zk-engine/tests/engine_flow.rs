@@ -95,6 +95,30 @@ impl RecordingSink {
         value
     }
 
+    fn assert_cost_update(
+        &self,
+        index: usize,
+        expected_usage: Option<Usage>,
+        pricing_status: &str,
+        usage_complete: Option<bool>,
+    ) {
+        let value = self.json_at(index);
+        assert_eq!(self.kinds()[index], "cost_update");
+        match expected_usage {
+            Some(usage) => assert_eq!(value["usage"], serde_json::to_value(usage).unwrap()),
+            None => assert!(
+                value.get("usage").is_none(),
+                "status refresh must not publish usage: {value}"
+            ),
+        }
+        assert_eq!(value["sessionPricingStatus"], pricing_status);
+        assert_eq!(value["totalPricingStatus"], pricing_status);
+        match usage_complete {
+            Some(complete) => assert_eq!(value["usageComplete"], complete),
+            None => assert!(value.get("usageComplete").is_none()),
+        }
+    }
+
     fn session_at(&self, index: usize) -> String {
         self.pushed.lock().expect("sink lock")[index].0.clone()
     }
@@ -1082,14 +1106,16 @@ async fn single_turn_streams_and_persists() {
             "stream_delta",
             // Batch 0 Step 0-6：Finish 携带 usage → push_cost_update 落于此。
             "cost_update",
+            "cost_update", // Terminal status only; no second usage charge.
             "message_complete",
             "session_list_updated"
         ]
     );
     assert_eq!(sink.session_at(0), sid);
     assert_eq!(sink.json_at(0)["delta"], "Hello");
-    // Batch 0 Step 0-6：cost_update 落于索引 2，message_complete 顺移至 3。
-    let complete = sink.json_at(3);
+    sink.assert_cost_update(2, Some(usage(12, 5)), "known", None);
+    sink.assert_cost_update(3, None, "known", Some(true));
+    let complete = sink.json_at(4);
     assert_eq!(complete["usage"]["inputTokens"], 12);
     assert_eq!(complete["usage"]["outputTokens"], 5);
     assert_eq!(complete["stopReason"], "end_turn");
@@ -1290,6 +1316,161 @@ async fn production_root_defaults_to_unlimited_spend_and_records_provider_usage(
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn unknown_pricing_allows_multiple_physical_calls_and_followup_turns() {
+    for model in ["bailian/glm-5.3", "custom-unpriced-model"] {
+        for bounded in [false, true] {
+            let db = Db::open_in_memory().expect("db");
+            let session = db.create_session(model, "/tmp").await.expect("session");
+            let provider = Arc::new(MockProvider::new(vec![
+                events(vec![
+                    ProviderEvent::ToolUseStart {
+                        id: "echo-unpriced".into(),
+                        name: "Echo".into(),
+                    },
+                    ProviderEvent::ToolInputDelta {
+                        id: "echo-unpriced".into(),
+                        delta: r#"{"text":"unpriced tool response"}"#.into(),
+                    },
+                    ProviderEvent::Finish {
+                        finish_reason: FinishReason::ToolUse,
+                        usage: Some(usage(12, 5)),
+                    },
+                ]),
+                events(vec![
+                    ProviderEvent::TextDelta {
+                        text: "first answer".into(),
+                    },
+                    ProviderEvent::Finish {
+                        finish_reason: FinishReason::EndTurn,
+                        usage: Some(usage(14, 6)),
+                    },
+                ]),
+                events(vec![
+                    ProviderEvent::TextDelta {
+                        text: "second answer".into(),
+                    },
+                    ProviderEvent::Finish {
+                        finish_reason: FinishReason::EndTurn,
+                        usage: Some(usage(16, 7)),
+                    },
+                ]),
+            ]));
+            let sink = Arc::new(RecordingSink::default());
+            let registry = registry_with_models(provider.clone(), &[model]);
+            let mut tools = ToolRegistry::new();
+            tools.register(Arc::new(EchoTool));
+            let policy = if bounded {
+                RootTaskBudgetPolicy {
+                    token_limit: Some(1_000_000),
+                    cost_limit_nanos_usd: Some(1_000_000_000),
+                    deadline: Duration::from_mins(1),
+                }
+            } else {
+                RootTaskBudgetPolicy::default()
+            };
+            let engine = Arc::new(
+                Engine::with_tools(
+                    db.clone(),
+                    registry as Arc<dyn ChatProvider>,
+                    sink.clone() as Arc<dyn MessageSink>,
+                    Arc::new(tools),
+                )
+                .with_root_task_budget_policy(policy),
+            );
+            run(&engine, &session.id, "use Echo then answer").await;
+            run(&engine, &session.id, "follow up").await;
+            assert_eq!(
+                provider.request_count(),
+                3,
+                "model={model}, bounded={bounded}, events={:?}",
+                sink.kinds()
+            );
+            assert!(!sink.kinds().contains(&"error"));
+            assert!(sink.kinds().contains(&"tool_result"));
+            let cost_indices = sink
+                .kinds()
+                .iter()
+                .enumerate()
+                .filter_map(|(index, kind)| (*kind == "cost_update").then_some(index))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                cost_indices.len(),
+                5,
+                "three usage deltas and two terminal status snapshots"
+            );
+            for (index, delta, complete) in [
+                (cost_indices[0], Some(usage(12, 5)), None),
+                (cost_indices[1], Some(usage(14, 6)), None),
+                (cost_indices[2], None, Some(true)),
+                (cost_indices[3], Some(usage(16, 7)), None),
+                (cost_indices[4], None, Some(true)),
+            ] {
+                sink.assert_cost_update(index, delta, "unknown", complete);
+            }
+            let calls: (i64, i64, i64, i64) = db.with_conn_blocking(|conn| {
+                conn.query_row("SELECT COUNT(*),SUM(usage_complete),COUNT(cost_nanos_usd),SUM(input_tokens+output_tokens) FROM llm_calls", [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).map_err(Into::into)
+            }).unwrap();
+            assert_eq!(
+                calls,
+                (3, 3, 0, 60),
+                "unknown cost stays NULL without poisoning valid usage"
+            );
+            let completed_runs: i64 = db.with_conn_blocking(|conn| conn.query_row("SELECT COUNT(*) FROM run_envelopes WHERE status='completed' AND usage_complete=1", [], |row| row.get(0)).map_err(Into::into)).unwrap();
+            assert_eq!(completed_runs, 2);
+        }
+    }
+}
+
+#[tokio::test]
+async fn unknown_pricing_compatibility_provider_preserves_usage_without_fake_calls() {
+    let db = Db::open_in_memory().unwrap();
+    let session = db
+        .create_session("custom-unpriced-model", "/tmp")
+        .await
+        .unwrap();
+    let provider = Arc::new(MockProvider::new(vec![events(vec![
+        ProviderEvent::TextDelta {
+            text: "compatibility response".into(),
+        },
+        ProviderEvent::Finish {
+            finish_reason: FinishReason::EndTurn,
+            usage: Some(usage(12, 5)),
+        },
+    ])]));
+    let sink = Arc::new(RecordingSink::default());
+    let engine = Arc::new(Engine::new(
+        db.clone(),
+        provider.clone() as Arc<dyn ChatProvider>,
+        sink.clone() as Arc<dyn MessageSink>,
+    ));
+    run(&engine, &session.id, "compatibility query").await;
+    assert_eq!(provider.request_count(), 1);
+    assert!(!sink.kinds().contains(&"error"));
+    let (status, complete, tokens): (String, bool, i64) = db
+        .with_conn_blocking(|conn| {
+            conn.query_row(
+                "SELECT status,usage_complete,total_tokens FROM run_envelopes",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(Into::into)
+        })
+        .unwrap();
+    assert_eq!((status, complete, tokens), ("completed".into(), true, 17));
+    let rows: i64 = db
+        .with_conn_blocking(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM llm_calls", [], |row| row.get(0))
+                .map_err(Into::into)
+        })
+        .unwrap();
+    assert_eq!(
+        rows, 0,
+        "a compatibility fallback cannot fabricate physical calls"
+    );
+}
+
+#[tokio::test]
 async fn exhausted_root_cost_budget_rejects_before_provider_execution() {
     let db = Db::open_in_memory().expect("in-memory db");
     let session = db
@@ -1399,14 +1580,17 @@ async fn missing_post_turn_usage_fails_before_assistant_or_tool_side_effects() {
 
     assert_eq!(provider.request_count(), 1);
     let kinds = sink.kinds();
-    assert!(kinds.contains(&"error"));
-    assert!(kinds.contains(&"message_complete"));
-    for forbidden in [
-        "cost_update",
-        "tool_use_start",
-        "tool_use_input",
-        "tool_result",
-    ] {
+    assert_eq!(
+        kinds,
+        vec![
+            "error",
+            "cost_update",
+            "message_complete",
+            "session_list_updated"
+        ]
+    );
+    sink.assert_cost_update(1, None, "unknown", Some(false));
+    for forbidden in ["tool_use_start", "tool_use_input", "tool_result"] {
         assert!(
             !kinds.contains(&forbidden),
             "unexpected {forbidden}: {kinds:?}"
@@ -1979,13 +2163,16 @@ async fn thinking_mixed_stream_and_trailing_usage() {
             "stream_delta",
             // Batch 0 Step 0-6：Finish + trailing usage → push_cost_update。
             "cost_update",
+            "cost_update", // Terminal status only; no second usage charge.
             "message_complete",
             "session_list_updated"
         ]
     );
     // thinking_delta 线上字段名为 delta（zk-protocol 权威形状）。
     assert_eq!(sink.json_at(0)["delta"], "pondering");
-    let complete = sink.json_at(3);
+    sink.assert_cost_update(2, Some(usage(3, 4)), "known", None);
+    sink.assert_cost_update(3, None, "known", Some(true));
+    let complete = sink.json_at(4);
     assert_eq!(complete["usage"]["inputTokens"], 3);
     assert_eq!(complete["usage"]["outputTokens"], 4);
 
@@ -2089,14 +2276,20 @@ async fn fatal_stream_error_emits_complete_only_after_durable_error_result() {
 
     assert_eq!(
         sink.kinds(),
-        vec!["error", "message_complete", "session_list_updated"]
+        vec![
+            "error",
+            "cost_update",
+            "message_complete",
+            "session_list_updated"
+        ]
     );
+    sink.assert_cost_update(1, None, "known", Some(true));
     let error = sink.json_at(0);
     assert_eq!(error["code"], "query_error");
     assert_eq!(error["retryable"], true);
     // The completion is now attributed to the durably failed Run and includes
     // only records which were already committed before publication.
-    let complete = sink.json_at(1);
+    let complete = sink.json_at(2);
     assert_eq!(complete["usage"]["inputTokens"], 0);
     assert_eq!(complete["stopReason"], "error");
     assert!(complete["runId"].as_str().is_some());
@@ -2145,8 +2338,14 @@ async fn setup_failure_from_chat_stream_is_fatal() {
 
     assert_eq!(
         sink.kinds(),
-        vec!["error", "message_complete", "session_list_updated"]
+        vec![
+            "error",
+            "cost_update",
+            "message_complete",
+            "session_list_updated"
+        ]
     );
+    sink.assert_cost_update(1, None, "known", Some(true));
     let error = sink.json_at(0);
     assert_eq!(error["code"], "query_error");
     // Provider Config errors are permanent and must not invite blind retries.
@@ -2172,11 +2371,17 @@ async fn root_establishment_budget_failure_preserves_the_exact_runtime_code() {
     assert_eq!(provider.request_count(), 1);
     assert_eq!(
         sink.kinds(),
-        vec!["error", "message_complete", "session_list_updated"]
+        vec![
+            "error",
+            "cost_update",
+            "message_complete",
+            "session_list_updated"
+        ]
     );
+    sink.assert_cost_update(1, None, "known", Some(true));
     assert_eq!(sink.json_at(0)["code"], "BUDGET_PRICE_UNKNOWN");
     assert_eq!(sink.json_at(0)["retryable"], false);
-    let complete = sink.json_at(1);
+    let complete = sink.json_at(2);
     assert_eq!(complete["stopReason"], "error");
     let run_id = complete["runId"].as_str().expect("run id");
     let result = db
@@ -2207,16 +2412,26 @@ async fn run_scripted_child_turns(
     run_scripted_child_with_hooks(scripts, max_turns, None).await
 }
 
-#[allow(clippy::too_many_lines)]
 async fn run_scripted_child_with_hooks(
     scripts: Vec<Result<BoxStream<'static, ProviderEvent>, ProviderError>>,
     max_turns: u32,
     hooks_root: Option<&std::path::Path>,
 ) -> (Db, Arc<MockProvider>, String, String, SubAgentRunOutcome) {
+    run_scripted_child_with_model(scripts, max_turns, hooks_root, None).await
+}
+
+#[allow(clippy::too_many_lines)]
+async fn run_scripted_child_with_model(
+    scripts: Vec<Result<BoxStream<'static, ProviderEvent>, ProviderError>>,
+    max_turns: u32,
+    hooks_root: Option<&std::path::Path>,
+    ledger_model: Option<&str>,
+) -> (Db, Arc<MockProvider>, String, String, SubAgentRunOutcome) {
+    let model = ledger_model.unwrap_or("qwen3.8-max-0902");
     let work_dir = hooks_root.map_or("/tmp", |root| root.to_str().unwrap());
     let db = Db::open_in_memory().expect("in-memory db");
     let root_session = db
-        .create_session("qwen3.8-max-0902", work_dir)
+        .create_session(model, work_dir)
         .await
         .expect("root session");
     let root_task_id = uuid::Uuid::new_v4().to_string();
@@ -2234,7 +2449,7 @@ async fn run_scripted_child_with_hooks(
             description: "root".into(),
             prompt: Some("root".into()),
             task_type: "agent".into(),
-            model: "qwen3.8-max-0902".into(),
+            model: model.into(),
             working_dir: work_dir.into(),
             execution_config_json: json!({
                 "budget": {
@@ -2268,7 +2483,7 @@ async fn run_scripted_child_with_hooks(
             description: "child".into(),
             prompt: Some("child".into()),
             task_type: "agent".into(),
-            model: "qwen3.8-max-0902".into(),
+            model: model.into(),
             working_dir: work_dir.into(),
             execution_config_json: json!({"isolation": "readOnly"}).to_string(),
             startup_epoch: 1,
@@ -2290,9 +2505,14 @@ async fn run_scripted_child_with_hooks(
     let child_run_id = child.run_id.clone();
     let child_session_id = child.transcript_session_id.clone();
     let provider = Arc::new(MockProvider::new(scripts));
+    let chat_provider: Arc<dyn ChatProvider> = if ledger_model.is_some() {
+        registry_with_models(provider.clone(), &[model])
+    } else {
+        provider.clone()
+    };
     let engine = Engine::with_tools(
         db.clone(),
-        Arc::clone(&provider) as Arc<dyn ChatProvider>,
+        chat_provider,
         Arc::new(RecordingSink::default()),
         Arc::new(ToolRegistry::new()),
     )
@@ -2311,7 +2531,7 @@ async fn run_scripted_child_with_hooks(
             agent_id: child_task_id.clone(),
             session_id: child_session_id,
             run_id: child_run_id.clone(),
-            model: "qwen3.8-max-0902".into(),
+            model: model.into(),
             system_prompt: "system".into(),
             user_prompt: "child".into(),
             work_dir: work_dir.into(),
@@ -2328,6 +2548,42 @@ async fn run_scripted_child_with_hooks(
     ))
     .await;
     (db, provider, child_task_id, child_run_id, outcome)
+}
+
+#[tokio::test]
+async fn unknown_pricing_child_uses_the_same_durable_usage_ledger() {
+    let (db, provider, task_id, run_id, outcome) = run_scripted_child_with_model(
+        vec![events(vec![
+            ProviderEvent::TextDelta {
+                text: "child completed".into(),
+            },
+            ProviderEvent::Finish {
+                finish_reason: FinishReason::EndTurn,
+                usage: Some(usage(12, 5)),
+            },
+        ])],
+        2,
+        None,
+        Some("bailian/glm-5.3"),
+    )
+    .await;
+    assert_eq!(provider.request_count(), 1);
+    assert!(!outcome.has_error, "{:?}", outcome.assistant_text);
+    assert_eq!(outcome.assistant_text.as_deref(), Some("child completed"));
+    let (owner, call_run, complete, cost): (String, String, bool, Option<i64>) = db
+        .with_conn_blocking(|conn| {
+            conn.query_row(
+                "SELECT task_id,run_id,usage_complete,cost_nanos_usd FROM llm_calls",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .map_err(Into::into)
+        })
+        .unwrap();
+    assert_eq!(owner, task_id);
+    assert_eq!(call_run, run_id);
+    assert!(complete);
+    assert_eq!(cost, None);
 }
 
 #[tokio::test]
@@ -2885,10 +3141,13 @@ async fn parse_error_then_finish_still_succeeds() {
         vec![
             "stream_delta",
             "cost_update",
+            "cost_update", // Terminal status only; no second usage charge.
             "message_complete",
             "session_list_updated"
         ]
     );
+    sink.assert_cost_update(1, Some(usage(1, 1)), "known", None);
+    sink.assert_cost_update(2, None, "known", Some(true));
 }
 
 #[tokio::test]
@@ -2954,10 +3213,18 @@ async fn stable_stream_runtime_failure_wins_over_later_finish_for_root() {
             "runtime_code={runtime_code}"
         );
         assert!(kinds.contains(&"error"), "runtime_code={runtime_code}");
-        assert!(
-            !kinds.contains(&"cost_update"),
-            "failed Finish usage must not be published: runtime_code={runtime_code}"
+        assert_eq!(
+            kinds,
+            vec![
+                "stream_delta",
+                "error",
+                "cost_update",
+                "message_complete",
+                "session_list_updated"
+            ],
+            "runtime_code={runtime_code}"
         );
+        sink.assert_cost_update(2, None, "known", Some(true));
         let error_index = kinds
             .iter()
             .position(|kind| *kind == "error")
@@ -3172,10 +3439,14 @@ async fn tool_call_loop_executes_and_continues() {
             "tool_result",
             "stream_delta",
             "cost_update",
+            "cost_update", // Terminal status only; no second usage charge.
             "message_complete",
             "session_list_updated",
         ]
     );
+    sink.assert_cost_update(0, Some(usage(3, 2)), "known", None);
+    sink.assert_cost_update(5, Some(usage(5, 4)), "known", None);
+    sink.assert_cost_update(6, None, "known", Some(true));
     let start = sink.json_at(1);
     assert_eq!(start["toolUseId"], "call-1");
     assert_eq!(start["toolName"], "Echo");
@@ -3188,7 +3459,7 @@ async fn tool_call_loop_executes_and_continues() {
     assert_eq!(result["result"]["content"], "hi");
     assert_eq!(result["result"]["isError"], false);
     // 终态：usage 跨轮累计、stopReason=end_turn、committed 4 条完整链。
-    let complete = sink.json_at(6);
+    let complete = sink.json_at(7);
     assert_eq!(complete["usage"]["inputTokens"], 8);
     assert_eq!(complete["usage"]["outputTokens"], 6);
     assert_eq!(complete["stopReason"], "end_turn");
@@ -4158,10 +4429,13 @@ async fn invalid_tool_arguments_json_is_nonretryable_query_error() {
         vec![
             "cost_update",
             "error",
+            "cost_update", // Terminal status only; no second usage charge.
             "message_complete",
             "session_list_updated"
         ]
     );
+    sink.assert_cost_update(0, Some(usage(1, 1)), "known", None);
+    sink.assert_cost_update(2, None, "known", Some(true));
     let error = sink.json_at(1);
     assert_eq!(error["code"], "query_error");
     assert_eq!(error["retryable"], false);
@@ -4337,10 +4611,14 @@ async fn unknown_tool_feeds_error_result_and_continues() {
             "tool_result",
             "stream_delta",
             "cost_update",
+            "cost_update", // Terminal status only; no second usage charge.
             "message_complete",
             "session_list_updated",
         ]
     );
+    sink.assert_cost_update(0, Some(usage(1, 1)), "known", None);
+    sink.assert_cost_update(4, Some(usage(1, 1)), "known", None);
+    sink.assert_cost_update(5, None, "known", Some(true));
     // 未知工具不会通过准入，因此始终停留在 preparing，不能伪造 running input。
     // 未知工具：错误结果回喂模型（旧逐字文案，含可用工具清单）。
     let result = sink.json_at(2);
@@ -5385,4 +5663,259 @@ async fn root_consumes_durable_teammate_input_once_at_natural_boundary() {
             .count(),
         1
     );
+}
+
+struct RecordedFixtureVerifier {
+    db: Db,
+    actions: Arc<std::sync::atomic::AtomicUsize>,
+    trusted: bool,
+}
+impl Tool for RecordedFixtureVerifier {
+    fn name(&self) -> &'static str {
+        "VerifyJourney"
+    }
+    fn description(&self) -> &'static str {
+        "recorded verifier fixture"
+    }
+    fn parameters(&self) -> serde_json::Value {
+        FixtureVerifyJourney.parameters()
+    }
+    fn produces_machine_evidence(&self) -> bool {
+        self.trusted
+    }
+    fn child_access(&self) -> zk_tools::ChildToolAccess {
+        zk_tools::ChildToolAccess::ReadOnly
+    }
+    fn execute(&self, input: serde_json::Value, ctx: ToolContext) -> BoxFuture<'_, ToolOutput> {
+        Box::pin(async move {
+            self.actions
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let owner = ctx.execution_resource_owner().unwrap();
+            let resource = format!("recording:{}", owner.invocation_id);
+            let identity = json!({"batch_id":uuid::Uuid::new_v4().to_string(),"session_id":ctx.session_id().unwrap(),"run_id":owner.run_id,"invocation_id":owner.invocation_id});
+            self.db.register_execution_resource(&zk_db::NewExecutionResource {
+                resource_id:resource.clone(),task_id:owner.task_id.clone(),run_id:owner.run_id.clone(),invocation_id:Some(owner.invocation_id.clone()),
+                resource_kind:"stream".into(),external_id:Some("recorded-fixture".into()),
+                metadata_json:json!({"kind":"browserSession","recordingFinalization":{"version":1,"phase":"reserved","identity":identity}}).to_string(),
+            }).await.unwrap();
+            self.db
+                .finalize_execution_resource(&resource, zk_db::ExecutionResourceStatus::Released)
+                .await
+                .unwrap();
+            let digest = "a".repeat(64);
+            self.db
+                .seal_browser_recording(
+                    &resource,
+                    json!({"identity":identity,"manifest_sha256":digest,"files":[]}),
+                    json!([]),
+                )
+                .await
+                .unwrap();
+            let mut output = FixtureVerifyJourney.execute(input, ctx).await;
+            output.metadata.as_mut().unwrap()["structuredResult"]["evidence"]["items"][0]["meta"] =
+                json!({"recording_manifest_sha256":digest,"recording_dispositions":[]});
+            output
+        })
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn recorded_verifier_root_and_child_recover_real_sqlite_failures_without_reexecution() {
+    for child in [false, true] {
+        for fault in ["evidence", "completion", "none", "untrusted"] {
+            let db = Db::open_in_memory().unwrap();
+            let sid = db
+                .create_session("qwen3.8-max-0902", "/tmp")
+                .await
+                .unwrap()
+                .id;
+            let actions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let mut registry = ToolRegistry::new();
+            registry.register(Arc::new(RecordedFixtureVerifier {
+                db: db.clone(),
+                actions: actions.clone(),
+                trusted: fault != "untrusted",
+            }));
+            let provider = Arc::new(MockProvider::new(vec![
+                events(vec![
+                    ProviderEvent::ToolUseStart {
+                        id: "recorded-verify".into(),
+                        name: "VerifyJourney".into(),
+                    },
+                    ProviderEvent::ToolInputDelta {
+                        id: "recorded-verify".into(),
+                        delta: json!({"outcome":"passed"}).to_string(),
+                    },
+                    ProviderEvent::Finish {
+                        finish_reason: FinishReason::ToolUse,
+                        usage: Some(usage(3, 2)),
+                    },
+                ]),
+                events(vec![
+                    ProviderEvent::TextDelta {
+                        text: "verified".into(),
+                    },
+                    ProviderEvent::Finish {
+                        finish_reason: FinishReason::EndTurn,
+                        usage: Some(usage(2, 1)),
+                    },
+                ]),
+            ]));
+            let sink = Arc::new(RecordingSink::default());
+            let engine = Arc::new(Engine::with_tools(
+                db.clone(),
+                provider.clone(),
+                sink.clone(),
+                Arc::new(registry),
+            ));
+            if fault == "evidence" || fault == "completion" {
+                db.with_conn_blocking(move |conn| {
+                    conn.execute_batch(if fault=="evidence" {
+                        "CREATE TEMP TRIGGER recorded_outage BEFORE INSERT ON evidence_bundles WHEN NEW.origin='machine' BEGIN SELECT RAISE(ABORT,'evidence outage'); END"
+                    } else {
+                        "CREATE TEMP TRIGGER recorded_outage BEFORE UPDATE OF status ON tool_result_postprocessing WHEN NEW.status='completed' BEGIN SELECT RAISE(ABORT,'completion outage'); END"
+                    })?;Ok(())
+                }).unwrap();
+            }
+            let session = if child {
+                let root_id = uuid::Uuid::new_v4().to_string();
+                db.start_root_run_with_budget(
+                    &root_id,
+                    &sid,
+                    None,
+                    "qwen3.8-max-0902",
+                    &TaskBudgetLimits {
+                        token_limit: Some(1_000_000),
+                        cost_limit_nanos_usd: Some(4_000_000_000),
+                        deadline_at_ms: Some(zk_db::time::now_millis() + 60_000),
+                    },
+                )
+                .await
+                .unwrap();
+                let root = db.find_run_by_id(&root_id).await.unwrap().unwrap();
+                let child = db
+                    .create_task_with_run(&CreateTaskWithRun {
+                        task_id: uuid::Uuid::new_v4().to_string(),
+                        run_id: uuid::Uuid::new_v4().to_string(),
+                        root_session_id: sid.clone(),
+                        transcript_session_id: uuid::Uuid::new_v4().to_string(),
+                        parent_task_id: Some(root.task_id),
+                        parent_run_id: Some(root.id),
+                        creator_tool_use_id: Some("agent-call".into()),
+                        ordinal: 0,
+                        description: "child verifier".into(),
+                        prompt: Some("verify".into()),
+                        task_type: "agent".into(),
+                        model: "qwen3.8-max-0902".into(),
+                        working_dir: "/tmp".into(),
+                        execution_config_json: json!({"isolation":"readOnly"}).to_string(),
+                        startup_epoch: 1,
+                    })
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    db.claim_task_run_cas(&child.task.id, &child.run_id, child.task.version)
+                        .await
+                        .unwrap(),
+                    CasOutcome::Applied
+                );
+                let budget = db.read_task_budget(&child.task.id).await.unwrap().unwrap();
+                let (_sender, mailbox) = tokio::sync::mpsc::unbounded_channel();
+                let session = child.transcript_session_id.clone();
+                engine
+                    .run_sub_agent(
+                        SubAgentRunConfig {
+                            agent_id: child.task.id,
+                            session_id: session.clone(),
+                            run_id: child.run_id,
+                            model: "qwen3.8-max-0902".into(),
+                            system_prompt: "system".into(),
+                            user_prompt: "verify".into(),
+                            work_dir: "/tmp".into(),
+                            max_turns: 3,
+                            mailbox,
+                            budget: TaskBudgetLimits {
+                                token_limit: budget.token_limit,
+                                cost_limit_nanos_usd: budget.cost_limit_nanos_usd,
+                                deadline_at_ms: budget.deadline_at_ms,
+                            },
+                            recovery_checkpoint: None,
+                        },
+                        CancellationToken::new(),
+                    )
+                    .await;
+                session
+            } else {
+                run(&engine, &sid, "verify").await;
+                sid
+            };
+            assert_eq!(
+                actions.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "child={child}, fault={fault}"
+            );
+            let invocation:String = db.with_conn_blocking(|conn|Ok(conn.query_row("SELECT invocation_id FROM tool_invocations WHERE tool_use_id='recorded-verify'",[],|r|r.get(0))?)).unwrap();
+            let before = db.list_messages(&session, None, 50).await.unwrap().unwrap();
+            if fault == "untrusted" {
+                assert!(
+                    !zk_engine::complete_recorded_verify_journey_evidence(&db, &invocation)
+                        .await
+                        .unwrap()
+                );
+                assert!(
+                    db.find_evidence_by_session(&session)
+                        .await
+                        .unwrap()
+                        .is_empty()
+                );
+                continue;
+            }
+            if fault == "none" {
+                assert_eq!(
+                    provider.request_count(),
+                    2,
+                    "completed shared path must skip the independent second CAS"
+                );
+            } else {
+                assert!(
+                    db.find_evidence_by_session(&session)
+                        .await
+                        .unwrap()
+                        .is_empty(),
+                    "failed final CAS must roll back evidence too"
+                );
+                assert!(!sink.pushed.lock().unwrap().iter().any(|(_,m)|matches!(m,ServerMessage::ToolResult{tool_use_id,..} if tool_use_id=="recorded-verify")));
+                db.with_conn_blocking(|conn| {
+                    conn.execute_batch("DROP TRIGGER recorded_outage")?;
+                    Ok(())
+                })
+                .unwrap();
+            }
+            let (left, right) = tokio::join!(
+                zk_engine::complete_recorded_verify_journey_evidence(&db, &invocation),
+                zk_engine::complete_recorded_verify_journey_evidence(&db, &invocation)
+            );
+            assert!(left.unwrap() && right.unwrap());
+            assert_eq!(actions.load(std::sync::atomic::Ordering::SeqCst), 1);
+            let evidence = db.find_evidence_by_session(&session).await.unwrap();
+            assert_eq!(evidence.len(), 1);
+            assert_eq!(evidence[0].agent_id, None);
+            assert_eq!(
+                evidence[0].producer_invocation_id.as_deref(),
+                Some(invocation.as_str())
+            );
+            let after = db.list_messages(&session, None, 50).await.unwrap().unwrap();
+            assert_eq!(
+                serde_json::to_value(before).unwrap(),
+                serde_json::to_value(after).unwrap()
+            );
+            let entry = db.pending_browser_recordings().await.unwrap().remove(0);
+            assert!(
+                db.advance_browser_recording(&entry.resource_id, entry.version, false)
+                    .await
+                    .unwrap()
+            );
+        }
+    }
 }

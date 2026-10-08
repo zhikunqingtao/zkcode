@@ -93,6 +93,15 @@ static SECRET_ASSIGNMENT: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)(token|password|secret|api[_-]?key)=\S+").expect("static regex")
 });
 
+// Display projection only. Never use these redactions for execution input or
+// exact authorization identity (distinct credentials must remain distinct).
+static AUTHORIZATION_HEADER: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?i)(authorization\s*:\s*)(?:(?:bearer|basic)\s+)?[^\s'"\\]+"#)
+        .expect("static regex")
+});
+static BEARER_CREDENTIAL: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"(?i)(\bbearer\s+)[^\s'"\\]+"#).expect("static regex"));
+
 /// 分析器身份（旧源 6 个 `OperationAnalyzer` 实例的判别式）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnalyzerKind {
@@ -518,6 +527,10 @@ pub fn file_operation(name: &str) -> TypedFileOperation {
 pub fn redact_command(command: &str) -> String {
     let compact = SECRET_ASSIGNMENT
         .replace_all(command, "$1=<redacted>")
+        .into_owned();
+    let compact = AUTHORIZATION_HEADER.replace_all(&compact, "${1}<redacted>");
+    let compact = BEARER_CREDENTIAL
+        .replace_all(&compact, "${1}<redacted>")
         .into_owned();
     if compact.chars().count() > 240 {
         let head: String = compact.chars().take(240).collect();
@@ -1386,6 +1399,21 @@ impl OperationAnalyzerRegistry {
 #[cfg(test)]
 mod mcp_identity_tests {
     use super::*;
+
+    #[test]
+    fn display_command_redacts_authorization_and_bearer_without_touching_original() {
+        for command in [
+            "fixture-http -H 'Authorization: Bearer canary-secret' https://example.test",
+            "fixture-http -H \"Authorization: Basic canary-secret\" https://example.test",
+            "runner --header='authorization: canary-secret'",
+            "echo Bearer canary-secret",
+        ] {
+            let summary = redact_command(command);
+            assert!(!summary.contains("canary-secret"), "{summary}");
+            assert!(command.contains("canary-secret"));
+        }
+        assert_eq!(redact_command("printf hello"), "printf hello");
+    }
 
     struct McpFacts {
         server: &'static str,

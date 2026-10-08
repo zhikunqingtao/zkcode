@@ -240,6 +240,10 @@ mod tests {
         }
     }
     #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "One persisted summary fixture checks splitting, epoch fencing and immutable completed units across recovery"
+    )]
     async fn split_plans_are_atomic_and_stale_epochs_cannot_commit_or_rewrite_completed_units() {
         let db = Db::open_in_memory().unwrap();
         let a = db.create_session("model", "/a").await.unwrap();
@@ -289,7 +293,18 @@ mod tests {
             .await
             .unwrap();
         let next = db
-            .transition_session_merge(&op.operation_id, Some(op.run_epoch), None, false)
+            .transition_session_merge(
+                &op.operation_id,
+                Some(
+                    db.session_merge(&op.operation_id)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .run_epoch,
+                ),
+                None,
+                false,
+            )
             .await
             .unwrap();
         let result = "{\"schemaVersion\":2,\"items\":[]}".to_owned();

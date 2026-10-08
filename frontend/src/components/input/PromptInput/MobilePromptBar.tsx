@@ -32,13 +32,13 @@ const MobilePromptBar: React.FC<MobilePromptBarProps> = ({ state: s, runActive, 
 
     return (
         <div data-testid="mobile-prompt-bar" className="flex min-h-0 min-w-0 flex-col rounded-[14px] border border-hairline bg-surfacev2 shadow-e2" style={{ minHeight: 'var(--mobile-composer-min-height, 0px)', maxHeight: 'calc(var(--viewport-height, 100dvh) * 0.382 - 2px)' }}>
-            <input ref={imageInputRef} data-mobile-image-input type="file" accept="image/*" multiple className="hidden" disabled={attachmentDisabled}
+            <input ref={imageInputRef} data-mobile-image-input type="file" accept="image/*" multiple className="hidden" disabled={attachmentDisabled || a.imageCapability !== 'ready'}
                 onChange={event => {
                     const files = Array.from(event.currentTarget.files ?? []);
                     event.currentTarget.value = '';
                     if (files.length) void a.handleFiles(files);
                 }} />
-            <input ref={cameraInputRef} data-mobile-camera-input type="file" accept="image/*" capture="environment" className="hidden" disabled={attachmentDisabled}
+            <input ref={cameraInputRef} data-mobile-camera-input type="file" accept="image/*" capture="environment" className="hidden" disabled={attachmentDisabled || a.imageCapability !== 'ready'}
                 onChange={event => {
                     const files = Array.from(event.currentTarget.files ?? []);
                     event.currentTarget.value = '';
@@ -55,8 +55,8 @@ const MobilePromptBar: React.FC<MobilePromptBarProps> = ({ state: s, runActive, 
             </div>
             <div data-testid="mobile-persistent-actions" className={`flex shrink-0 flex-wrap min-w-0 items-center px-2 py-1.5 ${runActive ? 'gap-0' : 'gap-1'}`}>
                 <button type="button" aria-label="文件引用" title="文件" disabled={attachmentDisabled} className={iconClass} onClick={pickFile}><Paperclip size={20} /></button>
-                <button type="button" aria-label="图片附件" title="图片" disabled={attachmentDisabled || a.maxImages <= 0} className={iconClass} onClick={pickImages}><ImagePlus size={20} /></button>
-                <button type="button" aria-label="拍照" title="拍照" disabled={attachmentDisabled || a.maxImages <= 0} className={iconClass} onClick={() => cameraInputRef.current?.click()}><Camera size={20} /></button>
+                <button type="button" aria-label="图片附件" title={a.imageCapabilityMessage} disabled={attachmentDisabled || a.imageCapability !== 'ready'} className={iconClass} onClick={pickImages}><ImagePlus size={20} /></button>
+                <button type="button" aria-label="拍照" title={a.imageCapabilityMessage} disabled={attachmentDisabled || a.imageCapability !== 'ready'} className={iconClass} onClick={() => cameraInputRef.current?.click()}><Camera size={20} /></button>
                 <button type="button" aria-label="命令" title="命令" disabled={busy} className="flex h-11 shrink-0 items-center gap-1 rounded-[10px] px-2 text-sm text-t2 hover:bg-hover2 focus-visible:ring-2 focus-visible:ring-accent2 disabled:opacity-50"
                     onClick={() => { s.setInput('/'); s.setShowCommands(true); requestAnimationFrame(() => s.textareaRef.current?.focus()); }}><span aria-hidden="true">/</span>命令</button>
                 <VoiceInputButton compact onTranscript={s.handleVoiceTranscript} disabled={!s.asrAvailable || busy}
@@ -65,6 +65,7 @@ const MobilePromptBar: React.FC<MobilePromptBarProps> = ({ state: s, runActive, 
                 <PromptSendButton variant="mobile" runActive={runActive} sendDisabled={sendDisabled} stopDisabled={disabled || s.isSubmitting}
                     onSend={() => { void s.handleSubmit(); }} onInterrupt={onInterrupt} />
             </div>
+            {a.imageCapability === 'unavailable' && !runActive && !compacting && <button type="button" onClick={a.retryImageCapabilities} disabled={busy} className="panel-control px-3 py-2 text-sm text-t2" aria-label="重新加载图片能力">重试图片能力</button>}
             <MobileComposerNavigation />
         </div>
     );

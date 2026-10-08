@@ -16,8 +16,13 @@ use zk_tools::{ExecutionResourceLease, ExecutionResourceTerminal, ToolContext};
 
 pub(super) struct JourneyResources {
     ctx: ToolContext,
+    recording_db: Option<zk_db::Db>,
     client: Arc<PythonClient>,
     pub(super) browser_id: String,
+    pub(super) recording_identity: Option<Value>,
+    pub(super) recording_manifest: Option<Value>,
+    pub(super) recording_error: Option<String>,
+    pub(super) recording_resource_id: Option<String>,
     browser: Option<ExecutionResourceLease>,
     browser_reserved: bool,
     preview: Option<(Child, i32, Option<ExecutionResourceLease>)>,
@@ -27,23 +32,41 @@ impl JourneyResources {
     pub(super) fn new(ctx: ToolContext, client: Arc<PythonClient>) -> Self {
         Self {
             ctx,
+            recording_db: None,
             client,
             browser_id: format!("rv-{}", uuid::Uuid::new_v4()),
             browser: None,
+            recording_identity: None,
+            recording_manifest: None,
+            recording_error: None,
+            recording_resource_id: None,
             browser_reserved: false,
             preview: None,
         }
     }
 
-    pub(super) async fn reserve_browser(&mut self) -> Result<(), String> {
+    pub(super) fn with_recording_store(mut self, db: zk_db::Db) -> Self {
+        self.recording_db = Some(db);
+        self
+    }
+
+    pub(super) async fn reserve_browser(&mut self, record: bool) -> Result<(), String> {
+        let mut metadata = json!({"kind":"browserSession", "sidecarSessionId":self.browser_id});
+        if record {
+            let owner = self
+                .ctx
+                .execution_resource_owner()
+                .ok_or("RECORDING_OWNER_REQUIRED")?;
+            let identity = json!({"batch_id":uuid::Uuid::new_v4().to_string(),"session_id":self.ctx.session_id().ok_or("RECORDING_OWNER_REQUIRED")?,"run_id":owner.run_id,"invocation_id":owner.invocation_id});
+            metadata["recordingFinalization"] =
+                json!({"version":1,"phase":"reserved","identity":identity});
+            self.recording_identity = Some(identity);
+        }
         self.browser = self
             .ctx
-            .register_execution_resource(
-                "stream",
-                Some(self.browser_id.clone()),
-                json!({"kind":"browserSession", "sidecarSessionId":self.browser_id}),
-            )
+            .register_execution_resource("stream", Some(self.browser_id.clone()), metadata)
             .await?;
+        self.recording_resource_id = self.browser.as_ref().map(|lease| lease.resource_id.clone());
         self.browser_reserved = true;
         Ok(())
     }
@@ -170,16 +193,21 @@ impl JourneyResources {
                 .call_if_available_with_timeout(
                     "BROWSER_AUTOMATION",
                     "/api/browser/close_session",
-                    &json!({"session_id":self.browser_id}),
+                    &json!({"session_id":self.browser_id,"recording":self.recording_identity}),
                     &Correlation::for_session(self.ctx.session_id()),
                     Duration::from_secs(7),
                 )
                 .await;
+            self.recording_manifest = response
+                .as_ref()
+                .and_then(|value| value.get("data"))
+                .and_then(|data| data.get("recording_manifest"))
+                .cloned();
             let released = response
                 .as_ref()
                 .is_some_and(|value| value.get("success") == Some(&Value::Bool(true)));
             if let Some(lease) = self.browser.take() {
-                let _ = self
+                let finished = self
                     .ctx
                     .finish_execution_resource(
                         lease,
@@ -190,6 +218,35 @@ impl JourneyResources {
                         },
                     )
                     .await;
+                if finished.is_err() && self.recording_identity.is_some() {
+                    self.recording_error = Some("RECORDING_FINALIZATION_UNCONFIRMED".into());
+                }
+            }
+            if self.recording_identity.is_some() {
+                let persisted = match (
+                    &self.recording_db,
+                    &self.recording_resource_id,
+                    response.as_ref(),
+                ) {
+                    (Some(db), Some(resource), Some(response)) if released => {
+                        if let Some(manifest) = &self.recording_manifest {
+                            db.seal_browser_recording(resource, manifest.clone(), json!([]))
+                                .await
+                        } else if let Some(proof) = response["data"].get("recording_finalization") {
+                            db.acknowledge_uncreated_browser_recording(resource, proof.clone())
+                                .await
+                        } else {
+                            Err(zk_db::DbError::Invalid("RECORDING_SEAL_UNCONFIRMED".into()))
+                        }
+                    }
+                    _ => Err(zk_db::DbError::Invalid(
+                        "RECORDING_CLEANUP_UNCONFIRMED".into(),
+                    )),
+                };
+                if let Err(error) = persisted {
+                    tracing::warn!(%error, "recording finalization retained for reconciliation");
+                    self.recording_error = Some("RECORDING_FINALIZATION_UNCONFIRMED".into());
+                }
             }
         }
 
@@ -231,8 +288,13 @@ impl Drop for JourneyResources {
         }
         let mut remaining = Self {
             ctx: self.ctx.clone(),
+            recording_db: self.recording_db.clone(),
             client: Arc::clone(&self.client),
             browser_id: self.browser_id.clone(),
+            recording_identity: self.recording_identity.clone(),
+            recording_manifest: self.recording_manifest.clone(),
+            recording_error: self.recording_error.clone(),
+            recording_resource_id: self.recording_resource_id.clone(),
             browser: self.browser.take(),
             browser_reserved: std::mem::take(&mut self.browser_reserved),
             preview: self.preview.take(),

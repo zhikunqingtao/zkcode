@@ -140,51 +140,7 @@ impl Db {
         validate_bundle(&bundle)?;
         self.with_writer(move |conn| {
             let tx = conn.transaction()?;
-            if let Some(existing) = load_bundle_base(&tx, &bundle.bundle_id)? {
-                if existing == bundle {
-                    tx.commit()?;
-                    return Ok(());
-                }
-                return Err(DbError::Invalid(
-                    "EVIDENCE_IMMUTABLE_MISMATCH".to_owned(),
-                ));
-            }
-            tx.execute(
-                "INSERT INTO evidence_bundles \
-                 (bundle_id,session_id,agent_id,kind,claim,origin,producer_invocation_id,verdict,created_at,run_id) \
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
-                rusqlite::params![
-                    &bundle.bundle_id,
-                    &bundle.session_id,
-                    &bundle.agent_id,
-                    content::store_text(&tx, &bundle.session_id, &bundle.kind)?,
-                    content::store_optional(&tx, &bundle.session_id, bundle.claim.as_deref())?,
-                    bundle.origin.as_db(),
-                    &bundle.producer_invocation_id,
-                    &bundle.verdict,
-                    &bundle.created_at,
-                    &bundle.run_id,
-                ],
-            )?;
-            for item in &bundle.items {
-                let meta_json = item.meta.as_ref().map(serde_json::to_string).transpose()?;
-                tx.execute(
-                    "INSERT INTO evidence_items \
-                     (id,bundle_id,producer_invocation_id,type,summary,blob_sha256,meta_json,sort_order) \
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
-                    rusqlite::params![
-                        &item.id,
-                        &bundle.bundle_id,
-                        &item.producer_invocation_id,
-                        content::store_text(&tx, &bundle.session_id, &item.item_type)?,
-                        content::store_optional(&tx, &bundle.session_id, item.summary.as_deref())?,
-                        content::store_optional(&tx, &bundle.session_id, item.blob_sha256.as_deref())?,
-                        content::store_optional(&tx, &bundle.session_id, meta_json.as_deref())?,
-                        item.sort_order,
-                    ],
-                )?;
-            }
-            project_machine_verification_in_current_write(&tx, &bundle)?;
+            save_evidence_bundle_in_current_write(&tx, &bundle)?;
             tx.commit()?;
             Ok(())
         })
@@ -347,7 +303,57 @@ pub(crate) fn load_bundle(
     Ok(Some(bundle))
 }
 
-fn load_bundle_base(
+pub(crate) fn save_evidence_bundle_in_current_write(
+    conn: &rusqlite::Connection,
+    bundle: &EvidenceBundleRecord,
+) -> Result<(), DbError> {
+    validate_bundle(bundle)?;
+    if let Some(existing) = load_bundle_base(conn, &bundle.bundle_id)? {
+        if existing == *bundle {
+            return Ok(());
+        }
+        return Err(DbError::Invalid("EVIDENCE_IMMUTABLE_MISMATCH".to_owned()));
+    }
+    conn.execute(
+        "INSERT INTO evidence_bundles \
+         (bundle_id,session_id,agent_id,kind,claim,origin,producer_invocation_id,verdict,created_at,run_id) \
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+        rusqlite::params![
+            &bundle.bundle_id,
+            &bundle.session_id,
+            &bundle.agent_id,
+            content::store_text(conn, &bundle.session_id, &bundle.kind)?,
+            content::store_optional(conn, &bundle.session_id, bundle.claim.as_deref())?,
+            bundle.origin.as_db(),
+            &bundle.producer_invocation_id,
+            &bundle.verdict,
+            &bundle.created_at,
+            &bundle.run_id,
+        ],
+    )?;
+    for item in &bundle.items {
+        let meta_json = item.meta.as_ref().map(serde_json::to_string).transpose()?;
+        conn.execute(
+            "INSERT INTO evidence_items \
+             (id,bundle_id,producer_invocation_id,type,summary,blob_sha256,meta_json,sort_order) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+            rusqlite::params![
+                &item.id,
+                &bundle.bundle_id,
+                &item.producer_invocation_id,
+                content::store_text(conn, &bundle.session_id, &item.item_type)?,
+                content::store_optional(conn, &bundle.session_id, item.summary.as_deref())?,
+                content::store_optional(conn, &bundle.session_id, item.blob_sha256.as_deref())?,
+                content::store_optional(conn, &bundle.session_id, meta_json.as_deref())?,
+                item.sort_order,
+            ],
+        )?;
+    }
+    project_machine_verification_in_current_write(conn, bundle)?;
+    Ok(())
+}
+
+pub(crate) fn load_bundle_base(
     conn: &rusqlite::Connection,
     bundle_id: &str,
 ) -> Result<Option<EvidenceBundleRecord>, DbError> {
@@ -360,6 +366,10 @@ fn load_bundle_base(
         return Ok(None);
     };
     let session_id: String = row.get(1)?;
+    // Retained audit records do not grant access after their owner is deleted.
+    // Check outside row decoding so a missing Session remains a typed 404,
+    // rather than being wrapped as a SQLite content-codec failure.
+    content::session_retention(conn, &session_id)?;
     let mut bundle = EvidenceBundleRecord {
         bundle_id: row.get(0)?,
         session_id: session_id.clone(),
@@ -898,6 +908,346 @@ mod tests {
             crate::CasOutcome::Applied
         );
         invocation_id
+    }
+
+    async fn complete_evidence_run(db: &Db, run_id: &str) {
+        let run = db.find_run_by_id(run_id).await.unwrap().unwrap();
+        db.ensure_task_final_assistant(&run.task_id, run_id, "verified")
+            .await
+            .unwrap();
+        let task = db
+            .find_runtime_task_by_id(&run.task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let outcome = db
+            .commit_task_result(&crate::CommitTaskResult {
+                task_id: task.id,
+                run_id: run_id.into(),
+                expected_task_version: task.version,
+                status: crate::ResultStatus::Complete,
+                content: "verified".into(),
+                media_type: "text/plain".into(),
+                error_code: None,
+                cleanup_status: crate::CleanupStatus::Confirmed,
+                verification_status: crate::VerificationStatus::NotRequested,
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            crate::CommitTaskResultOutcome::Committed { .. }
+        ));
+    }
+
+    async fn raw_evidence(db: &Db) -> Vec<Vec<Vec<rusqlite::types::Value>>> {
+        db.with_reader(|conn| {
+            [
+                "evidence_bundles",
+                "evidence_items",
+                "evidence_verdict_events",
+            ]
+            .into_iter()
+            .map(|table| {
+                let mut statement = conn.prepare(&format!("SELECT * FROM {table} ORDER BY 1"))?;
+                let columns = statement.column_count();
+                Ok(statement
+                    .query_map([], |row| {
+                        (0..columns).map(|column| row.get(column)).collect()
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?)
+            })
+            .collect()
+        })
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn session_deletion_preserves_machine_evidence_and_all_original_sources() {
+        let db = Db::open_in_memory().unwrap();
+        let session = db.create_session("model", "/tmp").await.unwrap();
+        let other = db.create_session("model", "/tmp").await.unwrap();
+        db.start_run(
+            "delete-evidence-run",
+            &session.id,
+            None,
+            Some("query"),
+            "model",
+        )
+        .await
+        .unwrap();
+        let first = seed_succeeded_verifier(&db, "delete-evidence-run", "first").await;
+        let second = seed_succeeded_verifier(&db, "delete-evidence-run", "second").await;
+        for verdict in ["verified", "failed"] {
+            let mut bundle =
+                machine_bundle(&session.id, "delete-evidence-run", &first, verdict, verdict);
+            let mut item = bundle.items[0].clone();
+            item.id.push_str("-second");
+            item.producer_invocation_id = Some(second.clone());
+            item.sort_order = 1;
+            bundle.items.push(item);
+            db.save_evidence_bundle(&bundle).await.unwrap();
+            db.update_evidence_verdict(&bundle.bundle_id, "inconclusive")
+                .await
+                .unwrap();
+        }
+        let before = raw_evidence(&db).await;
+        assert!(
+            db.delete_session(&session.id).await.is_err(),
+            "active Run still blocks deletion"
+        );
+        assert_eq!(raw_evidence(&db).await, before);
+        complete_evidence_run(&db, "delete-evidence-run").await;
+        assert!(db.delete_session(&session.id).await.unwrap());
+        assert!(!db.delete_session(&session.id).await.unwrap());
+        assert_eq!(
+            raw_evidence(&db).await,
+            before,
+            "delete must not clear source IDs or rewrite verdicts"
+        );
+        assert!(
+            db.find_run_by_id("delete-evidence-run")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(db.get_session(&other.id).await.unwrap().is_some());
+        db.with_writer(|conn| {
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM tool_invocations", [], |r| r
+                    .get::<_, i64>(0))?,
+                0
+            );
+            assert!(!conn.prepare("PRAGMA foreign_key_check")?.exists([])?);
+            for sql in [
+                "DELETE FROM evidence_bundles",
+                "DELETE FROM evidence_items",
+                "DELETE FROM evidence_verdict_events",
+                "UPDATE evidence_bundles SET run_id=NULL",
+                "UPDATE evidence_items SET producer_invocation_id=NULL",
+            ] {
+                assert!(
+                    conn.execute(sql, []).is_err(),
+                    "audit mutation was accepted: {sql}"
+                );
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(raw_evidence(&db).await, before);
+    }
+
+    #[tokio::test]
+    async fn deleting_parent_preserves_descendant_machine_evidence() {
+        let db = Db::open_in_memory().unwrap();
+        let parent = db.create_session("model", "/tmp").await.unwrap();
+        let parent_run = uuid::Uuid::new_v4().to_string();
+        let child_run = uuid::Uuid::new_v4().to_string();
+        db.start_root_run_with_budget(
+            &parent_run,
+            &parent.id,
+            Some("query"),
+            "model",
+            &crate::TaskBudgetLimits {
+                token_limit: Some(100_000),
+                cost_limit_nanos_usd: None,
+                deadline_at_ms: Some(crate::time::now_millis() + 60_000),
+            },
+        )
+        .await
+        .unwrap();
+        let child = db
+            .create_task_with_run(&crate::CreateTaskWithRun {
+                task_id: uuid::Uuid::new_v4().to_string(),
+                run_id: child_run.clone(),
+                root_session_id: parent.id.clone(),
+                transcript_session_id: uuid::Uuid::new_v4().to_string(),
+                parent_task_id: Some(parent_run.clone()),
+                parent_run_id: Some(parent_run.clone()),
+                creator_tool_use_id: Some("child-call".into()),
+                ordinal: 0,
+                description: "verify".into(),
+                prompt: None,
+                task_type: "agent".into(),
+                model: "model".into(),
+                working_dir: "/tmp".into(),
+                execution_config_json: r#"{"isolation":"readOnly"}"#.into(),
+                startup_epoch: 1,
+            })
+            .await
+            .unwrap();
+        let invocation = seed_succeeded_verifier(&db, &child_run, "verify").await;
+        db.save_evidence_bundle(&machine_bundle(
+            &child.transcript_session_id,
+            &child_run,
+            &invocation,
+            "child",
+            "verified",
+        ))
+        .await
+        .unwrap();
+        complete_evidence_run(&db, &child_run).await;
+        complete_evidence_run(&db, &parent_run).await;
+        let before = raw_evidence(&db).await;
+        assert!(db.delete_session(&parent.id).await.unwrap());
+        assert!(
+            db.get_session(&child.transcript_session_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(raw_evidence(&db).await, before);
+    }
+
+    #[tokio::test]
+    async fn run_only_evidence_is_retained_on_session_deletion() {
+        let db = Db::open_in_memory().unwrap();
+        let session = db.create_session("model", "/tmp").await.unwrap();
+        db.start_run("run-only", &session.id, None, Some("query"), "model")
+            .await
+            .unwrap();
+        db.with_writer(move |conn| {
+            conn.execute("INSERT INTO evidence_bundles(bundle_id,session_id,kind,origin,verdict,created_at,run_id) VALUES('run-only-proof',?1,'claim','modelAssertion','pending','now','run-only')", [&session.id])?;
+            Ok(())
+        }).await.unwrap();
+        complete_evidence_run(&db, "run-only").await;
+        let before = raw_evidence(&db).await;
+        let run = db.find_run_by_id("run-only").await.unwrap().unwrap();
+        assert!(db.delete_session(&run.session_id).await.unwrap());
+        assert_eq!(raw_evidence(&db).await, before);
+    }
+
+    #[tokio::test]
+    async fn evidence_run_source_must_exist_and_belong_to_the_owner_at_insert() {
+        let db = Db::open_in_memory().unwrap();
+        let session = db.create_session("model", "/tmp").await.unwrap();
+        let other = db.create_session("model", "/tmp").await.unwrap();
+        db.start_run("owned-source", &session.id, None, Some("query"), "model")
+            .await
+            .unwrap();
+        for (owner, run) in [
+            (other.id, "owned-source"),
+            (session.id.clone(), "missing-source"),
+        ] {
+            let error = db.with_writer(move |conn| {
+                conn.execute("INSERT INTO evidence_bundles(bundle_id,session_id,kind,origin,verdict,created_at,run_id) VALUES('forged-source',?1,'claim','modelAssertion','pending','now',?2)", rusqlite::params![owner,run])?;
+                Ok(())
+            }).await.expect_err("raw SQL cannot introduce missing or foreign run sources");
+            assert!(
+                error.to_string().contains("EVIDENCE_RUN_SESSION_MISMATCH"),
+                "{error}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn deleted_evidence_owner_is_a_missing_session_not_a_codec_failure() {
+        let db = Db::open_in_memory().unwrap();
+        let session = db.create_session("model", "/tmp").await.unwrap();
+        let owner = session.id.clone();
+        db.with_writer(move |conn| {
+            conn.execute("INSERT INTO evidence_bundles(bundle_id,session_id,kind,origin,verdict,created_at) VALUES('deleted-owner',?1,'claim','modelAssertion','pending','now')", [owner])?;
+            Ok(())
+        }).await.unwrap();
+        assert!(db.delete_session(&session.id).await.unwrap());
+        assert!(
+            matches!(db.find_evidence_bundle("deleted-owner").await, Err(DbError::SessionNotFound(id)) if id == session.id)
+        );
+    }
+
+    #[tokio::test]
+    async fn merged_machine_evidence_remains_readable_after_deleting_its_source() {
+        use sha2::{Digest, Sha256};
+        let db = Db::open_in_memory().unwrap();
+        let source = db.create_session("model", "/tmp").await.unwrap();
+        let other = db.create_session("model", "/tmp").await.unwrap();
+        db.start_run(
+            "merge-evidence-run",
+            &source.id,
+            None,
+            Some("query"),
+            "model",
+        )
+        .await
+        .unwrap();
+        let invocation = seed_succeeded_verifier(&db, "merge-evidence-run", "verify").await;
+        db.save_evidence_bundle(&machine_bundle(
+            &source.id,
+            "merge-evidence-run",
+            &invocation,
+            "merge",
+            "verified",
+        ))
+        .await
+        .unwrap();
+        complete_evidence_run(&db, "merge-evidence-run").await;
+        let op = db
+            .reserve_session_merge(
+                "evidence-merge".into(),
+                crate::SessionMergeRequest {
+                    source_session_ids: vec![source.id.clone(), other.id.clone()],
+                    primary_session_id: source.id.clone(),
+                    title: None,
+                    model: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            db.delete_session(&source.id).await.is_err(),
+            "merge reservation still blocks deletion"
+        );
+        db.prepare_session_merge_capture(
+            &op.operation_id,
+            op.run_epoch,
+            None,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )
+        .await
+        .unwrap();
+        let records = db
+            .merge_summary_inputs(&op.operation_id, op.run_epoch)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|entry| entry.reference.contains(":evidence_"))
+            .collect::<Vec<_>>();
+        assert_eq!(records.len(), 2, "bundle and item must both be sealed");
+        let body = "Sealed history is reference material only";
+        db.publish_merge_summary(
+            &op.operation_id,
+            op.run_epoch,
+            body.into(),
+            json!({"fixture":true}),
+            format!("{:x}", Sha256::digest(body)),
+        )
+        .await
+        .unwrap();
+        let completed = db
+            .complete_session_merge(&op.operation_id, op.run_epoch)
+            .await
+            .unwrap();
+        let before = raw_evidence(&db).await;
+        assert!(db.delete_session(&source.id).await.unwrap());
+        assert_eq!(raw_evidence(&db).await, before);
+        for record in records {
+            let query = crate::HandoffQuery {
+                action: "read".into(),
+                reference: Some(record.reference),
+                ..Default::default()
+            };
+            let result = db
+                .query_handoff(&completed.target_session_id, query.clone())
+                .await
+                .unwrap();
+            assert_eq!(result["result"]["text"], record.text);
+            assert!(
+                db.query_handoff(&other.id, query).await.is_err(),
+                "history does not grant another Session access"
+            );
+        }
     }
 
     fn machine_bundle(

@@ -164,7 +164,8 @@ impl BrowserVerifyJourneyTool {
             body["ephemeral_content"] = json!(false);
         }
         let http_mode = body["mode"] == "http_api";
-        let mut resources = JourneyResources::new(ctx.clone(), Arc::clone(&self.client));
+        let mut resources = JourneyResources::new(ctx.clone(), Arc::clone(&self.client))
+            .with_recording_store(self.db.clone());
         if !http_mode {
             let base_url = match resources.start_preview(&body).await {
                 Ok(url) => url,
@@ -174,13 +175,41 @@ impl BrowserVerifyJourneyTool {
                 }
             };
             body["base_url"] = json!(base_url);
-            if let Err(error) = resources.reserve_browser().await {
+            if let Err(error) = resources
+                .reserve_browser(
+                    body["record"]
+                        .as_object()
+                        .is_some_and(|record| record.values().any(|value| value == true)),
+                )
+                .await
+            {
                 resources.close().await;
                 return failure("VERIFY_RESOURCE_RESERVATION_FAILED", error);
             }
         }
+        if let Some(recording) = &resources.recording_identity {
+            body["recording"] = recording.clone();
+        }
         body["session_id"] = json!(resources.browser_id);
-        body["deadline_epoch_ms"] = json!(crate::iso::now_millis() + 120_000);
+        let mut deadline = crate::iso::now_millis() + 120_000;
+        if let Some(owner) = ctx.execution_resource_owner() {
+            match self.db.read_task_budget(&owner.task_id).await {
+                Ok(Some(budget)) => {
+                    if let Some(root_deadline) = budget.deadline_at_ms {
+                        deadline = deadline.min(root_deadline);
+                    }
+                }
+                Ok(None) => {}
+                Err(_) => {
+                    resources.close().await;
+                    return failure(
+                        "VERIFY_BUDGET_UNAVAILABLE",
+                        "Journey deadline cannot be verified",
+                    );
+                }
+            }
+        }
+        body["deadline_epoch_ms"] = json!(deadline);
         let correlation = Correlation {
             run_id: Some(run_id.to_owned()),
             session_id: Some(session_id.to_owned()),
@@ -227,6 +256,18 @@ impl BrowserVerifyJourneyTool {
                 "Journey did not return a confirmed result; do not automatically retry side effects",
             );
         };
+        if let Some(error) = &resources.recording_error {
+            return failure(
+                error,
+                "Browser closed but recording finalization is unconfirmed; retained evidence must be reconciled before deletion. Do not replay journey actions.",
+            );
+        }
+        if let Some(manifest) = &resources.recording_manifest {
+            response["recording_manifest"] = manifest.clone();
+        }
+        if let Some(resource) = &resources.recording_resource_id {
+            response["recording_resource_id"] = json!(resource);
+        }
         response["verification_mode"] = body["mode"].clone();
         let passed = response
             .get("passed")
@@ -417,6 +458,10 @@ fn normalize_request(mut input: Value) -> Result<Value, (&'static str, &'static 
     Ok(input)
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "Keep one ordered evidence budget and receipt assembly path"
+)]
 async fn build_journey_evidence_receipt(
     db: &Db,
     session_id: &str,
@@ -477,7 +522,8 @@ async fn build_journey_evidence_receipt(
             return Err("EPHEMERAL_RECORDING_UNEXPECTED".into());
         }
     } else {
-        archive_recordings(db, session_id, &workspace, response, &mut items).await;
+        super::browser_recordings::archive(db, session_id, &workspace, response, &mut items)
+            .await?;
     }
     if let Some(snapshot) = response.get("failure_snapshot")
         && items.len() < zk_tools::MAX_EVIDENCE_RECEIPT_ITEMS
@@ -609,6 +655,8 @@ fn sanitize_structured_response(response: &Value) -> Value {
     let mut sanitized = response.clone();
     if let Some(object) = sanitized.as_object_mut() {
         object.remove("artifacts");
+        object.remove("recording_manifest");
+        object.remove("recording_resource_id");
     }
     if let Some(steps) = sanitized
         .get_mut("step_results")
@@ -623,91 +671,6 @@ fn sanitize_structured_response(response: &Value) -> Value {
         }
     }
     sanitized
-}
-
-async fn archive_recordings(
-    db: &Db,
-    session_id: &str,
-    workspace: &std::path::Path,
-    response: &Value,
-    items: &mut Vec<EvidenceReceiptItem>,
-) {
-    let Some(artifacts) = response.get("artifacts").and_then(Value::as_object) else {
-        return;
-    };
-    let Ok(temp_root) = std::fs::canonicalize(std::env::temp_dir()) else {
-        return;
-    };
-    let mut remaining = 20 * 1024 * 1024u64;
-    for (key, prefix, extension) in [
-        ("trace_path", "rv-trace-", "zip"),
-        ("har_path", "rv-har-", "har"),
-        ("video_dir", "rv-video-", "webm"),
-    ] {
-        if items.len() >= zk_tools::MAX_EVIDENCE_RECEIPT_ITEMS {
-            if let Some(last) = items.last_mut().and_then(|item| item.meta.as_mut()) {
-                last["recordings_archive_error"] =
-                    json!("Recording omitted: receipt item limit reached");
-            }
-            break;
-        }
-        let Some(raw) = artifacts.get(key).and_then(Value::as_str) else {
-            continue;
-        };
-        let path = std::path::PathBuf::from(raw);
-        let path = if key == "video_dir" {
-            std::fs::read_dir(&path).ok().and_then(|entries| {
-                entries
-                    .flatten()
-                    .map(|entry| entry.path())
-                    .find(|file| file.extension().is_some_and(|ext| ext == extension))
-            })
-        } else {
-            Some(path)
-        };
-        let Some(path) = path.and_then(|path| std::fs::canonicalize(path).ok()) else {
-            continue;
-        };
-        if !path.starts_with(&temp_root)
-            || path.extension().is_none_or(|ext| ext != extension)
-            || path
-                .parent()
-                .and_then(std::path::Path::file_name)
-                .is_none_or(|name| !name.to_string_lossy().starts_with(prefix))
-        {
-            continue;
-        }
-        let size = tokio::fs::metadata(&path)
-            .await
-            .ok()
-            .map_or(u64::MAX, |metadata| metadata.len());
-        let stored = if size <= 10 * 1024 * 1024 && size <= remaining {
-            match tokio::fs::read(path).await {
-                Ok(bytes) => {
-                    crate::api::evidence::store_blob(db, session_id, workspace.to_owned(), bytes)
-                        .await
-                        .ok()
-                }
-                Err(_) => None,
-            }
-        } else {
-            None
-        };
-        if stored.is_some() {
-            remaining = remaining.saturating_sub(size);
-        }
-        items.push(EvidenceReceiptItem {
-            item_type: format!("journey_{key}"),
-            summary: Some(if stored.is_some() {
-                format!("Archived {key}")
-            } else {
-                format!("{key} was not archived: unavailable or recording byte budget exceeded")
-            }),
-            blob_sha256: stored,
-            meta: Some(json!({"format":extension})),
-            sort_order: u32::try_from(items.len()).unwrap_or(u32::MAX),
-        });
-    }
 }
 
 #[cfg(test)]

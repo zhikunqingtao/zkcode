@@ -71,6 +71,15 @@ impl BrowserReplayStore {
         if encoded.len() > MAX_REPLAY_BYTES {
             if let Some(object) = snapshot.as_object_mut() {
                 object.insert("screenshotBase64".to_owned(), Value::Null);
+                if object.get("captureStatus") != Some(&json!("failed")) {
+                    object.insert("captureStatus".to_owned(), json!("partial"));
+                }
+                let components = object.entry("components").or_insert_with(|| json!({}));
+                if !components.is_object() {
+                    *components = json!({});
+                }
+                components["screenshot"] =
+                    json!({"status":"failed","error_code":"REPLAY_BYTE_BUDGET_EXCEEDED"});
             }
             if let Some(last) = frames.last_mut() {
                 *last = snapshot;
@@ -105,6 +114,8 @@ impl BrowserReplayStore {
                 .cloned().unwrap_or(json!(0)),
             "interactive": data.get("interactive").cloned().unwrap_or_else(|| json!([])),
             "tree": data.get("tree").cloned().unwrap_or(Value::Null),
+            "captureStatus": data.get("capture_status").cloned().unwrap_or(Value::Null),
+            "components": data.get("components").cloned().unwrap_or(Value::Null),
             "screenshotBase64": data.get("screenshot_base64")
                 .or_else(|| data.get("screenshotBase64"))
                 .cloned().unwrap_or(Value::Null),
@@ -374,7 +385,13 @@ mod tests {
                 json!({"snapshotId": "large", "screenshotBase64": "x".repeat(3 * 1024 * 1024)}),
             )
             .expect("semantic frame fits after screenshot removal");
-        assert!(store.get("large").expect("read").expect("value")[0]["screenshotBase64"].is_null());
+        let retained = store.get("large").expect("read").expect("value");
+        assert!(retained[0]["screenshotBase64"].is_null());
+        assert_eq!(retained[0]["captureStatus"], "partial");
+        assert_eq!(
+            retained[0]["components"]["screenshot"]["error_code"],
+            "REPLAY_BYTE_BUDGET_EXCEEDED"
+        );
         fs::remove_dir_all(root).ok();
     }
 

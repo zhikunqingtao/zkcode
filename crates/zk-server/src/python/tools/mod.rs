@@ -16,6 +16,10 @@
 //!    位，沿用 zk-tools §4 既定约定——错误码以 `"CODE: message"` 落文本首段。
 
 mod browser_scope;
+mod browser_session_scope;
+pub use browser_session_scope::{close_session_browser_contexts, session_browser_id};
+mod browser_recordings;
+pub use browser_recordings::reconcile_browser_recordings;
 mod code_intel;
 mod git_enhanced;
 mod journey_resources;

@@ -27,6 +27,20 @@ use zk_protocol::{
 
 const TS: i64 = 1_755_000_000_000;
 
+#[test]
+fn cost_update_pricing_is_independent_and_legacy_status_is_unconfirmed() {
+    let legacy = json!({
+        "type": "cost_update", "sessionCost": 0.0, "totalCost": 0.0,
+        "usage": {"inputTokens": 1, "outputTokens": 2,
+                  "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0}
+    });
+    let message: ServerMessage = serde_json::from_value(legacy).unwrap();
+    let serialized = serde_json::to_value(message).unwrap();
+    assert_eq!(serialized["sessionPricingStatus"], "unavailable");
+    assert_eq!(serialized["totalPricingStatus"], "unavailable");
+    assert_eq!(serialized["usage"]["outputTokens"], 2);
+}
+
 /// 构造最简下行信封（ts 固定、无 seq / 路由字段）。
 fn env(msg: ServerMessage) -> ServerEnvelope {
     ServerEnvelope::new(msg, TS, None)
@@ -147,12 +161,15 @@ fn server_samples() -> Vec<ServerEnvelope> {
         env(ServerMessage::CostUpdate {
             session_cost: 0.125,
             total_cost: 1.5,
-            usage: Usage {
+            session_pricing_status: "known".into(),
+            total_pricing_status: "unknown".into(),
+            usage_complete: Some(true),
+            usage: Some(Usage {
                 input_tokens: 1,
                 output_tokens: 2,
                 cache_read_input_tokens: 3,
                 cache_creation_input_tokens: 4,
-            },
+            }),
         }),
         env(ServerMessage::RateLimit {
             retry_after_ms: 30_000,

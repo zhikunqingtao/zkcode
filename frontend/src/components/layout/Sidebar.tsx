@@ -242,7 +242,8 @@ export function Sidebar({ className = '', isDrawerMode = false, defaultTab, onNa
         if (isDrawerMode) return 280;
         const saved = localStorage.getItem(STORAGE_KEY);
         const maxW = Math.min(MAX_WIDTH, Math.floor(viewportWidth * 0.7));
-        return saved ? Math.min(Math.max(Number(saved), MIN_WIDTH), maxW) : DEFAULT_WIDTH;
+        const parsed = saved ? Number(saved) : DEFAULT_WIDTH;
+        return Math.min(Math.max(Number.isFinite(parsed) ? parsed : DEFAULT_WIDTH, MIN_WIDTH), maxW);
     });
     const [isDragging, setIsDragging] = useState(false);
     const widthRef = useRef(width);

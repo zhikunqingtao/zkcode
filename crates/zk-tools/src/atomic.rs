@@ -177,9 +177,10 @@ pub async fn write_checked_bytes_authorized(
         return WriteOutcome::not_started(format!("Atomic write failed: {error}"));
     }
 
-    if let Err(error) = verify_expected_state(&path, expected).await {
-        return WriteOutcome::not_started(error);
-    }
+    let admitted_identity = match verify_expected_state(&path, expected).await {
+        Ok(identity) => identity,
+        Err(error) => return WriteOutcome::not_started(error),
+    };
 
     let Some(parent) = parent else {
         return WriteOutcome::not_started("Atomic write failed: target has no parent directory");
@@ -195,11 +196,20 @@ pub async fn write_checked_bytes_authorized(
             return WriteOutcome::not_started(format!("Atomic write failed: {error}"));
         }
     };
-    let temp = match create_temp_sibling(&parent, &path).await {
+    let final_permissions = match admitted_identity.as_ref() {
+        Some(identity) => identity.permissions(),
+        None => match normal_creation_permissions(&parent).await {
+            Ok(permissions) => permissions,
+            Err(error) => {
+                return WriteOutcome::not_started(format!("Atomic write failed: {error}"));
+            }
+        },
+    };
+    let (temp, mut file) = match create_temp_sibling(&parent, &path, true).await {
         Ok(temp) => temp,
         Err(error) => return WriteOutcome::not_started(format!("Atomic write failed: {error}")),
     };
-    if let Err(error) = write_and_sync(&temp, content).await {
+    if let Err(error) = write_and_sync(&mut file, content, final_permissions).await {
         remove_quietly(&temp).await;
         return WriteOutcome::not_started(format!("Atomic write failed: {error}"));
     }
@@ -210,9 +220,16 @@ pub async fn write_checked_bytes_authorized(
         remove_quietly(&temp).await;
         return WriteOutcome::not_started("PRE_MOVE_SECURITY_DENIED: parent path changed");
     }
-    if let Err(error) = verify_expected_state(&path, expected).await {
-        remove_quietly(&temp).await;
-        return WriteOutcome::not_started(error);
+    match verify_expected_state(&path, expected).await {
+        Ok(current) if current == admitted_identity => {}
+        Ok(_) => {
+            remove_quietly(&temp).await;
+            return WriteOutcome::not_started("FILE_IDENTITY_OR_PERMISSIONS_CHANGED");
+        }
+        Err(error) => {
+            remove_quietly(&temp).await;
+            return WriteOutcome::not_started(error);
+        }
     }
     // 仅 ATOMIC_MOVE，无非原子降级路径（旧实现的显式设计）。
     if let Err(error) = tokio::fs::rename(&temp, &path).await {
@@ -276,7 +293,54 @@ pub async fn canonical_write_target(target: &Path) -> Option<PathBuf> {
 }
 
 /// Verify the exact pre-write state without following a target symlink.
-async fn verify_expected_state(path: &Path, expected: &ExpectedOldState) -> Result<(), String> {
+#[derive(Debug, PartialEq, Eq)]
+struct FileIdentity {
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(unix)]
+    mode: u32,
+    #[cfg(not(unix))]
+    permissions: std::fs::Permissions,
+}
+
+impl FileIdentity {
+    fn from_metadata(metadata: &std::fs::Metadata) -> Self {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            Self {
+                device: metadata.dev(),
+                inode: metadata.ino(),
+                mode: metadata.mode() & 0o7777,
+            }
+        }
+        #[cfg(not(unix))]
+        Self {
+            permissions: metadata.permissions(),
+        }
+    }
+
+    fn permissions(&self) -> std::fs::Permissions {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // Preserve access/executable bits; replacing content must not recreate
+            // set-id privileges that an ordinary write would clear.
+            std::fs::Permissions::from_mode(self.mode & 0o777)
+        }
+        #[cfg(not(unix))]
+        {
+            self.permissions.clone()
+        }
+    }
+}
+
+async fn verify_expected_state(
+    path: &Path,
+    expected: &ExpectedOldState,
+) -> Result<Option<FileIdentity>, String> {
     let metadata = match tokio::fs::symlink_metadata(path).await {
         Ok(metadata) if metadata.file_type().is_symlink() => {
             return Err("PRE_MOVE_SECURITY_DENIED: target is a symbolic link".to_owned());
@@ -289,7 +353,7 @@ async fn verify_expected_state(path: &Path, expected: &ExpectedOldState) -> Resu
         ExpectedOldState::Absent if metadata.is_some() => {
             Err("FILE_CONFLICT_EXPECTED_ABSENT".to_owned())
         }
-        ExpectedOldState::Absent => Ok(()),
+        ExpectedOldState::Absent => Ok(None),
         ExpectedOldState::Sha256(_) if metadata.is_none() => {
             Err("FILE_CONFLICT_EXPECTED_EXISTING".to_owned())
         }
@@ -298,7 +362,7 @@ async fn verify_expected_state(path: &Path, expected: &ExpectedOldState) -> Resu
                 .await
                 .map_err(|error| format!("Atomic write failed: {error}"))?;
             if sha256_hex(&bytes) == *expected_hash {
-                Ok(())
+                Ok(metadata.as_ref().map(FileIdentity::from_metadata))
             } else {
                 Err("OLD_HASH_CONFLICT".to_owned())
             }
@@ -351,7 +415,11 @@ fn path_lock(path: &Path) -> Arc<tokio::sync::Mutex<()>> {
 
 /// 在目标同目录建独占临时文件（对照旧
 /// `Files.createTempFile(parent, "." + fileName, ".tmp")`）。
-async fn create_temp_sibling(parent: &Path, target: &Path) -> std::io::Result<PathBuf> {
+async fn create_temp_sibling(
+    parent: &Path,
+    target: &Path,
+    private: bool,
+) -> std::io::Result<(PathBuf, tokio::fs::File)> {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let stem = target.file_name().map_or_else(
         || std::ffi::OsString::from("zk-edit"),
@@ -367,13 +435,25 @@ async fn create_temp_sibling(parent: &Path, target: &Path) -> std::io::Result<Pa
         name.push(&stem);
         name.push(format!(".{}-{serial}-{nanos}.tmp", std::process::id()));
         let candidate = parent.join(name);
-        match tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&candidate)
-            .await
-        {
-            Ok(_) => return Ok(candidate),
+        let mut options = tokio::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(if private { 0o600 } else { 0o666 });
+        match options.open(&candidate).await {
+            Ok(file) => {
+                // Content files are private in the creation syscall itself;
+                // chmod alone cannot revoke a reader that already opened an FD.
+                #[cfg(test)]
+                if let Err(error) = test_stages::visit(if private {
+                    test_stages::Phase::ContentFileCreated
+                } else {
+                    test_stages::Phase::PermissionProbeCreated
+                }) {
+                    remove_quietly(&candidate).await;
+                    return Err(error);
+                }
+                return Ok((candidate, file));
+            }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 last_error = Some(error);
             }
@@ -388,14 +468,32 @@ async fn create_temp_sibling(parent: &Path, target: &Path) -> std::io::Result<Pa
     }))
 }
 
+/// Obtain the umask-adjusted mode for a new target without ever exposing
+/// content in that inode. Existing targets do not need this empty probe.
+async fn normal_creation_permissions(parent: &Path) -> std::io::Result<std::fs::Permissions> {
+    let probe_name = parent.join(format!("zk-permissions-{}", uuid::Uuid::new_v4()));
+    let (path, file) = create_temp_sibling(parent, &probe_name, false).await?;
+    let permissions = file.metadata().await.map(|metadata| metadata.permissions());
+    drop(file);
+    tokio::fs::remove_file(path).await?;
+    permissions
+}
+
 /// 写满 + fsync（对照旧 `FileChannel.write` 循环 + `channel.force(true)`）。
-async fn write_and_sync(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let mut file = tokio::fs::OpenOptions::new()
-        .write(true)
-        .truncate(true)
-        .open(path)
-        .await?;
+async fn write_and_sync(
+    file: &mut tokio::fs::File,
+    bytes: &[u8],
+    permissions: std::fs::Permissions,
+) -> std::io::Result<()> {
+    #[cfg(test)]
+    test_stages::visit(test_stages::Phase::BeforeContent)?;
     file.write_all(bytes).await?;
+    // Tokio's write_all may leave a blocking write in flight; set_permissions
+    // does not drain it. Finish those writes while the inode is still private.
+    file.flush().await?;
+    #[cfg(test)]
+    test_stages::visit(test_stages::Phase::BeforeFinalPermissions)?;
+    file.set_permissions(permissions).await?;
     file.sync_all().await
 }
 
@@ -420,9 +518,385 @@ async fn remove_quietly(path: &Path) {
     }
 }
 
+// Task-local probes keep parallel fixtures isolated and compile out entirely
+// from production. They do not introduce a process-wide permission/failure flag.
+#[cfg(test)]
+mod test_stages {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub(super) enum Phase {
+        ContentFileCreated,
+        PermissionProbeCreated,
+        BeforeContent,
+        BeforeFinalPermissions,
+    }
+
+    type Hook = Box<dyn Fn(Phase) -> std::io::Result<()> + Send + Sync>;
+    tokio::task_local! {
+        pub(super) static HOOK: Hook;
+    }
+
+    pub(super) fn visit(phase: Phase) -> std::io::Result<()> {
+        HOOK.try_with(|hook| hook(phase)).unwrap_or(Ok(()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn replacement_preserves_existing_file_access_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("preserve-mode");
+        for mode in [0o600, 0o644, 0o755] {
+            let path = dir.join(format!("mode-{mode:o}"));
+            std::fs::write(&path, "before").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            let result = write_checked(
+                &path,
+                "after",
+                &ExpectedOldState::sha256(&sha256_hex(b"before")),
+            )
+            .await;
+            assert!(result.success, "{result:?}");
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                mode
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "after");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn newly_created_file_keeps_normal_creation_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("new-mode");
+        let normal = dir.join("normal");
+        std::fs::write(&normal, "control").unwrap();
+        let path = dir.join("atomic");
+        let _ = std::fs::remove_file(&path);
+        let result = write_checked(&path, "new", &ExpectedOldState::Absent).await;
+        assert!(result.success, "{result:?}");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            std::fs::metadata(&normal).unwrap().permissions().mode() & 0o777
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn temporary_file_is_private_at_creation_even_when_umask_is_permissive() {
+        use std::io::Read;
+        use std::os::unix::fs::PermissionsExt;
+        const CHILD: &str = "ZK_ATOMIC_PRIVATE_CREATION_FIXTURE";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "atomic::tests::temporary_file_is_private_at_creation_even_when_umask_is_permissive", "--nocapture"])
+                .env(CHILD, "1").output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        // Change umask only inside this isolated, single-test child process.
+        nix::sys::stat::umask(nix::sys::stat::Mode::empty());
+        let dir = temp_dir("creation-permissions");
+        for existing in [false, true] {
+            let target = dir.join(if existing { "existing" } else { "new" });
+            if existing {
+                std::fs::write(&target, "before").unwrap();
+                std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o640)).unwrap();
+            }
+            let inspected_dir = dir.clone();
+            let reader = Arc::new(Mutex::new(None::<std::fs::File>));
+            let captured_reader = Arc::clone(&reader);
+            let expected = if existing {
+                ExpectedOldState::sha256(&sha256_hex(b"before"))
+            } else {
+                ExpectedOldState::Absent
+            };
+            let outcome = test_stages::HOOK
+                .scope(
+                    Box::new(move |phase| {
+                        if phase == test_stages::Phase::ContentFileCreated {
+                            let temp = only_temporary_file(&inspected_dir);
+                            if std::fs::metadata(&temp)?.permissions().mode() & 0o004 != 0 {
+                                // Emulate an allowed non-owner read-open in the original
+                                // empty-file window; later chmod cannot revoke this FD.
+                                *captured_reader.lock().unwrap() =
+                                    Some(std::fs::File::open(&temp)?);
+                            }
+                        }
+                        Ok(())
+                    }),
+                    write_checked(&target, "private-fixture-content", &expected),
+                )
+                .await;
+            assert!(outcome.success, "{outcome:?}");
+            let mut leaked = String::new();
+            if let Some(mut file) = reader.lock().unwrap().take() {
+                file.read_to_string(&mut leaked).unwrap();
+            }
+            assert!(
+                leaked.is_empty(),
+                "a world-readable creation window retained an FD to subsequently private bytes: {leaked}"
+            );
+            assert_eq!(
+                std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+                if existing { 0o640 } else { 0o666 }
+            );
+            assert_no_temporary_files(&dir);
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn new_file_permission_probe_never_receives_content_and_is_removed() {
+        use std::io::Read;
+        let dir = temp_dir("empty-permission-probe");
+        let target = dir.join("new");
+        let reader = Arc::new(Mutex::new(None::<std::fs::File>));
+        let captured_reader = Arc::clone(&reader);
+        let inspected_dir = dir.clone();
+        let outcome = test_stages::HOOK
+            .scope(
+                Box::new(move |phase| {
+                    if phase == test_stages::Phase::PermissionProbeCreated {
+                        let probe = only_temporary_file(&inspected_dir);
+                        assert_eq!(std::fs::metadata(&probe)?.len(), 0);
+                        *captured_reader.lock().unwrap() = Some(std::fs::File::open(&probe)?);
+                    }
+                    Ok(())
+                }),
+                write_checked(
+                    &target,
+                    "body belongs only to the private inode",
+                    &ExpectedOldState::Absent,
+                ),
+            )
+            .await;
+        assert!(outcome.success, "{outcome:?}");
+        let mut probe = reader
+            .lock()
+            .unwrap()
+            .take()
+            .expect("new file uses an empty mode probe");
+        let mut contents = Vec::new();
+        probe.read_to_end(&mut contents).unwrap();
+        assert!(
+            contents.is_empty(),
+            "the mode probe must never hold body bytes"
+        );
+        assert_no_temporary_files(&dir);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn only_temporary_file(directory: &Path) -> PathBuf {
+        let files = std::fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|extension| extension == "tmp"))
+            .collect::<Vec<_>>();
+        assert_eq!(files.len(), 1, "expected one private temporary file");
+        files[0].clone()
+    }
+
+    #[cfg(unix)]
+    fn assert_no_temporary_files(directory: &Path) {
+        assert!(std::fs::read_dir(directory).unwrap().all(|entry| {
+            entry
+                .unwrap()
+                .path()
+                .extension()
+                .is_none_or(|extension| extension != "tmp")
+        }));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn concurrent_chmod_is_not_overwritten_after_admission() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("concurrent-chmod");
+        let target = dir.join("target");
+        std::fs::write(&target, "before").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let modified_target = target.clone();
+        let outcome = test_stages::HOOK
+            .scope(
+                Box::new(move |phase| {
+                    if phase == test_stages::Phase::BeforeFinalPermissions {
+                        std::fs::set_permissions(
+                            &modified_target,
+                            std::fs::Permissions::from_mode(0o600),
+                        )?;
+                    }
+                    Ok(())
+                }),
+                write_checked(
+                    &target,
+                    "after",
+                    &ExpectedOldState::sha256(&sha256_hex(b"before")),
+                ),
+            )
+            .await;
+        assert_eq!(outcome.effect, WriteEffect::NotStarted);
+        assert_eq!(
+            outcome.error.as_deref(),
+            Some("FILE_IDENTITY_OR_PERMISSIONS_CHANGED")
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"before");
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_no_temporary_files(&dir);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn same_content_replacement_inode_is_not_overwritten() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let dir = temp_dir("concurrent-replacement");
+        let target = dir.join("target");
+        let replacement = dir.join("replacement");
+        for path in [&target, &replacement] {
+            std::fs::write(path, "before").unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        let replacement_inode = std::fs::metadata(&replacement).unwrap().ino();
+        assert_ne!(std::fs::metadata(&target).unwrap().ino(), replacement_inode);
+        let modified_target = target.clone();
+        let outcome = test_stages::HOOK
+            .scope(
+                Box::new(move |phase| {
+                    if phase == test_stages::Phase::BeforeFinalPermissions {
+                        std::fs::rename(&replacement, &modified_target)?;
+                    }
+                    Ok(())
+                }),
+                write_checked(
+                    &target,
+                    "after",
+                    &ExpectedOldState::sha256(&sha256_hex(b"before")),
+                ),
+            )
+            .await;
+        assert_eq!(outcome.effect, WriteEffect::NotStarted);
+        assert_eq!(
+            outcome.error.as_deref(),
+            Some("FILE_IDENTITY_OR_PERMISSIONS_CHANGED")
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"before");
+        assert_eq!(std::fs::metadata(&target).unwrap().ino(), replacement_inode);
+        assert_no_temporary_files(&dir);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn temporary_content_stays_private_until_final_permissions_are_applied() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("private-content");
+        let target = dir.join("target");
+        std::fs::write(&target, "before").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let inspected_dir = dir.clone();
+        let stages = Arc::new(AtomicU64::new(0));
+        let observed_stages = Arc::clone(&stages);
+        let outcome = test_stages::HOOK
+            .scope(
+                Box::new(move |phase| {
+                    if phase == test_stages::Phase::ContentFileCreated {
+                        return Ok(());
+                    }
+                    let temp = only_temporary_file(&inspected_dir);
+                    assert_eq!(
+                        std::fs::metadata(&temp)?.permissions().mode() & 0o777,
+                        0o600
+                    );
+                    let expected: &[u8] = if phase == test_stages::Phase::BeforeContent {
+                        b""
+                    } else {
+                        b"private new content"
+                    };
+                    assert_eq!(std::fs::read(&temp)?, expected);
+                    assert_eq!(std::fs::read(inspected_dir.join("target"))?, b"before");
+                    observed_stages.fetch_add(1, Ordering::Relaxed);
+                    Ok(())
+                }),
+                write_checked(
+                    &target,
+                    "private new content",
+                    &ExpectedOldState::sha256(&sha256_hex(b"before")),
+                ),
+            )
+            .await;
+        assert!(outcome.success, "{outcome:?}");
+        assert_eq!(stages.load(Ordering::Relaxed), 2);
+        assert_eq!(std::fs::read(&target).unwrap(), b"private new content");
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+        assert_no_temporary_files(&dir);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn final_permission_failure_leaves_original_file_and_removes_temporary_content() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let dir = temp_dir("permission-failure");
+        let target = dir.join("target");
+        std::fs::write(&target, "before").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let original_inode = std::fs::metadata(&target).unwrap().ino();
+        let outcome = test_stages::HOOK
+            .scope(
+                Box::new(|phase| {
+                    if phase == test_stages::Phase::BeforeFinalPermissions {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::PermissionDenied,
+                            "injected final chmod failure",
+                        ));
+                    }
+                    Ok(())
+                }),
+                write_checked(
+                    &target,
+                    "after",
+                    &ExpectedOldState::sha256(&sha256_hex(b"before")),
+                ),
+            )
+            .await;
+        assert!(!outcome.success);
+        assert_eq!(outcome.effect, WriteEffect::NotStarted);
+        assert!(
+            outcome
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("injected final chmod failure")
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"before");
+        assert_eq!(std::fs::metadata(&target).unwrap().ino(), original_inode);
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        assert_no_temporary_files(&dir);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     fn temp_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("zk-atomic-{tag}-{}", std::process::id()));

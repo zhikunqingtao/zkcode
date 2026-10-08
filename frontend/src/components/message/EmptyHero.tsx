@@ -103,7 +103,7 @@ export function EmptyHero() {
                         </span>
                         <span aria-hidden="true">·</span>
                         <span className="flex items-center gap-1">
-                            <Kbd>Esc</Kbd> 中断任务
+                            <Kbd>Ctrl+C</Kbd> 中断任务
                         </span>
                     </div>
                 </>

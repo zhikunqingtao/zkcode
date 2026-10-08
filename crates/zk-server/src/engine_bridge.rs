@@ -99,6 +99,18 @@ pub(crate) fn build_task_runtime(
 }
 
 impl MessageSink for HubSink {
+    fn push_local_cancellation_notice<'a>(
+        &'a self,
+        session_id: &'a str,
+        run_id: &'a str,
+    ) -> BoxFuture<'a, ()> {
+        Box::pin(async move {
+            self.hub
+                .push_local_cancellation_notice(session_id, run_id)
+                .await;
+        })
+    }
+
     fn push<'a>(&'a self, session_id: &'a str, message: ServerMessage) -> BoxFuture<'a, ()> {
         self.push_from(session_id, session_id, message)
     }

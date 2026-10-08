@@ -25,7 +25,7 @@ impl MessageSink for Sink {
 }
 impl Sink {
     async fn wait_for(&self, kind: &str, count: usize) {
-        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        tokio::time::timeout(std::time::Duration::from_secs(6), async {
             loop {
                 let changed = self.changed.notified();
                 if self
@@ -804,14 +804,14 @@ async fn root_stop_survives_storage_outage_without_false_terminal_result() {
     }).await.unwrap();
     engine.interrupt(&session, "userCancelled");
     sink.wait_for("interrupt_ack", 1).await;
-    sink.wait_for("error", 1).await;
+    sink.wait_for("notification", 1).await;
     assert!(
         sink.events
             .lock()
             .unwrap()
             .iter()
             .any(|event| matches!(event,
-        ServerMessage::Error { code, .. } if code == "CANCELLATION_PERSISTENCE_PENDING"))
+        ServerMessage::Notification { key, .. } if key == &format!("cancellation-pending:{}", run.id)))
     );
     assert!(
         !job.is_finished(),
@@ -1051,4 +1051,215 @@ async fn image_reference_rejects_cross_workspace_symlink_and_corrupt_bytes_befor
         3
     );
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[derive(Debug, Default)]
+struct SlowCleanupFactory {
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+}
+struct SlowCleanupScope {
+    base: Arc<zk_tools::ToolRegistry>,
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+}
+impl zk_tools::RunToolScopeFactory for SlowCleanupFactory {
+    fn prepare(
+        &self,
+        _: zk_tools::ToolContext,
+        base: Arc<zk_tools::ToolRegistry>,
+    ) -> BoxFuture<'_, Result<Arc<dyn zk_tools::RunToolScope>, String>> {
+        let scope = SlowCleanupScope {
+            base,
+            entered: self.entered.clone(),
+            release: self.release.clone(),
+        };
+        Box::pin(async move { Ok(Arc::new(scope) as Arc<dyn zk_tools::RunToolScope>) })
+    }
+}
+impl zk_tools::RunToolScope for SlowCleanupScope {
+    fn registry(&self) -> Arc<zk_tools::ToolRegistry> {
+        self.base.clone()
+    }
+    fn cleanup(&self) -> BoxFuture<'_, Result<(), String>> {
+        Box::pin(async move {
+            self.entered.notify_one();
+            self.release.notified().await;
+            Ok(())
+        })
+    }
+}
+
+#[tokio::test]
+async fn cancellation_notice_covers_slow_scope_cleanup_with_healthy_storage() {
+    let (engine, provider, sink, db, session) = setup(&["cancel before completion"], true).await;
+    let gate = Arc::new(SlowCleanupFactory::default());
+    let engine = Arc::new(
+        Arc::try_unwrap(engine)
+            .ok()
+            .unwrap()
+            .with_run_tool_scopes(Arc::new(zk_engine::run_tool_scopes::RunToolScopes::new(
+                vec![gate.clone()],
+            ))),
+    );
+    let job = engine.spawn_user_message(&session, "work".into());
+    provider.entered.notified().await;
+    engine.interrupt(&session, "userCancelled");
+    tokio::time::timeout(std::time::Duration::from_secs(3), gate.entered.notified())
+        .await
+        .unwrap();
+    let run = db
+        .find_latest_root_run_by_session(&session)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(run.requested_exit_reason.as_deref(), Some("userCancelled"));
+    let observed = tokio::time::timeout(std::time::Duration::from_secs(4), async {
+        loop {
+            let changed = sink.changed.notified();
+            if sink.events.lock().unwrap().iter().any(|event| matches!(event,
+                ServerMessage::Notification {key,..} if key == &format!("cancellation-pending:{}",run.id))) { break; }
+            changed.await;
+        }
+    }).await.is_ok();
+    assert!(!job.is_finished(), "cleanup owner must remain alive");
+    assert!(
+        db.read_task_result(&run.task_id, None, 0, 1024)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    gate.release.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(5), job)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        observed,
+        "healthy cancellation persistence must not disable the slow cleanup notice"
+    );
+    assert_eq!(
+        sink.events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| matches!(event,
+        ServerMessage::Notification {key,..} if key == &format!("cancellation-pending:{}",run.id)))
+            .count(),
+        1
+    );
+    assert_eq!(provider.requests.lock().unwrap().len(), 1);
+    assert_eq!(
+        db.find_run_by_id(&run.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .exit_reason
+            .as_deref(),
+        Some("userCancelled")
+    );
+}
+
+#[tokio::test]
+async fn cancellation_notice_wakes_query_waiter_during_slow_cleanup() {
+    let (engine, provider, _sink, db, session) = setup(&["cancel before completion"], true).await;
+    let gate = Arc::new(SlowCleanupFactory::default());
+    let engine = Arc::new(
+        Arc::try_unwrap(engine)
+            .ok()
+            .unwrap()
+            .with_run_tool_scopes(Arc::new(zk_engine::run_tool_scopes::RunToolScopes::new(
+                vec![gate.clone()],
+            ))),
+    );
+    let service = Arc::new(zk_engine::ConversationService::new(engine, db.clone()));
+    let lease = service.reserve(&session).unwrap();
+    let cancellation = service.cancellation(&lease);
+    let executor = service.clone();
+    let job = tokio::spawn(async move {
+        executor
+            .execute_reserved(
+                lease,
+                "work".into(),
+                zk_engine::ConversationRunOptions::default(),
+            )
+            .await
+    });
+    provider.entered.notified().await;
+    cancellation.cancel("USER_CANCELLED");
+    tokio::time::timeout(std::time::Duration::from_secs(3), gate.entered.notified())
+        .await
+        .unwrap();
+    let notified = tokio::time::timeout(
+        std::time::Duration::from_secs(4),
+        cancellation.wait_cancellation_pending(),
+    )
+    .await
+    .is_ok();
+    assert!(!job.is_finished());
+    assert!(
+        service.reserve(&session).is_none(),
+        "HTTP diagnostic cannot release the Query lease"
+    );
+    gate.release.notify_one();
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), job)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        notified,
+        "the same pending signal used by synchronous HTTP must cover slow cleanup"
+    );
+    assert_eq!(outcome.run_id, cancellation.run_id());
+    assert!(service.reserve(&session).is_some());
+    assert_eq!(provider.requests.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn cancellation_notice_does_not_warn_for_slow_success_or_finished_cleanup() {
+    for cancelled in [false, true] {
+        let (engine, provider, sink, db, session) = setup(&["complete normally"], cancelled).await;
+        let gate = Arc::new(SlowCleanupFactory::default());
+        let engine = Arc::new(Arc::try_unwrap(engine).ok().unwrap().with_run_tool_scopes(
+            Arc::new(zk_engine::run_tool_scopes::RunToolScopes::new(vec![
+                gate.clone(),
+            ])),
+        ));
+        let job = engine.spawn_user_message(&session, "work".into());
+        provider.entered.notified().await;
+        if cancelled {
+            engine.interrupt(&session, "userCancelled");
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(3), gate.entered.notified())
+            .await
+            .unwrap();
+        if !cancelled {
+            tokio::time::sleep(std::time::Duration::from_millis(3200)).await;
+        }
+        gate.release.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(5), job)
+            .await
+            .unwrap()
+            .unwrap();
+        if cancelled {
+            tokio::time::sleep(std::time::Duration::from_millis(3200)).await;
+        }
+        assert!(
+            !sink
+                .events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|event| matches!(event,
+            ServerMessage::Notification {key,..} if key.starts_with("cancellation-pending:")))
+        );
+        assert_eq!(
+            db.find_latest_root_run_by_session(&session)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            if cancelled { "cancelled" } else { "completed" }
+        );
+    }
 }

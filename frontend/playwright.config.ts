@@ -2,6 +2,7 @@ import { defineConfig, devices } from '@playwright/test';
 
 const HEAVY_ANALYSIS_TESTS =
   /(?:f35-code-diagram|f40-code-path)\.spec\.ts/;
+const FIXTURE_BACKEND_TESTS = /(?:production-backend|mobile-prompt-bar|analysis-backend)\.spec\.ts/;
 const E2E_BASE_URL = 'http://localhost:5273';
 
 /**
@@ -10,6 +11,8 @@ const E2E_BASE_URL = 'http://localhost:5273';
  */
 export default defineConfig({
   testDir: './e2e',
+  // These suites own an isolated backend and must use their dedicated configs.
+  testIgnore: FIXTURE_BACKEND_TESTS,
   outputDir: '../docs/test-results/screenshots/visualization/_failures',
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
@@ -36,7 +39,7 @@ export default defineConfig({
     {
       name: 'chromium',
       use: { ...devices['Desktop Chrome'], channel: 'chrome' },
-      testIgnore: HEAVY_ANALYSIS_TESTS,
+      testIgnore: [HEAVY_ANALYSIS_TESTS, FIXTURE_BACKEND_TESTS],
     },
     {
       name: 'heavy-analysis',

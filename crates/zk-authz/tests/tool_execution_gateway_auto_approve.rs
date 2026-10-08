@@ -27,6 +27,11 @@ use zk_authz::model::{
 async fn records_mode_audit_and_admits_tool_exactly_once() {
     let harness = Harness::new();
     harness.seed_run("session", "run").await;
+    // The final gate reads the current mode; the manually constructed approval
+    // below is meaningful only while that mode is actually active.
+    harness
+        .modes
+        .set(zk_authz::model::PermissionMode::AutoApprove);
 
     // L34-38
     let tool = FakeTool::new("TestTool");

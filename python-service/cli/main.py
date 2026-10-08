@@ -389,6 +389,14 @@ def main(
         console.print(f"[red]Error: Backend not reachable at {server}[/red]")
         raise typer.Exit(code=3)
     except httpx.HTTPStatusError as e:
+        if e.response.status_code == 503:
+            try:
+                error = e.response.json()
+            except ValueError:
+                error = None
+            if isinstance(error, dict) and error.get("code") == "CANCELLATION_PERSISTENCE_PENDING":
+                console.print("[yellow]HTTP 等待已结束；原执行仍在保存取消状态或清理资源，请勿重发请求。[/yellow]")
+                raise typer.Exit(code=1)
         if e.response.status_code == 409:
             try:
                 body = e.response.json()

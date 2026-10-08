@@ -39,13 +39,20 @@ impl OAuthBindingStore for Bindings {
 struct Secrets {
     values: Mutex<HashMap<String, OAuthSecrets>>,
     fail_save: AtomicBool,
+    fail_load: AtomicBool,
+    fail_delete: AtomicBool,
 }
 impl OAuthSecretStore for Secrets {
     fn load<'a>(
         &'a self,
         reference: &'a str,
     ) -> BoxFuture<'a, Result<Option<OAuthSecrets>, OAuthError>> {
-        Box::pin(async move { Ok(lock(&self.values).get(reference).cloned()) })
+        Box::pin(async move {
+            if self.fail_load.load(Ordering::Acquire) {
+                return Err(OAuthError::SecretStorage);
+            }
+            Ok(lock(&self.values).get(reference).cloned())
+        })
     }
     fn save<'a>(
         &'a self,
@@ -62,9 +69,57 @@ impl OAuthSecretStore for Secrets {
     }
     fn delete<'a>(&'a self, reference: &'a str) -> BoxFuture<'a, Result<(), OAuthError>> {
         Box::pin(async move {
+            if self.fail_delete.load(Ordering::Acquire) {
+                return Err(OAuthError::SecretStorage);
+            }
             lock(&self.values).remove(reference);
             Ok(())
         })
+    }
+}
+
+#[tokio::test]
+async fn logout_failure_is_durably_inactive_across_restart_and_keeps_cleanup_reference() {
+    for fail_load in [true, false] {
+        let server = Server::start().await;
+        let bindings = Arc::new(Bindings::default());
+        let secrets = Arc::new(Secrets::default());
+        let oauth = coordinator(bindings.clone(), secrets.clone());
+        let resource = format!("{}/mcp", server.base);
+        let (start, completed) = oauth
+            .begin(
+                "srv",
+                &resource,
+                OAuthOptions::default(),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let state = server.capture(&start);
+        assert_eq!(callback(&start, &state).await, reqwest::StatusCode::OK);
+        assert_eq!(completed.await.unwrap(), Ok(()));
+        let original = bindings.load("srv").await.unwrap().unwrap();
+        secrets.fail_load.store(fail_load, Ordering::Release);
+        secrets.fail_delete.store(!fail_load, Ordering::Release);
+        assert_eq!(oauth.logout("srv").await, Err(OAuthError::SecretStorage));
+        let restarted = coordinator(bindings.clone(), secrets.clone());
+        assert_ne!(restarted.status("srv").await.unwrap().state, "authorized");
+        assert_eq!(
+            bindings.load("srv").await.unwrap().unwrap().credential_ref,
+            original.credential_ref
+        );
+        assert_eq!(
+            restarted.authorization_header("srv", &resource).await,
+            Err(OAuthError::AuthorizationRequired)
+        );
+        secrets.fail_load.store(false, Ordering::Release);
+        secrets.fail_delete.store(false, Ordering::Release);
+        restarted.logout("srv").await.unwrap();
+        assert!(lock(&secrets.values).is_empty());
+        assert_eq!(
+            restarted.authorization_header("srv", &resource).await,
+            Err(OAuthError::AuthorizationRequired)
+        );
     }
 }
 
@@ -309,7 +364,10 @@ async fn real_http_pkce_callback_rotation_singleflight_and_empty_body_revocation
     assert!(oauth.logout("srv").await.unwrap());
     assert_eq!(server.revokes.load(Ordering::Acquire), 1);
     assert!(lock(&secrets.values).is_empty());
-    assert!(bindings.load("srv").await.unwrap().is_none());
+    assert_eq!(
+        bindings.load("srv").await.unwrap().unwrap().state,
+        OAuthBindingState::Inactive
+    );
     assert_eq!(oauth.status("srv").await.unwrap().state, "idle");
 }
 

@@ -19,10 +19,16 @@ import base64
 import logging
 import os
 import time
+import uuid
+from contextvars import ContextVar
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from functools import partial
 from typing import Optional
 from urllib.parse import urlsplit
+
+from services.browser_recordings import RecordingSpool
 
 from playwright.async_api import (
     async_playwright,
@@ -34,6 +40,19 @@ from playwright.async_api import (
 )
 
 logger = logging.getLogger(__name__)
+creation_deadline: ContextVar[Optional[float]] = ContextVar("browser_creation_deadline", default=None)
+creation_owner: ContextVar[Optional[tuple]] = ContextVar("browser_creation_owner", default=None)
+_action_scope: ContextVar[Optional["_ActionScope"]] = ContextVar("browser_action_scope", default=None)
+
+
+@dataclass(frozen=True)
+class _ActionScope:
+    session_id: str
+    session: "BrowserSession"
+    generation: str
+    owner_session_id: Optional[str]
+    lease_key: Optional[tuple[str, str]]
+    deadline_epoch_ms: Optional[int]
 
 
 class BrowserNavigationRejected(ValueError):
@@ -62,39 +81,48 @@ _INTERACTIVE_QUERY_SCRIPT = """
   const root = scope ? document.querySelector(scope) : document.body;
   if (!root) return { nodeCount: 0, interactive: [] };
   const selectors = [
-    'button', 'a[href]', 'input:not([type=hidden])', 'select', 'textarea',
+    'button', 'a[href]', 'input:not([type=hidden])', 'select', 'textarea', 'option',
     '[role=button]', '[role=link]', '[role=textbox]', '[role=combobox]',
     '[role=checkbox]', '[role=radio]', '[role=switch]', '[role=tab]',
     '[role=menuitem]', '[role=option]', '[role=searchbox]', '[role=slider]',
-    '[role=spinbutton]'
+    '[role=spinbutton]', '[role=treeitem]', '[role=menuitemcheckbox]', '[role=menuitemradio]'
   ].join(',');
   const tagRole = { BUTTON: 'button', A: 'link', INPUT: 'textbox',
-                    SELECT: 'combobox', TEXTAREA: 'textbox' };
+                    SELECT: 'combobox', TEXTAREA: 'textbox', OPTION: 'option' };
   const typeRole = { checkbox: 'checkbox', radio: 'radio',
                      range: 'slider', search: 'searchbox',
                      number: 'spinbutton' };
-  const out = [];
-  const nodes = root.querySelectorAll(selectors);
-  for (let i = 0; i < nodes.length && out.length < limit; i++) {
-    const el = nodes[i];
+  // Both outputs share one observation of each element, including its guarded
+  // value read. The tree also projects nodes outside the interactive selector set.
+  const projections = new WeakMap();
+  function projectElement(el) {
+    if (projections.has(el)) return projections.get(el);
     let role = el.getAttribute('role');
     if (!role) {
       if (el.tagName === 'INPUT') {
         role = typeRole[(el.getAttribute('type') || '').toLowerCase()] || 'textbox';
+      } else if (el instanceof HTMLSelectElement && (el.multiple || el.size > 1)) {
+        role = 'listbox';
       } else {
         role = tagRole[el.tagName] || el.tagName.toLowerCase();
       }
     }
     const rawName = (
       el.getAttribute('aria-label') ||
+      (el.getAttribute('aria-labelledby') || '').split(/\\s+/).map(id => el.getRootNode().getElementById?.(id)?.textContent || '').join(' ').trim() ||
+      Array.from(el.labels || []).map(label => label.textContent || '').join(' ').trim() ||
       el.getAttribute('placeholder') ||
       el.getAttribute('title') ||
-      (el.textContent || '').trim() ||
+      (el.matches(selectors) ? (el.textContent || '').trim() : '') ||
       el.getAttribute('name') ||
       ''
     );
     const entry = { role: String(role).toLowerCase(), name: String(rawName).slice(0, 200) };
-    const val = (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement ||
+    const password = el instanceof HTMLInputElement && el.type.toLowerCase() === 'password';
+    if (password) entry.value_redacted = true;
+    // Hidden inputs were never value sources for the interactive projection.
+    const hiddenInput = el instanceof HTMLInputElement && el.type === 'hidden';
+    const val = !password && !hiddenInput && (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement ||
                  el instanceof HTMLSelectElement) ? el.value : null;
     if (val !== null && val !== undefined && val !== '') {
       entry.value = String(val).slice(0, 200);
@@ -102,11 +130,85 @@ _INTERACTIVE_QUERY_SCRIPT = """
     if (el.disabled === true || el.getAttribute('aria-disabled') === 'true') {
       entry.disabled = true;
     }
-    out.push(entry);
+    for (const state of ['checked', 'expanded', 'selected', 'pressed']) {
+      const value = el.getAttribute('aria-' + state);
+      if (value === 'true' || value === 'false') entry[state] = value === 'true';
+      else if (value === 'mixed' && (state === 'checked' || state === 'pressed')) entry[state] = 'mixed';
+    }
+    // Live native properties take precedence over stale/default attributes.
+    if (el instanceof HTMLInputElement && ['checkbox', 'radio'].includes(el.type)) {
+      entry.checked = el.type === 'checkbox' && el.indeterminate ? 'mixed' : el.checked;
+    }
+    if (el instanceof HTMLOptionElement) entry.selected = el.selected;
+    projections.set(el, entry);
+    return entry;
   }
-  // 节点总数（作用域内所有元素） — 给前端/LLM 做粗粒度页面规模指示
+  const out = [];
+  // Preserve the light-DOM interactive query independently of the tree budget:
+  // a control after a large text/hidden subtree must remain observable.
+  const nodes = [...(root.matches(selectors) ? [root] : []), ...root.querySelectorAll(selectors)];
+  for (let i = 0; i < nodes.length && out.length < limit; i++) {
+    out.push(projectElement(nodes[i]));
+  }
+  // Preserve the existing light-DOM count, including hidden descendants.
+  // Shadow content extends the observations, not this field's counting scope.
   const nodeCount = root.querySelectorAll('*').length + 1;
-  return { nodeCount, interactive: out };
+  const lines = [];
+  // The bounded tree walk also discovers controls inside open shadow roots,
+  // appending them to the remaining interactive capacity.
+  let visited = 0, bytes = 0;
+  let nodeTruncated = false, treeTruncated = false, interactiveTruncated = nodes.length > out.length;
+  const encoder = new TextEncoder();
+  function appendLine(line) {
+    const size = encoder.encode(line).length + (lines.length ? 1 : 0);
+    if (bytes + size > 65536) { treeTruncated = true; return; }
+    lines.push(line); bytes += size;
+  }
+  function walk(node, depth, inShadow = false) {
+    if (visited >= 2000) { nodeTruncated = true; return; }
+    visited++;
+    if (node.nodeType === Node.TEXT_NODE) {
+      if (treeTruncated) return;
+      const text = (node.textContent || '').trim();
+      if (text) appendLine('  '.repeat(Math.min(depth, 20)) + text.slice(0, 2000));
+      return;
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) return;
+    const tag = node.tagName.toLowerCase();
+    if (node.hidden || ['script', 'style', 'noscript', 'template'].includes(tag)) return;
+    // Light-DOM nodes were collected above. Ownership traversal (without slot
+    // expansion) visits every shadow node once, so neither set is duplicated.
+    if (inShadow && node.matches(selectors)) {
+      if (out.length < limit) out.push(projectElement(node));
+      else interactiveTruncated = true;
+    }
+    if (!treeTruncated) {
+      const entry = projectElement(node);
+      let line = '  '.repeat(Math.min(depth, 20)) + entry.role + (entry.name ? ': ' + entry.name : '');
+      if (entry.value !== undefined) line += ' value=' + JSON.stringify(entry.value);
+      for (const state of ['checked', 'expanded', 'selected', 'pressed', 'disabled', 'value_redacted']) {
+        if (entry[state] !== undefined) line += ' [' + state + '=' + entry[state] + ']';
+      }
+      appendLine(line);
+    }
+    // Textarea child text is the initial default, not its current form value.
+    if (node instanceof HTMLTextAreaElement) return;
+    for (const child of node.childNodes) {
+      if (nodeTruncated) break;
+      walk(child, depth + 1, inShadow);
+    }
+    // Keep DOM ownership order; do not flatten slots, cross frames, or inspect
+    // closed roots. Each output keeps its budget global across all roots.
+    if (node.shadowRoot) {
+      for (const child of node.shadowRoot.childNodes) {
+        if (nodeTruncated) break;
+        walk(child, depth + 1, true);
+      }
+    }
+  }
+  walk(root, 0);
+  return { nodeCount, interactive: out, truncated: interactiveTruncated || nodeTruncated,
+           safeDom: lines.join('\\n'), treeTruncated: treeTruncated || nodeTruncated };
 }
 """
 
@@ -135,22 +237,36 @@ class BrowserSession:
         self.close_task: Optional[asyncio.Task] = None
         self.owner_task: Optional[asyncio.Task] = None
         self.ephemeral_content = False
+        self.run_leases: dict[tuple[str, str], float] = {}
+        self.retired_run_leases: set[tuple[str, str]] = set()
+        self.owner_session_id: Optional[str] = None
 
     def touch(self):
         """更新最后活动时间"""
         self.last_activity = datetime.now()
 
     def is_expired(self, idle_timeout: timedelta) -> bool:
-        return self.owner_task is None and datetime.now() - self.last_activity > idle_timeout
+        expired = [key for key, deadline in self.run_leases.items() if deadline <= time.monotonic()]
+        for key in expired:
+            self.run_leases.pop(key)
+            self.retired_run_leases.add(key)
+        if expired and not self.run_leases:
+            self.touch()
+        return self.owner_task is None and not self.run_leases and datetime.now() - self.last_activity > idle_timeout
 
 
 class _SessionCreation:
     """A capacity reservation, retained until creation or rollback has finished."""
 
-    def __init__(self):
+    def __init__(self, deadline):
+        self.deadline = deadline
+        self.owner_identity = creation_owner.get()
+        self.initialization: Optional[asyncio.Task] = None
+        self.preparation: Optional[asyncio.Task] = None
         self.owner = asyncio.current_task()
         self.cancelled = False
         self.cleanup_confirmed = True
+        self.ancestor_released = False
         self.result_ready = asyncio.Event()
         self.done = asyncio.Event()
         self.session: Optional[BrowserSession] = None
@@ -178,6 +294,7 @@ class BrowserService:
         self._creating: dict[str, _SessionCreation] = {}
         self._unclosed_contexts: dict[BrowserContext, str] = {}
         self._resource_close_tasks: dict[object, asyncio.Task] = {}
+        self._retired_creation_tasks: set[asyncio.Task] = set()
         self._starting: Optional[asyncio.Task] = None
         self._startup_cleanup: Optional[asyncio.Task] = None
         self._playwright_exit = None
@@ -186,6 +303,13 @@ class BrowserService:
         self._stopping = False
         self._recovery_pending = False
         self.cleanup_timeout = 5.0
+        self.creation_timeout = 30.0
+        self.generation = str(uuid.uuid4())
+        self._degraded = False
+        self.recordings = RecordingSpool()
+        self._recording_sessions: dict[str, dict] = {}
+        self.owner_epochs: dict[str, int] = {}
+        self.retired_usage: set[tuple[str, str, str]] = set()
         self._cleanup_task: Optional[asyncio.Task] = None
         self._js_errors: dict[str, list[dict]] = {}  # session_id → collected JS errors
 
@@ -262,11 +386,12 @@ class BrowserService:
         """Explicit recovery only; never restart a browser with healthy sessions."""
         async with self._lifecycle_lock:
             async with self._lock:
-                if (self._creating or self._starting or self._startup_cleanup
+                if (any(not isinstance(r, _SessionCreation) or (not r.cancelled and not r.result_ready.is_set()) for r in self._creating.values())
+                        or self._starting or self._startup_cleanup
                         or any(not s.closing or s.owner_task is not None
                                for s in self._sessions.values())):
                     return False
-                if (not self._recovery_pending and not self._unclosed_contexts
+                if (not self._recovery_pending and not self._degraded and not self._unclosed_contexts
                         and not self._resource_close_tasks):
                     return False
                 # Keep restart intent if cleanup completes but startup fails or is cancelled.
@@ -275,6 +400,8 @@ class BrowserService:
             await self._finish_cleanup(self._shutdown_resources())
             # The existing guard forbids restart if ancestors did not confirm release.
             await self._startup_locked()
+            self._degraded = False
+            self.generation = str(uuid.uuid4())
             return True
 
     async def _rollback_startup(self):
@@ -351,6 +478,20 @@ class BrowserService:
         for context in contexts:
             self._forget_released_close(context.close)
         self._browser = None
+        for sid, reservation in list(self._creating.items()):
+            reservation.cancelled = True
+            reservation.ancestor_released = True
+            reservation.cleanup_confirmed = True
+            # Browser/driver close proves no live contexts, but cannot cancel a
+            # filesystem preparation thread. Keep its exact reservation until
+            # rollback observes that owner finish; otherwise not_created lies.
+            if reservation.preparation is None or reservation.preparation.done():
+                reservation.done.set()
+                self._creating.pop(sid)
+            for task in (reservation.rollback, reservation.allocation, reservation.initialization, reservation.preparation):
+                if task is not None and not task.done():
+                    self._retired_creation_tasks.add(task)
+                    task.add_done_callback(self._retired_creation_tasks.discard)
         self._sessions.clear()
         self._js_errors.clear()
         self._unclosed_contexts.clear()
@@ -424,8 +565,50 @@ class BrowserService:
 
     # ═══ 会话管理 ═══
 
+    def _validate_action_locked(self, scope: _ActionScope, session_id: str):
+        session = self._sessions.get(session_id)
+        if (scope.session_id != session_id or session is not scope.session
+                or session is None or session.closing or self._stopping
+                or scope.generation != self.generation):
+            raise BrowserAdmissionError("BROWSER_LEASE_EXPIRED", "Browser action no longer owns its context", 409)
+        if scope.deadline_epoch_ms is not None and scope.deadline_epoch_ms <= time.time() * 1000:
+            raise BrowserAdmissionError("BROWSER_LEASE_EXPIRED", "Browser action deadline passed", 409)
+        if scope.lease_key is not None:
+            host_epoch, run_id = scope.lease_key
+            if (session.owner_session_id != scope.owner_session_id
+                    or session.run_leases.get(scope.lease_key, 0) <= time.monotonic()
+                    or scope.lease_key in session.retired_run_leases
+                    or (session_id, host_epoch, run_id) in self.retired_usage):
+                raise BrowserAdmissionError("BROWSER_LEASE_EXPIRED", "Browser usage lease is not active", 409)
+        return session
+
+    @asynccontextmanager
+    async def action_scope(self, session_id, lease=None, deadline_epoch_ms=None):
+        """Pin an existing physical context; action lookups cannot recreate it."""
+        async with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None:
+                raise BrowserAdmissionError("SESSION_NOT_FOUND", "Browser context is not available", 404)
+            scope = _ActionScope(
+                session_id, session, lease.generation if lease else self.generation,
+                lease.owner_session_id if lease else None,
+                (lease.host_epoch, lease.run_id) if lease else None, deadline_epoch_ms,
+            )
+            self._validate_action_locked(scope, session_id)
+        token = _action_scope.set(scope)
+        try:
+            yield
+        finally:
+            _action_scope.reset(token)
+
     async def get_or_create_session(self, session_id: str) -> BrowserSession:
         """Reserve capacity atomically; all Playwright I/O stays outside the lock."""
+        scope = _action_scope.get()
+        if scope is not None:
+            async with self._lock:
+                session = self._validate_action_locked(scope, session_id)
+                session.touch()
+                return session
         from services.content_privacy import is_ephemeral_request
         if is_ephemeral_request():
             async with self._lock:
@@ -474,6 +657,9 @@ class BrowserService:
 
     async def _create_session(self, session_id, context_kwargs, initialize, *, journey=False):
         async with self._lock:
+            identity = creation_owner.get()
+            if identity is not None and (self.owner_epochs.get(identity[0], 0) != identity[1] or (session_id, identity[2], identity[3]) in self.retired_usage):
+                raise BrowserAdmissionError("BROWSER_LEASE_EXPIRED", "Browser owner was revoked", 409)
             if self._stopping or not self._browser:
                 raise BrowserAdmissionError("BROWSER_NOT_RUNNING", "BrowserService is not running")
             if session_id in self._sessions:
@@ -487,18 +673,27 @@ class BrowserService:
                 if journey:
                     raise BrowserAdmissionError("BROWSER_SESSION_CONFLICT", f"Browser session '{session_id}' is being created", 409)
             else:
+                if self._degraded:
+                    raise BrowserAdmissionError("BROWSER_CLEANUP_UNCONFIRMED", "Browser creation cleanup remains unconfirmed")
                 if session_id in self._unclosed_contexts.values():
                     raise BrowserAdmissionError("BROWSER_CLEANUP_PENDING", f"Browser session '{session_id}' has unfinished cleanup")
                 # Unclosed rollback contexts still consume capacity; never silently evict a user.
                 if len(self._sessions) + len(self._creating) + len(self._unclosed_contexts) >= self.max_sessions:
                     raise BrowserAdmissionError("BROWSER_CAPACITY_REACHED", "Browser session capacity reached")
-                reservation = _SessionCreation()
+                deadline = time.monotonic() + self.creation_timeout
+                requested = creation_deadline.get()
+                if requested is not None:
+                    deadline = min(deadline, requested)
+                reservation = _SessionCreation(deadline)
                 self._creating[session_id] = reservation
 
         if pending:
             # Ordinary callers share the original creation, not another allocation.
             # A cancelled waiter cannot cancel the owner or retry after close.
-            await pending.result_ready.wait()
+            try:
+                await asyncio.wait_for(pending.result_ready.wait(), max(0, pending.deadline - time.monotonic()))
+            except TimeoutError as error:
+                raise BrowserAdmissionError("BROWSER_CREATE_TIMEOUT", "Browser creation deadline exceeded", 504) from error
             async with self._lock:
                 if pending.error is not None:
                     raise pending.error
@@ -513,13 +708,30 @@ class BrowserService:
         try:
             # Cancelling a Playwright RPC does not cancel creation in Chromium.
             # Keep its result obtainable so rollback can close a late context.
+            async def before_deadline(task):
+                done, _ = await asyncio.wait({task}, timeout=max(0, reservation.deadline - time.monotonic()))
+                if not done:
+                    reservation.cancelled = True
+                    self._degraded = True
+                    raise BrowserAdmissionError("BROWSER_CREATE_TIMEOUT", "Browser creation deadline exceeded", 504)
+                return task.result()
+            if callable(context_kwargs):
+                reservation.preparation = asyncio.create_task(context_kwargs())
+                context_kwargs = await before_deadline(reservation.preparation)
+            if reservation.cancelled or reservation.ancestor_released:
+                raise asyncio.CancelledError
             reservation.allocation = asyncio.create_task(self._browser.new_context(**context_kwargs))
-            context = await asyncio.shield(reservation.allocation)
-            session = await initialize(context)
+            context = await before_deadline(reservation.allocation)
+            reservation.initialization = asyncio.create_task(initialize(context))
+            session = await before_deadline(reservation.initialization)
             session.owner_task = reservation.owner if journey else None
             async with self._lock:
-                if self._stopping or reservation.cancelled or reservation.owner.cancelling():
+                identity = reservation.owner_identity
+                revoked = identity is not None and (self.owner_epochs.get(identity[0], 0) != identity[1] or (session_id, identity[2], identity[3]) in self.retired_usage)
+                if self._stopping or reservation.cancelled or reservation.owner.cancelling() or revoked:
                     raise asyncio.CancelledError
+                if identity is not None:
+                    session.owner_session_id = identity[0]
                 self._sessions[session_id] = session
                 self._creating.pop(session_id)
                 reservation.session = session
@@ -528,6 +740,10 @@ class BrowserService:
             logger.info("New browser session: %s (total: %s)", session_id, len(self._sessions))
             return session
         except BaseException as exc:
+            reservation.cancelled = True
+            if reservation.initialization is not None and not reservation.initialization.done():
+                reservation.initialization.cancel()
+                reservation.initialization.add_done_callback(lambda task: None if task.cancelled() else task.exception())
             reservation.error = exc
             # Notify callers independently of rollback, which may still own a
             # late allocation indefinitely and must continue reserving capacity.
@@ -547,6 +763,11 @@ class BrowserService:
 
     async def _abort_creation(self, session_id, reservation, context):
         try:
+            if reservation.preparation is not None:
+                try:
+                    await reservation.preparation
+                except (Exception, asyncio.CancelledError):
+                    pass
             if context is None and reservation.allocation is not None:
                 try:
                     context = await reservation.allocation
@@ -554,13 +775,15 @@ class BrowserService:
                     # The RPC itself failed (e.g. driver shutdown): no context
                     # was returned. An ordinary caller cancellation is shielded.
                     pass
-            if context is not None:
+            if context is not None and not reservation.ancestor_released:
                 reservation.cleanup_confirmed = await self._close_context(context, session_id)
         finally:
             async with self._lock:
                 if self._creating.get(session_id) is reservation:
                     self._creating.pop(session_id)
-                self._js_errors.pop(session_id, None)
+                    self._js_errors.pop(session_id, None)
+                if not self._creating and not self._unclosed_contexts and reservation.cleanup_confirmed:
+                    self._degraded = False
                 reservation.done.set()
 
     async def close_session(self, session_id: str, expected_session=None) -> bool:
@@ -569,6 +792,9 @@ class BrowserService:
 
     async def _close_session(self, session_id, expected_session=None, *, expired_only=False, requester=None):
         async with self._lock:
+            scope = _action_scope.get()
+            if scope is not None:
+                self._validate_action_locked(scope, session_id)
             session = self._sessions.get(session_id)
             if expected_session is not None and session is not expected_session:
                 return False
@@ -629,6 +855,32 @@ class BrowserService:
                 if session.closed:
                     self._sessions.pop(session_id)
                     self._js_errors.pop(session_id, None)
+                session.touch()
+
+    async def renew_run_lease(self, session_id, run_id, host_epoch, generation, ttl=60):
+        async with self._lock:
+            session = self._sessions.get(session_id)
+            if generation != self.generation or session is None or session.closing:
+                raise BrowserAdmissionError("BROWSER_LEASE_EXPIRED", "Browser lease no longer owns an available context", 409)
+            if not run_id or not host_epoch or not 0 < ttl <= 60:
+                raise BrowserAdmissionError("BROWSER_LEASE_INVALID", "Invalid browser usage lease", 400)
+            lease_key = (host_epoch, run_id)
+            if lease_key in session.run_leases and session.run_leases[lease_key] <= time.monotonic():
+                session.run_leases.pop(lease_key)
+                session.retired_run_leases.add(lease_key)
+            if lease_key in session.retired_run_leases or (session_id, host_epoch, run_id) in self.retired_usage:
+                raise BrowserAdmissionError("BROWSER_LEASE_EXPIRED", "Browser usage lease already ended", 409)
+            session.run_leases[(host_epoch, run_id)] = time.monotonic() + ttl
+            session.touch()
+
+    async def release_run_lease(self, session_id, run_id, host_epoch, generation):
+        async with self._lock:
+            if generation != self.generation:
+                raise BrowserAdmissionError("BROWSER_LEASE_EXPIRED", "Browser generation changed", 409)
+            session = self._sessions.get(session_id)
+            if session:
+                session.run_leases.pop((host_epoch, run_id), None)
+                session.retired_run_leases.add((host_epoch, run_id))
                 session.touch()
 
     async def validate_session(self, session_id: str) -> bool:
@@ -1065,7 +1317,7 @@ class BrowserService:
         """产出页面语义快照 — Playwright 1.49+ API。
 
         组合两种来源：
-        - ``locator.aria_snapshot()`` 产出 ARIA YAML 文本（只含有语义的节点）
+        - 同步 DOM 投影提供角色、名称、正文和普通表单值；不调用原生 ARIA，不读取密码值
         - ``page.evaluate`` 执行 DOM 查询提取结构化交互元素清单。
 
         相比原始 HTML 体积小 10-100 倍；交互清单供 LLM 直接做决策。
@@ -1073,7 +1325,7 @@ class BrowserService:
         错误语义：
         - ``strict_session=True`` 且会话不存在时返回 guard dict
         - ``selector`` 指向元素不存在时抛 ``ValueError``
-        - aria_snapshot 运行时错误并非致命，tree 为空但交互清单仍会返回
+        - components 分别报告投影、交互及截图状态；截断或截图失败为 partial，投影失败为 failed
         """
         if strict_session:
             # A late failure snapshot must never recreate a resource closed by
@@ -1099,14 +1351,11 @@ class BrowserService:
             if not element:
                 raise ValueError(f"Element not found: {selector}")
 
-        # ARIA YAML 文本 — 对应 locator
-        locator = page.locator(scope) if scope else page.locator("body")
-        aria_yaml = ""
-        try:
-            aria_yaml = await locator.first.aria_snapshot()
-        except PlaywrightError as e:
-            logger.warning("aria_snapshot failed (%s)", type(e).__name__)
-
+        # Native aria_snapshot reads password.value before serialization. A
+        # single synchronous DOM projection prevents a check/snapshot type race.
+        components = {"aria": {"status": "not_requested", "reason": "PASSWORD_SAFE_PROJECTION"},
+                      "safe_dom": {"status": "ok"}, "interactive": {"status": "ok"},
+                      "screenshot": {"status": "not_requested"}}
         # 交互元素提取 + 节点总数
         try:
             stats = await page.evaluate(
@@ -1114,9 +1363,15 @@ class BrowserService:
                 {"scope": scope, "limit": 200},
             )
         except PlaywrightError as e:
+            components["interactive"] = {"status": "failed", "error_code": "SNAPSHOT_INTERACTIVE_FAILED"}
+            components["safe_dom"] = {"status": "failed", "error_code": "SNAPSHOT_SAFE_DOM_FAILED"}
             logger.warning("interactive query failed (%s)", type(e).__name__)
             stats = {"nodeCount": 0, "interactive": []}
 
+        if isinstance(stats, dict) and stats.get("truncated"):
+            components["interactive"]["truncated"] = True
+        if isinstance(stats, dict) and stats.get("treeTruncated"):
+            components["safe_dom"]["truncated"] = True
         node_count = int(stats.get("nodeCount") or 0) if isinstance(stats, dict) else 0
         interactive = stats.get("interactive") or [] if isinstance(stats, dict) else []
         if not isinstance(interactive, list):
@@ -1130,24 +1385,30 @@ class BrowserService:
             "interesting_only": interesting_only,
             "node_count": node_count,
             "interactive": interactive,
-            "tree": {"aria": aria_yaml},
+            "tree": {"safe_dom": stats.get("safeDom", ""), "source": "safe_dom_v1"},
         }
         if include_screenshot:
             try:
                 raw = await page.screenshot(full_page=False, type="png")
                 result["screenshot_base64"] = base64.b64encode(raw).decode()
                 result["screenshot_size"] = len(raw)
+                components["screenshot"] = {"status": "ok"}
             except Exception as e:
                 logger.debug("snapshot_semantic screenshot skipped (%s)", type(e).__name__)
                 result["screenshot_base64"] = None
+                components["screenshot"] = {"status": "failed", "error_code": "SNAPSHOT_SCREENSHOT_FAILED"}
+        failed = sum(components[key]["status"] == "failed" for key in ("safe_dom", "interactive"))
+        partial = any(value["status"] == "failed" or value.get("truncated") for value in components.values())
+        result["capture_status"] = "failed" if failed == 2 else "partial" if partial else "complete"
+        result["components"] = components
+        if failed == 2:
+            result.update(success=False, error_code="SNAPSHOT_CAPTURE_FAILED", error_message="No semantic snapshot component could be captured")
         return result
 
     # ═══ Journey 专用会话创建 ═══
 
-    async def _create_context_for_journey(self, session_id: str, record_opts: dict, viewport: dict, *, ephemeral_content: bool = False):
+    async def _create_context_for_journey(self, session_id: str, record_opts: dict, viewport: dict, *, ephemeral_content: bool = False, recording: Optional[dict] = None):
         """为 journey 创建带录制能力的新 context（必须在 new_context 时传入 record 参数）"""
-        import tempfile
-
         if ephemeral_content and any(record_opts.values()):
             raise BrowserAdmissionError("EPHEMERAL_RECORDING_UNSUPPORTED", "Temporary browser recordings are unavailable", 409)
         context_kwargs = {
@@ -1157,16 +1418,24 @@ class BrowserService:
         if ephemeral_content:
             context_kwargs["accept_downloads"] = False
 
-        # 录制选项必须在 new_context 时传入
-        if record_opts.get("video"):
-            video_dir = tempfile.mkdtemp(prefix="rv-video-")
-            context_kwargs["record_video_dir"] = video_dir
-            context_kwargs["record_video_size"] = viewport
+        batch = None
+        async def prepare_context():
+            nonlocal batch
+            if any(record_opts.values()):
+                if recording is None:
+                    raise BrowserAdmissionError("RECORDING_OWNER_REQUIRED", "Recordings require host ownership", 400)
+                try:
+                    batch = await asyncio.to_thread(self.recordings.reserve, recording, self.generation, record_opts)
+                except (ValueError, OSError) as error:
+                    raise BrowserAdmissionError(str(error) if isinstance(error, ValueError) else "RECORDING_SPOOL_UNAVAILABLE", "Recording reservation failed", 409) from error
+                self._recording_sessions[session_id] = recording
+            if record_opts.get("video"):
+                context_kwargs["record_video_dir"] = str(batch / "video")
+                context_kwargs["record_video_size"] = viewport
+            if record_opts.get("har"):
+                context_kwargs["record_har_path"] = str(batch / "network.har")
 
-        if record_opts.get("har"):
-            har_dir = tempfile.mkdtemp(prefix="rv-har-")
-            har_path = os.path.join(har_dir, f"{session_id}.har")
-            context_kwargs["record_har_path"] = har_path
+            return context_kwargs
 
         async def initialize(context):
             await context.add_init_script("""
@@ -1182,10 +1451,12 @@ class BrowserService:
             session = BrowserSession(context=context, page=page, created_at=datetime.now())
             session.ephemeral_content = ephemeral_content
             session._record_opts = record_opts
+            session._recording_batch = batch
+            session._recording_identity = recording
             session._context_kwargs = context_kwargs
             return session
 
-        return await self._create_session(session_id, context_kwargs, initialize, journey=True)
+        return await self._create_session(session_id, prepare_context, initialize, journey=True)
 
     # ═══ JS 错误收集内部方法 ═══
 

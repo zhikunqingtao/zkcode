@@ -37,6 +37,13 @@
       "sha256": "64d3f6b8aacd94a93a03298d7988dfa0c747f8a4fcc539a4e59d9c9f920ca62f",
       "format": "gz",
       "executable": "rust-analyzer"
+    },
+    "rust-src": {
+      "version": "1.97.1",
+      "url": "https://static.rust-lang.org/dist/rust-src-1.97.1.tar.gz",
+      "sha256": "59f02b4f23fd8d7193a3cb17ea192255ccf02f1109783d7988521334891d27ae",
+      "format": "tar.gz",
+      "stripRoot": true
     }
   },
   "gopls": {

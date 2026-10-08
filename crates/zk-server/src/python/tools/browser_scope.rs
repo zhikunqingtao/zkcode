@@ -83,11 +83,20 @@ impl RunToolScopeFactory for BrowserRunScopeFactory {
     ) -> BoxFuture<'_, Result<Arc<dyn RunToolScope>, String>> {
         Box::pin(async move {
             let binding = base.resolve("WebBrowser");
-            if !context.is_ephemeral() || binding.is_none() {
+            if binding.is_none() {
                 return Ok(Arc::new(Scope {
                     directory: base,
                     manager: None,
                 }) as Arc<dyn RunToolScope>);
+            }
+            if !context.is_ephemeral() {
+                return super::browser_session_scope::prepare(
+                    context,
+                    base,
+                    self.client.clone(),
+                    self.db.clone(),
+                )
+                .await;
             }
             let binding = binding.expect("checked binding");
             if context.execution_resource_owner().is_none() || context.run_id().is_none() {
@@ -339,12 +348,29 @@ impl Manager {
             },
         );
         let slot = &slots[alias];
+        let mut deadline = crate::iso::now_millis() + 30_000;
+        if let Some(owner) = self.context.execution_resource_owner() {
+            match self.db.read_task_budget(&owner.task_id).await {
+                Ok(Some(budget)) => {
+                    if let Some(root_deadline) = budget.deadline_at_ms {
+                        deadline = deadline.min(root_deadline);
+                    }
+                }
+                Ok(None) => {}
+                Err(_) => {
+                    return Err(failure(
+                        "BROWSER_BUDGET_UNAVAILABLE",
+                        "Browser deadline cannot be verified",
+                    ));
+                }
+            }
+        }
         let response: Option<PythonEnvelope> = self
             .client
             .call_if_available_with_timeout(
                 BROWSER_AUTOMATION,
                 "/api/browser/owned/create",
-                &json!({"session_id":slot.id,"ephemeral_content":true}),
+                &json!({"session_id":slot.id,"ephemeral_content":true,"deadline_epoch_ms":deadline}),
                 &Correlation::for_session(context.session_id()),
                 Duration::from_secs(30),
             )

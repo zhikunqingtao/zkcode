@@ -1,65 +1,57 @@
-import { test, expect } from '@playwright/test';
+import { test, expect } from './support/production-test';
+import AxeBuilder from '@axe-core/playwright';
 
-/** 常驻移动输入卡片：填词不发送，附件菜单可用，失焦保留草稿。 */
-test.describe('MobilePromptBar 常驻卡片', () => {
-  test('T1: 常驻操作、模板填词、附件菜单与失焦草稿', async ({ page }) => {
-    await page.goto('/', { waitUntil: 'networkidle' });
-    const bar = page.getByTestId('mobile-prompt-bar');
-    const input = page.getByRole('textbox', { name: '输入消息' });
-    const actions = page.getByTestId('mobile-persistent-actions');
-    await expect(bar).toBeVisible();
-    await expect(input).toBeVisible();
-    await expect(actions).toBeVisible();
-    await page.getByRole('button', { name: '生成 API 文档', exact: true }).tap();
-    await expect(input).toHaveValue(/API/);
-    await expect(input).toBeFocused();
-    await expect(page.getByText('选择文件夹授权')).toHaveCount(0);
-    await page.locator('header').first().tap();
-    await expect(input).toHaveValue(/API/);
-    await expect(actions).toBeVisible();
+// Uses the isolated production backend configured by playwright.production.config.ts.
+// Touch is explicit: viewport size alone does not exercise tap behavior.
+test.use({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
 
-    const plus = page.getByRole('button', { name: '附件与工具', exact: true });
-    await plus.tap();
-    const menu = page.getByRole('dialog', { name: '附件与工具' });
-    await expect(menu).toBeVisible();
-    await expect(menu.getByRole('button', { name: '图片附件' })).toBeVisible();
-    await expect(menu.getByRole('button', { name: /文件引用|上传本地文件/ })).toBeVisible();
-    await menu.getByRole('button', { name: '运行测试' }).tap();
-    await expect(input).toHaveValue('运行测试');
-    await expect(input).toBeFocused();
-    await expect(menu).toBeHidden();
-    await expect(page.getByText('选择文件夹授权')).toHaveCount(0);
+test('real backend mobile: navigation keeps each draft and the current input controls', async ({ page, request }) => {
+  const ids: string[] = [];
+  for (let index = 0; index < 2; index++) {
+    const response = await request.post('/api/sessions', { data: { model: 'qwen3.8-max-0902' } });
+    expect(response.status()).toBe(201);
+    ids.push((await response.json()).sessionId);
+  }
+  await page.addInitScript(id => sessionStorage.setItem('zkcode.activeSessionId', id), ids[0]);
+  await page.goto('/');
+  const bar = page.getByTestId('mobile-prompt-bar');
+  const input = page.getByRole('textbox', { name: '输入消息' });
+  await expect(bar).toBeVisible();
+  await expect(page.getByTestId('mobile-persistent-actions')).toBeVisible();
+  await input.fill('mobile draft A');
+  await page.getByRole('button', { name: '打开会话列表', exact: true }).tap();
+  await page.locator(`[title^="${ids[1]} ·"]`).tap();
+  await expect(input).toHaveValue('');
+  await input.fill('mobile draft B');
+  await page.getByRole('button', { name: '打开会话列表', exact: true }).tap();
+  await page.locator(`[title^="${ids[0]} ·"]`).tap();
+  await expect(input).toHaveValue('mobile draft A');
+  await page.getByRole('button', { name: '命令', exact: true }).tap();
+  await expect(input).toHaveValue('/');
+  await expect(page.getByTestId('command-palette-footer')).toBeVisible();
+  await input.press('Escape');
+  await expect(page.getByTestId('command-palette-footer')).toBeHidden();
+  await expect(input).toHaveValue('/');
+  await expect(page.locator('input[data-mobile-image-input]')).toHaveAttribute('accept', 'image/*');
+  for (const label of ['图片附件', '拍照', '文件引用', '发送消息']) {
+    const box = await page.getByRole('button', { name: label, exact: true }).boundingBox();
+    expect(box?.width).toBeGreaterThanOrEqual(44);
+    expect(box?.height).toBeGreaterThanOrEqual(44);
+  }
+});
 
-    await plus.tap();
-    await menu.getByRole('button', { name: '命令面板' }).tap();
-    await expect(input).toHaveValue('/');
-    await expect(page.getByTestId('command-palette-footer')).toBeVisible();
-    await input.press('Escape');
-    await expect(page.getByTestId('command-palette-footer')).toBeHidden();
-    await expect(page.locator('input[data-mobile-image-input]')).toHaveAttribute('accept', 'image/*');
-    const sendBox = await page.getByRole('button', { name: '发送消息' }).boundingBox();
-    expect(sendBox?.width).toBeGreaterThanOrEqual(44);
-    expect(sendBox?.height).toBeGreaterThanOrEqual(44);
-  });
-
-  test('T2: 输入后点发送走提交链路', async ({ page }) => {
-    await page.goto('/', { waitUntil: 'networkidle' });
-    const textarea = page.locator('textarea[aria-label="输入消息"]');
-    await expect(textarea).toBeVisible({ timeout: 15000 });
-
-    await textarea.tap();
-    await textarea.pressSequentially('probe 提交链路验证');
-    const sendBtn = page.locator('button[aria-label="发送消息"]');
-    await expect(sendBtn).toBeEnabled();
-    await sendBtn.tap();
-
-    // 无后端环境的确定性 UI 反馈：提交链路进入会话授权对话框
-    // （handleSubmit → onSubmit → ensureSessionReady → 授权选择）
-    await expect(page.getByText('选择文件夹授权')).toBeVisible({ timeout: 10000 });
-
-    // 取消授权 → 提交未成功，草稿保留（与桌面行为一致）
-    await page.getByRole('button', { name: '取消本次选择' }).click();
-    await expect(page.getByText('选择文件夹授权')).toBeHidden();
-    await expect(textarea).toHaveValue('probe 提交链路验证');
-  });
+test('real backend mobile: input and settings pass WCAG checks with keyboard navigation', async ({ page, request }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  const configured = await request.put('/api/config', { data: { theme: 'light' } });
+  expect(configured.ok()).toBe(true);
+  await page.goto('/');
+  await expect(page.getByTestId('mobile-prompt-bar')).toBeVisible();
+  await page.getByRole('textbox', { name: '输入消息' }).fill('draft remains while navigating');
+  const scan = await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa']).analyze();
+  expect(scan.violations).toEqual([]);
+  await page.getByRole('button', { name: '更多', exact: true }).tap();
+  await expect(page.getByRole('dialog', { name: '更多操作' })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('dialog', { name: '更多操作' })).toBeHidden();
+  await expect(page.getByRole('textbox', { name: '输入消息' })).toHaveValue('draft remains while navigating');
 });

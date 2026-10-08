@@ -220,6 +220,8 @@ struct RunHandle {
     /// 取消时间戳——`interrupt` 时写入，供周期清理判断滞留 run。
     cancelled_at: Arc<OnceLock<Instant>>,
     steering: Arc<tokio::sync::Mutex<SteeringQueue>>,
+    owner: std::sync::Weak<()>,
+    cancellation_pending: tokio::sync::watch::Sender<bool>,
 }
 
 /// Exclusive query reservation. Acquire before changing options or exposing a
@@ -243,6 +245,26 @@ impl ConversationCancellation {
     #[must_use]
     pub fn run_id(&self) -> Option<String> {
         self.run.run_id.get().cloned()
+    }
+
+    /// Wait for a non-terminal cancellation reconciliation diagnostic. The
+    /// original execution continues to own its lease and cleanup resources.
+    pub async fn wait_cancellation_pending(&self) {
+        let mut progress = self.run.cancellation_pending.subscribe();
+        loop {
+            if *progress.borrow_and_update() {
+                return;
+            }
+            if progress.changed().await.is_err() {
+                std::future::pending::<()>().await;
+            }
+        }
+    }
+
+    /// Session identity bound to this transport's exact execution.
+    #[must_use]
+    pub fn session_id(&self) -> &str {
+        &self.session_id
     }
 
     /// Request cancellation without transferring ownership of cleanup to the transport.
@@ -440,7 +462,7 @@ impl Default for RootTaskBudgetPolicy {
 impl RootTaskBudgetPolicy {
     fn limits_for(
         &self,
-        model: &str,
+        _model: &str,
         options: &ConversationRunOptions,
     ) -> Result<zk_db::TaskBudgetLimits, String> {
         let narrowest = |policy: Option<i64>, requested: Option<i64>| match (policy, requested) {
@@ -451,9 +473,6 @@ impl RootTaskBudgetPolicy {
         let token_limit = narrowest(self.token_limit, options.token_budget);
         let cost_limit_nanos_usd =
             narrowest(self.cost_limit_nanos_usd, options.cost_budget_nanos_usd);
-        if cost_limit_nanos_usd.is_some() && !crate::llm_ledger::has_known_price(model) {
-            return Err(format!("BUDGET_PRICE_UNKNOWN: {model}"));
-        }
         let deadline = options
             .deadline
             .map_or(self.deadline, |requested| requested.min(self.deadline));
@@ -1155,10 +1174,6 @@ async fn admit_task_llm_request(
         .await
         .map_err(|error| LlmAdmissionError::Internal(format!("BUDGET_TASK_READ_FAILED: {error}")))?
         .ok_or_else(|| LlmAdmissionError::Internal("BUDGET_TASK_NOT_FOUND".to_owned()))?;
-    if !crate::llm_ledger::has_known_price(&request.model) {
-        return Err(LlmAdmissionError::Runtime(LlmRuntimeFailure::PriceUnknown));
-    }
-
     let input_tokens = estimate_sub_agent_request_tokens(request);
     let mut output_tokens = i64::from(request.max_tokens);
     if let Some(limit) = limits.token_limit {
@@ -1188,15 +1203,29 @@ async fn admit_task_llm_request(
             task.budget_reserved_cost_nanos_usd,
             task.budget_consumed_cost_nanos_usd,
         );
-        let affordable =
-            crate::llm_ledger::affordable_output_tokens(&request.model, input_tokens, remaining)
-                .ok_or(LlmAdmissionError::Runtime(LlmRuntimeFailure::PriceUnknown))?;
-        if affordable == 0 {
+        if remaining <= 0 {
             return Err(LlmAdmissionError::Runtime(
                 LlmRuntimeFailure::CostBudgetExhausted,
             ));
         }
-        output_tokens = output_tokens.min(i64::from(affordable));
+        // Unknown prices cannot produce a dollar estimate. The physical-call
+        // transaction still enforces known charges, tokens and the deadline.
+        if crate::llm_ledger::has_known_price(&request.model) {
+            let affordable = crate::llm_ledger::affordable_output_tokens(
+                &request.model,
+                input_tokens,
+                remaining,
+            )
+            .ok_or_else(|| {
+                LlmAdmissionError::Internal("BUDGET_COST_ESTIMATE_INVALID".to_owned())
+            })?;
+            if affordable == 0 {
+                return Err(LlmAdmissionError::Runtime(
+                    LlmRuntimeFailure::CostBudgetExhausted,
+                ));
+            }
+            output_tokens = output_tokens.min(i64::from(affordable));
+        }
     }
     if output_tokens <= 0 {
         return Err(LlmAdmissionError::Runtime(
@@ -4025,7 +4054,7 @@ impl Engine {
                                 return None;
                             }
                         }
-                        if let Err(error) = self
+                        let evidence_completed = match self
                             .register_machine_evidence(
                                 session_id,
                                 run_id,
@@ -4036,11 +4065,14 @@ impl Engine {
                             )
                             .await
                         {
-                            self.quarantine_sub_agent_tool_durability(task_id, run_id, &error)
-                                .await;
-                            return None;
-                        }
-                        if postprocessing_required {
+                            Ok(completed) => completed,
+                            Err(error) => {
+                                self.quarantine_sub_agent_tool_durability(task_id, run_id, &error)
+                                    .await;
+                                return None;
+                            }
+                        };
+                        if postprocessing_required && !evidence_completed {
                             let outcome = self
                                 .db
                                 .complete_tool_result_postprocessing_cas(&cursor.invocation_id, 0)
@@ -4563,8 +4595,13 @@ impl Engine {
             };
             if let Some(run_id) = run_id {
                 match engine
-                    .run_cancellation
-                    .cancel(&run_id, cause.exit_reason(), reason)
+                    .with_cancellation_notice(
+                        &session,
+                        &handle,
+                        engine
+                            .run_cancellation
+                            .cancel(&run_id, cause.exit_reason(), reason),
+                    )
                     .await
                 {
                     Ok(()) => {
@@ -4572,14 +4609,6 @@ impl Engine {
                     }
                     Err(error) => {
                         tracing::error!(session_id = %session, %run_id, reason, error_type = std::any::type_name_of_val(&error), "run stopped locally; cancellation persistence is unconfirmed");
-                        engine
-                            .push_error(
-                                &session,
-                                "CANCELLATION_PERSISTENCE_PENDING",
-                                format!("已请求停止当前执行，但取消状态尚未确认保存：{error}"),
-                                true,
-                            )
-                            .await;
                     }
                 }
             }
@@ -4604,9 +4633,12 @@ impl Engine {
         let mut runs = lock_runs(&self.runs);
         let now = Instant::now();
         let before = runs.len();
-        runs.retain(|_, handle| match handle.cancelled_at.get() {
-            Some(cancelled) => now.duration_since(*cancelled) < max_age,
-            None => true,
+        runs.retain(|_, handle| {
+            handle.owner.upgrade().is_some()
+                || match handle.cancelled_at.get() {
+                    Some(cancelled) => now.duration_since(*cancelled) < max_age,
+                    None => true,
+                }
         });
         let removed = before - runs.len();
         if removed > 0 {
@@ -4673,14 +4705,18 @@ impl Engine {
             options: Arc::clone(&self.conversation_options),
             session_id: session_id.to_owned(),
         };
-        Box::pin(self.execute_turns(
+        self.with_cancellation_notice(
             session_id,
-            UserContentInput {
-                text,
-                ..UserContentInput::default()
-            },
             &lease.run,
-        ))
+            Box::pin(self.execute_turns(
+                session_id,
+                UserContentInput {
+                    text,
+                    ..UserContentInput::default()
+                },
+                &lease.run,
+            )),
+        )
         .await;
         let detail = self
             .db
@@ -4726,7 +4762,12 @@ impl Engine {
             .await;
             return;
         };
-        Box::pin(self.execute_turns(&session_id, input, &run)).await;
+        self.with_cancellation_notice(
+            &session_id,
+            &run,
+            Box::pin(self.execute_turns(&session_id, input, &run)),
+        )
+        .await;
         // 槽位守卫显式活到 run 终点（含内部提前 return 的全部路径）。
         drop(guard);
     }
@@ -4747,7 +4788,10 @@ impl Engine {
         if runs.contains_key(session_id) {
             return None;
         }
+        let owner = Arc::new(());
         let handle = RunHandle {
+            owner: Arc::downgrade(&owner),
+            cancellation_pending: tokio::sync::watch::channel(false).0,
             cancel: session_token.child_token(),
             abort_reason: Arc::new(OnceLock::new()),
             run_id: Arc::new(OnceLock::new()),
@@ -4759,6 +4803,7 @@ impl Engine {
         drop(runs);
         Some((
             RunGuard {
+                owner,
                 runs: Arc::clone(&self.runs),
                 session_id: session_id.to_owned(),
             },
@@ -6746,19 +6791,25 @@ impl Engine {
         receipt: Option<EvidenceReceipt>,
         output_is_error: bool,
         cursor: &ToolInvocationCursor,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         if !cursor
             .binding
             .as_ref()
             .is_some_and(|binding| binding.tool().produces_machine_evidence())
         {
-            return Ok(());
+            return Ok(false);
+        }
+        if tool_name == "VerifyJourney"
+            && crate::complete_recorded_verify_journey_evidence(&self.db, &cursor.invocation_id)
+                .await?
+        {
+            return Ok(true);
         }
         let Some(receipt) = receipt else {
             return if output_is_error || tool_name != "VerifyJourney" {
                 // Admission, transport and input failures make no verification
                 // claim and must not manufacture an Evidence row.
-                Ok(())
+                Ok(false)
             } else {
                 Err(
                     "EVIDENCE_RECEIPT_MISSING: successful VerifyJourney returned no valid receipt"
@@ -6799,6 +6850,7 @@ impl Engine {
                 items,
             })
             .await
+            .map(|()| false)
             .map_err(|error| format!("EVIDENCE_REGISTRATION_FAILED: {error}"))
     }
 
@@ -7535,7 +7587,7 @@ impl Engine {
                                 .await;
                         }
                     }
-                    if let Err(error) = self
+                    let evidence_completed = match self
                         .register_machine_evidence(
                             session_id,
                             run_id,
@@ -7546,11 +7598,14 @@ impl Engine {
                         )
                         .await
                     {
-                        return self
-                            .fail_tool_durability(session_id, run_id, run, invocations, error)
-                            .await;
-                    }
-                    if postprocessing_required {
+                        Ok(completed) => completed,
+                        Err(error) => {
+                            return self
+                                .fail_tool_durability(session_id, run_id, run, invocations, error)
+                                .await;
+                        }
+                    };
+                    if postprocessing_required && !evidence_completed {
                         let outcome = self
                             .db
                             .complete_tool_result_postprocessing_cas(&cursor.invocation_id, 0)
@@ -7942,8 +7997,11 @@ impl Engine {
             let exit_reason = cause.exit_reason();
             let reason = cause.reason();
             if let Err(error) = self
-                .task_runtime
-                .cancel_run_with_cause(run_id, exit_reason, reason)
+                .with_run_cancellation_notice(
+                    run_id,
+                    self.task_runtime
+                        .cancel_run_with_cause(run_id, exit_reason, reason),
+                )
                 .await
             {
                 tracing::warn!(
@@ -8086,10 +8144,83 @@ impl Engine {
         ToolPhase::DurabilityFailed
     }
 
-    /// A stopped root keeps its execution lease until its cancellation intent
-    /// is durable. Storage outages must neither relaunch work nor turn the
-    /// missing requested-exit field into an `INTERNAL_ERROR` terminal result.
+    /// Observe one root's entire stop lifecycle, including physical cleanup.
+    /// The first stop starts one clock; nested persistence/reconciliation calls
+    /// share it and the once-only notice. The operation always keeps its owner.
+    fn with_cancellation_notice<'a, F, T>(
+        &'a self,
+        session_id: &'a str,
+        run: &'a RunHandle,
+        operation: F,
+    ) -> BoxFuture<'a, T>
+    where
+        F: std::future::Future<Output = T> + Send + 'a,
+        T: Send + 'a,
+    {
+        Box::pin(async move {
+            let mut operation = Box::pin(operation);
+            // Ordinary requests have no cancellation deadline. Race completion
+            // first so a completed operation cannot produce a late diagnostic.
+            tokio::select! {
+                biased;
+                result = &mut operation => return result,
+                () = run.cancel.cancelled() => {}
+            }
+            let stopped_at = *run.cancelled_at.get_or_init(Instant::now);
+            tokio::select! {
+                biased;
+                result = &mut operation => return result,
+                () = tokio::time::sleep_until(tokio::time::Instant::from_std(stopped_at) + Duration::from_secs(3)) => {}
+            }
+            if run.cancel.is_cancelled()
+                && run.owner.upgrade().is_some()
+                && run.cancellation_pending.send_if_modified(|pending| {
+                    if *pending {
+                        false
+                    } else {
+                        *pending = true;
+                        true
+                    }
+                })
+                && let Some(run_id) = run.run_id.get()
+            {
+                self.sink
+                    .push_local_cancellation_notice(session_id, run_id)
+                    .await;
+            }
+            operation.await
+        })
+    }
+
+    fn with_run_cancellation_notice<'a, F, T>(
+        &'a self,
+        run_id: &'a str,
+        operation: F,
+    ) -> BoxFuture<'a, T>
+    where
+        F: std::future::Future<Output = T> + Send + 'a,
+        T: Send + 'a,
+    {
+        Box::pin(async move {
+            let owner = lock_runs(&self.runs)
+                .iter()
+                .find(|(_, run)| run.run_id.get().is_some_and(|id| id == run_id))
+                .map(|(session, run)| (session.clone(), run.clone()));
+            if let Some((session, run)) = owner {
+                self.with_cancellation_notice(&session, &run, operation)
+                    .await
+            } else {
+                operation.await
+            }
+        })
+    }
+
     async fn await_local_cancellation(&self, run_id: &str) -> bool {
+        self.with_run_cancellation_notice(run_id, self.reconcile_local_cancellation(run_id))
+            .await
+    }
+
+    async fn reconcile_local_cancellation(&self, run_id: &str) -> bool {
         let mut failures = 0_u32;
         loop {
             match self.task_runtime.reconcile_run_cancellation(run_id).await {
@@ -8141,8 +8272,11 @@ impl Engine {
             let exit_reason = cause.exit_reason();
             let reason = cause.reason();
             if let Err(error) = self
-                .task_runtime
-                .cancel_run_with_cause(run_id, exit_reason, reason)
+                .with_run_cancellation_notice(
+                    run_id,
+                    self.task_runtime
+                        .cancel_run_with_cause(run_id, exit_reason, reason),
+                )
                 .await
             {
                 tracing::warn!(
@@ -8167,16 +8301,19 @@ impl Engine {
         let usage_fallback = if *total_usage == Usage::default() {
             None
         } else {
-            let cost_nanos_usd =
-                crate::llm_ledger::usd_to_nanos(usage_cost_usd(model, total_usage));
+            let cost_nanos_usd = crate::llm_ledger::has_known_price(model)
+                .then(|| crate::llm_ledger::usd_to_nanos(usage_cost_usd(model, total_usage)))
+                .flatten();
             Some(RunUsageFallback {
                 input_tokens: total_usage.input_tokens,
                 output_tokens: total_usage.output_tokens,
                 cache_read_tokens: total_usage.cache_read_input_tokens,
                 cache_create_tokens: total_usage.cache_creation_input_tokens,
                 cost_nanos_usd: cost_nanos_usd.unwrap_or(0),
-                usage_complete: crate::llm_ledger::has_known_price(model)
-                    && cost_nanos_usd.is_some(),
+                usage_complete: total_usage.input_tokens >= 0
+                    && total_usage.output_tokens >= 0
+                    && total_usage.cache_read_input_tokens >= 0
+                    && total_usage.cache_creation_input_tokens >= 0,
             })
         };
 
@@ -8664,6 +8801,39 @@ impl Engine {
             return;
         };
         let stop_reason = committed_stop_reason(terminal.exit_reason.as_deref(), stop_reason);
+        let committed = match self
+            .db
+            .project_message_runtime_diagnostics(session_id, committed)
+            .await
+        {
+            Ok(messages) => messages,
+            Err(error) => {
+                tracing::warn!(session_id, run_id, %error, "Run diagnostic projection failed");
+                self.push_error(
+                    session_id,
+                    "durability_error",
+                    "The committed Run diagnostic could not be read".into(),
+                    true,
+                )
+                .await;
+                return;
+            }
+        };
+        // Refresh coverage after terminal settlement, including failed calls and
+        // summaries, without adding the logical usage to the tracker again.
+        let usage_complete = match self
+            .db
+            .read_llm_usage_integrity(&terminal.task_id, &terminal.id)
+            .await
+        {
+            Ok(integrity) => integrity.map(zk_db::LlmUsageIntegrity::is_complete),
+            Err(error) => {
+                tracing::warn!(session_id, run_id, %error, "terminal usage integrity unavailable");
+                None
+            }
+        };
+        self.push_cost_snapshot(session_id, None, usage_complete)
+            .await;
         self.sink
             .push(
                 session_id,
@@ -9892,15 +10062,40 @@ impl Engine {
     /// `f64::to_bits`，见 `zk-server::cost::AtomicCostTracker`）；未装配 tracker
     /// 时 [`NoopCostTracker`] 返回 0，与本 Step 接入前一致。Batch 0 Step 0-6。
     async fn push_cost_update(&self, session_id: &str, model: &str, usage: &Usage) {
-        let session_cost = self.cost_tracker.add_usage(session_id, model, usage);
+        self.cost_tracker.add_usage(session_id, model, usage);
+        self.push_cost_snapshot(session_id, Some(*usage), None)
+            .await;
+    }
+
+    async fn push_cost_snapshot(
+        &self,
+        session_id: &str,
+        usage: Option<Usage>,
+        usage_complete: Option<bool>,
+    ) {
+        let session_cost = self.cost_tracker.session_cost(session_id);
         let total_cost = self.cost_tracker.global_cost();
+        let (session_pricing_status, total_pricing_status) =
+            match self.db.get_pricing_status(session_id).await {
+                Ok((session_unknown, total_unknown)) => (
+                    if session_unknown { "unknown" } else { "known" },
+                    if total_unknown { "unknown" } else { "known" },
+                ),
+                Err(error) => {
+                    tracing::warn!(session_id, %error, "pricing coverage unavailable");
+                    ("unavailable", "unavailable")
+                }
+            };
         self.sink
             .push(
                 session_id,
                 ServerMessage::CostUpdate {
                     session_cost,
                     total_cost,
-                    usage: *usage,
+                    session_pricing_status: session_pricing_status.to_owned(),
+                    total_pricing_status: total_pricing_status.to_owned(),
+                    usage_complete,
+                    usage,
                 },
             )
             .await;
@@ -9946,13 +10141,20 @@ impl Engine {
 
 /// run 槽位守卫：Drop 时移除注册表条目（含 panic 路径，busy 槽不泄漏）。
 struct RunGuard {
+    owner: Arc<()>,
     runs: RunMap,
     session_id: String,
 }
 
 impl Drop for RunGuard {
     fn drop(&mut self) {
-        lock_runs(&self.runs).remove(&self.session_id);
+        let mut runs = lock_runs(&self.runs);
+        if runs
+            .get(&self.session_id)
+            .is_some_and(|run| run.owner.ptr_eq(&Arc::downgrade(&self.owner)))
+        {
+            runs.remove(&self.session_id);
+        }
     }
 }
 
@@ -12048,16 +12250,66 @@ mod telemetry_push_tests {
                 session_cost,
                 total_cost,
                 usage: reported,
+                session_pricing_status,
+                total_pricing_status,
+                usage_complete,
             } => {
                 assert_eq!(*session_cost, 1.25);
                 assert_eq!(*total_cost, 9.75);
-                assert_eq!(reported.input_tokens, 100);
-                assert_eq!(reported.output_tokens, 200);
-                assert_eq!(reported.cache_read_input_tokens, 50);
-                assert_eq!(reported.cache_creation_input_tokens, 0);
+                assert_eq!(reported.as_ref().unwrap().input_tokens, 100);
+                assert_eq!(reported.as_ref().unwrap().output_tokens, 200);
+                assert_eq!(reported.as_ref().unwrap().cache_read_input_tokens, 50);
+                assert_eq!(reported.as_ref().unwrap().cache_creation_input_tokens, 0);
+                assert_eq!(session_pricing_status, "known");
+                assert_eq!(total_pricing_status, "known");
+                assert_eq!(*usage_complete, None);
             }
             other => panic!("expected CostUpdate, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn cost_snapshot_read_failure_is_unavailable_without_charging_usage() {
+        struct ReadOnlyTracker;
+        impl CostTracker for ReadOnlyTracker {
+            fn add_usage(&self, _: &str, _: &str, _: &Usage) -> f64 {
+                panic!("terminal snapshot must not charge usage again")
+            }
+            fn session_cost(&self, _: &str) -> f64 {
+                1.25
+            }
+            fn global_cost(&self) -> f64 {
+                9.75
+            }
+            fn last_model_cost(&self, _: &str) -> f64 {
+                0.0
+            }
+            fn reset(&self, _: &str) {}
+        }
+        let (engine, sink) = build_engine(Arc::new(ReadOnlyTracker));
+        engine
+            .db
+            .with_conn_blocking(|conn| {
+                conn.execute("DROP TABLE llm_calls", [])?;
+                Ok(())
+            })
+            .unwrap();
+        engine.push_cost_snapshot("sess-1", None, Some(false)).await;
+        let frames = sink.take();
+        assert!(matches!(
+            &frames[0].1,
+            ServerMessage::CostUpdate {
+                session_cost,
+                total_cost,
+                session_pricing_status,
+                total_pricing_status,
+                usage_complete: Some(false),
+                usage: None,
+                ..
+            } if *session_cost == 1.25 && *total_cost == 9.75
+                && session_pricing_status == "unavailable"
+                && total_pricing_status == "unavailable"
+        ));
     }
 
     /// `push_token_budget_nudge` → pct / `current_tokens` / `budget_tokens` 全字段直传。
@@ -12169,6 +12421,31 @@ mod final_recovery_tests {
 #[cfg(test)]
 mod early_cancellation_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cancelled_live_owner_is_not_reaped_by_age() {
+        let db = Db::open_in_memory().unwrap();
+        let session = db.create_session("qwen3.8-max-0902", "/tmp").await.unwrap();
+        let engine = Arc::new(Engine::new(
+            db,
+            Arc::new(NeverProvider),
+            Arc::new(QuietSink),
+        ));
+        let lease = engine.reserve_conversation(&session.id).unwrap();
+        lease.run.cancel.cancel();
+        lease
+            .run
+            .cancelled_at
+            .set(Instant::now().checked_sub(Duration::from_hours(1)).unwrap())
+            .unwrap();
+        engine.cleanup_expired_runs(Duration::from_mins(30));
+        assert!(
+            engine.reserve_conversation(&session.id).is_none(),
+            "live cleanup owner must retain the session slot"
+        );
+        drop(lease);
+        assert!(engine.reserve_conversation(&session.id).is_some());
+    }
 
     #[derive(Default)]
     struct RecordedCancellation(std::sync::Mutex<Vec<(String, String)>>);

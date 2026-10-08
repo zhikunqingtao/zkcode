@@ -8,6 +8,7 @@ use axum::{
     Json,
     extract::{Path, Query, State},
     http::HeaderMap,
+    response::{IntoResponse, Response},
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -87,17 +88,17 @@ pub(crate) struct QueryRequest {
 pub(crate) async fn sync_query(
     State(state): State<AppState>,
     Json(request): Json<QueryRequest>,
-) -> Result<Json<ConversationOutcome>, ApiError> {
+) -> Result<Response, ApiError> {
     let execution = prepare(&state, request, false).await?.start();
-    Ok(Json(execution.finish().await?))
+    execution.finish_http().await
 }
 
 pub(crate) async fn conversation_query(
     State(state): State<AppState>,
     Json(request): Json<QueryRequest>,
-) -> Result<Json<ConversationOutcome>, ApiError> {
+) -> Result<Response, ApiError> {
     let execution = prepare(&state, request, true).await?.start();
-    Ok(Json(execution.finish().await?))
+    execution.finish_http().await
 }
 
 pub(crate) async fn stream_query(
@@ -169,15 +170,29 @@ pub(crate) async fn cancel_query(
     let service = state.conversation().ok_or_else(|| {
         ApiError::feature_not_ready("Query", "ConversationService is unavailable")
     })?;
+    let cancellation = service.request_cancellation(&id);
     let active = service.cancel_request(&id).map_err(|code| ApiError {
         status: axum::http::StatusCode::SERVICE_UNAVAILABLE,
         code: code.into(),
         message: "Request cancellation could not be registered".into(),
     })?;
     // Stop the live execution first even if persisting cancellation later fails.
-    state.db.cancel_query_request(&id).await?;
+    let request_persistence_pending = state.db.cancel_query_request(&id).await.is_err();
+    let run = if let Some(run_id) = cancellation.and_then(|handle| handle.run_id()) {
+        state.db.find_run_by_id(&run_id).await.ok().flatten()
+    } else {
+        None
+    };
+    let persistence_pending = request_persistence_pending
+        || (active
+            && run.as_ref().is_none_or(|run| {
+                run.requested_exit_reason.is_none() && run.finished_at.is_none()
+            }));
+    let cleanup_confirmed = run
+        .as_ref()
+        .is_some_and(|run| run.cleanup_status == "confirmed");
     Ok(Json(
-        serde_json::json!({"requestId":id,"stopRequested":active,"admissionBlocked":true,"cleanupConfirmed":false}),
+        serde_json::json!({"requestId":id,"stopRequested":active,"admissionBlocked":true,"persistencePending":persistence_pending,"cleanupConfirmed":cleanup_confirmed}),
     ))
 }
 
@@ -196,6 +211,7 @@ struct QueryExecution {
     completion: tokio::sync::oneshot::Receiver<ConversationOutcome>,
     cancellation: ConversationCancellation,
     finished: bool,
+    request_id: String,
 }
 
 impl Drop for QueryExecution {
@@ -207,12 +223,28 @@ impl Drop for QueryExecution {
 }
 
 impl QueryExecution {
-    async fn finish(mut self) -> Result<ConversationOutcome, ApiError> {
-        let outcome = (&mut self.completion)
-            .await
-            .map_err(|_| ApiError::internal())?;
-        self.finished = true;
-        Ok(outcome)
+    async fn finish_http(mut self) -> Result<Response, ApiError> {
+        tokio::select! {
+            biased;
+            outcome = &mut self.completion => {
+                let outcome = outcome.map_err(|_| ApiError::internal())?;
+                self.finished = true;
+                Ok(Json(outcome).into_response())
+            }
+            () = self.cancellation.wait_cancellation_pending() => {
+                // Only this transport is done. The spawned worker still owns the
+                // request registration, session lease, content and cleanup duty.
+                self.finished = true;
+                Ok((axum::http::StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({
+                    "code":"CANCELLATION_PERSISTENCE_PENDING",
+                    "message":"HTTP 等待已结束；原执行仍在保存取消状态或清理资源，请勿重发请求。",
+                    "queryRequestId":self.request_id,
+                    "sessionId":self.cancellation.session_id(),
+                    "runId":self.cancellation.run_id(),
+                    "terminal":false,
+                }))).into_response())
+            }
+        }
     }
 }
 
@@ -229,6 +261,7 @@ impl Drop for RequestRegistration {
 
 impl PreparedQuery {
     fn start(self) -> QueryExecution {
+        let request_id = self.request_id.clone();
         let cancellation = self.service.cancellation(&self.lease);
         let worker_cancel = cancellation.clone();
         let (tx, completion) = tokio::sync::oneshot::channel();
@@ -272,6 +305,7 @@ impl PreparedQuery {
             completion,
             cancellation,
             finished: false,
+            request_id,
         }
     }
 }

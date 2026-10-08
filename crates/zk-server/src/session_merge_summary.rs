@@ -251,9 +251,11 @@ struct Processor<'a> {
     limits: TaskBudgetLimits,
     input_budget: u32,
     output_budget: u32,
+    cancel: CancellationToken,
 }
 impl Processor<'_> {
     async fn check(&self) -> Result<(), DbError> {
+        check_local_cancel(&self.cancel)?;
         let current = self
             .state
             .db
@@ -278,6 +280,7 @@ impl Processor<'_> {
         input: &MergeUnitInput,
         sources: &BTreeMap<String, String>,
     ) -> Result<(), DbError> {
+        self.check().await?;
         let (left, right) = split_inputs(input, sources, &self.model)?;
         self.state
             .db
@@ -308,6 +311,7 @@ impl Processor<'_> {
             .db
             .assert_llm_usage_complete(&self.run, &self.run)
             .await?;
+        check_local_cancel(&self.cancel)?;
         let system = if retry {
             format!("{PROMPT}\n上次响应未通过，请严格检查完整JSON、栏目、状态和证据别名。")
         } else {
@@ -347,6 +351,8 @@ impl Processor<'_> {
         let mut checks = tokio::time::interval(Duration::from_millis(200));
         loop {
             tokio::select! {
+                biased;
+                ()=self.cancel.cancelled()=>{error=Some(DbError::Conflict("MERGE_WORKER_CANCELLED".into()));break;},
                 ()=&mut timeout=>{error=Some(failure("MERGE_CALL_TIMEOUT"));break;},
                 _=checks.tick()=>{if let Err(e)=self.check().await{error=Some(e);break;}},
                 event=stream.next()=>match event{
@@ -389,6 +395,7 @@ impl Processor<'_> {
         stage: &str,
         sources: &mut BTreeMap<String, String>,
     ) -> Result<Vec<MergeSummaryUnit>, DbError> {
+        self.check().await?;
         self.state
             .db
             .set_merge_summary_stage(
@@ -421,6 +428,7 @@ impl Processor<'_> {
                 continue;
             }
             for attempt in 0..3 {
+                self.check().await?;
                 let attempt_id = self
                     .state
                     .db
@@ -445,6 +453,7 @@ impl Processor<'_> {
                     .await?;
                 match result {
                     Ok(detail) => {
+                        self.check().await?;
                         let encoded = serde_json::to_string(&detail)?;
                         self.state
                             .db
@@ -532,7 +541,25 @@ fn generation_budget(capabilities: &zk_llm::ModelCapabilities, visible: u32) -> 
 }
 
 /// Prepare every retained text unit and a bounded directory/brief before publication.
+fn check_local_cancel(cancel: &CancellationToken) -> Result<(), DbError> {
+    if cancel.is_cancelled() {
+        Err(DbError::Conflict("MERGE_WORKER_CANCELLED".into()))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
 pub(crate) async fn prepare(state: &AppState, op: &SessionMergeOperation) -> Result<(), DbError> {
+    prepare_with_cancel(state, op, CancellationToken::new()).await
+}
+
+pub(crate) async fn prepare_with_cancel(
+    state: &AppState,
+    op: &SessionMergeOperation,
+    cancel: CancellationToken,
+) -> Result<(), DbError> {
+    check_local_cancel(&cancel)?;
     let primary = state.db.merge_primary_context(&op.operation_id).await?;
     let model = op.request.model.as_ref().unwrap_or(&primary.model).clone();
     if !zk_llm::is_known_model(&model) {
@@ -565,6 +592,7 @@ pub(crate) async fn prepare(state: &AppState, op: &SessionMergeOperation) -> Res
         .await?;
     let mut sources = BTreeMap::new();
     for (ordinal, input) in inputs.into_iter().enumerate() {
+        check_local_cancel(&cancel)?;
         if hash(&input.text) != input.sha256 {
             return Err(failure("MERGE_SOURCE_HASH_MISMATCH"));
         }
@@ -642,6 +670,7 @@ pub(crate) async fn prepare(state: &AppState, op: &SessionMergeOperation) -> Res
         ),
     };
     let run = uuid::Uuid::new_v4().to_string();
+    check_local_cancel(&cancel)?;
     state
         .db
         .start_root_run_with_budget_at_epoch(
@@ -662,8 +691,9 @@ pub(crate) async fn prepare(state: &AppState, op: &SessionMergeOperation) -> Res
         limits,
         input_budget,
         output_budget,
+        cancel,
     };
-    let prepared = prepare_units(&processor, &mut sources).await;
+    let mut prepared = prepare_units(&processor, &mut sources).await;
     // Closing the hidden Task uses the same terminal/result transaction and usage
     // authority as normal execution, even for a rejected response or cancellation.
     let task = state
@@ -671,6 +701,9 @@ pub(crate) async fn prepare(state: &AppState, op: &SessionMergeOperation) -> Res
         .find_runtime_task_by_id(&run)
         .await?
         .ok_or_else(|| failure("MERGE_BILLING_TASK_MISSING"))?;
+    if prepared.is_ok() {
+        prepared = processor.check().await;
+    }
     let result_content = match &prepared {
         Ok(()) => "Merge handoff extraction completed".to_owned(),
         Err(error) => error.to_string(),
@@ -802,6 +835,7 @@ async fn prepare_units(
         }
         current = next;
     }
+    processor.check().await?;
     processor
         .state
         .db
@@ -856,6 +890,7 @@ async fn plan_aggregate(
     ordinal: i64,
     inputs: Vec<MergeInputRef>,
 ) -> Result<(), DbError> {
+    processor.check().await?;
     let child_unit_ids = inputs
         .iter()
         .filter_map(|reference| {
@@ -1083,7 +1118,20 @@ mod tests {
             .unwrap();
         let resumed = state
             .db
-            .transition_session_merge(&op.operation_id, Some(op.run_epoch), None, false)
+            .transition_session_merge(
+                &op.operation_id,
+                Some(
+                    state
+                        .db
+                        .session_merge(&op.operation_id)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .run_epoch,
+                ),
+                None,
+                false,
+            )
             .await
             .unwrap();
         prepare(&state, &resumed).await.unwrap();
@@ -1140,7 +1188,20 @@ mod tests {
             .unwrap();
         let resumed = state
             .db
-            .transition_session_merge(&op.operation_id, Some(op.run_epoch), None, false)
+            .transition_session_merge(
+                &op.operation_id,
+                Some(
+                    state
+                        .db
+                        .session_merge(&op.operation_id)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .run_epoch,
+                ),
+                None,
+                false,
+            )
             .await
             .unwrap();
         assert!(
@@ -1197,6 +1258,62 @@ mod tests {
                 .all(|unit| unit.state != "completed")
         );
     }
+
+    #[tokio::test]
+    async fn local_cancel_stops_paid_merge_when_epoch_write_fails() {
+        let (state, op, provider) = fixture(true, true).await;
+        state.db.with_writer(|conn|{conn.execute_batch("CREATE TRIGGER reject_merge_cancel BEFORE UPDATE OF status ON session_merges WHEN NEW.status='cancelled' BEGIN SELECT RAISE(ABORT,'fixture cancellation save failure'); END;")?;Ok(())}).await.unwrap();
+        let cancel = CancellationToken::new();
+        let worker_cancel = cancel.clone();
+        let worker_state = state.clone();
+        let worker_op = op.clone();
+        let mut worker = tokio::spawn(async move {
+            prepare_with_cancel(&worker_state, &worker_op, worker_cancel).await
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while provider.calls.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        cancel.cancel();
+        assert!(
+            state
+                .db
+                .transition_session_merge(&op.operation_id, None, None, true)
+                .await
+                .is_err()
+        );
+        let result = tokio::time::timeout(Duration::from_secs(3), &mut worker).await;
+        if result.is_err() {
+            state
+                .db
+                .with_writer(|conn| {
+                    conn.execute_batch("DROP TRIGGER reject_merge_cancel;")?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            state
+                .db
+                .transition_session_merge(&op.operation_id, None, None, true)
+                .await
+                .unwrap();
+            let _ = tokio::time::timeout(Duration::from_secs(5), worker).await;
+            panic!("local stop was ignored after the epoch write failed");
+        }
+        assert!(result.unwrap().unwrap().is_err());
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        assert!(
+            state
+                .db
+                .get_session(&op.target_session_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
     #[tokio::test]
     async fn paused_wall_time_does_not_expire_a_new_epoch_and_completed_units_still_reuse() {
         let (state, op, provider) = fixture(true, false).await;
@@ -1209,7 +1326,20 @@ mod tests {
         state.db.with_writer(move|conn|{conn.execute("UPDATE session_merges SET created_at='2020-01-01T00:00:00.000000Z' WHERE id=?1",[id])?;Ok(())}).await.unwrap();
         let resumed = state
             .db
-            .transition_session_merge(&op.operation_id, Some(op.run_epoch), None, false)
+            .transition_session_merge(
+                &op.operation_id,
+                Some(
+                    state
+                        .db
+                        .session_merge(&op.operation_id)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .run_epoch,
+                ),
+                None,
+                false,
+            )
             .await
             .unwrap();
         prepare(&state, &resumed).await.unwrap();

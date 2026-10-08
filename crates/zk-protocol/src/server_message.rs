@@ -28,6 +28,10 @@ use crate::model::{FlexEpoch, Message, Usage};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+fn unavailable_pricing_status() -> String {
+    "unavailable".to_owned()
+}
+
 /// 下行消息枚举——57 个 type 全量冻结。
 ///
 /// 每个 variant 的文档注明旧 record / 直推调用点、一句话语义与激活状态
@@ -336,8 +340,18 @@ pub enum ServerMessage {
         session_cost: f64,
         /// 全局累计费用。
         total_cost: f64,
-        /// 本次用量。
-        usage: Usage,
+        /// Session pricing coverage: known, unknown, or unavailable. Independent of usage.
+        #[serde(default = "unavailable_pricing_status")]
+        session_pricing_status: String,
+        /// Global pricing coverage, without changing the existing numeric cost calculation.
+        #[serde(default = "unavailable_pricing_status")]
+        total_pricing_status: String,
+        /// Authoritative terminal usage integrity, when available; not a pricing flag.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        usage_complete: Option<bool>,
+        /// 本次用量；仅刷新计价状态时省略，不覆盖客户端已有用量。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        usage: Option<Usage>,
     },
 
     /// 旧 record `RateLimit` / 直推点 `sendRateLimit`（L516）：限流通知。

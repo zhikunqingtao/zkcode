@@ -96,7 +96,7 @@ export function usePromptState({
         isSubmitting,
         isUploadingPaste: promptAttachments.isUploadingPaste,
     });
-    const { attachments, maxImages } = promptAttachments;
+    const { attachments, maxImages, imageCapability, notifyUnavailable } = promptAttachments;
     const {
         isPickingLocalFile,
         localFiles,
@@ -159,6 +159,10 @@ export function usePromptState({
                ) return;
 
         if (compacting) return;
+        if (attachments.length > 0 && imageCapability !== 'ready') {
+            notifyUnavailable();
+            return;
+        }
         if (attachments.length > maxImages) {
             useNotificationStore.getState().addNotification({ key: 'image-model-limit', level: 'warning', message: '当前模型的图片数量上限不足，请移除超出图片或切换模型' });
             return;
@@ -225,6 +229,8 @@ export function usePromptState({
     }, [
         input,
         maxImages,
+        imageCapability,
+        notifyUnavailable,
         attachments,
         localFiles,
         isPickingLocalFile,

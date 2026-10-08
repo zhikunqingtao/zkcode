@@ -11,6 +11,7 @@
  * 样式实现见 styles/jelly.css
  */
 
+import { refreshZkMonacoTheme } from '@/styles/zkMonaco';
 import React, { useEffect, useCallback, useRef } from 'react';
 import { defaultSpaceshipFx, defaultInkHavocFx, defaultJellyFx, normalizeThemeMode, useConfigStore } from '@/store/configStore';
 import { applyAccent, DEFAULT_ACCENT_HEX } from '@/theme/accents';
@@ -89,6 +90,7 @@ export const ThemeProvider: React.FC<ThemeProviderProps> = ({ children }) => {
         // v2 强调色令牌（§3.4）：按 effectiveTheme 写入（glass 有独立清透档；主题/强调色变化时随 applyTheme 重算）。
         // 旧 --accent-color/--accent/--color-primary 链路已退役（消费方全部迁移至 v2 令牌）。
         applyAccent(theme.accentColor ?? DEFAULT_ACCENT_HEX, mode);
+        refreshZkMonacoTheme();
 
         // 应用字体大小
         if (theme.fontSize) {

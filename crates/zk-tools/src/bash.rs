@@ -390,7 +390,9 @@ mod tests {
 
     fn ctx() -> ToolContext {
         let (tx, _rx) = mpsc::unbounded_channel();
-        ToolContext::new(CancellationToken::new(), tx).with_working_dir(std::env::temp_dir())
+        ToolContext::new(CancellationToken::new(), tx)
+            .with_working_dir(std::env::temp_dir())
+            .with_session_id(format!("bash-unit-{}", uuid::Uuid::new_v4()))
     }
 
     #[tokio::test]

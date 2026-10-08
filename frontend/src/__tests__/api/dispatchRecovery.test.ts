@@ -16,6 +16,10 @@ import { useEvidenceStore } from '@/store/evidenceStore';
 import { useInboxStore } from '@/store/inboxStore';
 import { useJourneyVerifyStore } from '@/store/journeyVerifyStore';
 import { usePlanStore } from '@/store/planStore';
+import { buildTurns } from '@/store/selectors/turnProjection';
+import { splitTurnLayers } from '@/store/selectors/turnSections';
+import { resolveTurnOutcome } from '@/components/message/turn/turnUtils';
+import type { Message } from '@/types';
 import { runtimeEnvelope } from '@/test/runtimeEnvelope';
 
 const sendToServerMock = vi.hoisted(() => vi.fn(() => true));
@@ -80,6 +84,96 @@ const elicitationInteraction = (sessionId: string, suffix: string) => ({
 });
 
 describe('transport-scoped bind recovery', () => {
+    it('keeps a root failure visible after error, committed completion and matching restoration', async () => {
+        const sessionId = 'failed-session';
+        const context = { sessionId, taskId: 'failed-task', runId: 'failed-run' };
+        let payload!: { sessionId: string; protocolVersion: number; bindRequestId: string; bindingEpoch: number };
+        const restore = async (messages: Message[]) => {
+            const bound = bindSessionAndWait(sessionId, value => { payload = value; });
+            dispatch({ ...runtimeEnvelope(), type: 'session_restored', bindRequestId: payload.bindRequestId, protocolVersion: 4,
+                bindingEpoch: payload.bindingEpoch, messages,
+                metadata: { sessionId, model: 'model', permissionMode: 'DEFAULT', status: 'idle' } });
+            await expect(bound).resolves.toBe(true);
+        };
+        await restore([]);
+        const committed: Message[] = [
+            { type: 'system', uuid: 'root-boundary', timestamp: 1, subtype: 'task_boundary', content: '', metadata: { task_id: context.taskId, title: 'failed task', runtimeDiagnostic: {
+                runId: context.runId, taskId: context.taskId, status: 'failed', code: 'PROVIDER_ERROR', message: '供应商返回错误',
+            } } },
+            { type: 'user', uuid: 'query', timestamp: 2, content: [{ type: 'text', text: '请分析' }] },
+        ];
+        dispatch({ ...runtimeEnvelope(context), type: 'error', code: 'PROVIDER_ERROR', message: '供应商返回错误' });
+        expect(useMessageStore.getState().messages.some(message => message.type === 'system' && message.subtype === 'error')).toBe(true);
+        dispatch({ ...runtimeEnvelope(context), type: 'message_complete', sessionId, runId: context.runId,
+            stopReason: 'error', replaceAfterMessageId: null, committedMessages: committed,
+            usage: { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 } });
+        await Promise.resolve();
+        const assertFailure = () => {
+            const [turn] = buildTurns(useMessageStore.getState().messages);
+            expect(resolveTurnOutcome(turn)).toBe('error');
+            expect(splitTurnLayers(turn).tail).toHaveLength(1);
+            expect(splitTurnLayers(turn).tail[0]).toMatchObject({ content: '供应商返回错误', errorCode: 'PROVIDER_ERROR' });
+        };
+        assertFailure();
+        await restore(committed);
+        assertFailure();
+    });
+
+    it('updates pricing status without changing usage completeness and ignores another Session', async () => {
+        let payload!: { sessionId: string; protocolVersion: number; bindRequestId: string; bindingEpoch: number };
+        const bound = bindSessionAndWait('pricing-active', value => { payload = value; });
+        dispatch({ ...runtimeEnvelope(), type: 'session_restored', bindRequestId: payload.bindRequestId, protocolVersion: 4,
+            bindingEpoch: payload.bindingEpoch, messages: [], metadata: { sessionId: 'pricing-active', model: 'model', permissionMode: 'DEFAULT', status: 'idle' } });
+        await expect(bound).resolves.toBe(true);
+        const usage = { inputTokens: 13, outputTokens: 8, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 };
+        dispatch({ ...runtimeEnvelope({ sessionId: 'pricing-active' }), type: 'cost_update', sessionCost: 0, totalCost: 0,
+            sessionPricingStatus: 'unknown', totalPricingStatus: 'unknown', usageComplete: true, usage });
+        expect(useCostStore.getState()).toMatchObject({ sessionPricingStatus: 'unknown', totalPricingStatus: 'unknown', usageComplete: true });
+        dispatch({ ...runtimeEnvelope({ sessionId: 'pricing-other' }), type: 'cost_update', sessionCost: 9, totalCost: 9,
+            sessionPricingStatus: 'known', totalPricingStatus: 'known', usageComplete: false, usage });
+        expect(useCostStore.getState()).toMatchObject({ sessionCost: 0, sessionPricingStatus: 'unknown', usageComplete: true });
+        useCostStore.getState().resetSessionCost();
+        expect(useCostStore.getState()).toMatchObject({ sessionPricingStatus: 'unavailable', totalPricingStatus: 'unknown' });
+    });
+
+    it('does not clear incomplete usage when a pricing-only update omits usageComplete', () => {
+        const usage = { inputTokens: 13, outputTokens: 8, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 };
+        useCostStore.getState().updateCost({ sessionCost: 0, totalCost: 0, usage, usageComplete: false, sessionPricingStatus: 'unknown' });
+        useCostStore.getState().updateCost({ sessionCost: 0, totalCost: 0, usage, sessionPricingStatus: 'known' });
+        expect(useCostStore.getState()).toMatchObject({ usageComplete: false, sessionPricingStatus: 'known' });
+        useCostStore.getState().updateCost({ sessionCost: 0, totalCost: 0, usage, usageComplete: true, sessionPricingStatus: 'unknown' });
+        expect(useCostStore.getState()).toMatchObject({ usageComplete: true, sessionPricingStatus: 'unknown' });
+    });
+
+    it('preserves the last request usage during terminal pricing refresh and accepts explicit zero usage', () => {
+        const usage = { inputTokens: 13, outputTokens: 8, cacheReadInputTokens: 3, cacheCreationInputTokens: 0 };
+        useCostStore.getState().updateCost({ sessionCost: 0.01, totalCost: 0.02, usage, usageComplete: true });
+        dispatch({ ...runtimeEnvelope(), type: 'cost_update', sessionCost: 0.01, totalCost: 0.02,
+            sessionPricingStatus: 'unknown', totalPricingStatus: 'unknown', usageComplete: false });
+        expect(useCostStore.getState()).toMatchObject({ usage, usageComplete: false, sessionPricingStatus: 'unknown' });
+        const zeroUsage = { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 };
+        dispatch({ ...runtimeEnvelope(), type: 'cost_update', sessionCost: 0.01, totalCost: 0.02,
+            sessionPricingStatus: 'known', totalPricingStatus: 'known', usage: zeroUsage, usageComplete: true });
+        expect(useCostStore.getState()).toMatchObject({ usage: zeroUsage, usageComplete: true });
+    });
+
+    it('restores pricing status independently of usage and clears unconfirmed Session prices', async () => {
+        let payload!: { sessionId: string; protocolVersion: number; bindRequestId: string; bindingEpoch: number };
+        for (const [id, costSummary] of [
+            ['priced-unknown', { sessionCost: 0, totalCost: 0.01, usageComplete: true, sessionPricingStatus: 'unknown', totalPricingStatus: 'unknown' }],
+            ['different-session', { sessionCost: 1, totalCost: 0.01, usageComplete: false }],
+        ] as const) {
+            const bound = bindSessionAndWait(id, value => { payload = value; });
+            dispatch({ ...runtimeEnvelope(), type: 'session_restored', bindRequestId: payload.bindRequestId, protocolVersion: 4,
+                bindingEpoch: payload.bindingEpoch, messages: [], costSummary,
+                metadata: { sessionId: id, model: 'model', permissionMode: 'DEFAULT', status: 'idle' } });
+            await expect(bound).resolves.toBe(true);
+            expect(useCostStore.getState()).toMatchObject(id === 'priced-unknown'
+                ? { sessionPricingStatus: 'unknown', totalPricingStatus: 'unknown', usageComplete: true }
+                : { sessionPricingStatus: 'unavailable', totalPricingStatus: 'unavailable', usageComplete: false });
+        }
+    });
+
     it('accepts the service purpose only from the matching bind acknowledgment and clears it on the next chat bind', async () => {
         vi.stubGlobal('fetch', vi.fn(async () => response([])));
         for (const purpose of ['mcp', 'chat'] as const) {
@@ -109,6 +203,7 @@ describe('transport-scoped bind recovery', () => {
             totalCost: 0,
             usage: { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 },
             usageComplete: true,
+            sessionPricingStatus: 'unavailable', totalPricingStatus: 'unavailable',
         });
         useRunStore.setState({ recoverySnapshots: new Map(), recoveryEventSeq: new Map() });
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => [] }));
@@ -153,11 +248,13 @@ describe('transport-scoped bind recovery', () => {
         expect(useEvidenceStore.getState()).toMatchObject({ loading: false, error: null });
         expect(useCostStore.getState().usageComplete).toBe(false);
 
+        const refresh = recoverPendingInteractions('session-new');
         pendingResponse.resolve(response([
             permissionInteraction('session-new', 'new'),
             elicitationInteraction('session-new', 'new'),
         ]));
         await expect(bound).resolves.toBe(true);
+        await refresh;
         expect(usePermissionStore.getState().pendingPermissions.map(item => item.interactionId))
             .toEqual(['permission-new']);
         expect(useAppUiStore.getState().elicitationDialog?.interactionId)
@@ -184,8 +281,10 @@ describe('transport-scoped bind recovery', () => {
             metadata: { sessionId: 'session-a', model: 'model-a', permissionMode: 'DEFAULT', status: 'idle' },
         });
 
+        await expect(boundA).resolves.toBe(true);
+        const refreshA = recoverPendingInteractions('session-a');
         const boundB = bindSessionAndWait('session-b', value => { payloadB = value; });
-        await expect(boundA).resolves.toBe(false);
+        await refreshA;
         dispatch({
             ...runtimeEnvelope(),
             type: 'session_restored', bindRequestId: payloadB!.bindRequestId, protocolVersion: 4,
@@ -194,6 +293,7 @@ describe('transport-scoped bind recovery', () => {
         });
         await expect(boundB).resolves.toBe(true);
 
+        await recoverPendingInteractions('session-b');
         sessionAResponse.resolve(response([
             permissionInteraction('session-a', 'a'),
             elicitationInteraction('session-a', 'a'),
@@ -224,8 +324,10 @@ describe('transport-scoped bind recovery', () => {
             bindingEpoch: payloadA!.bindingEpoch, messages: [],
             metadata: { sessionId: 'session-a', model: 'model-a', permissionMode: 'DEFAULT', status: 'idle' },
         });
+        await expect(boundA).resolves.toBe(true);
+        const refreshA = recoverPendingInteractions('session-a');
         const boundB = bindSessionAndWait('session-b', value => { payloadB = value; });
-        await expect(boundA).resolves.toBe(false);
+        await refreshA;
         dispatch({
             ...runtimeEnvelope(),
             type: 'session_restored', bindRequestId: payloadB!.bindRequestId, protocolVersion: 4,

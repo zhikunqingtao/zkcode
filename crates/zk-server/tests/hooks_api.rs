@@ -64,7 +64,7 @@ async fn confirmed_hook_editor_uses_real_config_and_cas_without_running_commands
     assert_eq!(status, StatusCode::CONFLICT, "{conflict}");
     assert_eq!(conflict["code"], "HOOK_CONFIG_CHANGED");
     let invalid = format!("{content}matcher = '['\n");
-    let (status, _) = request(
+    let (status, invalid_response) = request(
         &mut router,
         &id,
         Method::PUT,
@@ -72,6 +72,13 @@ async fn confirmed_hook_editor_uses_real_config_and_cas_without_running_commands
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+    let message = invalid_response["message"].as_str().unwrap();
+    assert!(message.contains("sentinel"), "{invalid_response}");
+    assert!(message.contains("RUN_START"), "{invalid_response}");
+    assert!(
+        message.contains("HOOK_MATCHER_INVALID"),
+        "{invalid_response}"
+    );
     assert_eq!(
         std::fs::read_to_string(root.join(".zk/hooks.toml")).unwrap(),
         content

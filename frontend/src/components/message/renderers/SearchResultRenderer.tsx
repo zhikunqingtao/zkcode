@@ -30,7 +30,9 @@ export const SearchResultRenderer: React.FC<{ content: string; query?: string }>
     const highlightMatch = (text: string) => {
         if (!query) return text;
         const regex = new RegExp(`(${query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi');
-        return text.replace(regex, '<mark class="bg-warnsoft text-warnstrong">$1</mark>');
+        return text.split(regex).map((part, index) => index % 2 === 1
+            ? <mark key={index} className="bg-warnsoft text-warnstrong">{part}</mark>
+            : part);
     };
 
     return (
@@ -50,7 +52,7 @@ export const SearchResultRenderer: React.FC<{ content: string; query?: string }>
                                 <span className="w-12 text-right text-t4 px-2 shrink-0 tabular-nums"
                                     >{m.line}</span>
                                 <span className="flex-1 font-mono panel-code text-t1 whitespace-pre"
-                                    dangerouslySetInnerHTML={{ __html: highlightMatch(m.content) }} />
+                                    >{highlightMatch(m.content)}</span>
                             </div>
                         ))}
                     </div>

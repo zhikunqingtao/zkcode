@@ -80,10 +80,9 @@ async def lifespan(app: FastAPI):
                             f"浏览器服务启动失败: {type(browser_error).__name__}"
                         )
                         logger.warning(
-                            "浏览器服务未就绪，跳过路由注册: %s",
+                            "浏览器服务未就绪，保留状态及恢复路由: %s",
                             type(browser_error).__name__,
                         )
-                        continue
                     browser_lifecycle = module
                 app.include_router(module.router, prefix=prefix, tags=tags)
                 logger.info(f"路由已注册: {prefix} [{info.name}]")

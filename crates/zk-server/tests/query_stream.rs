@@ -180,6 +180,201 @@ fn sse_payload(text: &str, name: &str) -> Value {
         .expect("named SSE payload")
 }
 
+async fn reject_cancellation_and_outbox(db: &Db) {
+    db.with_writer(|connection| {
+        connection.execute_batch(
+            "CREATE TRIGGER reject_root_cancel BEFORE UPDATE OF status ON tasks
+            WHEN NEW.status='cancelling' BEGIN SELECT RAISE(ABORT, 'cancellation outage'); END;
+            CREATE TRIGGER reject_cancel_notice BEFORE INSERT ON run_event_log
+            WHEN NEW.event_type='ws_notification' BEGIN SELECT RAISE(ABORT, 'outbox outage'); END;",
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+
+async fn restore_cancellation_storage(db: &Db) {
+    db.with_writer(|connection| {
+        connection
+            .execute_batch("DROP TRIGGER reject_root_cancel; DROP TRIGGER reject_cancel_notice;")?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn cancellation_outage_keeps_sse_alive_and_delivers_nonterminal_notice_without_outbox() {
+    use futures::SinkExt;
+    use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
+    let fixture = Fixture::new().await;
+    let mut upgrade = format!("{}/ws", fixture.base.replacen("http://", "ws://", 1))
+        .into_client_request()
+        .unwrap();
+    upgrade
+        .headers_mut()
+        .insert("Origin", "http://127.0.0.1:5273".parse().unwrap());
+    let (mut ws, _) = tokio_tungstenite::connect_async(upgrade).await.unwrap();
+    ws.send(Message::Text(
+        json!({"type":"bind_session", "sessionId":fixture.session,
+        "bindRequestId":"cancel-outage-bind", "bindingEpoch":1, "protocolVersion":4})
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    let restored = tokio::time::timeout(Duration::from_secs(5), ws.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(restored.to_text().unwrap().contains("session_restored"));
+    let request = uuid::Uuid::new_v4().to_string();
+    let response = fixture
+        .post("/api/query/stream")
+        .json(&fixture.body(&request))
+        .send()
+        .await
+        .unwrap();
+    let mut stream = response.bytes_stream();
+    let mut text = String::new();
+    receive_until(&mut stream, &mut text, "first fragment").await;
+    let run = fixture
+        .db
+        .find_latest_root_run_by_session(&fixture.session)
+        .await
+        .unwrap()
+        .unwrap();
+    reject_cancellation_and_outbox(&fixture.db).await;
+    let ack = fixture
+        .post(&format!("/api/query/{request}/cancel"))
+        .send()
+        .await
+        .unwrap();
+    assert!(ack.status().is_success());
+    receive_until(&mut stream, &mut text, "cancellation-pending:").await;
+    let notice = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Message::Text(frame) = ws.next().await.unwrap().unwrap() {
+                let value: Value = serde_json::from_str(&frame).unwrap();
+                if value["type"] == "notification"
+                    && value["key"]
+                        .as_str()
+                        .is_some_and(|key| key.starts_with("cancellation-pending:"))
+                {
+                    break value;
+                }
+                assert_ne!(value["type"], "message_complete");
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(notice["eventContext"]["runId"], run.id);
+    assert_eq!(notice["_sessionId"], fixture.session);
+    assert!(
+        notice["eventContext"]["eventId"]
+            .as_str()
+            .unwrap()
+            .starts_with("ephemeral:")
+    );
+    assert!(!text.contains("event: complete"));
+    assert!(text.contains(&run.id));
+    let busy = fixture
+        .post("/api/query")
+        .json(&fixture.body(&uuid::Uuid::new_v4().to_string()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(busy.status(), reqwest::StatusCode::CONFLICT);
+    assert_eq!(fixture.provider.calls.load(Ordering::SeqCst), 1);
+    restore_cancellation_storage(&fixture.db).await;
+    receive_until(&mut stream, &mut text, "event: complete").await;
+    assert_eq!(text.matches("cancellation-pending:").count(), 1);
+    assert_eq!(text.matches("event: complete\n").count(), 1);
+    assert_eq!(
+        fixture
+            .db
+            .find_run_by_id(&run.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .exit_reason
+            .as_deref(),
+        Some("userCancelled")
+    );
+}
+
+#[tokio::test]
+async fn cancellation_outage_sync_returns_pending_identity_and_keeps_original_owner() {
+    let fixture = Fixture::new().await;
+    let request = uuid::Uuid::new_v4().to_string();
+    let post = fixture.post("/api/query").json(&fixture.body(&request));
+    let response = tokio::spawn(async move { post.send().await.unwrap() });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while fixture.provider.calls.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let run = fixture
+        .db
+        .find_latest_root_run_by_session(&fixture.session)
+        .await
+        .unwrap()
+        .unwrap();
+    reject_cancellation_and_outbox(&fixture.db).await;
+    assert!(
+        fixture
+            .post(&format!("/api/query/{request}/cancel"))
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
+    let result = tokio::time::timeout(Duration::from_secs(6), response)
+        .await
+        .expect("HTTP waiting must end without claiming Run completion")
+        .unwrap();
+    assert_eq!(result.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+    let body: Value = result.json().await.unwrap();
+    assert_eq!(body["code"], "CANCELLATION_PERSISTENCE_PENDING");
+    assert_eq!(body["queryRequestId"], request);
+    assert_eq!(body["sessionId"], fixture.session);
+    assert_eq!(body["runId"], run.id);
+    assert_eq!(body["terminal"], false);
+    let busy = fixture
+        .post("/api/query")
+        .json(&fixture.body(&uuid::Uuid::new_v4().to_string()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(busy.status(), reqwest::StatusCode::CONFLICT);
+    restore_cancellation_storage(&fixture.db).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if fixture
+                .db
+                .find_run_by_id(&run.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status
+                == "cancelled"
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(fixture.provider.calls.load(Ordering::SeqCst), 1);
+}
+
 #[tokio::test]
 async fn streaming_is_live_exclusive_and_ledger_backed() {
     let fixture = Fixture::new().await;
@@ -708,6 +903,7 @@ async fn disconnected_stream_resumes_existing_execution_without_replaying_input(
     let client = reqwest::Client::new();
     let invalid = client
         .get(format!("{}/api/query/{request}/stream", fixture.base))
+        .header("Origin", "http://127.0.0.1:5273")
         .header("Last-Event-ID", format!("{}:1", uuid::Uuid::new_v4()))
         .send()
         .await
@@ -719,6 +915,7 @@ async fn disconnected_stream_resumes_existing_execution_without_replaying_input(
     );
     let response = client
         .get(format!("{}/api/query/{request}/stream", fixture.base))
+        .header("Origin", "http://127.0.0.1:5273")
         .header("Last-Event-ID", cursor)
         .send()
         .await
@@ -745,6 +942,7 @@ async fn disconnected_stream_resumes_existing_execution_without_replaying_input(
     assert!(resumed.next().await.is_none());
     let gone = client
         .get(format!("{}/api/query/{request}/stream", fixture.base))
+        .header("Origin", "http://127.0.0.1:5273")
         .header("Last-Event-ID", terminal_cursor)
         .send()
         .await

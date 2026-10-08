@@ -53,7 +53,11 @@ export function Header({ onMenuClick, showMenuButton = false }: HeaderProps) {
         useAppUiStore.getState().setMobileNavTab(null);
     };
     const { sessionId, model, setModel, purpose } = useSessionStore();
-    const { sessionCost, totalCost, usage } = useCostStore();
+    const { sessionCost, totalCost, usage, sessionPricingStatus, totalPricingStatus } = useCostStore();
+    const pricingNotice = (status: typeof sessionPricingStatus) => status === 'unknown'
+        ? '费用未知／参考费用不完整' : status === 'known' ? '' : '费用未确认';
+    const sessionPricingNotice = pricingNotice(sessionPricingStatus);
+    const totalPricingNotice = pricingNotice(totalPricingStatus);
     const { bridgeStatus } = useBridgeStore();
     const { openDialog } = useDialogStore();
     const { theme, setTheme } = useConfigStore();
@@ -178,13 +182,13 @@ export function Header({ onMenuClick, showMenuButton = false }: HeaderProps) {
                         )}
                     </div>
                     <MetricDivider className="hidden lg:block" />
-                    <div className="hidden lg:flex items-center gap-1 tabular-nums" title="当前会话成本">
+                    <div className="hidden lg:flex items-center gap-1 tabular-nums" title={`当前会话成本${sessionPricingNotice ? `：${sessionPricingNotice}` : ''}`}>
                         <Coins className="w-3.5 h-3.5 text-t3" />
-                        <span>${sessionCost.toFixed(3)}</span>
+                        <span>${sessionCost.toFixed(3)}{sessionPricingNotice && <span className="ml-1 text-warn">{sessionPricingStatus === 'unknown' ? '费用未知' : '费用未确认'}</span>}</span>
                     </div>
                     <MetricDivider className="hidden lg:block" />
-                    <span className="hidden lg:block tabular-nums" title={`全局累计: $${totalCost.toFixed(3)}`}>
-                        ∑ ${totalCost.toFixed(3)}
+                    <span className="hidden lg:block tabular-nums" title={`全局累计: $${totalCost.toFixed(3)}${totalPricingNotice ? `；${totalPricingNotice}` : ''}`}>
+                        ∑ ${totalCost.toFixed(3)}{totalPricingNotice && <span className="ml-1 text-warn">{totalPricingStatus === 'unknown' ? '费用未知' : '费用未确认'}</span>}
                     </span>
                 </div>
 

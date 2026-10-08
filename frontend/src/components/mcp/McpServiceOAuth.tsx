@@ -73,7 +73,7 @@ export function McpServiceOAuth({ name, enabled }: { name: string; enabled: bool
     };
 
     return <div className="mt-2 text-sm">
-        <button type="button" aria-expanded={expanded} className="text-accent" onClick={() => setExpanded(value => !value)}>OAuth 授权设置</button>
+        <button type="button" aria-expanded={expanded} className="text-accent2-ink" onClick={() => setExpanded(value => !value)}>OAuth 授权设置</button>
         {expanded && <div className="mt-2 space-y-2">
             <p className="text-t2">授权令牌保存在 macOS 钥匙串。现有 Bearer 配置仍可使用；仅在服务要求 OAuth 时配置这里。</p>
             <p role="status">{({ idle: '尚未授权', pending: '等待浏览器授权', authorized: '授权已保存', error: '授权失败' })[status.state]}</p>
@@ -89,7 +89,7 @@ export function McpServiceOAuth({ name, enabled }: { name: string; enabled: bool
                 <p className="break-all">授权方：{start.issuer}</p>
                 <p className="break-all">服务：{start.resource}</p>
                 {start.scope && <p className="break-all">请求范围：{start.scope}</p>}
-                <a className="text-accent underline" href={start.authorizationUrl} target="_blank" rel="noopener noreferrer">在浏览器中审核并授权</a>
+                <a className="text-accent2-ink underline" href={start.authorizationUrl} target="_blank" rel="noopener noreferrer">在浏览器中审核并授权</a>
                 <p className="text-t2">请在 {Math.ceil(start.expiresIn / 60)} 分钟内完成。完成后状态会自动刷新。</p>
             </div>}
             {notice && <p>{notice}</p>}

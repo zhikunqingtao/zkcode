@@ -56,3 +56,10 @@ export function getEffectiveTheme(): 'light' | 'dark' {
 export function zkMonacoTheme(): 'zk-light' | 'zk-dark' {
     return getEffectiveTheme() === 'dark' ? 'zk-dark' : 'zk-light';
 }
+
+/** ThemeProvider calls this after applying the effective DOM theme, including OS changes. */
+export function refreshZkMonacoTheme(): void {
+    if (!monacoInstance) return;
+    ensureZkMonacoThemes(monacoInstance);
+    monacoInstance.editor.setTheme(zkMonacoTheme());
+}

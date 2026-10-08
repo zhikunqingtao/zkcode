@@ -434,25 +434,37 @@ impl McpServerConnection {
 
     /// 建立连接并完成 MCP 协议握手（对照 Java `connect()`）。
     pub async fn connect(self: &Arc<Self>) {
+        self.connect_if(|| true).await;
+    }
+
+    /// Managed startup must recheck admission after acquiring the lifecycle lock:
+    /// a close may have won while this future was waiting to connect.
+    pub(crate) async fn connect_if(self: &Arc<Self>, admitted: impl Fn() -> bool + Send + Sync) {
         let _lifecycle = self.lifecycle.lock().await;
+        if !admitted() {
+            return;
+        }
         self.set_status(McpConnectionStatus::Pending);
 
         // Invalidate the old session before awaiting its close.  Late
         // responses/callbacks can no longer mutate this connection or its
         // dynamic directory entries.
         let (generation, previous) = {
-            let mut slot = write_lock(&self.transport);
+            let slot = read_lock(&self.transport);
             let generation = self.next_transport_generation();
-            (generation, slot.take())
+            (generation, slot.clone())
         };
         self.clear_transport_capabilities(true);
         if let Some(previous) = previous {
             previous.close().await;
             if !previous.cleanup_confirmed() {
-                *write_lock(&self.transport) = Some(previous);
                 self.set_status(McpConnectionStatus::Failed);
                 return;
             }
+            write_lock(&self.transport).take();
+        }
+        if !admitted() {
+            return;
         }
         let Some(transport) = create_transport(&self.config) else {
             // An unsupported transport has performed no handshake or I/O.
@@ -868,20 +880,29 @@ impl McpServerConnection {
 
     /// 关闭连接并清空能力（对照 Java `close()`）。
     pub async fn close(&self) {
+        self.close_if(|| true).await;
+    }
+
+    /// An older managed attempt must not close a newer generation that is
+    /// deliberately reusing this connection for restart.
+    pub(crate) async fn close_if(&self, owns_cleanup: impl Fn() -> bool + Send + Sync) -> bool {
         let _lifecycle = self.lifecycle.lock().await;
+        if !owns_cleanup() {
+            return false;
+        }
         self.set_status(McpConnectionStatus::Disabled);
         let transport = {
-            let mut slot = write_lock(&self.transport);
             self.next_transport_generation();
-            slot.take()
+            read_lock(&self.transport).clone()
         };
         self.clear_transport_capabilities(true);
         if let Some(transport) = transport {
             transport.close().await;
-            if !transport.cleanup_confirmed() {
-                *write_lock(&self.transport) = Some(transport);
+            if transport.cleanup_confirmed() {
+                write_lock(&self.transport).take();
             }
         }
+        true
     }
 
     /// Closing cannot discard an unconfirmed process or durable resource lease.
@@ -1352,6 +1373,7 @@ mod tests {
     struct StubTransport {
         responder: StubResponder,
         connected: AtomicBool,
+        stall_close: AtomicBool,
         requests: Mutex<Vec<(String, Option<Value>)>>,
         notifications: Mutex<Vec<(String, Option<Value>)>>,
         responses: Mutex<Vec<(RequestId, Value)>>,
@@ -1364,6 +1386,7 @@ mod tests {
             Arc::new(Self {
                 responder,
                 connected: AtomicBool::new(true),
+                stall_close: AtomicBool::new(false),
                 requests: Mutex::new(Vec::new()),
                 notifications: Mutex::new(Vec::new()),
                 responses: Mutex::new(Vec::new()),
@@ -1463,9 +1486,56 @@ mod tests {
 
         fn close(&self) -> BoxFuture<'_, ()> {
             Box::pin(async {
+                if self.stall_close.load(Ordering::Acquire) {
+                    std::future::pending::<()>().await;
+                }
                 self.connected.store(false, Ordering::Release);
             })
         }
+
+        fn cleanup_confirmed(&self) -> bool {
+            !self.connected.load(Ordering::Acquire)
+        }
+    }
+
+    #[tokio::test]
+    async fn managed_connect_rechecks_admission_after_close_wins_the_lifecycle_lock() {
+        let transport = StubTransport::scripted(script(vec![]));
+        let connection = connected_with(transport);
+        let lifecycle = connection.lifecycle.lock().await;
+        let admitted = AtomicBool::new(true);
+        let mut closing = Box::pin(connection.close());
+        assert!(futures::poll!(&mut closing).is_pending());
+        let mut connecting = Box::pin(connection.connect_if(|| admitted.load(Ordering::Acquire)));
+        assert!(futures::poll!(&mut connecting).is_pending());
+        admitted.store(false, Ordering::Release);
+        drop(lifecycle);
+        tokio::join!(closing, connecting);
+        assert_eq!(connection.status(), McpConnectionStatus::Disabled);
+        assert_eq!(
+            connection.transport_generation(),
+            1,
+            "late connect may not start a transport generation"
+        );
+        assert!(connection.transport().is_none());
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_connection_close_preserves_the_transport_owner() {
+        let transport = StubTransport::scripted(script(vec![]));
+        transport.stall_close.store(true, Ordering::Release);
+        let connection = connected_with(transport.clone());
+        let mut closing = Box::pin(connection.close());
+        assert!(futures::poll!(&mut closing).is_pending());
+        drop(closing);
+        assert!(
+            !connection.cleanup_confirmed(),
+            "pending transport was removed before cleanup"
+        );
+        assert_eq!(connection.status(), McpConnectionStatus::Disabled);
+        transport.stall_close.store(false, Ordering::Release);
+        connection.close().await;
+        assert!(connection.cleanup_confirmed());
     }
 
     fn connected_with(transport: Arc<dyn McpTransport>) -> Arc<McpServerConnection> {

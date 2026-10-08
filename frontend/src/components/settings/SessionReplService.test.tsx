@@ -17,8 +17,9 @@ describe('SessionReplService', () => {
         expect(screen.queryByRole('button', { name: '停止 REPL 服务' })).not.toBeInTheDocument();
         expect(fetcher).toHaveBeenCalledWith('/api/sessions/session-a/repl-service', expect.objectContaining({ headers: { 'X-Session-Id': 'session-a' }, signal: expect.any(AbortSignal) }));
     });
-    it('requires confirmation and shows pending until the actual cleanup is confirmed', async () => {
-        let value = status('running', 'pending');
+    it.each(['running', 'starting'])('requires confirmation from %s and waits for actual cleanup', async (initial) => {
+        const timer = vi.spyOn(globalThis, 'setTimeout');
+        let value = status(initial, 'pending');
         const fetcher = vi.fn().mockImplementation((_url: string, options: RequestInit) => {
             if (options.method === 'DELETE') value = status('stopping', 'pending');
             return Promise.resolve(response(value, options.method === 'DELETE' ? 202 : 200));
@@ -26,6 +27,7 @@ describe('SessionReplService', () => {
         vi.stubGlobal('fetch', fetcher);
         render(<SessionReplService />);
         fireEvent.click(await screen.findByRole('button', { name: '停止 REPL 服务' }));
+        if (initial === 'starting') expect(timer).toHaveBeenCalledWith(expect.any(Function), 1000);
         expect(fetcher.mock.calls.some(([, options]) => options.method === 'DELETE')).toBe(false);
         fireEvent.click(screen.getByRole('button', { name: '确认停止 REPL' }));
         expect(await screen.findByText('正在停止，等待清理完成')).toBeVisible();

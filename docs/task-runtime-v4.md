@@ -11,6 +11,16 @@ SQLite is authoritative. In-memory maps, cancellation tokens, notifications,
 WebSocket queues, and provider semaphores are disposable execution aids and may
 never answer a lifecycle query on their own.
 
+Cancellation reconciliation has one narrow diagnostic exception to durable
+event delivery: after three seconds without confirmed persistence/cleanup, a
+still-owned root may emit one memory-only `notification` keyed by its Run ID.
+It cannot change lifecycle state, authorize replay, or replace a tool result,
+artifact or terminal event. The owner retains its lease and resources until
+reconciliation; age alone does not reap a live cancelled owner. Synchronous
+Query transport may return a non-terminal 503 with the original request and
+Run identities while that worker continues cleanup. An interrupt ACK does not
+mean the Run is idle or finished.
+
 All persisted identifiers are canonical lower-case UUID v4 strings. Public JSON
 uses lowerCamelCase. Only root Sessions are listed as conversations; every child
 transcript is a Session with `kind=internal` and an explicit parent Task.

@@ -8,8 +8,7 @@ dev_sync_documents() {
     fi
     [ "${DEV_OFFLINE:-0}" -eq 0 ] || dev_fail 14 "document toolchain is incomplete offline; run ./dev bootstrap"
     DEV_BREW=$(dev_find_brew) || {
-        dev_install_homebrew || dev_fail 11 "Homebrew is required for the document toolchain"
-        DEV_BREW=$(dev_find_brew) || dev_fail 11 "Homebrew is unavailable"
+        dev_fail 11 "Homebrew is required; run ./dev bootstrap to review and authorize its installation"
     }
     DEV_DOCUMENT_FORMULAS=$(dev_toml_string "$ROOT_DIR/configuration/dev-toolchain.toml" document_formulas) || dev_fail 2 "missing document_formulas"
     DEV_DOCUMENT_CASKS=$(dev_toml_string "$ROOT_DIR/configuration/dev-toolchain.toml" document_casks) || dev_fail 2 "missing document_casks"
@@ -31,7 +30,12 @@ dev_sync_documents() {
             dev_run_bounded 1800 "Homebrew repair $DEV_DOCUMENT_FORMULA" env HOMEBREW_NO_AUTO_UPDATE=1 "$DEV_BREW" reinstall "$DEV_DOCUMENT_FORMULA" || dev_fail 11 "failed to repair $DEV_DOCUMENT_FORMULA"
         fi
     done
-    "$DEV_PYTHON" "$ROOT_DIR/scripts/dev/ocr-models.py" --policy "$ROOT_DIR/configuration/dev-toolchain.toml" --data-dir "$("$DEV_BREW" --prefix)/share/tessdata" || dev_fail 11 "failed to install Chinese OCR models"
+    DEV_DOCUMENT_BREW_PREFIX=$("$DEV_BREW" --prefix) || dev_fail 11 "Homebrew prefix lookup failed"
+    case "$DEV_DOCUMENT_BREW_PREFIX" in
+        /*) ;;
+        *) dev_fail 11 "Homebrew prefix must be a nonempty absolute path";;
+    esac
+    "$DEV_PYTHON" "$ROOT_DIR/scripts/dev/ocr-models.py" --policy "$ROOT_DIR/configuration/dev-toolchain.toml" --data-dir "$DEV_DOCUMENT_BREW_PREFIX/share/tessdata" || dev_fail 11 "failed to install Chinese OCR models"
     for DEV_DOCUMENT_CASK in $DEV_DOCUMENT_CASKS; do
         case "$DEV_DOCUMENT_CASK" in *[!a-z0-9-]*) dev_fail 2 "invalid document cask";; esac
         if [ "$DEV_DOCUMENT_CASK" = libreoffice ] && command -v soffice >/dev/null 2>&1 && soffice --version >/dev/null 2>&1; then

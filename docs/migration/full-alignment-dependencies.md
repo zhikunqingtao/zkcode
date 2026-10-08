@@ -2,6 +2,14 @@
 
 依赖仍以 `Cargo.lock`、`frontend/package-lock.json`、Python runtime/build lock 和 `configuration/dev-toolchain.toml` 为版本事实来源。新增库仅承担现有标准协议/格式处理，不替代 Rust 执行生命周期或费用账本。
 
+## 2026-10-08 必要缺陷修复补充
+
+本轮没有新增 Cargo、npm 或 Python 运行依赖。开发安装器要求 Python `>=3.11.4,<3.12`，用于既有安全解包 API；不收窄 Python 服务自身的支持范围。`dev sync` 不再隐式安装 Homebrew，OCR 安装先确认 `brew --prefix` 成功且返回非空绝对路径。
+
+私有 LSP manifest 增加 `rust-src 1.97.1`，来源和归档 SHA-256 固定在 `configuration/lsp-toolchain.json`。解包后完整源码树按相对 POSIX 路径的 UTF-8 字节排序计算身份；Python 安装器与 Rust 校验器使用同一规则。当前验证树 SHA-256 为 `37f0c50967c8fe5dc7ebdc721a3efba591861f913d156c45f34eec1df727ee07`。rust-analyzer 使用显式 `cargo.sysrootSrc`，不修改全局 rustup，也不在查询时下载。
+
+本轮验收使用隔离安装目录与新构建，现有运行服务继续使用原 LSP manifest。原目录 doctor 的 stale/schema 状态与候选环境分开记录；下文旧轮次的 doctor 通过记录只代表对应历史源码。本轮结果以 [必要修复验收](necessary-fixes-2026-10.md) 和配套门禁记录为准。切换正在使用的服务不属于本轮自动操作。
+
 ## JSON Schema 校验
 
 `jsonschema = 0.58.6` 关闭默认特性，只进行有界的本地最终答案校验；远程 schema 引用拒绝，不在请求时下载依赖。它经 `referencing → fluent-uri` 引入 `borrow-or-share 0.2.4`。

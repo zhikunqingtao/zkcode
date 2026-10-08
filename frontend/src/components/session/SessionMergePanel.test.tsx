@@ -37,6 +37,26 @@ function complete() {
     useSessionMergeStore.setState({ pending: { key: 'key', request, operation: { ...operation, lockedSourceSessionIds: [], status: 'completed', stage: 'completed',
         result: { copiedCount: 2, warningCount: 1, warnings: [{ originalPath: '/missing.txt', status: 'missing', reason: '文件缺失' }] } } } });
 }
+
+it.each([
+    ['unknown', true, 0, '费用未知'],
+    ['unknown', true, 1_000_000, '参考费用不完整'],
+    ['unknown', false, 0, '费用未知'],
+    ['known', true, 0, '$0.000000'],
+    ['known', false, 0, '$0.000000'],
+    ['unavailable', true, 0, '费用状态未确认'],
+    [undefined, true, 0, '费用状态未确认'],
+] as const)('keeps merge pricing=%s independent from usageComplete=%s and subtotal=%s', (pricingStatus, usageComplete, costNanosUsd, label) => {
+    useSessionMergeStore.setState({ open: true, pending: { key: 'key', request, operation: {
+        ...operation, usage: { tokens: 32, costNanosUsd, usageComplete, ...{ pricingStatus } },
+    } } });
+    render(<SessionMergePanel />);
+    const usage = screen.getByText(/合并用量：/);
+    expect(usage).toHaveTextContent(label);
+    expect(usage).toHaveTextContent('32 tokens');
+    expect(usage.textContent?.includes('用量尚不完整')).toBe(!usageComplete);
+    if (pricingStatus !== 'known' && costNanosUsd === 0) expect(usage).not.toHaveTextContent('$0.000000');
+});
 it('opens E through existing activation only while the initiating panel remains open', async () => {
     await begin();
     act(complete);
@@ -89,6 +109,15 @@ it('restores completed results without automatically changing the active session
     render(<SessionMergePanel />);
     expect(screen.getByRole('button', { name: '合并结果' })).toBeInTheDocument();
     expect(activateSessionCandidate).not.toHaveBeenCalled();
+});
+
+it.each(['preparing', 'cancelled'] as const)('shows pending cancellation after restoring a %s merge', status => {
+    const error = 'MERGE_CANCELLATION_PENDING：取消状态或来源锁释放仍待确认';
+    useSessionMergeStore.setState({ open: true, pending: { key: 'key', request,
+        operation: { ...operation, status, error, canResume: false, canCancel: true } } });
+    render(<SessionMergePanel />);
+    expect(screen.getByRole('alert')).toHaveTextContent(error);
+    expect(screen.queryByRole('button', { name: '继续合并' })).not.toBeInTheDocument();
 });
 
 it('uses the same goal preview as the session list when a session has no explicit title', async () => {

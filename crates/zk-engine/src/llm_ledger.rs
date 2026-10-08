@@ -166,16 +166,14 @@ impl LlmCallObserver for DbLlmCallObserver {
                 provider_request_id: call.provider_request_id,
             };
             if let Some(budget) = budget {
-                if (budget.limits.token_limit.is_some()
-                    || budget.limits.cost_limit_nanos_usd.is_some())
-                    && !has_known_price(&physical_model)
+                let reserved_cost = if budget.limits.cost_limit_nanos_usd.is_some()
+                    && has_known_price(&physical_model)
                 {
-                    return Err("BUDGET_PRICE_UNKNOWN".to_owned());
-                }
-                let reserved_cost = if budget.limits.cost_limit_nanos_usd.is_some() {
                     estimate_cost_nanos(&physical_model, budget.input_tokens, budget.output_tokens)
-                        .ok_or_else(|| "BUDGET_PRICE_UNKNOWN".to_owned())?
+                        .ok_or_else(|| "BUDGET_COST_ESTIMATE_INVALID".to_owned())?
                 } else {
+                    // Zero reserves only the known amount; it does not declare
+                    // the call free. Unknown prices remain NULL at settlement.
                     0
                 };
                 db.start_llm_call_with_budget(
@@ -217,7 +215,7 @@ impl LlmCallObserver for DbLlmCallObserver {
                     .as_ref()
                     .map(|usage| usage.cache_creation_input_tokens),
                 cost_nanos_usd,
-                usage_complete: call.usage.is_some() && pricing_known && cost_nanos_usd.is_some(),
+                usage_complete: call.usage.is_some(),
                 error_code: call.error_code,
             };
             let outcome = db
@@ -320,7 +318,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn persists_exact_usage_and_marks_unknown_price_incomplete() {
+    async fn persists_exact_usage_with_unknown_pricing_independent_of_cost() {
         let db = Db::open_in_memory().expect("db");
         let session = db
             .create_session("gpt-5.4-mini", "/tmp/llm-ledger")
@@ -399,16 +397,62 @@ mod tests {
                 Some(10),
                 Some(4),
                 None,
-                0,
+                1,
             )
         );
         assert!(
-            !db.find_run_by_id(&run_id)
+            db.find_run_by_id(&run_id)
                 .await
                 .expect("run")
                 .unwrap()
                 .usage_complete
         );
+    }
+
+    #[tokio::test]
+    async fn unknown_pricing_invalid_usage_is_not_settled_as_complete() {
+        let db = Db::open_in_memory().unwrap();
+        let session = db
+            .create_session("custom", "/tmp/invalid-usage")
+            .await
+            .unwrap();
+        let run_id = uuid::Uuid::new_v4().to_string();
+        db.start_run(&run_id, &session.id, None, Some("query"), "custom")
+            .await
+            .unwrap();
+        let observer = DbLlmCallObserver::new(db.clone());
+        observer
+            .call_started(LlmCallStarted {
+                call_id: "invalid-usage".into(),
+                attribution: LlmExecutionAttribution::new(&run_id, &run_id, "conversation"),
+                provider: "fixture".into(),
+                model: "custom".into(),
+                route: "{}".into(),
+                provider_request_id: None,
+            })
+            .await
+            .unwrap();
+        let failure = observer
+            .call_finished(LlmCallFinished {
+                call_id: "invalid-usage".into(),
+                model: "custom".into(),
+                status: LlmCallStatus::Completed,
+                usage: Some(Usage {
+                    input_tokens: -1,
+                    output_tokens: 3,
+                    ..Usage::default()
+                }),
+                error_code: None,
+            })
+            .await;
+        assert!(
+            failure.is_err(),
+            "invalid usage must fail durable validation"
+        );
+        let row: (String, i64, Option<i64>) = db.with_conn_blocking(|conn| {
+            conn.query_row("SELECT status,usage_complete,cost_nanos_usd FROM llm_calls WHERE call_id='invalid-usage'", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).map_err(Into::into)
+        }).unwrap();
+        assert_eq!(row, ("started".into(), 0, None));
     }
 
     #[tokio::test]

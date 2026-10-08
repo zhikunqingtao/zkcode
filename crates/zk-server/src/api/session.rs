@@ -273,7 +273,7 @@ pub(crate) async fn get_session_detail(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let detail = load_session(&state, &session_id).await?;
+    let detail = load_session(&state, &session_id, true).await?;
     Ok(Json(mapping::detail_to_value(&detail)))
 }
 
@@ -311,7 +311,7 @@ pub(crate) async fn resume_session(
     Path(session_id): Path<String>,
 ) -> Result<Json<ResumeSessionResponse>, ApiError> {
     require_durable_conversation(&state, &session_id).await?;
-    let detail = load_session(&state, &session_id).await?;
+    let detail = load_session(&state, &session_id, true).await?;
     Ok(Json(ResumeSessionResponse {
         session_id: detail.session_id.clone(),
         web_socket_url: ws_url(&detail.session_id),
@@ -362,7 +362,7 @@ pub(crate) async fn export_session(
     Query(query): Query<HashMap<String, String>>,
 ) -> Result<Response, ApiError> {
     require_durable_conversation(&state, &session_id).await?;
-    let detail = load_session(&state, &session_id).await?;
+    let detail = load_session(&state, &session_id, false).await?;
     let format = query
         .get("format")
         .map(String::as_str)
@@ -429,7 +429,7 @@ pub(crate) async fn list_session_messages(
     )?;
     let page = state
         .db
-        .list_messages(&session_id, query.get("cursor").map(String::as_str), limit)
+        .list_messages_for_display(&session_id, query.get("cursor").map(String::as_str), limit)
         .await?
         .ok_or_else(|| ApiError::session_not_found(&session_id))?;
     Ok(Json(MessageListResponse {
@@ -456,15 +456,17 @@ async fn require_durable_conversation(state: &AppState, session_id: &str) -> Res
 async fn load_session(
     state: &AppState,
     session_id: &str,
+    display: bool,
 ) -> Result<zk_db::model::SessionDetail, ApiError> {
     if state.db.is_merge_billing_session(session_id).await? {
         return Err(ApiError::session_not_found(session_id));
     }
-    state
-        .db
-        .get_session(session_id)
-        .await?
-        .ok_or_else(|| ApiError::session_not_found(session_id))
+    let detail = if display {
+        state.db.get_session_for_display(session_id).await?
+    } else {
+        state.db.get_session(session_id).await?
+    };
+    detail.ok_or_else(|| ApiError::session_not_found(session_id))
 }
 
 /// UI projections are scoped separately from the canonical conversation body.

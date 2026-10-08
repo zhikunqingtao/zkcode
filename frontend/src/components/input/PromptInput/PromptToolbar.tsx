@@ -144,6 +144,9 @@ interface PromptToolbarProps {
     fileReferenceTitle: string;
     asrAvailable: boolean;
     maxImages: number;
+    imageCapability: 'loading' | 'unavailable' | 'unsupported' | 'ready';
+    imageCapabilityMessage: string;
+    onRetryImages: () => void;
     onFileReferenceClick: () => void;
     onFiles: (files: File[]) => void;
     onVoiceTranscript: (text: string) => void;
@@ -159,6 +162,9 @@ export const PromptToolbar: React.FC<PromptToolbarProps> = ({
     fileReferenceTitle,
     asrAvailable,
     maxImages,
+    imageCapability,
+    imageCapabilityMessage,
+    onRetryImages,
     onFileReferenceClick,
     onFiles,
     onVoiceTranscript,
@@ -183,10 +189,11 @@ export const PromptToolbar: React.FC<PromptToolbarProps> = ({
             <FileUpload
                 onFiles={onFiles}
                 accept="image/*"
-                disabled={disabled || isSubmitting || isUploadingPaste || maxImages <= 0}
-                title={maxImages > 0 ? `上传图片（当前模型有效上限 ${maxImages} 张）` : '当前模型没有可用的图片处理能力'}
+                disabled={disabled || isSubmitting || isUploadingPaste || imageCapability !== 'ready' || maxImages <= 0}
+                title={imageCapabilityMessage}
             />
         )}
+        {imageCapability === 'unavailable' && !runActive && !compacting && <button type="button" className="panel-control px-2 text-xs text-t2" onClick={onRetryImages} disabled={disabled || isSubmitting} aria-label="重新加载图片能力">重试图片能力</button>}
         {asrAvailable && !runActive && !compacting && (
             <VoiceInputButton
                 onTranscript={onVoiceTranscript}

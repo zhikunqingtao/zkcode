@@ -686,15 +686,19 @@ impl AuthorizationService {
         let denied = |message: &str| {
             AuthzError::new("AUTHORIZATION_FINAL_RECHECK_DENIED", message.to_owned())
         };
-        if authorized.descriptor.analyzer_id == "hook-v1" {
-            let mode = self
-                .modes
-                .mode_in_current_write(conn, &authorized.subject.root_session_id);
-            if mode == PermissionMode::Plan
-                || (authorized.reason_code == "AUTO_APPROVE" && mode != PermissionMode::AutoApprove)
-            {
-                return Err(denied("Hook permission mode changed before execution"));
-            }
+        let mode = self
+            .modes
+            .mode_in_current_write(conn, &authorized.subject.root_session_id);
+        let allowed_by_current_policy =
+            self.current_policy_allows_in_transaction(conn, authorized, mode);
+        if (mode == PermissionMode::Plan
+            || matches!(
+                authorized.reason_code.as_str(),
+                "AUTO_APPROVE" | "ACCEPT_EDITS"
+            ))
+            && !allowed_by_current_policy
+        {
+            return Err(denied("Permission mode changed before execution"));
         }
         // 和取消状态变更使用同一个 writer，避免批准后、执行前的取消竞态。
         // waitingDependencies 仍可能有同批次并行工具需要完成。
@@ -767,6 +771,53 @@ impl AuthorizationService {
             ));
         }
         Ok(())
+    }
+
+    /// Re-evaluate only the existing non-interactive policy branches under the
+    /// admission transaction. This never creates or consumes a replacement grant.
+    fn current_policy_allows_in_transaction(
+        &self,
+        conn: &rusqlite::Connection,
+        authorized: &AuthorizedOperation,
+        mode: PermissionMode,
+    ) -> bool {
+        let operation = &authorized.descriptor;
+        if operation.effects == [EffectClass::SafeInternal] || mode == PermissionMode::AutoApprove {
+            return true;
+        }
+        if operation.risk == RiskClass::High || operation.analyzer_id == "hook-v1" {
+            return false;
+        }
+        let read = operation.effects == [EffectClass::ReadResource];
+        if read && operation.analyzer_id == "file-v1" && operation.risk == RiskClass::Safe {
+            return true;
+        }
+        // PLAN may retain the same bounded read policies as initial admission,
+        // but never the write branches or a remembered approval.
+        if (read || mode != PermissionMode::Plan)
+            && (self.is_trusted_system_scratchpad_file_operation_in_current_write(
+                conn,
+                &authorized.subject,
+                operation,
+            ) || self.is_trusted_private_tmp_file_operation_in_current_write(
+                conn,
+                &authorized.subject,
+                operation,
+            ))
+        {
+            return true;
+        }
+        if mode == PermissionMode::Plan {
+            return false;
+        }
+        self.is_trusted_project_file_write_in_current_write(conn, &authorized.subject, operation)
+            || (mode == PermissionMode::AcceptEdits
+                && operation.analyzer_id == "file-v1"
+                && operation.effects == [EffectClass::WriteResource]
+                && !operation
+                    .resources
+                    .iter()
+                    .any(|resource| resource.outside_workspace))
     }
 
     /// 旧源 `recordFinalDenial`（L359-368）：诊断写入失败只记 error，不改变裁决。

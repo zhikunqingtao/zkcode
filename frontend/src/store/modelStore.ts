@@ -24,7 +24,7 @@ export interface ModelInfo {
      * 当前配置下单次请求允许的图片数量上限。原生视觉模型取自身上限，
      * 非视觉模型取后端实际视觉路由目标上限，无可用路由时为 0。
      */
-    maxImages: number;
+    maxImages: number | null;
     supportsToolUse?: boolean;
     costPer1kInput?: number;
     costPer1kOutput?: number;
@@ -78,7 +78,8 @@ export const useModelStore = create<ModelStoreState>()(
                             supportsStreaming: m.supportsStreaming,
                             supportsThinking: m.supportsThinking,
                             supportsImages: !!m.supportsImages,
-                            maxImages: typeof m.maxImages === 'number' ? m.maxImages : 0,
+                            // Missing capability metadata is unknown, not an explicit zero limit.
+                            maxImages: typeof m.maxImages === 'number' ? m.maxImages : null,
                             supportsToolUse: m.supportsToolUse,
                             costPer1kInput: m.costPer1kInput,
                             costPer1kOutput: m.costPer1kOutput,

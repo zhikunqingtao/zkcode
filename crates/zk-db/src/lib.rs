@@ -32,6 +32,8 @@
 //!   依赖的本 crate；`zk_server::interaction::runs` 现为本模块的再导出。
 
 mod activity;
+mod browser_recordings;
+pub use browser_recordings::{BrowserRecordingFinalization, RecordedJourneyPostprocessing};
 mod anomaly;
 mod artifact;
 mod artifact_terminal;

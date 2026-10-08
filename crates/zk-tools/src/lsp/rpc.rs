@@ -105,7 +105,11 @@ impl Peer {
                 json!({"protocol":"lsp","language":language}),
             )
             .await?;
-        let settings = settings(&language, &installation.bundle);
+        let settings = settings(
+            &language,
+            &installation.bundle,
+            &installation.rust_source_root,
+        );
         let shared = Arc::new(Shared {
             pending: Mutex::new(HashMap::new()),
             diagnostics: Mutex::new(HashMap::new()),
@@ -158,10 +162,7 @@ impl Peer {
             )
             .env("HOME", state.join("home"))
             .env("TMPDIR", state.join("tmp"))
-            .env(
-                "RUSTUP_TOOLCHAIN",
-                installation.versions["rustCompiler"].as_str().unwrap_or(""),
-            )
+            .env("RUSTUP_TOOLCHAIN", &installation.rust_compiler_version)
             .env("CARGO_TARGET_DIR", state.join("rust-target"))
             .env("JAVA_HOME", installation.bundle.join("java/Contents/Home"))
             .env("GOTOOLCHAIN", "local")
@@ -595,10 +596,10 @@ async fn read_loop(stdout: Option<ChildStdout>, shared: Arc<Shared>, writer: Wri
     }
     shared.disconnect();
 }
-fn settings(language: &str, bundle: &Path) -> Value {
+fn settings(language: &str, bundle: &Path, rust_source: &Path) -> Value {
     match language {
         "rust" => {
-            json!({"rust-analyzer":{"cargo":{"buildScripts":{"enable":false},"autoreload":false,"extraArgs":["--locked"]},"procMacro":{"enable":false},"checkOnSave":false,"check":{"enable":false}}})
+            json!({"rust-analyzer":{"cargo":{"sysrootSrc":rust_source,"buildScripts":{"enable":false},"autoreload":false,"extraArgs":["--locked"]},"procMacro":{"enable":false},"checkOnSave":false,"check":{"enable":false}}})
         }
         "java" => {
             json!({"java":{"home":bundle.join("java/Contents/Home"),"autobuild":{"enabled":false},"import":{"gradle":{"enabled":false},"maven":{"enabled":false}},"configuration":{"updateBuildConfiguration":"disabled"}}})
@@ -623,5 +624,22 @@ fn initialization(language: &str, settings: &Value, bundle: &Path) -> Value {
         }
         "go" => json!({"analyses":{},"usePlaceholders":false}),
         _ => Value::Null,
+    }
+}
+
+#[cfg(test)]
+mod settings_tests {
+    use super::*;
+    #[test]
+    fn rust_initialization_pins_private_sources_without_enabling_workspace_execution() {
+        let bundle = Path::new("/private/lsp/bundle");
+        let source = bundle.join("rust-src/rust-src/lib/rustlib/src/rust/library");
+        let settings = settings("rust", bundle, &source);
+        let options = initialization("rust", &settings, bundle);
+        assert_eq!(options["cargo"]["sysrootSrc"], source.to_str().unwrap());
+        assert_eq!(options["cargo"]["buildScripts"]["enable"], false);
+        assert_eq!(options["procMacro"]["enable"], false);
+        assert_eq!(options["checkOnSave"], false);
+        assert_eq!(options["cargo"]["extraArgs"], json!(["--locked"]));
     }
 }

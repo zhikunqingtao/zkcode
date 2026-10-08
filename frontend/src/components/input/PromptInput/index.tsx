@@ -149,6 +149,9 @@ const PromptInput: React.FC<PromptInputProps> = (props) => {
                             fileReferenceTitle={f.fileReferenceTitle}
                             asrAvailable={s.asrAvailable}
                             maxImages={a.maxImages}
+                            imageCapability={a.imageCapability}
+                            imageCapabilityMessage={a.imageCapabilityMessage}
+                            onRetryImages={a.retryImageCapabilities}
                             onFileReferenceClick={f.handleFileReferenceClick}
                             onFiles={a.handleFiles}
                             onVoiceTranscript={s.handleVoiceTranscript}
