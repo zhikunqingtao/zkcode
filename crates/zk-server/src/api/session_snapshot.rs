@@ -182,13 +182,6 @@ fn start_reserved_restore(
         })?;
         let status = metadata_string(&snapshot, "status").unwrap_or("active");
         let title = snapshot.metadata.get("title").and_then(Value::as_str);
-        let input_tokens = metadata_i64(&snapshot, "totalInputTokens");
-        let output_tokens = metadata_i64(&snapshot, "totalOutputTokens");
-        let cost_usd = snapshot
-            .metadata
-            .get("totalCostUsd")
-            .and_then(Value::as_f64)
-            .unwrap_or(0.0);
         match db
             .restore_session_snapshot(
                 &session_id,
@@ -196,9 +189,6 @@ fn start_reserved_restore(
                 model,
                 status,
                 title,
-                input_tokens,
-                output_tokens,
-                cost_usd,
                 snapshot.messages.clone(),
             )
             .await?
@@ -208,6 +198,17 @@ fn start_reserved_restore(
             SnapshotRestoreOutcome::WorkspaceMismatch => Err(ApiError::validation_with_code(
                 "SNAPSHOT_WORKSPACE_MISMATCH",
                 "Snapshot belongs to a different workspace",
+            )),
+            SnapshotRestoreOutcome::HistoryConflict => Err(ApiError {
+                status: axum::http::StatusCode::CONFLICT,
+                code: "SNAPSHOT_HISTORY_CONFLICT".into(),
+                message:
+                    "Snapshot history conflicts with the current session; no changes were applied"
+                        .into(),
+            }),
+            SnapshotRestoreOutcome::InvalidMessages => Err(ApiError::validation_with_code(
+                "SNAPSHOT_MESSAGES_INVALID",
+                "Snapshot messages are invalid; no changes were applied",
             )),
         }
     })
@@ -231,14 +232,6 @@ pub(crate) async fn delete(
 
 fn metadata_string<'a>(snapshot: &'a SessionSnapshot, key: &str) -> Option<&'a str> {
     snapshot.metadata.get(key).and_then(Value::as_str)
-}
-
-fn metadata_i64(snapshot: &SessionSnapshot, key: &str) -> i64 {
-    snapshot
-        .metadata
-        .get(key)
-        .and_then(Value::as_i64)
-        .unwrap_or(0)
 }
 
 #[cfg(test)]

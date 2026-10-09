@@ -7,13 +7,18 @@
 //!   subagent 过滤）、`loadSession`（详情含全量消息与 metadata 解析）
 //! - `SessionController.listSessions`（无效游标回退、nextCursor 编码）
 
+use std::collections::HashSet;
+
 use rusqlite::{Connection, OptionalExtension, params};
 
 use zk_protocol::model::Usage;
 
 use crate::cursor::{decode_session_cursor, encode_session_cursor};
 use crate::error::DbError;
-use crate::model::{SessionDetail, SessionPage, SessionSummary, goal_preview};
+use crate::model::{
+    MessageRecord, MessageRole, SessionDetail, SessionPage, SessionSummary, StoredBlock,
+    goal_preview,
+};
 use crate::run::{RunEnvelopeView, map_envelope_row};
 use crate::task_runtime::{RUNTIME_TASK_COLUMNS, RuntimeTaskRecord, map_runtime_task};
 use crate::time::{format_rfc3339_micros, now_millis, parse_rfc3339_millis};
@@ -21,12 +26,16 @@ use crate::time::{format_rfc3339_micros, now_millis, parse_rfc3339_millis};
 /// 单事务快照恢复结果。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SnapshotRestoreOutcome {
-    /// 会话与消息已整体替换。
+    /// 展示属性已恢复；相同消息保留原行，安全的普通后缀已截除。
     Applied,
     /// 目标会话不存在。
     NotFound,
     /// 快照声明的工作区与数据库中的授权工作区不一致。
     WorkspaceMismatch,
+    /// 快照不是当前历史的原样前缀，或截尾会损伤已有执行事实/依赖。
+    HistoryConflict,
+    /// 快照消息的会话、身份或序号结构非法。
+    InvalidMessages,
 }
 
 /// One `SQLite` snapshot used to rebuild every session-scoped live projection.
@@ -166,12 +175,9 @@ fn query_from_latest(
         .collect::<rusqlite::Result<_>>()?)
 }
 
-fn ensure_snapshot_messages_replaceable(
-    conn: &Connection,
-    session_id: &str,
-) -> Result<(), DbError> {
-    // Restoring history is destructive, so admission and all message
-    // dependencies must be checked in the same transaction as DELETE.
+fn ensure_snapshot_restore_admitted(conn: &Connection, session_id: &str) -> Result<(), DbError> {
+    // Restore can change session preferences and truncate ordinary history.
+    // Keep admission in the same transaction as those writes.
     crate::session_merge::ensure_idle(conn, session_id)?;
     let merge_reserved: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM session_merge_locks WHERE session_id=?1)",
@@ -183,10 +189,10 @@ fn ensure_snapshot_messages_replaceable(
             "session is reserved by an active merge".into(),
         ));
     }
-    // The FK cascade removes journals even when the same message IDs
-    // will be reinserted. A succeeded sealed recording still needs its
-    // completed journal to become ackEligible. ACK itself does not.
-    // Scope this to messages being replaced, not descendant transcripts.
+    // Preserve the existing pending/sealed admission policy, including restores
+    // that retain every message. Retaining rows already prevents FK cascades;
+    // relaxing this additional policy is outside this repair. Scope the guard
+    // to this transcript rather than unrelated descendant transcripts.
     let messages_required: bool = conn.query_row(
         "SELECT EXISTS(
             SELECT 1 FROM tool_result_postprocessing p
@@ -212,6 +218,197 @@ fn ensure_snapshot_messages_replaceable(
         ));
     }
     Ok(())
+}
+
+fn snapshot_messages_well_formed(messages: &[MessageRecord], session_id: &str) -> bool {
+    let mut ids = HashSet::with_capacity(messages.len());
+    let mut previous_seq = None;
+    messages.iter().all(|message| {
+        let valid = message.session_id == session_id
+            && !message.id.trim().is_empty()
+            && ids.insert(message.id.as_str())
+            && previous_seq.is_none_or(|seq| message.seq_num > seq);
+        previous_seq = Some(message.seq_num);
+        valid
+    })
+}
+
+fn normalize_snapshot_message(message: &mut MessageRecord) {
+    if message
+        .meta
+        .as_ref()
+        .is_some_and(serde_json::Value::is_null)
+    {
+        message.meta = None;
+    }
+    for block in &mut message.content {
+        if let StoredBlock::ToolResult { metadata, .. } = block
+            && metadata.as_ref().is_some_and(serde_json::Value::is_null)
+        {
+            *metadata = None;
+        }
+    }
+}
+
+fn snapshot_message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<MessageRecord>> {
+    let role: String = row.get(2)?;
+    let content: String = row.get(3)?;
+    let created_at: String = row.get(7)?;
+    let metadata: Option<String> = row.get(9)?;
+    let (Some(role), Ok(content), Some(created_at)) = (
+        MessageRole::parse(&role),
+        serde_json::from_str::<Vec<StoredBlock>>(&content),
+        parse_rfc3339_millis(&created_at),
+    ) else {
+        return Ok(None);
+    };
+    let meta = match metadata
+        .as_deref()
+        .map(serde_json::from_str::<Option<serde_json::Value>>)
+        .transpose()
+    {
+        Ok(meta) => meta.flatten(),
+        Err(_) => return Ok(None),
+    };
+    Ok(Some(MessageRecord {
+        id: row.get(0)?,
+        session_id: row.get(1)?,
+        role,
+        content,
+        stop_reason: row.get(4)?,
+        input_tokens: row.get(5)?,
+        output_tokens: row.get(6)?,
+        created_at,
+        seq_num: row.get(8)?,
+        meta,
+    }))
+}
+
+// Unlike the UI loader, restoring must not skip unknown roles/blocks or replace
+// malformed timestamps/metadata with defaults. A lossy read cannot prove that a
+// snapshot preserves the current history. Persistent content is read in place;
+// its original JSON and timestamps are never rewritten after comparison.
+fn load_snapshot_history(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<Option<Vec<MessageRecord>>, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT id,session_id,role,content_json,stop_reason,input_tokens,output_tokens,
+                created_at,seq_num,metadata_json
+           FROM messages WHERE session_id=?1 ORDER BY seq_num",
+    )?;
+    let mut rows = stmt.query([session_id])?;
+    let mut messages = Vec::new();
+    while let Some(row) = rows.next()? {
+        let message = match snapshot_message_from_row(row) {
+            Ok(message) => message,
+            Err(
+                rusqlite::Error::InvalidColumnType(..)
+                | rusqlite::Error::FromSqlConversionFailure(..)
+                | rusqlite::Error::IntegralValueOutOfRange(..),
+            ) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let Some(message) = message else {
+            return Ok(None);
+        };
+        messages.push(message);
+    }
+    Ok(snapshot_messages_well_formed(&messages, session_id).then_some(messages))
+}
+
+// A Run can read the entire transcript before writing its first attributed
+// message, and can reload it later. Without a durable read boundary, ownership
+// of the last message is not proof that an unbound suffix was never consumed.
+// Task.session_id is root ownership: Runs in another transcript alone do not
+// freeze this one. A Task with no surviving Run has no resolvable read scope.
+fn snapshot_history_has_execution_facts(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<bool, DbError> {
+    let execution: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM run_envelopes WHERE session_id=?1)
+             OR EXISTS(SELECT 1 FROM messages WHERE session_id=?1
+                       AND (task_id IS NOT NULL OR run_id IS NOT NULL
+                            OR source_task_id IS NOT NULL OR origin<>'conversation'))
+             OR EXISTS(SELECT 1 FROM tasks t
+                       WHERE NOT EXISTS(SELECT 1 FROM run_envelopes r WHERE r.task_id=t.id)
+                         AND (t.session_id=?1 OR EXISTS(
+                             SELECT 1 FROM sessions s WHERE s.id=?1 AND s.parent_task_id=t.id)))",
+        [session_id],
+        |row| row.get(0),
+    )?;
+    if execution {
+        return Ok(true);
+    }
+    let references: bool = conn.query_row(
+        "WITH target_messages AS (SELECT id FROM messages WHERE session_id=?1)
+         SELECT EXISTS(SELECT 1 FROM task_results r
+                       JOIN target_messages m ON m.id=r.final_message_id)
+             OR EXISTS(SELECT 1 FROM task_result_receipts r
+                       JOIN target_messages m ON m.id=r.message_id)
+             OR EXISTS(SELECT 1 FROM tool_result_postprocessing p
+                       JOIN target_messages m ON m.id=p.result_message_id)
+             OR EXISTS(SELECT 1 FROM run_workbench_bindings b
+                       JOIN target_messages m ON m.id=b.request_message_id
+                                               OR m.id=b.result_message_id)
+             OR EXISTS(SELECT 1 FROM external_tool_requests q
+                       JOIN target_messages m ON m.id=q.result_message_id)",
+        [session_id],
+        |row| row.get(0),
+    )?;
+    if references {
+        return Ok(true);
+    }
+    // The normal producer uses message:<id>[#sha256:<digest>]. Include any
+    // suffix after '#' conservatively: a malformed digest must not hide an
+    // otherwise resolvable dependency. Target-owned invocations (including
+    // opaque/invalid references) are already covered by their Run above.
+    // output_ref has no index. Joining it to each target message would scan the
+    // global invocation table repeatedly while holding the writer. Read it once
+    // and resolve links against the target's message identities instead.
+    let target_ids: HashSet<String> = conn
+        .prepare("SELECT id FROM messages WHERE session_id=?1")?
+        .query_map([session_id], |row| row.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let max_id_len = target_ids.iter().map(String::len).max().unwrap_or(0);
+    let mut statement = conn.prepare(
+        "SELECT output_ref FROM tool_invocations WHERE substr(output_ref,1,8)='message:'",
+    )?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        let reference: String = row.get(0)?;
+        let Some(message_id) = reference.strip_prefix("message:") else {
+            continue;
+        };
+        if (message_id.len() <= max_id_len && target_ids.contains(message_id))
+            || message_id
+                .match_indices('#')
+                .take_while(|(index, _)| *index <= max_id_len)
+                .any(|(index, _)| target_ids.contains(&message_id[..index]))
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+// File snapshots contain caller-provided file bytes and a message-local link;
+// they do not read the transcript. References to a retained prefix stay valid.
+// Null/dangling/foreign links in this session cannot establish a safe scope.
+fn snapshot_tail_has_file_dependencies(
+    conn: &Connection,
+    session_id: &str,
+    last_retained_seq: Option<i64>,
+) -> Result<bool, DbError> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM file_snapshots f
+                       LEFT JOIN messages m ON m.id=f.message_id
+                       WHERE (m.session_id=?1 AND (?2 IS NULL OR m.seq_num>?2))
+                          OR (f.session_id=?1 AND (m.id IS NULL OR m.session_id<>?1)))",
+        params![session_id, last_retained_seq],
+        |row| row.get(0),
+    )?)
 }
 
 impl crate::Db {
@@ -863,16 +1060,15 @@ impl crate::Db {
         .await
     }
 
-    /// 在一个 `SQLite` 写事务中恢复会话元数据与完整消息序列。
+    /// 在一个 `SQLite` 写事务中恢复展示属性与可安全截尾的消息历史。
     ///
-    /// 重复调用会先删除再插入同一组稳定消息 ID，不产生重复消息；任一消息
-    /// 序列化/约束失败时整个事务回滚。工作区在事务内复检，避免校验与写入间
-    /// 被替换。运行、合并或工具后处理仍依赖当前历史时拒绝恢复。
+    /// 相同历史保留全部原行；只允许删除没有执行事实或依赖的普通消息后缀。
+    /// 不补回消息、不覆盖消息内容或归属，也不回退累计用量。工作区、运行、
+    /// 合并、工具后处理和历史依赖均在同一事务内复检。
     ///
     /// # Errors
-    /// 会话不存在、工作区不匹配、消息约束/序列化失败或事务写入失败时返回
-    /// [`DbError`]。
-    #[allow(clippy::too_many_arguments)]
+    /// 活跃工作、内容保留策略或数据库操作失败时返回 [`DbError`]；消息结构
+    /// 非法或历史不能安全恢复时返回对应的 [`SnapshotRestoreOutcome`]。
     pub async fn restore_session_snapshot(
         &self,
         session_id: &str,
@@ -880,10 +1076,7 @@ impl crate::Db {
         model: &str,
         status: &str,
         title: Option<&str>,
-        input_tokens: i64,
-        output_tokens: i64,
-        cost_usd: f64,
-        messages: Vec<crate::MessageRecord>,
+        mut messages: Vec<MessageRecord>,
     ) -> Result<SnapshotRestoreOutcome, DbError> {
         let session_id = session_id.to_owned();
         let expected_working_dir = expected_working_dir.to_owned();
@@ -906,63 +1099,37 @@ impl crate::Db {
             if working_dir != expected_working_dir {
                 return Ok(SnapshotRestoreOutcome::WorkspaceMismatch);
             }
-            if messages
-                .iter()
-                .any(|message| message.session_id != session_id)
-            {
-                return Err(DbError::Invalid(
-                    "snapshot message session mismatch".to_owned(),
-                ));
+            if !snapshot_messages_well_formed(&messages, &session_id) {
+                return Ok(SnapshotRestoreOutcome::InvalidMessages);
             }
 
-            ensure_snapshot_messages_replaceable(&tx, &session_id)?;
-
-            tx.execute(
-                "DELETE FROM messages WHERE session_id = ?1",
-                params![&session_id],
-            )?;
-            for message in messages {
-                let content_json = serde_json::to_string(&message.content)?;
+            ensure_snapshot_restore_admitted(&tx, &session_id)?;
+            let Some(current) = load_snapshot_history(&tx, &session_id)? else {
+                return Ok(SnapshotRestoreOutcome::HistoryConflict);
+            };
+            for message in &mut messages {
+                normalize_snapshot_message(message);
+            }
+            if !current.starts_with(&messages) {
+                return Ok(SnapshotRestoreOutcome::HistoryConflict);
+            }
+            if messages.len() < current.len() {
+                let last_retained_seq = messages.last().map(|message| message.seq_num);
+                if snapshot_history_has_execution_facts(&tx, &session_id)?
+                    || snapshot_tail_has_file_dependencies(&tx, &session_id, last_retained_seq)?
+                {
+                    return Ok(SnapshotRestoreOutcome::HistoryConflict);
+                }
                 tx.execute(
-                    "INSERT INTO messages (
-                        id, session_id, role, content_json, stop_reason,
-                        input_tokens, output_tokens, created_at, seq_num, metadata_json
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                    params![
-                        message.id,
-                        &session_id,
-                        message.role.as_str(),
-                        content_json,
-                        message.stop_reason,
-                        message.input_tokens,
-                        message.output_tokens,
-                        format_rfc3339_micros(message.created_at),
-                        message.seq_num,
-                        message
-                            .meta
-                            .as_ref()
-                            .map(serde_json::to_string)
-                            .transpose()?,
-                    ],
+                    "DELETE FROM messages WHERE session_id=?1 AND (?2 IS NULL OR seq_num>?2)",
+                    params![&session_id, last_retained_seq],
                 )?;
             }
             let now = format_rfc3339_micros(now_millis());
             tx.execute(
                 "UPDATE sessions SET title = ?1, model = ?2, status = ?3,
-                    total_input_tokens = ?4, total_output_tokens = ?5,
-                    total_cache_read = 0, total_cache_create = 0,
-                    total_cost_usd = ?6, updated_at = ?7
-                 WHERE id = ?8",
-                params![
-                    title,
-                    model,
-                    status,
-                    input_tokens,
-                    output_tokens,
-                    cost_usd,
-                    now,
-                    &session_id,
-                ],
+                    updated_at = ?4 WHERE id = ?5",
+                params![title, model, status, now, &session_id],
             )?;
             tx.commit()?;
             Ok(SnapshotRestoreOutcome::Applied)

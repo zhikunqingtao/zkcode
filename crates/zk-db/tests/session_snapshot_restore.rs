@@ -99,9 +99,6 @@ async fn restore(
         "restored",
         "active",
         Some("restored title"),
-        0,
-        0,
-        0.0,
         messages,
     )
     .await
@@ -129,8 +126,8 @@ async fn finish(f: &Fixture) {
         CasOutcome::Applied
     );
     // The verifier succeeded, but a later Run failure has no final assistant.
-    // Successful TaskResults retain their final message with ON DELETE RESTRICT;
-    // that separate constraint would otherwise mask the restore guards below.
+    // Keep this fixture distinct from a Complete result's final-message reference;
+    // these tests isolate admission and recording-finalization constraints.
     let task =
         f.db.find_runtime_task_by_id(&f.task)
             .await
@@ -257,7 +254,7 @@ async fn idle_sealed_success_keeps_completed_journal_even_when_restoring_same_me
 }
 
 #[tokio::test]
-async fn ack_eligible_recording_can_restore_and_finish_ack_without_journal() {
+async fn ack_eligible_recording_can_restore_same_history_and_finish_ack_with_journal() {
     let f = fixture(true).await;
     save_recording_evidence(&f).await;
     finish(&f).await;
@@ -271,8 +268,15 @@ async fn ack_eligible_recording_can_restore_and_finish_ack_without_journal() {
             .await
             .unwrap()
     );
+    let messages =
+        f.db.get_session(&f.session)
+            .await
+            .unwrap()
+            .unwrap()
+            .messages;
+    let before = facts(&f).await["ledger"].clone();
     assert_eq!(
-        restore(&f.db, &f.session, Vec::new()).await.unwrap(),
+        restore(&f.db, &f.session, messages).await.unwrap(),
         SnapshotRestoreOutcome::Applied
     );
     let journal_count: i64 =
@@ -285,7 +289,8 @@ async fn ack_eligible_recording_can_restore_and_finish_ack_without_journal() {
         })
         .await
         .unwrap();
-    assert_eq!(journal_count, 0);
+    assert_eq!(journal_count, 1);
+    assert_eq!(facts(&f).await["ledger"], before);
     assert!(
         f.db.advance_browser_recording(RESOURCE, entry.version + 1, true)
             .await
@@ -307,6 +312,23 @@ async fn descendant_sealed_recording_does_not_block_replacing_only_parent_messag
     save_recording_evidence(&f).await;
     finish(&f).await;
     let parent = f.db.create_session("parent", "/tmp").await.unwrap().id;
+    for text in ["saved parent", "unsaved parent"] {
+        f.db.append_message(
+            &parent,
+            NewMessage {
+                meta: None,
+                role: MessageRole::User,
+                content: vec![StoredBlock::Text { text: text.into() }],
+                stop_reason: None,
+                input_tokens: 0,
+                output_tokens: 0,
+            },
+        )
+        .await
+        .unwrap();
+    }
+    let mut parent_snapshot = f.db.get_session(&parent).await.unwrap().unwrap().messages;
+    parent_snapshot.truncate(1);
     let (child_session, child_task, parent_id) =
         (f.session.clone(), f.task.clone(), parent.clone());
     // Reparent this completed fixture into an internal transcript; all identities,
@@ -319,8 +341,14 @@ async fn descendant_sealed_recording_does_not_block_replacing_only_parent_messag
     f.db.ensure_session_idle(&parent).await.unwrap();
     let before = facts(&f).await;
     assert_eq!(
-        restore(&f.db, &parent, Vec::new()).await.unwrap(),
+        restore(&f.db, &parent, parent_snapshot.clone())
+            .await
+            .unwrap(),
         SnapshotRestoreOutcome::Applied
+    );
+    assert_eq!(
+        f.db.get_session(&parent).await.unwrap().unwrap().messages,
+        parent_snapshot
     );
     assert_eq!(facts(&f).await, before);
     let entry =
